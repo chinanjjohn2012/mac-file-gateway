@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+.env*
+*.log
+
+evidence/
+
+.gateway-backups/
+.gateway-tmp-*
+
+.DS_Store
+/local-skill-policy/
+/local-skill-policy-draft*/

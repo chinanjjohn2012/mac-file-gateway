@@ -1,0 +1,649 @@
+{
+  "schema_version": 1,
+  "generated_from_audit": "Synthetic example only; not a trusted production audit.",
+  "source_root": "agent-runtime/skills",
+  "rules": {
+    "evidence_required_for_code_facts": true,
+    "code_fact_requires_sha256": true,
+    "policy_decisions_are_not_code_facts": true,
+    "stale_hash_behavior": "disable_skill_and_propagate_to_dependents",
+    "common_hook_stale_behavior": "disable_local_skill_bridge"
+  },
+  "skills": {
+    "sample-clickhouse": {
+      "role": "entry",
+      "disposition": "PASS_WITH_CONSTRAINTS",
+      "allowed_scripts": [
+        "scripts/ck_query.sh"
+      ],
+      "disabled_workflows": [
+        "schema_sync",
+        "database_write"
+      ],
+      "dependencies": [],
+      "argv": {
+        "scripts/ck_query.sh": [
+          {
+            "index": 0,
+            "name": "sql",
+            "required": true,
+            "non_empty": true,
+            "reject_nul": true
+          },
+          {
+            "index": 1,
+            "name": "instance",
+            "required": false,
+            "default": "sample-primary",
+            "enum": [
+              "sample-primary",
+              "sample-secondary",
+              "sample-third"
+            ],
+            "explicit_empty": "reject"
+          }
+        ]
+      },
+      "realtime_time_columns": {
+        "sample-primary/sample_events_realtime": "time",
+        "sample-primary/sample_trafficbody_realtime": "time",
+        "sample-primary/sample_brokerbody_realtime": "time",
+        "sample-primary/sample_traffic_ifa_realtime": "date_hour",
+        "sample-primary/sample_ifa_realtime": "date_hour",
+        "sample-primary/sample_api_tracking_realtime": {
+          "column": "time",
+          "source": "policy_decision"
+        },
+        "sample-secondary/sample_rollup_realtime": "date_hour",
+        "sample-third/sample_rebid_data_realtime": "date_hour",
+        "sample-third/sample_bitfloor_revenue_realtime": "date_hour"
+      },
+      "small_schema_count": 0,
+      "evidence": [
+        {
+          "id": "ch-skill",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-clickhouse/SKILL.md",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "id": "sample-clickhouse-script",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-clickhouse/scripts/ck_query.sh",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "id": "ch-sync-script",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-clickhouse/scripts/ck_sync_schemas.sh",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "kind": "clickhouse"
+    },
+    "sample-mysql": {
+      "role": "entry",
+      "disposition": "PASS_WITH_CONSTRAINTS",
+      "allowed_scripts": [
+        "scripts/mysql_query.sh"
+      ],
+      "disabled_workflows": [
+        "database_write",
+        "schema_sync",
+        "system_operational_diagnostics"
+      ],
+      "argv": {
+        "scripts/mysql_query.sh": [
+          {
+            "index": 0,
+            "name": "sql",
+            "required": true,
+            "non_empty": true,
+            "reject_nul": true
+          },
+          {
+            "index": 1,
+            "name": "format",
+            "required": false,
+            "default": "pretty",
+            "enum": [
+              "pretty",
+              "csv"
+            ],
+            "explicit_empty": "reject"
+          }
+        ]
+      },
+      "evidence": [
+        {
+          "id": "mysql-skill",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-mysql/SKILL.md",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "id": "sample-mysql-script",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-mysql/scripts/mysql_query.sh",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "id": "mysql-sync-script",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-mysql/scripts/mysql_sync_schemas.sh",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "kind": "mysql"
+    },
+    "sample-metrics": {
+      "role": "entry",
+      "disposition": "PASS_WITH_CONSTRAINTS",
+      "allowed_scripts": [
+        "scripts/collect_prom.sh"
+      ],
+      "disabled_workflows": [],
+      "instruction_overlay": [
+        "Scope metric queries to business_namespace=\"sample\"; this is guidance, not a hard security gate."
+      ],
+      "argv": {
+        "scripts/collect_prom.sh": [
+          {
+            "index": 0,
+            "name": "promql",
+            "required": true,
+            "non_empty": true,
+            "reject_nul": true
+          },
+          {
+            "index": 1,
+            "name": "offset_minutes",
+            "required": false,
+            "default": 30,
+            "type": "positive_integer",
+            "max": 1440,
+            "source": "policy_decision"
+          },
+          {
+            "index": 2,
+            "name": "step_seconds",
+            "required": false,
+            "default": 60,
+            "type": "positive_integer"
+          },
+          {
+            "constraint": "offset_minutes * 60 / step_seconds <= 11000",
+            "source": "policy_decision"
+          }
+        ]
+      },
+      "evidence": [
+        {
+          "id": "prom-skill",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-metrics/SKILL.md",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "id": "prom-script",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-metrics/scripts/collect_prom.sh",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "id": "prom-reference",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-metrics/references/prom-queries.md",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "kind": "prometheus"
+    },
+    "sample-cloud": {
+      "role": "entry",
+      "disposition": "PASS_WITH_CONSTRAINTS",
+      "allowed_scripts": [
+        "scripts/do_api.sh",
+        "scripts/linode_api.sh"
+      ],
+      "disabled_workflows": [
+        "write_cloud_resources"
+      ],
+      "evidence": [
+        {
+          "id": "infra-skill",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-cloud/SKILL.md",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "id": "infra-do-script",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-cloud/scripts/do_api.sh",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "id": "infra-linode-script",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-cloud/scripts/linode_api.sh",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "id": "infra-do-path-args",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-cloud/scripts/do_api.sh",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "id": "infra-linode-path-args",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-cloud/scripts/linode_api.sh",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "arg_policy": {
+        "source": "policy_decision",
+        "global": {
+          "explicit_empty": "reject",
+          "reject_nul": true,
+          "reject_control_chars": true,
+          "reject_extra_args": true,
+          "unknown_command": "reject"
+        },
+        "do_api": {
+          "command_enum": [
+            "droplets",
+            "search",
+            "droplet",
+            "monitoring",
+            "billing",
+            "capacity",
+            "droplet-k8s-diff",
+            "lb",
+            "lb-detail",
+            "k8s",
+            "k8s-pools",
+            "k8s-nodes"
+          ],
+          "commands": {
+            "droplets": {
+              "args": [
+                {
+                  "name": "tag",
+                  "repeatable": true,
+                  "optional": true,
+                  "max_items": 8,
+                  "pattern": "^[A-Za-z0-9._:-]{1,64}$"
+                }
+              ]
+            },
+            "search": {
+              "args": [
+                {
+                  "name": "query",
+                  "required": true,
+                  "max_length": 128
+                },
+                {
+                  "name": "tag",
+                  "optional": true,
+                  "default": "adx",
+                  "pattern": "^[A-Za-z0-9._:-]{1,64}$"
+                }
+              ]
+            },
+            "droplet": {
+              "args": [
+                {
+                  "name": "droplet_id",
+                  "required": true,
+                  "pattern": "^[0-9]+$"
+                }
+              ]
+            },
+            "monitoring": {
+              "args": [
+                {
+                  "name": "droplet_id",
+                  "required": true,
+                  "pattern": "^[0-9]+$"
+                },
+                {
+                  "name": "metric",
+                  "required": true,
+                  "enum": [
+                    "cpu",
+                    "memory",
+                    "disk",
+                    "bandwidth_out",
+                    "bandwidth_in"
+                  ]
+                },
+                {
+                  "name": "hours",
+                  "optional": true,
+                  "default": 1,
+                  "type": "integer",
+                  "min": 1,
+                  "max": 168
+                }
+              ]
+            },
+            "billing": {
+              "args": []
+            },
+            "capacity": {
+              "args": [
+                {
+                  "name": "size_slug",
+                  "required": true,
+                  "pattern": "^[A-Za-z0-9._-]{1,64}$"
+                },
+                {
+                  "name": "region",
+                  "optional": true,
+                  "pattern": "^[a-z0-9-]{1,32}$"
+                }
+              ]
+            },
+            "droplet-k8s-diff": {
+              "args": [
+                {
+                  "name": "search_pattern",
+                  "required": true,
+                  "max_length": 128
+                },
+                {
+                  "name": "cluster_id",
+                  "required": true,
+                  "format": "uuid"
+                }
+              ]
+            },
+            "lb": {
+              "args": []
+            },
+            "lb-detail": {
+              "args": [
+                {
+                  "name": "load_balancer_id",
+                  "required": true,
+                  "format": "uuid"
+                }
+              ]
+            },
+            "k8s": {
+              "args": []
+            },
+            "k8s-pools": {
+              "args": [
+                {
+                  "name": "cluster_id",
+                  "required": true,
+                  "format": "uuid"
+                }
+              ]
+            },
+            "k8s-nodes": {
+              "args": [
+                {
+                  "name": "cluster_id",
+                  "required": true,
+                  "format": "uuid"
+                },
+                {
+                  "name": "pool_id_or_name",
+                  "optional": true,
+                  "max_length": 128
+                }
+              ]
+            }
+          }
+        },
+        "linode_api": {
+          "command_enum": [
+            "instances",
+            "search",
+            "instance",
+            "stats",
+            "billing",
+            "nb",
+            "nb-detail",
+            "lke",
+            "lke-pools",
+            "lke-nodes"
+          ],
+          "commands": {
+            "instances": {
+              "args": [
+                {
+                  "name": "tag",
+                  "optional": true,
+                  "default": "adx",
+                  "pattern": "^[A-Za-z0-9._:-]{1,64}$"
+                }
+              ]
+            },
+            "search": {
+              "args": [
+                {
+                  "name": "query",
+                  "required": true,
+                  "max_length": 128
+                },
+                {
+                  "name": "tag",
+                  "optional": true,
+                  "default": "adx",
+                  "pattern": "^[A-Za-z0-9._:-]{1,64}$"
+                }
+              ]
+            },
+            "instance": {
+              "args": [
+                {
+                  "name": "linode_id",
+                  "required": true,
+                  "pattern": "^[0-9]+$"
+                }
+              ]
+            },
+            "stats": {
+              "args": [
+                {
+                  "name": "linode_id",
+                  "required": true,
+                  "pattern": "^[0-9]+$"
+                }
+              ]
+            },
+            "billing": {
+              "args": []
+            },
+            "nb": {
+              "args": []
+            },
+            "nb-detail": {
+              "args": [
+                {
+                  "name": "nodebalancer_id",
+                  "required": true,
+                  "pattern": "^[0-9]+$"
+                }
+              ]
+            },
+            "lke": {
+              "args": []
+            },
+            "lke-pools": {
+              "args": [
+                {
+                  "name": "cluster_id",
+                  "required": true,
+                  "pattern": "^[0-9]+$"
+                }
+              ]
+            },
+            "lke-nodes": {
+              "args": [
+                {
+                  "name": "cluster_id",
+                  "required": true,
+                  "pattern": "^[0-9]+$"
+                },
+                {
+                  "name": "pool_id",
+                  "optional": true,
+                  "pattern": "^[0-9]+$"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "kind": "cloud-api",
+      "command_script_sections": {
+        "scripts/do_api.sh": "do_api",
+        "scripts/linode_api.sh": "linode_api"
+      }
+    },
+    "sample-trace": {
+      "role": "entry",
+      "disposition": "PASS_WITH_CONSTRAINTS",
+      "allowed_scripts": [
+        "scripts/query_trace.sh"
+      ],
+      "disabled_workflows": [
+        "image_download",
+        "image_visual_review"
+      ],
+      "argv": {
+        "scripts/query_trace.sh": [
+          {
+            "index": 0,
+            "name": "trace_id",
+            "required": true,
+            "non_empty": true,
+            "reject_nul": true
+          },
+          {
+            "flag": "--limit",
+            "type": "integer",
+            "min": 1,
+            "max": 500,
+            "default": 100
+          },
+          {
+            "flag": "--max-field-chars",
+            "type": "integer",
+            "min": 100,
+            "max": 100000,
+            "default": 12000
+          }
+        ]
+      },
+      "evidence": [
+        {
+          "id": "langfuse-skill",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-trace/SKILL.md",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "id": "langfuse-shell",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-trace/scripts/query_trace.sh",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "id": "langfuse-python",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-trace/scripts/query_trace.py",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "kind": "trace"
+    },
+    "sample-compare": {
+      "role": "entry",
+      "disposition": "PASS_WITH_CONSTRAINTS",
+      "allowed_scripts": [],
+      "dependencies": [
+        {
+          "skill": "sample-clickhouse",
+          "access": "execute_allowed_script"
+        }
+      ],
+      "evidence": [
+        {
+          "id": "dvpx-skill",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-compare/SKILL.md",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "kind": "instructions"
+    },
+    "sample-diagnosis": {
+      "role": "entry",
+      "disposition": "PASS_WITH_CONSTRAINTS",
+      "allowed_scripts": [],
+      "dependencies": [
+        {
+          "skill": "sample-source",
+          "access": "read_only"
+        },
+        {
+          "skill": "sample-mysql",
+          "access": "execute_allowed_script"
+        },
+        {
+          "skill": "sample-clickhouse",
+          "access": "execute_allowed_script"
+        }
+      ],
+      "evidence": [
+        {
+          "id": "pix-link-skill",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-diagnosis/SKILL.md",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "kind": "instructions"
+    },
+    "sample-source": {
+      "role": "dependency_only",
+      "disposition": "PASS_WITH_CONSTRAINTS",
+      "evidence": [
+        {
+          "id": "sample-source-skill",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-source/SKILL.md",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "id": "sample-source-flow",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-source/references/flow-tracing.md",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "kind": "instructions"
+    },
+    "sample-deferred": {
+      "role": "deferred",
+      "disposition": "DEFER",
+      "evidence": [
+        {
+          "id": "sample-deferred-skill",
+          "kind": "code_fact",
+          "path": "agent-runtime/skills/sample-deferred/SKILL.md",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "kind": "instructions"
+    }
+  },
+  "agent_dir_env": "LOCAL_SKILL_AGENT_DIR"
+}

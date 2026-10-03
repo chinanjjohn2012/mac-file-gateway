@@ -1,0 +1,732 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "sql-deny-mysql-delete",
+      "skill": "sample-mysql",
+      "kind": "must_deny",
+      "input": {
+        "sql": "DELETE FROM t WHERE id=1"
+      },
+      "expected_error": "skill_sql_not_readonly",
+      "enforced_by": "sql_policy.readonly"
+    },
+    {
+      "id": "sql-deny-mysql-replace-statement",
+      "skill": "sample-mysql",
+      "kind": "must_deny",
+      "input": {
+        "sql": "REPLACE INTO t(id) VALUES (1)"
+      },
+      "expected_error": "skill_sql_not_readonly",
+      "enforced_by": "sql_policy.readonly"
+    },
+    {
+      "id": "sql-deny-mysql-system-schema",
+      "skill": "sample-mysql",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT * FROM information_schema.innodb_trx"
+      },
+      "expected_error": "skill_system_schema_not_allowed",
+      "enforced_by": "sql_policy.system_schema"
+    },
+    {
+      "id": "sql-deny-show-processlist",
+      "skill": "sample-mysql",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SHOW FULL PROCESSLIST"
+      },
+      "expected_error": "skill_show_not_allowed",
+      "enforced_by": "sql_policy.show"
+    },
+    {
+      "id": "sql-deny-show-engine",
+      "skill": "sample-mysql",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SHOW ENGINE INNODB STATUS"
+      },
+      "expected_error": "skill_show_not_allowed",
+      "enforced_by": "sql_policy.show"
+    },
+    {
+      "id": "sql-allow-show-columns",
+      "skill": "sample-mysql",
+      "kind": "must_allow",
+      "input": {
+        "sql": "SHOW COLUMNS FROM t"
+      },
+      "enforced_by": "sql_policy.show"
+    },
+    {
+      "id": "sql-allow-describe",
+      "skill": "sample-mysql",
+      "kind": "must_allow",
+      "input": {
+        "sql": "DESCRIBE t"
+      },
+      "enforced_by": "sql_policy.readonly"
+    },
+    {
+      "id": "sql-allow-replace-function",
+      "skill": "sample-mysql",
+      "kind": "must_allow",
+      "input": {
+        "sql": "SELECT REPLACE(name, 'a', 'b') FROM t"
+      },
+      "enforced_by": "sql_policy.token_scan"
+    },
+    {
+      "id": "sql-allow-set-inside-string",
+      "skill": "sample-mysql",
+      "kind": "must_allow",
+      "input": {
+        "sql": "SELECT 'SET UPDATE DELETE' AS text_value"
+      },
+      "enforced_by": "sql_policy.token_scan"
+    },
+    {
+      "id": "sql-deny-explain-analyze",
+      "skill": "sample-mysql",
+      "kind": "must_deny",
+      "input": {
+        "sql": "EXPLAIN ANALYZE SELECT * FROM t"
+      },
+      "expected_error": "skill_explain_analyze_not_allowed",
+      "enforced_by": "sql_policy.explain"
+    },
+    {
+      "id": "sql-deny-ch-url-function",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT * FROM url('https://example.invalid','CSV','x String')"
+      },
+      "expected_error": "skill_table_function_not_allowed",
+      "enforced_by": "sql_policy.readonly"
+    },
+    {
+      "id": "sql-deny-ch-cluster-function",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT * FROM cluster('x','db','table')"
+      },
+      "expected_error": "skill_table_function_not_allowed",
+      "enforced_by": "sql_policy.readonly"
+    },
+    {
+      "id": "sql-deny-realtime-no-time",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT count() FROM sample_events_realtime"
+      },
+      "expected_error": "skill_query_scope_unknown",
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "sql-deny-realtime-3h",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT count() FROM sample_events_realtime WHERE time >= now() - INTERVAL 3 HOUR"
+      },
+      "expected_error": "skill_query_scope_exceeded",
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "sql-allow-realtime-2h",
+      "skill": "sample-clickhouse",
+      "kind": "must_allow",
+      "input": {
+        "sql": "SELECT count() FROM sample_events_realtime WHERE time >= now() - INTERVAL 2 HOUR"
+      },
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "sql-deny-realtime-or",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT count() FROM sample_events_realtime WHERE time >= now() - INTERVAL 1 HOUR OR platform_id=1"
+      },
+      "expected_error": "skill_query_scope_unknown",
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "sql-deny-small-no-schema",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT count() FROM some_table_small WHERE time >= now() - INTERVAL 1 HOUR"
+      },
+      "expected_error": "skill_query_scope_unknown",
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "arg-deny-ch-instance-typo",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "script": "scripts/ck_query.sh",
+        "argv": [
+          "SELECT 1",
+          "ch3"
+        ]
+      },
+      "expected_error": "skill_arg_not_allowed",
+      "enforced_by": "skill_arg_validator"
+    },
+    {
+      "id": "arg-deny-explicit-empty",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "script": "scripts/ck_query.sh",
+        "argv": [
+          "SELECT 1",
+          ""
+        ]
+      },
+      "expected_error": "skill_arg_not_allowed",
+      "enforced_by": "skill_arg_validator"
+    },
+    {
+      "id": "arg-deny-nul",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "script": "scripts/ck_query.sh",
+        "argv": [
+          "SELECT\u0000 1",
+          "sample-primary"
+        ]
+      },
+      "expected_error": "skill_arg_not_allowed",
+      "enforced_by": "skill_arg_validator"
+    },
+    {
+      "id": "script-deny-ch-sync",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "script": "scripts/ck_sync_schemas.sh",
+        "argv": []
+      },
+      "expected_error": "skill_script_not_allowed",
+      "enforced_by": "skill_registry"
+    },
+    {
+      "id": "script-deny-mysql-sync",
+      "skill": "sample-mysql",
+      "kind": "must_deny",
+      "input": {
+        "script": "scripts/mysql_sync_schemas.sh",
+        "argv": []
+      },
+      "expected_error": "skill_script_not_allowed",
+      "enforced_by": "skill_registry"
+    },
+    {
+      "id": "path-deny-pycache",
+      "skill": "sample-trace",
+      "kind": "must_deny",
+      "input": {
+        "path": "scripts/__pycache__/query_trace.cpython-311.pyc"
+      },
+      "expected_error": "skill_file_not_allowed",
+      "enforced_by": "path_normalizer"
+    },
+    {
+      "id": "dependency-deny-unlisted",
+      "skill": "sample-diagnosis",
+      "kind": "must_deny",
+      "input": {
+        "dependency": "bidder-release"
+      },
+      "expected_error": "skill_dependency_not_allowed",
+      "enforced_by": "skill_registry"
+    },
+    {
+      "id": "infra-deny-do-droplet-traversal",
+      "skill": "sample-cloud",
+      "kind": "must_deny",
+      "input": {
+        "script": "scripts/do_api.sh",
+        "argv": [
+          "droplet",
+          "../../kubernetes/clusters/x"
+        ]
+      },
+      "expected_error": "skill_arg_not_allowed",
+      "enforced_by": "skill_arg_validator"
+    },
+    {
+      "id": "infra-deny-do-k8s-cluster-traversal",
+      "skill": "sample-cloud",
+      "kind": "must_deny",
+      "input": {
+        "script": "scripts/do_api.sh",
+        "argv": [
+          "k8s-pools",
+          "../../droplets"
+        ]
+      },
+      "expected_error": "skill_arg_not_allowed",
+      "enforced_by": "skill_arg_validator"
+    },
+    {
+      "id": "infra-deny-do-lb-non-uuid",
+      "skill": "sample-cloud",
+      "kind": "must_deny",
+      "input": {
+        "script": "scripts/do_api.sh",
+        "argv": [
+          "lb-detail",
+          "../../customers/my/balance"
+        ]
+      },
+      "expected_error": "skill_arg_not_allowed",
+      "enforced_by": "skill_arg_validator"
+    },
+    {
+      "id": "infra-allow-do-lb-uuid",
+      "skill": "sample-cloud",
+      "kind": "must_allow",
+      "input": {
+        "script": "scripts/do_api.sh",
+        "argv": [
+          "lb-detail",
+          "123e4567-e89b-12d3-a456-426614174000"
+        ]
+      },
+      "enforced_by": "skill_arg_validator"
+    },
+    {
+      "id": "infra-deny-do-metric",
+      "skill": "sample-cloud",
+      "kind": "must_deny",
+      "input": {
+        "script": "scripts/do_api.sh",
+        "argv": [
+          "monitoring",
+          "123",
+          "../../x"
+        ]
+      },
+      "expected_error": "skill_arg_not_allowed",
+      "enforced_by": "skill_arg_validator"
+    },
+    {
+      "id": "infra-deny-linode-instance-traversal",
+      "skill": "sample-cloud",
+      "kind": "must_deny",
+      "input": {
+        "script": "scripts/linode_api.sh",
+        "argv": [
+          "instance",
+          "../../lke/clusters/123/kubeconfig"
+        ]
+      },
+      "expected_error": "skill_arg_not_allowed",
+      "enforced_by": "skill_arg_validator"
+    },
+    {
+      "id": "infra-deny-linode-nb-traversal",
+      "skill": "sample-cloud",
+      "kind": "must_deny",
+      "input": {
+        "script": "scripts/linode_api.sh",
+        "argv": [
+          "nb-detail",
+          "../../account"
+        ]
+      },
+      "expected_error": "skill_arg_not_allowed",
+      "enforced_by": "skill_arg_validator"
+    },
+    {
+      "id": "infra-deny-linode-cluster-traversal",
+      "skill": "sample-cloud",
+      "kind": "must_deny",
+      "input": {
+        "script": "scripts/linode_api.sh",
+        "argv": [
+          "lke-pools",
+          "../../account"
+        ]
+      },
+      "expected_error": "skill_arg_not_allowed",
+      "enforced_by": "skill_arg_validator"
+    },
+    {
+      "id": "infra-deny-search-nul",
+      "skill": "sample-cloud",
+      "kind": "must_deny",
+      "input": {
+        "script": "scripts/do_api.sh",
+        "argv": [
+          "search",
+          "bidder\u0000x"
+        ]
+      },
+      "expected_error": "skill_arg_not_allowed",
+      "enforced_by": "skill_arg_validator"
+    },
+    {
+      "id": "infra-deny-search-too-long",
+      "skill": "sample-cloud",
+      "kind": "must_deny",
+      "input": {
+        "script": "scripts/linode_api.sh",
+        "argv": [
+          "search",
+          "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        ]
+      },
+      "expected_error": "skill_arg_not_allowed",
+      "enforced_by": "skill_arg_validator"
+    },
+    {
+      "id": "infra-deny-unknown-command",
+      "skill": "sample-cloud",
+      "kind": "must_deny",
+      "input": {
+        "script": "scripts/do_api.sh",
+        "argv": [
+          "anything"
+        ]
+      },
+      "expected_error": "skill_arg_not_allowed",
+      "enforced_by": "skill_arg_validator"
+    },
+    {
+      "id": "sql-deny-multi-statement",
+      "skill": "sample-mysql",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT 1; DELETE FROM t"
+      },
+      "expected_error": "skill_sql_not_readonly",
+      "enforced_by": "sql_policy.readonly"
+    },
+    {
+      "id": "sql-allow-keywords-in-comment",
+      "skill": "sample-mysql",
+      "kind": "must_allow",
+      "input": {
+        "sql": "SELECT 1 /* DELETE UPDATE SET */"
+      },
+      "enforced_by": "sql_policy.token_scan"
+    },
+    {
+      "id": "sql-allow-replaceall-function",
+      "skill": "sample-clickhouse",
+      "kind": "must_allow",
+      "input": {
+        "sql": "SELECT replaceAll(name, 'a', 'b') FROM t"
+      },
+      "enforced_by": "sql_policy.token_scan"
+    },
+    {
+      "id": "sql-allow-load-column",
+      "skill": "sample-mysql",
+      "kind": "must_allow",
+      "input": {
+        "sql": "SELECT load, system FROM metrics"
+      },
+      "enforced_by": "sql_policy.token_scan"
+    },
+    {
+      "id": "sql-deny-for-update",
+      "skill": "sample-mysql",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT * FROM t FOR UPDATE"
+      },
+      "expected_error": "skill_sql_not_readonly",
+      "enforced_by": "sql_policy.readonly"
+    },
+    {
+      "id": "sql-deny-show-variables",
+      "skill": "sample-mysql",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SHOW VARIABLES"
+      },
+      "expected_error": "skill_show_not_allowed",
+      "enforced_by": "sql_policy.show"
+    },
+    {
+      "id": "sql-deny-show-grants",
+      "skill": "sample-mysql",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SHOW GRANTS"
+      },
+      "expected_error": "skill_show_not_allowed",
+      "enforced_by": "sql_policy.show"
+    },
+    {
+      "id": "sql-deny-show-users",
+      "skill": "sample-mysql",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SHOW USERS"
+      },
+      "expected_error": "skill_show_not_allowed",
+      "enforced_by": "sql_policy.show"
+    },
+    {
+      "id": "sql-deny-show-create-user",
+      "skill": "sample-mysql",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SHOW CREATE USER x"
+      },
+      "expected_error": "skill_show_not_allowed",
+      "enforced_by": "sql_policy.show"
+    },
+    {
+      "id": "sql-deny-explain-delete",
+      "skill": "sample-mysql",
+      "kind": "must_deny",
+      "input": {
+        "sql": "EXPLAIN DELETE FROM t WHERE id=1"
+      },
+      "expected_error": "skill_sql_not_readonly",
+      "enforced_by": "sql_policy.explain"
+    },
+    {
+      "id": "sql-deny-ch-system-schema",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT * FROM system.processes"
+      },
+      "expected_error": "skill_system_schema_not_allowed",
+      "enforced_by": "sql_policy.system_schema"
+    },
+    {
+      "id": "sql-deny-ch-information-schema",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT * FROM INFORMATION_SCHEMA.TABLES"
+      },
+      "expected_error": "skill_system_schema_not_allowed",
+      "enforced_by": "sql_policy.system_schema"
+    },
+    {
+      "id": "sql-deny-ch-merge-function",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT * FROM merge('db','table.*')"
+      },
+      "expected_error": "skill_table_function_not_allowed",
+      "enforced_by": "sql_policy.readonly"
+    },
+    {
+      "id": "sql-deny-ch-clusterall-function",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT * FROM clusterAllReplicas('x','db','table')"
+      },
+      "expected_error": "skill_table_function_not_allowed",
+      "enforced_by": "sql_policy.readonly"
+    },
+    {
+      "id": "sql-deny-realtime-1day",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT count() FROM sample_events_realtime WHERE time >= now() - INTERVAL 1 DAY"
+      },
+      "expected_error": "skill_query_scope_exceeded",
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "sql-deny-realtime-180m",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT count() FROM sample_events_realtime WHERE time >= now() - INTERVAL 180 MINUTE"
+      },
+      "expected_error": "skill_query_scope_exceeded",
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "sql-deny-realtime-unknown-schema",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT count() FROM unknown_realtime WHERE time >= now() - INTERVAL 1 HOUR"
+      },
+      "expected_error": "skill_query_scope_unknown",
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "sql-deny-realtime-wrong-time-column",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT count() FROM sample_api_tracking_realtime WHERE bid_time >= now() - INTERVAL 1 HOUR"
+      },
+      "expected_error": "skill_query_scope_unknown",
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "sql-deny-realtime-join",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT count() FROM sample_events_realtime r JOIN x ON r.platform_id=x.id WHERE r.time >= now() - INTERVAL 1 HOUR"
+      },
+      "expected_error": "skill_query_scope_unknown",
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "sql-deny-realtime-cte",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "WITH x AS (SELECT 1) SELECT count() FROM sample_events_realtime WHERE time >= now() - INTERVAL 1 HOUR"
+      },
+      "expected_error": "skill_query_scope_unknown",
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "sql-deny-realtime-subquery",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT count() FROM sample_events_realtime WHERE time >= now() - INTERVAL 1 HOUR AND platform_id IN (SELECT id FROM x)"
+      },
+      "expected_error": "skill_query_scope_unknown",
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "sql-deny-realtime-union",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT count() FROM sample_events_realtime WHERE time >= now() - INTERVAL 1 HOUR UNION ALL SELECT 1"
+      },
+      "expected_error": "skill_query_scope_unknown",
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "sql-deny-realtime-absolute-lower-only",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT count() FROM sample_events_realtime WHERE time >= '2026-10-01 10:00:00'"
+      },
+      "expected_error": "skill_query_scope_unknown",
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "sql-allow-realtime-absolute-2h",
+      "skill": "sample-clickhouse",
+      "kind": "must_allow",
+      "input": {
+        "sql": "SELECT count() FROM sample_events_realtime WHERE time >= '2026-10-01 10:00:00' AND time < '2026-10-01 12:00:00'"
+      },
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "sql-allow-realtime-between-2h",
+      "skill": "sample-clickhouse",
+      "kind": "must_allow",
+      "input": {
+        "sql": "SELECT count() FROM sample_events_realtime WHERE time BETWEEN '2026-10-01 10:00:00' AND '2026-10-01 12:00:00'"
+      },
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "sql-deny-realtime-absolute-3h",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT count() FROM sample_events_realtime WHERE time >= '2026-10-01 10:00:00' AND time < '2026-10-01 13:00:00'"
+      },
+      "expected_error": "skill_query_scope_exceeded",
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "sql-deny-realtime-comma-join",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT count() FROM sample_events_realtime, other_table WHERE time >= now() - INTERVAL 1 HOUR"
+      },
+      "expected_error": "skill_query_scope_unknown",
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "sql-deny-realtime-extended-relative-expression",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT count() FROM sample_events_realtime WHERE time >= now() - INTERVAL 2 HOUR - INTERVAL 1 DAY"
+      },
+      "expected_error": "skill_query_scope_unknown",
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "sql-deny-realtime-extended-absolute-lower",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT count() FROM sample_events_realtime WHERE time >= '2026-10-01 10:00:00' - INTERVAL 1 DAY AND time < '2026-10-01 12:00:00'"
+      },
+      "expected_error": "skill_query_scope_unknown",
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "sql-deny-realtime-extended-between-upper",
+      "skill": "sample-clickhouse",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT count() FROM sample_events_realtime WHERE time BETWEEN '2026-10-01 10:00:00' AND '2026-10-01 12:00:00' - INTERVAL 1 DAY"
+      },
+      "expected_error": "skill_query_scope_unknown",
+      "enforced_by": "sql_policy.query_scope"
+    },
+    {
+      "id": "sql-deny-mysql-quoted-system-schema",
+      "skill": "sample-mysql",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SELECT * FROM \"mysql\".user"
+      },
+      "expected_error": "skill_system_schema_not_allowed",
+      "enforced_by": "sql_policy.system_schema"
+    },
+    {
+      "id": "sql-deny-show-tables-mysql-schema",
+      "skill": "sample-mysql",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SHOW TABLES FROM mysql"
+      },
+      "expected_error": "skill_system_schema_not_allowed",
+      "enforced_by": "sql_policy.system_schema"
+    },
+    {
+      "id": "sql-deny-show-tables-information-schema",
+      "skill": "sample-mysql",
+      "kind": "must_deny",
+      "input": {
+        "sql": "SHOW TABLES IN information_schema"
+      },
+      "expected_error": "skill_system_schema_not_allowed",
+      "enforced_by": "sql_policy.system_schema"
+    }
+  ]
+}

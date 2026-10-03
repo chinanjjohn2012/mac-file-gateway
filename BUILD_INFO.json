@@ -1,0 +1,43 @@
+{
+  "name": "Mac File Gateway",
+  "bundle_release": "2.3.0",
+  "runtime_version": "2.3.0",
+  "built_on": "2026-09-30",
+  "source_baseline": "main@2.2.0",
+  "mcp_tools_always": [
+    "gateway_info",
+    "list_files",
+    "read_file",
+    "search_files"
+  ],
+  "mcp_tools_when_writes_enabled": [
+    "create_directory",
+    "create_file",
+    "write_file",
+    "replace_text",
+    "delete_file",
+    "remove_file",
+    "unlink",
+    "rename",
+    "move"
+  ],
+  "mcp_tools_when_exec_enabled": [
+    "run_command"
+  ],
+  "controlled_execution": {
+    "shell": false,
+    "requires_allow_exec": true,
+    "requires_exec_path": true,
+    "runner_fallback": "nearest Pipfile inside exec scope => pipenv; otherwise direct",
+    "allowed_commands": [
+      "pytest",
+      "python -m pytest",
+      "python -m compileall",
+      "python <relative-script.py>",
+      "go test",
+      "go vet"
+    ]
+  },
+  "directory_delete": false,
+  "arbitrary_shell": false
+}

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "hooks_manifest": {
+    "path": "agent-runtime/hooks.json",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "hooks": [
+    {
+      "name": "sample-guard",
+      "script": "hooks/sample-guard.sh",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "must_allow": [
+        {
+          "id": "sample-allow",
+          "script": "$SKILL_ROOT/sample-mysql/scripts/query.sh",
+          "argv": [
+            "SELECT 1"
+          ]
+        }
+      ],
+      "must_deny": [
+        {
+          "id": "sample-deny",
+          "script": "$SKILL_ROOT/sample-mysql/scripts/query.sh",
+          "argv": [
+            "DELETE FROM sample_table"
+          ]
+        }
+      ]
+    }
+  ]
+}

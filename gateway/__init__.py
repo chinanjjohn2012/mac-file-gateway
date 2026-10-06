@@ -1,2 +1,2 @@
-"""Mac File Gateway with opt-in guarded writes and controlled execution."""
-__version__ = "2.3.0"
+"""Mac File Gateway with opt-in guarded writes, controlled execution, and Local Skill Bridge."""
+__version__ = "2.4.0"

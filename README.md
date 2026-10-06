@@ -246,6 +246,8 @@ bash run.sh "/path/to/project" \
 pipenv run pytest ...
 ```
 
+如果没有显式配置 `--exec-runner`，Gateway 会在当前允许的 exec scope 内，从执行目录向上查找最近的 `Pipfile`；找到后自动使用 `pipenv run`，否则使用 direct runner。
+
 不需要维护交互式 `pipenv shell`。
 
 ### 5. 启用 Local Skill Bridge
@@ -445,31 +447,38 @@ API key 输入时不会显示。
 
 不要把 runtime API key、kubeconfig token 或其他凭据发送到聊天中。
 
-### 5. 在 ChatGPT 中添加连接
+### 5. 在 ChatGPT 中创建自定义 App
 
-根据当前连接流程，先打开：
+ChatGPT 当前通过 **Apps / 自定义 MCP App** 管理这类连接，不再使用旧的 “Plugins → 添加 MCP 连接” 流程。
+
+先确认工作区允许 Developer mode。根据套餐和角色，入口通常在：
 
 ```text
 Settings
-  → Security and login
+  → Apps
+  → Advanced settings
   → Developer mode
 ```
 
-然后在 ChatGPT 的连接/插件入口添加 MCP：
+管理员/所有者也可以从：
 
 ```text
-ChatGPT Plugins
-  → 添加 MCP 连接
-  → 名称：Mac File Gateway
-  → Connection：Tunnel
-  → 选择 Tunnel 或填写 tunnel_id
-  → 创建连接
-  → 检查发现的 MCP 工具
+Workspace settings
+  → Apps
+  → Create
 ```
 
-创建后，在新对话的工具菜单中启用 **Mac File Gateway**。
+创建自定义 App。Enterprise / Edu 工作区还可能需要管理员先在 `Permissions & Roles → Connected Data` 中授予 Developer mode 权限。
 
-入口名称可能随账号、客户端和工作区策略变化；如果看不到 Developer mode 或 Tunnel 相关入口，需要先确认工作区权限。
+创建 **Mac File Gateway** App 时，使用当前工作区提供的 Secure MCP Tunnel 连接方式，选择已有 Tunnel 或填写对应 `tunnel_id`，然后执行工具扫描（Scan Tools）并创建 App。创建完成后，开发中的 App 会出现在 `Settings → Apps → Enabled Apps`，通常带有 `Dev` 标记。
+
+在聊天中需要访问本地 Gateway 时，从工具菜单选择 **Mac File Gateway**，或在支持的界面中 @mention 该 App。App 的选择作用于当前消息；后续消息如果需要再次读取本地数据或执行工具，应再次选择或引用该 App。
+
+当前包含 write / modify actions 的完整 MCP 主要面向 ChatGPT Business、Enterprise 和 Edu；Pro 的自定义 MCP 目前限 read / fetch。具体 UI 和权限仍可能随产品更新而变化。
+
+OpenAI 官方说明：
+
+https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt
 
 **到这里才表示网页版 ChatGPT 已经可以调用你的 Mac Gateway。**
 
@@ -663,11 +672,13 @@ Gateway 主要面向普通代码和 UTF-8 文本文件。
 
 ## 七、常用检查命令
 
-完整本地验证：
+代码级本地验证（MCP import、compileall、pytest、HTTP smoke 和 `MANIFEST.sha256` 一致性）：
 
 ```bash
 bash verify.sh --require-mcp
 ```
+
+`verify.sh` 会在 Git 工作树中按已跟踪文件重新计算发布清单；文件内容、文件集合或 `MANIFEST.sha256` 任一发生漂移都会失败。`release/ms1` 的 GitHub Actions 使用同一发布清单作为门禁。
 
 只检查启动策略：
 

@@ -4,14 +4,23 @@ on:
   push:
     branches:
       - main
-      - feature/controlled-exec
+      - release/ms1
   pull_request:
     paths:
+      - ".github/workflows/**"
       - "gateway/**"
       - "tests/**"
+      - "tools/**"
+      - "docs/**"
+      - "samples/**"
+      - "README*.md"
+      - "BUILD_INFO.json"
+      - "MANIFEST.sha256"
       - "requirements*.txt"
       - "setup.sh"
+      - "run.sh"
       - "verify.sh"
+      - "tunnel.sh"
 
 jobs:
   test:
@@ -29,7 +38,7 @@ jobs:
       - run: python tests/smoke_live.py
       - run: python -m compileall -q gateway tests tools
       - run: bash -n setup.sh run.sh verify.sh tunnel.sh
-      - name: Generate manifest candidate
+      - name: Verify release manifest
         run: |
           find . -type f \
             ! -path './.git/*' \
@@ -37,4 +46,5 @@ jobs:
             ! -path '*/__pycache__/*' \
             ! -path './MANIFEST.sha256' \
             ! -name '*.pyc' ! -name '*.pyo' -print0 \
-          | sort -z | xargs -0 sha256sum
+          | sort -z | xargs -0 sha256sum > /tmp/MANIFEST.sha256
+          diff -u MANIFEST.sha256 /tmp/MANIFEST.sha256

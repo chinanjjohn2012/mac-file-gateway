@@ -1,8 +1,8 @@
-1122770646f73e6d8dcf5d78e0c6022f76fbb7b51791c7ff07a6af72f2d9944b  ./.github/workflows/controlled-exec-tests.yml
+84badfb5d62bc995fc2e5debf0b7761ea05107e031726525da429c4a117a3076  ./.github/workflows/controlled-exec-tests.yml
 ef06acea97a3c12d0a236a36d6d1bd74b735c62b712e3ad69e50c6f87ac90b90  ./.gitignore
-de6f7cb63ddf17aada59b178c8f6ccc8d151f159cfbdfd8ed5639e7ab2bbe1a2  ./BUILD_INFO.json
-b622830f68bfdb5b050c033905605add45f3f547e47a1ca703c9b9a496ea3c41  ./README.md
-e0cd18fb87bd97ba20526c60ac034e795c3fc362bf31e505755069c225d6265f  ./README.zh-CN.md
+c9b4979d8382f95c5164e9de1ca14e9c8e26a0bdaae9d5de6c7b1ebb21b46ad7  ./BUILD_INFO.json
+99125118c265a5b2ad4738c733e9fb70dbc2dd203b9609769e64e55ced355809  ./README.md
+327935afaec18eb940c7201e202749485e66bf7266a5998e53c0b3ed29e231f8  ./README.zh-CN.md
 218322b0ad7ecb49967fd93d4e51a80cc24e3ce371002a03b2300494128f1db9  ./docs/2026-10-01-local-skill-bridge.md
 1b5c9b97775f1d9d76205c430e2b6113dc0a8cb7be6e0d50619e330121b88f5d  ./docs/CONTROLLED_EXEC.md
 6133250e80219b7f0948cfb9bdf22fc5536460f3eee14fa3841dd55a09113afe  ./docs/DIRECTORY_API.md
@@ -26,7 +26,7 @@ c60ae6bfd5272614ba62d2232dbd1a1ab26bba70d2795f411cb96bb9cceb7e95  ./docs/legacy-
 488a6704e497b8b37d25ab3e0a3e27c53355ef051dba824116eb557a2c7039d9  ./docs/legacy-v2/UPGRADE.md
 1e95a8424b5cae7d8c47cbb30269ea0b773edc50df03eb78151f93553f5ee284  ./docs/superpowers/plans/2026-09-22-guarded-writes.md
 9844da6b4c1cd80fdc462b86d39654108b07d163802c622d380e56f301610942  ./docs/superpowers/specs/2026-09-22-guarded-writes.md
-08417dec41553ba77fd023a5b8636df44b6f294b0308c4e39a87c06e0ab3df9f  ./gateway/__init__.py
+e2b20ae4529dc9bee34e6a6373f4e6592b2ae8e16d4a67e9a5da91ac13a2d920  ./gateway/__init__.py
 c93b28e4cf5d7bc6d3b6f2c4895313fd7bb9e55ee7967df4eeebd180c12aeb6b  ./gateway/__main__.py
 d2728e3ea5f9af44489f99070352116368b5a44e71b01239474f4e7c960f2757  ./gateway/core.py
 cd7e7a30920aa4117d44fc61bae90cc7a5a6c130d7225fedf857657b63a3feae  ./gateway/directories.py
@@ -92,4 +92,4 @@ d4c009b8db994234522713addff672089869728d0ac81788dc27effba3168fdb  ./tools/check_
 9c2fe6459eed7ef8fffe08891971c25ec3d142c859fba6386c161ac97bb8c120  ./tools/collect_local_skill_policy.py
 6b0a5f1252e90d7b3479993a37bf9be265bb28680f0aff62552c6f4f863b23ab  ./tools/diagnose_lock.py
 5048106bee7348de64bcaaf9c7cab93d8c1277f73bf287ae9afc31a45ada1a81  ./tunnel.sh
-b3ef2c35e66d17c5a9f7d73fc91e106778be5cc7d16ca06a22651b1f03dab546  ./verify.sh
+01a9145e327a81cfdc942c8e750b94d6cf2f538c89fd8915def63fd3cb75a32e  ./verify.sh

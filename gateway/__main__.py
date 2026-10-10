@@ -18,6 +18,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--exclude", action="append", default=[], help="Additional case-insensitive exclusion glob; repeatable")
     parser.add_argument("--allow-write", action="store_true", help="Enable guarded file writes and directory creation (default: read-only)")
     parser.add_argument("--write-path", action="append", default=[], help="Writable relative subtree or file; repeatable; requires --allow-write")
+    parser.add_argument("--backup-retention-days", type=int, default=15, help="Backup retention in UTC days (1-3650; default 15)")
     parser.add_argument("--allow-exec", action="store_true", help="Enable controlled project command execution (default: disabled)")
     parser.add_argument("--exec-path", action="append", default=[], help="Executable relative subtree; repeatable; required with --allow-exec")
     parser.add_argument("--exec-runner", action="append", default=[], help="Project runner mapping PATH=direct or PATH=pipenv; repeatable; requires --allow-exec")
@@ -35,13 +36,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--http-only requires --transport http")
     if args.write_path and not args.allow_write:
         parser.error("--write-path requires --allow-write")
+    if not 1 <= args.backup_retention_days <= 3650:
+        parser.error("--backup-retention-days must be from 1 to 3650")
     if (args.exec_path or args.exec_runner) and not args.allow_exec:
         parser.error("--exec-path/--exec-runner require --allow-exec")
     if args.allow_exec and not args.exec_path:
         parser.error("--allow-exec requires at least one --exec-path")
     gateway = None
     try:
-        gateway = Gateway(args.root, excludes=tuple(args.exclude), allow_write=args.allow_write, write_paths=tuple(args.write_path), allow_exec=args.allow_exec, exec_paths=tuple(args.exec_path), exec_runners=tuple(args.exec_runner))
+        gateway = Gateway(args.root, excludes=tuple(args.exclude), allow_write=args.allow_write, write_paths=tuple(args.write_path), backup_retention_days=args.backup_retention_days, allow_exec=args.allow_exec, exec_paths=tuple(args.exec_path), exec_runners=tuple(args.exec_runner))
         local_skill_bridge = None
         if args.local_skill_root:
             from .local_skills import LocalSkillBridge

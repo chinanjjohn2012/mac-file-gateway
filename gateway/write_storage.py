@@ -6,12 +6,13 @@ share an advisory lock, but ordinary editors do not participate in that lock.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import ctypes
 import errno
 import fcntl
 import json
 import os
+import re
 import stat
 import sys
 import time
@@ -21,8 +22,10 @@ from uuid import uuid4
 from .core import GatewayError
 
 BACKUP_DIR = ".gateway-backups"
-BACKUP_COUNT_LIMIT = 2000
-BACKUP_BYTES_LIMIT = 1024 * 1024 * 1024
+BACKUP_COUNT_LIMIT = 10000
+BACKUP_BYTES_LIMIT = 5120 * 1024 * 1024
+BACKUP_RETENTION_DAYS = 15
+_BACKUP_NAME = re.compile(r"^([0-9]{8}T[0-9]{6}Z)-[0-9a-f]{32}\.bak$")
 
 
 def _private_file(fd: int) -> None:
@@ -132,8 +135,82 @@ def _save_exact(directory: int, name: str, data: bytes) -> None:
             os.close(fd)
 
 
-def save_backup(directory: int, path: str, raw: bytes, sha256: str) -> str:
-    """Keep original bytes and a separate metadata record; never auto-prune."""
+def _prune_expired_backups(directory: int, retention_days: int) -> None:
+    """Remove only complete and verified backup pairs beyond the UTC retention window.
+
+    Caller holds write_lock. Incomplete or damaged records are preserved for
+    manual review; unexpected links or file types fail closed.
+    """
+    if type(retention_days) is not int or not 1 <= retention_days <= 3650:
+        raise GatewayError("invalid_argument", "backup_retention_days must be from 1 to 3650.")
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    candidates = []
+    entries = 0
+    with os.scandir(directory) as iterator:
+        for entry in iterator:
+            entries += 1
+            if entries > BACKUP_COUNT_LIMIT * 3 + 10:
+                raise GatewayError("backup_full", "Backup state has too many entries; review it locally before writing.")
+            match = _BACKUP_NAME.fullmatch(entry.name)
+            if match is None:
+                continue
+            try:
+                created = datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if created < cutoff:
+                candidates.append((entry.name, entry.name[:-4] + ".json"))
+
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    dirty = False
+    try:
+        for backup_name, metadata_name in sorted(candidates):
+            backup_fd = metadata_fd = -1
+            try:
+                try:
+                    backup_fd = os.open(backup_name, flags, dir_fd=directory)
+                    metadata_fd = os.open(metadata_name, flags, dir_fd=directory)
+                except FileNotFoundError:
+                    continue
+                _private_file(backup_fd)
+                _private_file(metadata_fd)
+                backup_info = os.fstat(backup_fd)
+                meta_info = os.fstat(metadata_fd)
+                if not 0 < meta_info.st_size <= 16384:
+                    continue
+                raw = os.read(metadata_fd, meta_info.st_size + 1)
+                if len(raw) != meta_info.st_size:
+                    continue
+                try:
+                    record = json.loads(raw)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                if (record.get("backup") != backup_name
+                        or type(record.get("bytes")) is not int
+                        or record["bytes"] != backup_info.st_size
+                        or not isinstance(record.get("path"), str)
+                        or not isinstance(record.get("sha256"), str)
+                        or re.fullmatch(r"[0-9a-f]{64}", record["sha256"]) is None):
+                    continue
+                os.unlink(backup_name, dir_fd=directory)
+                dirty = True
+                os.unlink(metadata_name, dir_fd=directory)
+            finally:
+                if metadata_fd >= 0:
+                    os.close(metadata_fd)
+                if backup_fd >= 0:
+                    os.close(backup_fd)
+    finally:
+        if dirty:
+            os.fsync(directory)
+
+
+def save_backup(directory: int, path: str, raw: bytes, sha256: str,
+                retention_days: int = BACKUP_RETENTION_DAYS) -> str:
+    """Prune expired verified pairs before checking backup hard limits."""
+    _prune_expired_backups(directory, retention_days)
     count = byte_count = entries = 0
     with os.scandir(directory) as iterator:
         for entry in iterator:

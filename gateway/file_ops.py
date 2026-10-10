@@ -58,7 +58,8 @@ def delete_file(writer: FileWriter, path: str, expected_sha256: str, dry_run: bo
                 return result
 
             assert state is not None
-            result["backup_path"] = storage.save_backup(state, canonical, snapshot.raw, snapshot.sha256)
+            result["backup_path"] = storage.save_backup(state, canonical, snapshot.raw, snapshot.sha256,
+                                                                 retention_days=writer.gateway.backup_retention_days)
 
             def verify() -> None:
                 try:

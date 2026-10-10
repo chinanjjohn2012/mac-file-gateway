@@ -179,10 +179,14 @@ class FileSnapshot:
 class Gateway:
     def __init__(self, root: str | Path, *, excludes: tuple[str, ...] = (), limits: Limits | None = None,
                  allow_write: bool = False, write_paths: tuple[str, ...] = (),
+                 backup_retention_days: int = 15,
                  allow_exec: bool = False, exec_paths: tuple[str, ...] = (),
                  exec_runners: tuple[str, ...] = ()):
         if type(allow_write) is not bool:
             raise GatewayError("invalid_argument", "allow_write must be a boolean.")
+        if type(backup_retention_days) is not int or not 1 <= backup_retention_days <= 3650:
+            raise GatewayError("invalid_argument", "backup_retention_days must be from 1 to 3650.")
+        self.backup_retention_days = backup_retention_days
         self.allow_write = allow_write
         self.allow_exec = allow_exec
         self.limits = limits or Limits()

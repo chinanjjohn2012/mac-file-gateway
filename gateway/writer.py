@@ -63,6 +63,7 @@ class FileWriter:
                 "backup_directory": storage.BACKUP_DIR,
                 "max_backup_files": storage.BACKUP_COUNT_LIMIT,
                 "max_backup_bytes": storage.BACKUP_BYTES_LIMIT,
+                "backup_retention_days": self.gateway.backup_retention_days,
                 "parent_directories_must_exist": True,  # File operations; mkdir is explicit.
                 "directory_creation": {"enabled": self.gateway.allow_write,
                                        "parents_default": False, "exist_ok_default": True,
@@ -210,7 +211,8 @@ class FileWriter:
                     return result
                 if snapshot is not None:
                     assert state is not None
-                    result["backup_path"] = storage.save_backup(state, canonical, snapshot.raw, snapshot.sha256)
+                    result["backup_path"] = storage.save_backup(state, canonical, snapshot.raw, snapshot.sha256,
+                                                                 retention_days=self.gateway.backup_retention_days)
 
                 def verify() -> None:
                     if snapshot is None:

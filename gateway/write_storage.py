@@ -22,7 +22,7 @@ from .core import GatewayError
 
 BACKUP_DIR = ".gateway-backups"
 BACKUP_COUNT_LIMIT = 2000
-BACKUP_BYTES_LIMIT = 256 * 1024 * 1024
+BACKUP_BYTES_LIMIT = 1024 * 1024 * 1024
 
 
 def _private_file(fd: int) -> None:

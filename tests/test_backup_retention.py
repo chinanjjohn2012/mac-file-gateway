@@ -36,6 +36,8 @@ def seed(root, days, suffix, *, now=None):
     bak.write_bytes(b"old")
     meta.write_text(json.dumps({"path": "app.py", "sha256": sha(b"old"),
                                 "bytes": 3, "backup": bak.name}))
+    bak.chmod(0o600)
+    meta.chmod(0o600)
     return bak, meta
 
 

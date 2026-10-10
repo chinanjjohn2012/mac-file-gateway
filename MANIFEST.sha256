@@ -1,7 +1,7 @@
 84badfb5d62bc995fc2e5debf0b7761ea05107e031726525da429c4a117a3076  ./.github/workflows/controlled-exec-tests.yml
 ef06acea97a3c12d0a236a36d6d1bd74b735c62b712e3ad69e50c6f87ac90b90  ./.gitignore
 c9b4979d8382f95c5164e9de1ca14e9c8e26a0bdaae9d5de6c7b1ebb21b46ad7  ./BUILD_INFO.json
-99125118c265a5b2ad4738c733e9fb70dbc2dd203b9609769e64e55ced355809  ./README.md
+a3b6f8b7cb7b53a82c98d4014f9514185436cc1b825a70dfa6636e3c077a855c  ./README.md
 327935afaec18eb940c7201e202749485e66bf7266a5998e53c0b3ed29e231f8  ./README.zh-CN.md
 218322b0ad7ecb49967fd93d4e51a80cc24e3ce371002a03b2300494128f1db9  ./docs/2026-10-01-local-skill-bridge.md
 1b5c9b97775f1d9d76205c430e2b6113dc0a8cb7be6e0d50619e330121b88f5d  ./docs/CONTROLLED_EXEC.md
@@ -48,7 +48,7 @@ edbec4fc416f85668aa2e87f06ae4bec527dad2718b1a42b7228d7f84c8a5c69  ./gateway/loca
 8cab6cfe4e045c3d8e9c217267fcda4ca41bc284961a899f0d4b4fe441de0564  ./gateway/local_skills/sql_policy.py
 e1bc8074c248cc69f7ae91078a386b57d9ae116f958d80124022750600e0219d  ./gateway/local_skills/sql_scope.py
 0b881ca38b7db9b51b6d92e3dd46f4ad386d598c098900371688841db24c29fe  ./gateway/mcp_adapter.py
-4dff3f8833cbddb7b8965c42d1b37b4a678acafbf9df33d755a9f4ba45db5902  ./gateway/write_storage.py
+bd8801baaeac7c290a580d91b70bf1b9f61234d9231ccdb4c1fd744de53c209c  ./gateway/write_storage.py
 55c03669378273b677a6470fe30e47d9c7a6180cf7295926657b23fc088d3264  ./gateway/writer.py
 26d1829a68ab5214cf28fa5368ce847268ee67cc793a259e061f504ab01103fd  ./requirements-dev.txt
 5ced1af900e0abb166c32aebf080e3baeb556a3da07008a1f00c88efe15d4bb0  ./requirements.txt

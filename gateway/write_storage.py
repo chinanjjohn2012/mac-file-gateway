@@ -21,7 +21,7 @@ from uuid import uuid4
 from .core import GatewayError
 
 BACKUP_DIR = ".gateway-backups"
-BACKUP_COUNT_LIMIT = 500
+BACKUP_COUNT_LIMIT = 2000
 BACKUP_BYTES_LIMIT = 256 * 1024 * 1024
 
 

@@ -145,7 +145,8 @@ Local Skill Bridge 与 `--allow-exec` 是两套独立能力。启用 Local Skill
 - 单次读取最多 **300 行**
 - 搜索单次最多返回 **100 条结果**
 - 只处理允许范围内的 UTF-8 代码和文本文件
-- 默认屏蔽隐藏文件/目录；可用 `--allow-hidden-path` 精确授权某个隐藏目录及其子项（可重复，默认不授权）\n- 即使授权也拒绝 .git、.env、.ssh、.venv、.gateway-backups 等敏感路径；仍拒绝依赖目录、数据库和密钥文件
+- 默认屏蔽隐藏文件/目录；可用 `--allow-hidden-path` 精确授权某个隐藏目录及其子项（可重复，默认不授权）
+- 即使授权也拒绝 `.git`、`.env`、`.ssh`、`.venv`、`.gateway-backups` 等敏感路径；仍拒绝依赖目录、数据库和密钥文件
 - 拒绝路径越界、符号链接和多链接普通文件
 - `*kubeconfig*` 文件默认拒绝访问
 - credential-like 内容会做 best-effort 脱敏

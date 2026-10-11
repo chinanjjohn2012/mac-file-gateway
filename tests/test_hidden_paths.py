@@ -14,7 +14,7 @@ def test_explicit_grant_reads_creates_edits_deletes_nested_entries(tmp_path):
     (root / ".other" / "private.py").write_text("not allowed")
     g = Gateway(root, allow_hidden_paths=("adx-opsagent/.scratch",), allow_write=True)
     try:
-        assert ".scratch" in {entry["name"] for entry in g.list_files("adx-opsagent")["entries"]} or True
+        assert ".scratch" in {entry["name"] for entry in g.list_files("adx-opsagent")["entries"]}
         assert g.create_directory("adx-opsagent/.scratch/sub", parents=True)["applied"] is False
         assert g.create_directory("adx-opsagent/.scratch/sub", parents=True, dry_run=False)["applied"]
         path = "adx-opsagent/.scratch/sub/a.py"

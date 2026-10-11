@@ -16,6 +16,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", required=True, help="Existing project directory; never / or the entire home directory")
     parser.add_argument("--port", type=int, default=8765, help="Loopback HTTP port (1024-65535; default 8765)")
     parser.add_argument("--exclude", action="append", default=[], help="Additional case-insensitive exclusion glob; repeatable")
+    parser.add_argument("--allow-hidden-path", action="append", default=[], help="Allow one exact project-relative hidden directory (repeatable; protected names remain denied)")
     parser.add_argument("--allow-write", action="store_true", help="Enable guarded file writes and directory creation (default: read-only)")
     parser.add_argument("--write-path", action="append", default=[], help="Writable relative subtree or file; repeatable; requires --allow-write")
     parser.add_argument("--backup-retention-days", type=int, default=15, help="Backup retention in UTC days (1-3650; default 15)")
@@ -44,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--allow-exec requires at least one --exec-path")
     gateway = None
     try:
-        gateway = Gateway(args.root, excludes=tuple(args.exclude), allow_write=args.allow_write, write_paths=tuple(args.write_path), backup_retention_days=args.backup_retention_days, allow_exec=args.allow_exec, exec_paths=tuple(args.exec_path), exec_runners=tuple(args.exec_runner))
+        gateway = Gateway(args.root, excludes=tuple(args.exclude), allow_hidden_paths=tuple(args.allow_hidden_path), allow_write=args.allow_write, write_paths=tuple(args.write_path), backup_retention_days=args.backup_retention_days, allow_exec=args.allow_exec, exec_paths=tuple(args.exec_path), exec_runners=tuple(args.exec_runner))
         local_skill_bridge = None
         if args.local_skill_root:
             from .local_skills import LocalSkillBridge

@@ -12,6 +12,7 @@
   ],
   "mcp_tools_when_writes_enabled": [
     "create_directory",
+    "delete_directory",
     "create_file",
     "write_file",
     "replace_text",
@@ -38,7 +39,7 @@
       "go vet"
     ]
   },
-  "directory_delete": false,
+  "directory_delete": "empty_only",
   "arbitrary_shell": false,
   "mcp_tools_when_local_skill_bridge_configured": [
     "local_skill_info",
@@ -51,5 +52,6 @@
     "requires_allow_exec": false,
     "policy_dir_default": "~/.config/mac-file-gateway/local-skill-policy",
     "sample_policy_loaded_by_default": false
-  }
+  },
+  "hidden_directories": "exact_allowlist_via_--allow-hidden-path"
 }

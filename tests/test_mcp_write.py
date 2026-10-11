@@ -36,8 +36,8 @@ def client(root):
 
 def test_sdk_write_tools_have_truthful_annotations(client):
     tools = {t["name"]: t for t in rpc(client, "tools/list")["tools"]}
-    assert set(tools) == {"gateway_info", "list_files", "read_file", "search_files", "create_file", "write_file", "replace_text", "create_directory", "delete_file", "remove_file", "unlink", "rename", "move"}
-    for name in ("create_file", "write_file", "replace_text", "create_directory"):
+    assert set(tools) == {"gateway_info", "list_files", "read_file", "search_files", "create_file", "write_file", "replace_text", "create_directory", "delete_directory", "delete_file", "remove_file", "unlink", "rename", "move"}
+    for name in ("create_file", "write_file", "replace_text", "create_directory", "delete_directory"):
         t = tools[name]
         assert t["annotations"]["readOnlyHint"] is False
         assert t["annotations"]["openWorldHint"] is False

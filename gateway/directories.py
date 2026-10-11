@@ -5,7 +5,8 @@ Errors carry the relative paths created by this request; never auto-remove them.
 """
 from __future__ import annotations
 
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
+import errno
 import os
 import stat
 from typing import Any, TYPE_CHECKING
@@ -146,3 +147,53 @@ def create_directory(writer: FileWriter, path: str, parents: bool = False,
         details = {"operation": "mkdir", "path": canonical, "created_paths": list(created),
                    "partial": bool(created), "warnings": list(warnings)}
         raise GatewayError(code, message, details=details) from None
+
+
+
+def delete_directory(writer: FileWriter, path: str, dry_run: bool = True) -> dict[str, Any]:
+    """Remove exactly one empty directory. No recursive deletion or link following."""
+    parts = writer._path(path, is_file=False)
+    if type(dry_run) is not bool:
+        raise GatewayError("invalid_argument", "dry_run must be a boolean.")
+    if not parts:
+        raise GatewayError("invalid_path", "Cannot delete the project root.")
+    canonical = "/".join(parts)
+    with writer._lock, writer.gateway._directory(parts[:-1]) as parent:
+        context = nullcontext() if dry_run else storage.write_lock(writer.gateway._root_fd)
+        with context:
+            fd = _open_child(parent, parts[-1], final=True)
+            if fd is None:
+                raise GatewayError("unavailable", "Directory does not exist.")
+            try:
+                original = os.fstat(fd)
+                with os.scandir(fd) as entries:
+                    if next(entries, None) is not None:
+                        raise GatewayError("not_empty", "Directory is not empty; delete its files first.")
+                result = {
+                    "operation": "rmdir", "path": canonical, "dry_run": dry_run,
+                    "applied": False, "changed": True, "warnings": [],
+                    "content_trust": "untrusted_file_data",
+                }
+                if dry_run:
+                    return result
+                latest = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+                if (not stat.S_ISDIR(latest.st_mode)
+                        or (latest.st_dev, latest.st_ino, latest.st_ctime_ns)
+                        != (original.st_dev, original.st_ino, original.st_ctime_ns)):
+                    raise GatewayError("conflict", "Directory changed before deletion.")
+                try:
+                    os.rmdir(parts[-1], dir_fd=parent)
+                except OSError as exc:
+                    if exc.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                        raise GatewayError("not_empty", "Directory is no longer empty.") from None
+                    raise GatewayError("write_failed", "Directory deletion failed; inspect the path.") from None
+                try:
+                    os.fsync(parent)
+                except OSError:
+                    result["warnings"].append(
+                        "Directory deleted, but directory sync failed; crash durability is not guaranteed."
+                    )
+                result["applied"] = True
+                return result
+            finally:
+                os.close(fd)

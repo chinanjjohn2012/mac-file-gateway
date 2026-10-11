@@ -150,7 +150,7 @@ def _error(exc: GatewayError) -> JSONResponse:
               "write_disabled": 403, "write_scope": 403, "sensitive_content": 403, "write_protected": 403,
               "conflict": 409, "already_exists": 409, "match_count": 409,
               "busy": 409, "backup_full": 507, "backup_unavailable": 503,
-              "cross_device": 409, "move_unavailable": 501,
+              "not_empty": 409, "cross_device": 409, "move_unavailable": 501,
               "exec_disabled": 403, "exec_scope": 403, "command_not_allowed": 403,
               "runner_unavailable": 503, "exec_failed": 500,
               "write_failed": 500, "json_required": 415}.get(exc.code, 400)
@@ -221,6 +221,9 @@ def create_app(gateway: Gateway, *, enable_mcp: bool = True, port: int = 8765, t
             if route == "/mkdir":
                 args = await _json_params(request, {"path", "parents", "exist_ok", "dry_run"}, {"path"})
                 result = await run_in_threadpool(gateway.create_directory, **args)
+            elif route == "/rmdir":
+                args = await _json_params(request, {"path", "dry_run"}, {"path"})
+                result = await run_in_threadpool(gateway.delete_directory, **args)
             elif route == "/create":
                 args = await _json_params(request, {"path", "content", "dry_run"}, {"path", "content"})
                 result = await run_in_threadpool(gateway.create_file, **args)
@@ -243,7 +246,7 @@ def create_app(gateway: Gateway, *, enable_mcp: bool = True, port: int = 8765, t
             return _error(exc)
 
     routes = [Route(path, endpoint, methods=["GET"]) for path in ("/health", "/info", "/list", "/read", "/search")]
-    routes += [Route(path, write_endpoint, methods=["POST"]) for path in ("/create", "/write", "/replace", "/mkdir", "/delete", "/remove", "/unlink", "/rename", "/move", "/run")]
+    routes += [Route(path, write_endpoint, methods=["POST"]) for path in ("/create", "/write", "/replace", "/mkdir", "/rmdir", "/delete", "/remove", "/unlink", "/rename", "/move", "/run")]
     if enable_mcp:
         from .mcp_adapter import build_mcp
         app = build_mcp(gateway, port=port, local_skill_bridge=local_skill_bridge).streamable_http_app()

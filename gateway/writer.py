@@ -71,7 +71,7 @@ class FileWriter:
                 "scope_matching": "case-exact path components",
                 "file_delete": self.gateway.allow_write,
                 "file_move": self.gateway.allow_write,
-                "directory_delete": False,
+                "directory_delete": self.gateway.allow_write,
                 "command_tools": False}
 
     def _path(self, path: str, *, is_file: bool = True) -> tuple[str, ...]:

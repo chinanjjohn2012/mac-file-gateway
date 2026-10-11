@@ -1,6 +1,4 @@
 """Explicit hidden-directory grants and guarded empty-directory deletion."""
-import os
-
 import pytest
 
 from gateway.core import Gateway, GatewayError

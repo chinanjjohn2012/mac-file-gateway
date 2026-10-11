@@ -185,5 +185,5 @@ def test_write_policy_reports_file_delete_and_move(root, gateway):
     policy = gateway.info()["write_policy"]
     assert policy["file_delete"] is True
     assert policy["file_move"] is True
-    assert policy["directory_delete"] is False
+    assert policy["directory_delete"] is True
     assert policy["command_tools"] is False

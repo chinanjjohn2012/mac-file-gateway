@@ -221,13 +221,13 @@ bash run.sh "/path/to/project" \
 
 ### 4. 允许特定隐藏目录的读写和空目录删除
 
-例如，需要让 Web 管理 adx-opsagent 的 .scratch 文件及子文件夹：
+例如，需要让 Web 管理 `service-a/.scratch` 隐藏目录中的文件及子文件夹：
 
 ```bash
 bash run.sh "/path/to/project" \
   --allow-write \
-  --allow-hidden-path adx-opsagent/.scratch \
-  --write-path adx-opsagent/.scratch
+  --allow-hidden-path service-a/.scratch \
+  --write-path service-a/.scratch
 ```
 
 授权项必须是项目内的**精确隐藏目录路径**，不能使用 glob；可以重复指定。只设置 `--allow-hidden-path` 开放读取，不开放写入；创建、修改、删除还必须有 `--allow-write` 和对应写入范围。删除空文件夹使用 `delete_directory`（REST：`POST /rmdir`），默认先预览；非空目录必须先逐个删除允许范围内的文件，再删除空目录。不提供递归目录删除。隐藏目录中的文件仍需符合文件类型、敏感名称和哈希校验等原有安全策略。

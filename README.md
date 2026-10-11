@@ -72,11 +72,12 @@ Mac File Gateway 按启动参数决定暴露哪些工具，不会默认打开全
 - `read_file`
 - `search_files`
 
-#### 文件写入：额外 9 个
+#### 文件写入：额外 10 个
 
 启用 `--allow-write` 后增加：
 
 - `create_directory`
+- `delete_directory`（只删除空目录）
 - `create_file`
 - `write_file`
 - `replace_text`
@@ -120,7 +121,7 @@ Mac File Gateway 按启动参数决定暴露哪些工具，不会默认打开全
 
 Local Skill Bridge 与 `--allow-exec` 是两套独立能力。启用 Local Skill Bridge **不需要**启用 `run_command`。
 
-如果同时启用读取、写入、受控命令和 Local Skill Bridge，最多会暴露 **18 个 MCP 工具**。
+如果同时启用读取、写入、受控命令和 Local Skill Bridge，最多会暴露 **19 个 MCP 工具**。
 
 ### 预览、安全保护和限制
 
@@ -144,7 +145,7 @@ Local Skill Bridge 与 `--allow-exec` 是两套独立能力。启用 Local Skill
 - 单次读取最多 **300 行**
 - 搜索单次最多返回 **100 条结果**
 - 只处理允许范围内的 UTF-8 代码和文本文件
-- 默认屏蔽隐藏文件/目录、依赖目录、数据库文件、密钥文件等
+- 默认屏蔽隐藏文件/目录；可用 `--allow-hidden-path` 精确授权某个隐藏目录及其子项（可重复，默认不授权）\n- 即使授权也拒绝 .git、.env、.ssh、.venv、.gateway-backups 等敏感路径；仍拒绝依赖目录、数据库和密钥文件
 - 拒绝路径越界、符号链接和多链接普通文件
 - `*kubeconfig*` 文件默认拒绝访问
 - credential-like 内容会做 best-effort 脱敏
@@ -218,7 +219,20 @@ bash run.sh "/path/to/project" \
 
 `--write-path` 不会扩大读取权限，只会进一步缩小可修改范围。
 
-### 4. 启用受控测试/命令执行
+### 4. 允许特定隐藏目录的读写和空目录删除
+
+例如，需要让 Web 管理 adx-opsagent 的 .scratch 文件及子文件夹：
+
+```bash
+bash run.sh "/path/to/project" \
+  --allow-write \
+  --allow-hidden-path adx-opsagent/.scratch \
+  --write-path adx-opsagent/.scratch
+```
+
+授权项必须是项目内的**精确隐藏目录路径**，不能使用 glob；可以重复指定。只设置 `--allow-hidden-path` 开放读取，不开放写入；创建、修改、删除还必须有 `--allow-write` 和对应写入范围。删除空文件夹使用 `delete_directory`（REST：`POST /rmdir`），默认先预览；非空目录必须先逐个删除允许范围内的文件，再删除空目录。不提供递归目录删除。隐藏目录中的文件仍需符合文件类型、敏感名称和哈希校验等原有安全策略。
+
+### 5. 启用受控测试/命令执行
 
 例如：
 
@@ -250,7 +264,7 @@ pipenv run pytest ...
 
 不需要维护交互式 `pipenv shell`。
 
-### 5. 启用 Local Skill Bridge
+### 6. 启用 Local Skill Bridge
 
 以下是通用示例；将 `agent-runtime` 换为你的实际项目相对路径。真实 policy 放在本机配置目录：
 
@@ -275,7 +289,7 @@ bash run.sh "/path/to/project" \
   --local-skill-policy-dir "$HOME/.config/mac-file-gateway/local-skill-policy"
 ```
 
-### 6. 额外排除文件
+### 7. 额外排除文件
 
 例如：
 
@@ -285,7 +299,7 @@ bash run.sh "/path/to/project" \
   --exclude '*.json'
 ```
 
-### 7. 本地地址
+### 8. 本地地址
 
 默认监听：
 
@@ -301,7 +315,7 @@ http://127.0.0.1:8765/mcp
 
 保持这个终端窗口运行。按 `Ctrl+C` 停止 Gateway。
 
-### 8. 本地健康检查
+### 9. 本地健康检查
 
 另开一个终端：
 
@@ -337,7 +351,7 @@ curl --noproxy '*' -fsS http://127.0.0.1:8765/health
 2.4.0
 ```
 
-### 9. Local Skill Bridge 真实树检查
+### 10. Local Skill Bridge 真实树检查
 
 合并或发布前，可以验证真实 `project/agent-runtime`：
 
@@ -530,7 +544,7 @@ Gateway 会使用 `file_sha256` 做版本检查。
 
 > 读取 src/old.py 后，把它移动到 src/archive/old.py。先预览，不覆盖已有文件。
 
-目录删除不开放。
+可删除空目录（`delete_directory`，默认预览），不支持递归删除非空目录。
 
 ### 5. 执行项目测试
 

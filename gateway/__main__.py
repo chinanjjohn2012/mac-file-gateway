@@ -13,7 +13,8 @@ from .core import Gateway, GatewayError
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Read one explicitly selected project, with optional guarded writes and controlled command execution.")
-    parser.add_argument("--root", required=True, help="Existing project directory; never / or the entire home directory")
+    parser.add_argument("--root", help="Existing project directory; never / or the entire home directory")
+    parser.add_argument("--config", help="Private Multi-Workspace gateway.json; mutually exclusive with legacy --root")
     parser.add_argument("--port", type=int, default=8765, help="Loopback HTTP port (1024-65535; default 8765)")
     parser.add_argument("--exclude", action="append", default=[], help="Additional case-insensitive exclusion glob; repeatable")
     parser.add_argument("--allow-hidden-path", action="append", default=[], help="Allow one exact project-relative hidden directory (repeatable; protected names remain denied)")
@@ -29,6 +30,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--http-only", action="store_true", help="Explicit REST-only mode; cannot connect as an MCP server")
     parser.add_argument("--check", action="store_true", help="Check the root and print policy JSON without opening a network listener")
     args = parser.parse_args(argv)
+    actual_argv = list(sys.argv[1:] if argv is None else argv)
+    if args.config:
+        forbidden = (
+            "--root", "--port", "--exclude", "--allow-hidden-path",
+            "--allow-write", "--write-path", "--backup-retention-days",
+            "--allow-exec", "--exec-path", "--exec-runner",
+            "--local-skill-root", "--local-skill-policy-dir",
+        )
+        if any(arg == option or arg.startswith(option + "=")
+               for option in forbidden for arg in actual_argv):
+            parser.error("--config cannot be combined with legacy project or permission arguments")
+        if args.transport != "http":
+            parser.error("--config requires HTTP transport; multi stdio is not supported")
+        from .multi_cli import run_multi
+        return run_multi(args)
+    if not args.root:
+        parser.error("the following arguments are required: --root")
     if args.local_skill_policy_dir and not args.local_skill_root:
         parser.error("--local-skill-policy-dir requires --local-skill-root")
     if not 1024 <= args.port <= 65535:

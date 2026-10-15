@@ -199,7 +199,8 @@ class Gateway:
                  allow_write: bool = False, write_paths: tuple[str, ...] = (),
                  backup_retention_days: int = 15,
                  allow_exec: bool = False, exec_paths: tuple[str, ...] = (),
-                 exec_runners: tuple[str, ...] = ()):
+                 exec_runners: tuple[str, ...] = (),
+                 protected_content_paths: tuple[str, ...] = ()):
         if type(allow_write) is not bool:
             raise GatewayError("invalid_argument", "allow_write must be a boolean.")
         if type(backup_retention_days) is not int or not 1 <= backup_retention_days <= 3650:
@@ -208,6 +209,8 @@ class Gateway:
         self.allow_write = allow_write
         self.allow_exec = allow_exec
         self.limits = limits or Limits()
+        from .visibility import SensitiveContentPolicy
+        self._visibility = SensitiveContentPolicy(protected_content_paths)
         self.excludes = tuple(x.casefold() for x in excludes)
         if isinstance(allow_hidden_paths, (str, bytes)):
             raise GatewayError("invalid_argument", "allow_hidden_paths must be a sequence of directory paths.")
@@ -353,8 +356,8 @@ class Gateway:
 
     def _text(self, parts: tuple[str, ...]) -> tuple[list[str], int, int]:
         snapshot = self._snapshot(parts)
-        lines, redacted = _redact(snapshot.text)
-        return lines, redacted, len(snapshot.raw)
+        lines, redacted = self._visibility.redact_lines(snapshot.text)
+        return lines, redacted, len(snapshot.raw), self._visibility.sensitive_flags(snapshot.text)
 
     def create_directory(self, path: str, parents: bool = False, exist_ok: bool = True,
                          dry_run: bool = True) -> dict[str, Any]:
@@ -443,7 +446,7 @@ class Gateway:
         _integer(start_line, "start_line", 1, 10_000_000)
         _integer(max_lines, "max_lines", 1, self.limits.max_read_lines)
         snapshot = self._snapshot(parts)
-        lines, redacted = _redact(snapshot.text)
+        lines, redacted = self._visibility.redact_lines(snapshot.text)
         size = len(snapshot.raw)
         selected: list[str] = []
         output_chars = 0
@@ -525,12 +528,14 @@ class Gateway:
                 break
             scan.files += 1
             try:
-                lines, _, byte_count = self._text(tuple(entry["path"].split("/")))
+                lines, _, byte_count, hidden_flags = self._text(tuple(entry["path"].split("/")))
             except GatewayError:
                 scan.skipped += 1
                 continue
             scan.bytes_read += byte_count
             for number, line in enumerate(lines, 1):
+                if hidden_flags[number - 1]:
+                    continue
                 if target not in (line if case_sensitive else line.casefold()):
                     continue
                 snippet = line[:self.limits.max_line_chars]
@@ -545,7 +550,7 @@ class Gateway:
                     break
             if scan.reasons & {"max_results", "max_output_chars"}:
                 break
-        return {"query": query, "path": "/".join(parts) or ".", "matches": matches,
+        return {"query": self._visibility.safe_text(query), "path": "/".join(parts) or ".", "matches": matches,
                 "truncated": bool(scan.reasons), "limit_reasons": sorted(scan.reasons),
                 "files_scanned": scan.files, "bytes_scanned": scan.bytes_read,
                 "skipped_files_or_directories": scan.skipped,

@@ -196,6 +196,9 @@ class FileWriter:
                     if replacements != expected_count:
                         raise GatewayError("match_count", "Exact-match count differs from expected_count in visible source text; no change was applied.")
                     updated_text = self._replace_spans(source_text, visible_matches, new_text)
+                    if not self.gateway._visibility.preserves_hidden_lines(
+                            source_text, updated_text, visible_matches, new_text):
+                        raise GatewayError("sensitive_content", "Edits may not expose or merge protected source lines.")
                     if self.gateway._visibility.new_sensitive_content(source_text, updated_text):
                         raise GatewayError("sensitive_content", "Edits may not introduce protected content.")
                     raw = self._content(updated_text, reject_sensitive=False)

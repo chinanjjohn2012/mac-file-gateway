@@ -5,6 +5,7 @@ Run from any working directory: python tests/smoke_live.py
 """
 from __future__ import annotations
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -13,6 +14,19 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+
+
+def smoke_environment() -> dict[str, str]:
+    """Run independent REST smoke without inheriting a caller's bearer token.
+
+    The live smoke client intentionally sends no Authorization header. If the
+    child inherits GATEWAY_TOKEN, /health returns HTTP 401 and readiness times
+    out even though the child started normally. Do not mutate os.environ:
+    other user-managed Gateway processes should keep their own credentials.
+    """
+    env = os.environ.copy()
+    env.pop("GATEWAY_TOKEN", None)
+    return env
 
 
 def main() -> None:
@@ -26,6 +40,7 @@ def main() -> None:
         process = subprocess.Popen(
             [sys.executable, "-m", "gateway", "--root", str(root), "--port", str(port), "--allow-write", "--http-only"],
             cwd=package_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=smoke_environment(),
         )
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -41,17 +56,25 @@ def main() -> None:
 
         try:
             deadline = time.monotonic() + 10
+            last_health_status = None
             while True:
                 if process.poll() is not None:
                     raise RuntimeError("Gateway process exited: " + process.communicate()[1])
                 try:
                     status, data = request("/health")
+                    last_health_status = status
                     if status == 200:
                         break
+                    if status in {400, 401, 403, 421}:
+                        raise RuntimeError(
+                            f"Temporary gateway /health rejected readiness probe: HTTP {status}"
+                        )
                 except (OSError, urllib.error.URLError):
                     pass
                 if time.monotonic() >= deadline:
-                    raise RuntimeError("Temporary gateway did not become ready")
+                    raise RuntimeError(
+                        f"Temporary gateway did not become ready (last /health HTTP status: {last_health_status})"
+                    )
                 time.sleep(0.05)
             assert data["read_only"] is False and data["mcp_enabled"] is False
             mkdir_args = {"path": "src/generated", "parents": True}

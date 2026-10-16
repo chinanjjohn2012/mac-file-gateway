@@ -45,5 +45,35 @@ def test_real_mcp_registry_and_workspace_isolation(tmp_path):
             raw=b'{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_file","arguments":{"workspace":"a","workspace":"b","path":"x.py"}}}'
             bad=client.post('/mcp',headers=HEADERS,content=raw)
             assert bad.status_code==400
+
+            # Phase-1 MCP writes must pass through the same source-hash and
+            # Workspace authorization boundary as REST writes.
+            created=rpc(client,'tools/call',{'name':'create_file','arguments':{
+                'workspace':'a','path':'mcp-roundtrip.py',
+                'content':'state = 1\n','dry_run':False}})['result']
+            assert created.get('isError') is not True
+            assert created['structuredContent']['applied'] is True
+            assert (a/'mcp-roundtrip.py').read_text() == 'state = 1\n'
+
+            read=rpc(client,'tools/call',{'name':'read_file','arguments':{
+                'workspace':'a','path':'mcp-roundtrip.py'}})['result']['structuredContent']
+            replaced=rpc(client,'tools/call',{'name':'replace_text','arguments':{
+                'workspace':'a','path':'mcp-roundtrip.py','old_text':'1',
+                'new_text':'2','expected_sha256':read['file_sha256'],
+                'dry_run':False}})['result']
+            assert replaced['structuredContent']['applied'] is True
+            assert (a/'mcp-roundtrip.py').read_text() == 'state = 2\n'
+
+            newest=rpc(client,'tools/call',{'name':'read_file','arguments':{
+                'workspace':'a','path':'mcp-roundtrip.py'}})['result']['structuredContent']
+            denied=rpc(client,'tools/call',{'name':'delete_file','arguments':{
+                'workspace':'b','path':'mcp-roundtrip.py',
+                'expected_sha256':newest['file_sha256'],'dry_run':False}})['result']
+            assert denied.get('isError') is True
+            removed=rpc(client,'tools/call',{'name':'delete_file','arguments':{
+                'workspace':'a','path':'mcp-roundtrip.py',
+                'expected_sha256':newest['file_sha256'],'dry_run':False}})['result']
+            assert removed['structuredContent']['applied'] is True
+            assert not (a/'mcp-roundtrip.py').exists()
     finally:
         service.close()

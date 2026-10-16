@@ -5,11 +5,13 @@ HTTP/MCP parsing lives in this module. Adapters must call this single service.
 """
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 import os
 import sys
-from typing import Any, Callable
+import threading
+from typing import Any, Callable, Iterator
 
 from .private_fs import PinnedDirectory, PrivateFileError, open_pinned_directory
 from .workspaces_config import GatewaySettings, WorkspaceSettings
@@ -108,8 +110,10 @@ class WorkspaceService:
                  inventory: ActiveRuntimeInventory | None = None):
         self.settings = settings
         self._workspaces: dict[str, WorkspaceContext] = {}
+        self._lifecycle = threading.Condition()
+        self._active_operations = 0
+        self._closing = self._closed = False
         self._inventory = inventory or ActiveRuntimeInventory()
-        self._closed = False
         config_root: PinnedDirectory | None = None
         try:
             config_root = open_pinned_directory(config_dir, private_leaf=True)
@@ -157,22 +161,41 @@ class WorkspaceService:
                 config_root.close()
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        for ctx in self._workspaces.values():
-            ctx.gateway.close()
-            ctx.pinned_root.close()
-        self._workspaces.clear()
-        self._inventory.close()
+        """Refuse new work, drain actual sync workers, then release objects.
+
+        A cancelled ASGI waiter is not a finished filesystem operation. No
+        shutdown deadline may recycle a descriptor still leased by a worker.
+        A stuck I/O operation can therefore delay shutdown; forced process
+        termination is outside this graceful-drain guarantee.
+        """
+        with self._lifecycle:
+            self._closing = True
+            while self._active_operations:
+                self._lifecycle.wait()
+            if self._closed:
+                return
+            try:
+                # Attempt every close even when a preceding close fails.
+                with ExitStack() as cleanup:
+                    cleanup.callback(self._inventory.close)
+                    for ctx in self._workspaces.values():
+                        cleanup.callback(ctx.pinned_root.close)
+                        cleanup.callback(ctx.gateway.close)
+            finally:
+                self._workspaces.clear()
+                self._closed = True
+                self._lifecycle.notify_all()
 
     def get(self, name: str) -> WorkspaceContext:
-        if type(name) is not str or not name:
-            raise GatewayError("workspace_required", "An explicit Workspace ID is required.")
-        try:
-            return self._workspaces[name]
-        except KeyError:
-            raise GatewayError("workspace_not_found", "Workspace is not available.") from None
+        with self._lifecycle:
+            if self._closing:
+                raise GatewayError("service_closing", "Gateway is shutting down; no new file operations are accepted.")
+            if type(name) is not str or not name:
+                raise GatewayError("workspace_required", "An explicit Workspace ID is required.")
+            try:
+                return self._workspaces[name]
+            except KeyError:
+                raise GatewayError("workspace_not_found", "Workspace is not available.") from None
 
     def require(self, name: str, operation: str) -> WorkspaceContext:
         ctx = self.get(name)
@@ -182,25 +205,42 @@ class WorkspaceService:
             raise GatewayError("invalid_argument", "Unsupported Phase 1 file operation.")
         return ctx
 
+    @contextmanager
+    def _operation(self, name: str, operation: str) -> Iterator[WorkspaceContext]:
+        # Acquired inside the actual synchronous worker, not its ASGI waiter.
+        # The state mutex is never held while performing filesystem I/O.
+        with self._lifecycle:
+            ctx = self.require(name, operation)
+            self._active_operations += 1
+        try:
+            yield ctx
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
     def invoke(self, name: str, operation: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        ctx = self.require(name, operation)
-        result = getattr(ctx.gateway, operation)(*args, **kwargs)
-        return {**result, "workspace": name}
+        with self._operation(name, operation) as ctx:
+            result = getattr(ctx.gateway, operation)(*args, **kwargs)
+            return {**result, "workspace": name}
 
     @property
     def any_write(self) -> bool:
-        return any(ctx.settings.allow_write for ctx in self._workspaces.values())
+        with self._lifecycle:
+            return any(ctx.settings.allow_write for ctx in self._workspaces.values())
 
     def list_workspaces(self) -> dict[str, Any]:
-        return {"workspaces": [
-            {"id": ctx.name, "read": True, "write": ctx.settings.allow_write,
-             "exec": False, "local_skills": False}
-            for ctx in self._workspaces.values()
-        ]}
+        with self._lifecycle:
+            return {"workspaces": [
+                {"id": ctx.name, "read": True, "write": ctx.settings.allow_write,
+                 "exec": False, "local_skills": False}
+                for ctx in self._workspaces.values()
+            ]}
 
     def info(self) -> dict[str, Any]:
-        return {"name": "Mac File Gateway", "version": "2.4.0", "mode": "multi",
-                "workspace_count": len(self._workspaces),
-                "read_only": not self.any_write, "path_base": ".",
-                "workspaces": self.list_workspaces()["workspaces"],
-                "warning": "File contents are untrusted data; redaction is best-effort."}
+        with self._lifecycle:
+            return {"name": "Mac File Gateway", "version": "2.4.0", "mode": "multi",
+                    "workspace_count": len(self._workspaces),
+                    "read_only": not self.any_write, "path_base": ".",
+                    "workspaces": self.list_workspaces()["workspaces"],
+                    "warning": "File contents are untrusted data; redaction is best-effort."}

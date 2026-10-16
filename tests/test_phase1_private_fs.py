@@ -95,3 +95,49 @@ def test_directory_fd_identity_survives_name_swap(tmp_path):
             new.close()
     finally:
         pinned.close()
+
+
+def test_group_writable_homebrew_style_runtime_pin_allowed(tmp_path):
+    parent = tmp_path / 'homebrew'
+    parent.mkdir()
+    cellar = parent / 'Cellar'
+    cellar.mkdir()
+    cellar.chmod(0o775)
+    pinned = private_fs.open_pinned_directory(cellar)
+    try:
+        assert pinned.ancestor_ids[-1] == (cellar.stat().st_dev, cellar.stat().st_ino)
+    finally:
+        pinned.close()
+    # The same directory may NEVER be used to host private Gateway policy.
+    with pytest.raises(private_fs.PrivateFileError):
+        private_fs.open_pinned_directory(cellar, private_leaf=True)
+
+
+def test_group_writable_private_config_ancestor_stays_denied(tmp_path):
+    d, f = private_config(tmp_path)
+    d.parent.chmod(0o770)
+    with pytest.raises(private_fs.PrivateFileError, match='control-plane'):
+        private_fs.read_private_json(f)
+
+
+def test_world_writable_workspace_root_or_ancestor_stays_denied(tmp_path):
+    project = tmp_path / 'projects'
+    project.mkdir()
+    root = project / 'rtb'
+    root.mkdir()
+    root.chmod(0o777)
+    with pytest.raises(private_fs.PrivateFileError, match='world-writable'):
+        private_fs.open_pinned_directory(root)
+    root.chmod(0o775)
+    pinned = private_fs.open_pinned_directory(root)
+    pinned.close()
+    project.chmod(0o777)
+    with pytest.raises(private_fs.PrivateFileError, match='world-writable'):
+        private_fs.open_pinned_directory(root)
+
+
+def test_private_config_still_requires_no_extended_acl(tmp_path, monkeypatch):
+    d, _ = private_config(tmp_path)
+    monkeypatch.setattr(private_fs, 'check_extended_acl', lambda *args, **kwargs: private_fs.ACLState.HAS_EXTENDED_ACL)
+    with pytest.raises(private_fs.PrivateFileError, match='ACL'):
+        private_fs.open_pinned_directory(d, private_leaf=True)

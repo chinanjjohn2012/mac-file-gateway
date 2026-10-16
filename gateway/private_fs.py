@@ -75,14 +75,27 @@ def check_extended_acl(fd: int, *, is_directory: bool = False) -> ACLState:
     return ACLState.ACL_CHECK_ERROR
 
 
-def _check_ancestor(st: os.stat_result) -> None:
+def _check_ancestor(st: os.stat_result, *, private_control_plane: bool) -> None:
+    """Validate an FD-pinned ancestor according to its trust domain.
+
+    Control-plane ancestors (private config/policy) cannot be group- or
+    other-writable. Runtime and explicitly selected Workspace paths may be
+    owner/group-writable on a single-user development Mac (e.g. Homebrew's
+    user-owned Cellar), but still cannot be writable by *other* users.
+    Neither case promises protection from a malicious same-UID process or
+    another account authorized as a writable group member.
+    """
     mode = stat.S_IMODE(st.st_mode)
     if not stat.S_ISDIR(st.st_mode) or st.st_uid not in {os.geteuid(), 0}:
-        raise PrivateFileError("Unsafe control-plane path ancestor.")
-    # A root-owned sticky system temp folder is a platform-typical parent for
-    # tests and managed temporary directories. Descendants remain FD pinned.
-    if mode & 0o022 and not (st.st_uid == 0 and mode & stat.S_ISVTX):
-        raise PrivateFileError("Unsafe writable control-plane path ancestor.")
+        raise PrivateFileError("Unsafe pinned directory ancestor.")
+    # Keep root-owned sticky system temp dirs as the narrowly justified
+    # exception: children are opened by FD with O_NOFOLLOW.
+    is_trusted_sticky = st.st_uid == 0 and bool(mode & stat.S_ISVTX)
+    denied_write_bits = 0o022 if private_control_plane else 0o002
+    if mode & denied_write_bits and not is_trusted_sticky:
+        if private_control_plane:
+            raise PrivateFileError("Unsafe writable control-plane path ancestor.")
+        raise PrivateFileError("Unsafe world-writable runtime or Workspace ancestor.")
 
 
 def _check_private(st: os.stat_result, *, directory: bool) -> None:
@@ -119,7 +132,11 @@ class PinnedDirectory:
 
 
 def open_pinned_directory(path: str | Path, *, private_leaf: bool = False) -> PinnedDirectory:
-    """Resolve each directory object with O_NOFOLLOW; close on every failure."""
+    """FD-pin a private control directory or a runtime/Workspace directory.
+
+    The private flag governs ancestor permissions as well as the leaf's mode
+    and ACL. This must not relax private control-plane file loading.
+    """
     parts = _components(path)
     fd = -1
     try:
@@ -130,7 +147,7 @@ def open_pinned_directory(path: str | Path, *, private_leaf: bool = False) -> Pi
             os.close(fd)
             fd = nxt
             st = os.fstat(fd)
-            _check_ancestor(st)
+            _check_ancestor(st, private_control_plane=private_leaf)
             ids.append(_identity(st))
         if private_leaf:
             _check_private(os.fstat(fd), directory=True)

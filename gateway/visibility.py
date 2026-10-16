@@ -92,12 +92,48 @@ class SensitiveContentPolicy:
     def is_sensitive(self, text: str) -> bool:
         return any(self.sensitive_flags(text))
 
-    def new_sensitive_content(self, old: str, new: str) -> bool:
-        """Reject newly classified lines while preserving unchanged hidden lines.
+    def preserves_hidden_lines(self, source: str, updated: str,
+                               spans: list[tuple[int, int]], replacement: str) -> bool:
+        """Map original hidden lines through the actual edit, not by content.
 
-        The writer replaces only visible runs; unchanged hidden source lines
-        remain byte-exact. Count multiplicity to prevent introducing a clone
-        of an existing sensitive line.
+        A hidden line must remain byte-identical, be a complete line at its
+        mapped offset, and still be classified hidden. Equal counts or an
+        identical hidden line elsewhere cannot substitute for its provenance.
+        Offsets are UTF-8-decoded character offsets, with BOM/CRLF retained.
+        """
+        previous_end = 0
+        for left, right in spans:
+            if not 0 <= previous_end <= left < right <= len(source):
+                return False
+            previous_end = right
+        updated_lines: dict[int, tuple[int, str, bool]] = {}
+        offset = 0
+        for line, hidden in zip(updated.splitlines(keepends=True), self.sensitive_flags(updated)):
+            end = offset + len(line)
+            updated_lines[offset] = (end, line, hidden)
+            offset = end
+
+        offset = displacement = edit_index = 0
+        for line, hidden in zip(source.splitlines(keepends=True), self.sensitive_flags(source)):
+            end = offset + len(line)
+            if hidden:
+                while edit_index < len(spans) and spans[edit_index][1] <= offset:
+                    left, right = spans[edit_index]
+                    displacement += len(replacement) - (right - left)
+                    edit_index += 1
+                if edit_index < len(spans) and spans[edit_index][0] < end:
+                    return False
+                expected = (end + displacement, line, True)
+                if updated_lines.get(offset + displacement) != expected:
+                    return False
+            offset = end
+        return True
+
+    def new_sensitive_content(self, old: str, new: str) -> bool:
+        """Reject newly classified lines, including additional identical ones.
+
+        This multiplicity check is separate from preserves_hidden_lines;
+        it does not by itself establish original hidden-line preservation.
         """
         from collections import Counter
         old_hidden = Counter(line for line, hidden in zip(old.splitlines(), self.sensitive_flags(old)) if hidden)

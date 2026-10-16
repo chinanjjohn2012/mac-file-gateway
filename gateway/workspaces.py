@@ -21,9 +21,15 @@ _WRITE = frozenset({"create_directory", "delete_directory", "create_file", "writ
 
 
 def _intersects(a: PinnedDirectory, b: PinnedDirectory) -> bool:
-    """Physical root identity and ancestor relation; never lexical path prefix."""
+    """Detect the same or a nested directory through any ancestor route.
+
+    Darwin firmlinks can give the same object different ancestor prefixes.
+    Shared parents alone do not make disjoint sibling roots overlap.
+    """
     x, y = a.ancestor_ids, b.ancestor_ids
-    return x[:len(y)] == y or y[:len(x)] == x
+    if not x or not y:
+        raise PrivateFileError("Directory identity evidence is unavailable.")
+    return x[-1] in y or y[-1] in x
 
 
 def _directory_for_runtime_path(raw: str | Path) -> Path:

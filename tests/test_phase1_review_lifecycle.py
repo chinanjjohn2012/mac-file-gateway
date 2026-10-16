@@ -258,8 +258,9 @@ def test_real_listener_forced_graceful_timeout_drains_sync_write(tmp_path):
                 assert wait_until(ready), 'temporary listener did not start'
                 future = executor.submit(request_write)
                 assert wait_until(lambda: (tmp_path / 'entered').exists())
-                proc.send_signal(signal.SIGTERM)
-                assert wait_until(lambda: (tmp_path / 'closing').exists()), 'service close was not reached'
+                proc.send_signal(signal.SIGINT)
+                assert wait_until(lambda: (tmp_path / 'closing').exists()), (tmp_path / 'listener.log').read_text()
+                # SIGINT reaches CLI finally after Uvicorn's signal replay.
                 # Still-running write must keep the process/owned FDs alive.
                 time.sleep(0.15)
                 remained_alive = proc.poll() is None

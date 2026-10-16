@@ -13,38 +13,42 @@ from .core import Gateway, GatewayError
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Read one explicitly selected project, with optional guarded writes and controlled command execution.")
-    parser.add_argument("--root", help="Existing project directory; never / or the entire home directory")
+    parser.add_argument("--root", default=argparse.SUPPRESS, help="Existing project directory; never / or the entire home directory")
     parser.add_argument("--config", help="Private Multi-Workspace gateway.json; mutually exclusive with legacy --root")
-    parser.add_argument("--port", type=int, default=8765, help="Loopback HTTP port (1024-65535; default 8765)")
-    parser.add_argument("--exclude", action="append", default=[], help="Additional case-insensitive exclusion glob; repeatable")
-    parser.add_argument("--allow-hidden-path", action="append", default=[], help="Allow one exact project-relative hidden directory (repeatable; protected names remain denied)")
-    parser.add_argument("--allow-write", action="store_true", help="Enable guarded file writes and directory creation (default: read-only)")
-    parser.add_argument("--write-path", action="append", default=[], help="Writable relative subtree or file; repeatable; requires --allow-write")
-    parser.add_argument("--backup-retention-days", type=int, default=15, help="Backup retention in UTC days (1-3650; default 15)")
-    parser.add_argument("--allow-exec", action="store_true", help="Enable controlled project command execution (default: disabled)")
-    parser.add_argument("--exec-path", action="append", default=[], help="Executable relative subtree; repeatable; required with --allow-exec")
-    parser.add_argument("--exec-runner", action="append", default=[], help="Project runner mapping PATH=direct or PATH=pipenv; repeatable; requires --allow-exec")
-    parser.add_argument("--local-skill-root", help="Optional project-relative agent-runtime root for Local Skill Bridge")
-    parser.add_argument("--local-skill-policy-dir", help="Private local audit policy directory (default: ~/.config/mac-file-gateway/local-skill-policy)")
+    parser.add_argument("--port", type=int, default=argparse.SUPPRESS, help="Loopback HTTP port (1024-65535; default 8765)")
+    parser.add_argument("--exclude", action="append", default=argparse.SUPPRESS, help="Additional case-insensitive exclusion glob; repeatable")
+    parser.add_argument("--allow-hidden-path", action="append", default=argparse.SUPPRESS, help="Allow one exact project-relative hidden directory (repeatable; protected names remain denied)")
+    parser.add_argument("--allow-write", action="store_true", default=argparse.SUPPRESS, help="Enable guarded file writes and directory creation (default: read-only)")
+    parser.add_argument("--write-path", action="append", default=argparse.SUPPRESS, help="Writable relative subtree or file; repeatable; requires --allow-write")
+    parser.add_argument("--backup-retention-days", type=int, default=argparse.SUPPRESS, help="Backup retention in UTC days (1-3650; default 15)")
+    parser.add_argument("--allow-exec", action="store_true", default=argparse.SUPPRESS, help="Enable controlled project command execution (default: disabled)")
+    parser.add_argument("--exec-path", action="append", default=argparse.SUPPRESS, help="Executable relative subtree; repeatable; required with --allow-exec")
+    parser.add_argument("--exec-runner", action="append", default=argparse.SUPPRESS, help="Project runner mapping PATH=direct or PATH=pipenv; repeatable; requires --allow-exec")
+    parser.add_argument("--local-skill-root", default=argparse.SUPPRESS, help="Optional project-relative agent-runtime root for Local Skill Bridge")
+    parser.add_argument("--local-skill-policy-dir", default=argparse.SUPPRESS, help="Private local audit policy directory (default: ~/.config/mac-file-gateway/local-skill-policy)")
     parser.add_argument("--transport", choices=("http", "stdio"), default="http")
     parser.add_argument("--http-only", action="store_true", help="Explicit REST-only mode; cannot connect as an MCP server")
     parser.add_argument("--check", action="store_true", help="Check the root and print policy JSON without opening a network listener")
+    # Suppressed defaults preserve explicit canonical option presence even
+    # for abbreviations, --option=value and values equal to the old defaults.
+    # Restore the legacy defaults only after deciding which mode was selected.
+    legacy_defaults = {
+        'root': None, 'port': 8765, 'exclude': [], 'allow_hidden_path': [],
+        'allow_write': False, 'write_path': [], 'backup_retention_days': 15,
+        'allow_exec': False, 'exec_path': [], 'exec_runner': [],
+        'local_skill_root': None, 'local_skill_policy_dir': None,
+    }
     args = parser.parse_args(argv)
-    actual_argv = list(sys.argv[1:] if argv is None else argv)
     if args.config:
-        forbidden = (
-            "--root", "--port", "--exclude", "--allow-hidden-path",
-            "--allow-write", "--write-path", "--backup-retention-days",
-            "--allow-exec", "--exec-path", "--exec-runner",
-            "--local-skill-root", "--local-skill-policy-dir",
-        )
-        if any(arg == option or arg.startswith(option + "=")
-               for option in forbidden for arg in actual_argv):
+        if any(hasattr(args, name) for name in legacy_defaults):
             parser.error("--config cannot be combined with legacy project or permission arguments")
         if args.transport != "http":
             parser.error("--config requires HTTP transport; multi stdio is not supported")
         from .multi_cli import run_multi
         return run_multi(args)
+    for name, default in legacy_defaults.items():
+        if not hasattr(args, name):
+            setattr(args, name, default)
     if not args.root:
         parser.error("the following arguments are required: --root")
     if args.local_skill_policy_dir and not args.local_skill_root:

@@ -6,6 +6,7 @@ validated Content-Type header is canonicalized for the SDK.
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 from starlette.responses import JSONResponse
@@ -40,6 +41,14 @@ def media_type(headers: list[tuple[bytes, bytes]]) -> None:
             raise RejectPost('invalid_content_type', 415)
 
 
+def _utf8_size(value: str) -> int:
+    """Reject decoded lone surrogates without returning untrusted input."""
+    try:
+        return len(value.encode('utf-8'))
+    except UnicodeError:
+        raise RejectPost('invalid_json') from None
+
+
 def parse_envelope(raw: bytes, *, mcp: bool) -> dict[str, Any]:
     def no_duplicate(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         if len(pairs) > MAX_OBJECT_MEMBERS:
@@ -72,12 +81,14 @@ def parse_envelope(raw: bytes, *, mcp: bool) -> dict[str, Any]:
             if len(value) > MAX_OBJECT_MEMBERS:
                 raise RejectPost('json_too_complex')
             for key, child in value.items():
-                text_bytes += len(key.encode('utf-8'))
+                text_bytes += _utf8_size(key)
                 stack.append((child, depth + 1))
         elif type(value) is list:
             stack.extend((child, depth + 1) for child in value)
         elif type(value) is str:
-            text_bytes += len(value.encode('utf-8'))
+            text_bytes += _utf8_size(value)
+        elif type(value) is float and not math.isfinite(value):
+            raise RejectPost('invalid_json')
         if text_bytes > MAX_DECODED_TEXT_BYTES:
             raise RejectPost('decoded_content_too_large', 413)
     if mcp:

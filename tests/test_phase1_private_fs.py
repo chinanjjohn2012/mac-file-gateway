@@ -32,15 +32,16 @@ def test_bad_json(tmp_path, text):
         private_fs.read_private_json(f)
 
 
-def test_reject_insecure_file_and_directory_permissions(tmp_path):
+def test_private_config_not_gated_by_local_permissions(tmp_path):
     d, f = private_config(tmp_path)
+    # Multi-Workspace intentionally trusts local OS accounts. Only Web/MCP
+    # API path boundaries are enforced. Keep strict filesystem permissions
+    # as a recommendation rather than a startup prerequisite.
     f.chmod(0o644)
-    with pytest.raises(private_fs.PrivateFileError):
-        private_fs.read_private_json(f)
-    f.chmod(0o600)
-    d.chmod(0o755)
-    with pytest.raises(private_fs.PrivateFileError):
-        private_fs.read_private_json(f)
+    d.chmod(0o777)
+    assert private_fs.read_private_json(f) == {'schema_version': 1}
+    f.chmod(0o666)
+    assert private_fs.read_private_json(f) == {'schema_version': 1}
 
 
 def test_reject_symlink_parents_and_leaf(tmp_path):
@@ -78,9 +79,6 @@ def test_parse_depth_and_nodes_budget():
         private_fs.parse_strict_json(b'{"a":[1,2,3]}', max_nodes=2)
 
 
-def test_acl_fail_closed_invalid_fd():
-    assert private_fs.check_extended_acl(-1) is private_fs.ACLState.ACL_CHECK_ERROR
-
 
 def test_directory_fd_identity_survives_name_swap(tmp_path):
     d, _ = private_config(tmp_path)
@@ -97,47 +95,47 @@ def test_directory_fd_identity_survives_name_swap(tmp_path):
         pinned.close()
 
 
-def test_group_writable_homebrew_style_runtime_pin_allowed(tmp_path):
+def test_group_writable_runtime_and_control_directory_allowed(tmp_path):
     parent = tmp_path / 'homebrew'
     parent.mkdir()
     cellar = parent / 'Cellar'
     cellar.mkdir()
     cellar.chmod(0o775)
-    pinned = private_fs.open_pinned_directory(cellar)
-    try:
-        assert pinned.ancestor_ids[-1] == (cellar.stat().st_dev, cellar.stat().st_ino)
-    finally:
-        pinned.close()
-    # The same directory may NEVER be used to host private Gateway policy.
-    with pytest.raises(private_fs.PrivateFileError):
-        private_fs.open_pinned_directory(cellar, private_leaf=True)
+    for private in (False, True):
+        pinned = private_fs.open_pinned_directory(cellar, private_leaf=private)
+        try:
+            assert pinned.ancestor_ids[-1] == (cellar.stat().st_dev, cellar.stat().st_ino)
+        finally:
+            pinned.close()
 
 
-def test_group_writable_private_config_ancestor_stays_denied(tmp_path):
+def test_other_writable_ancestors_are_not_an_admission_gate(tmp_path):
     d, f = private_config(tmp_path)
-    d.parent.chmod(0o770)
-    with pytest.raises(private_fs.PrivateFileError, match='control-plane'):
-        private_fs.read_private_json(f)
+    d.parent.chmod(0o777)
+    d.chmod(0o777)
+    f.chmod(0o644)
+    assert private_fs.read_private_json(f) == {'schema_version': 1}
 
 
-def test_world_writable_workspace_root_or_ancestor_stays_denied(tmp_path):
+def test_workspace_root_with_0777_and_world_writable_ancestor_allowed(tmp_path):
     project = tmp_path / 'projects'
     project.mkdir()
     root = project / 'rtb'
     root.mkdir()
     root.chmod(0o777)
-    with pytest.raises(private_fs.PrivateFileError, match='world-writable'):
-        private_fs.open_pinned_directory(root)
-    root.chmod(0o775)
-    pinned = private_fs.open_pinned_directory(root)
-    pinned.close()
     project.chmod(0o777)
-    with pytest.raises(private_fs.PrivateFileError, match='world-writable'):
-        private_fs.open_pinned_directory(root)
+    pinned = private_fs.open_pinned_directory(root)
+    try:
+        assert pinned.ancestor_ids[-1] == (root.stat().st_dev, root.stat().st_ino)
+    finally:
+        pinned.close()
 
 
-def test_private_config_still_requires_no_extended_acl(tmp_path, monkeypatch):
-    d, _ = private_config(tmp_path)
-    monkeypatch.setattr(private_fs, 'check_extended_acl', lambda *args, **kwargs: private_fs.ACLState.HAS_EXTENDED_ACL)
-    with pytest.raises(private_fs.PrivateFileError, match='ACL'):
-        private_fs.open_pinned_directory(d, private_leaf=True)
+def test_config_fd_type_identity_guards_preserved(tmp_path):
+    d, f = private_config(tmp_path)
+    os.link(f, d / 'second.json')
+    with pytest.raises(private_fs.PrivateFileError, match='singly linked'):
+        private_fs.read_private_json(f)
+    (d / 'another.json').symlink_to(f)
+    with pytest.raises(private_fs.PrivateFileError):
+        private_fs.read_private_json(d / 'another.json')

@@ -90,3 +90,19 @@ def test_pinned_root_identity(tmp_path):
         assert svc.get('a').pinned_root.ancestor_ids[-1] != (a.stat().st_dev,a.stat().st_ino)
     finally:
         svc.close()
+
+
+def test_phase1_start_accepts_world_writable_workspace_root(tmp_path):
+    a,b,config,runtime=make_tree(tmp_path)
+    a.parent.chmod(0o777)
+    a.chmod(0o777)
+    config.chmod(0o777)
+    svc=WorkspaceService(settings(a,b),config_dir=config,
+                         inventory=ActiveRuntimeInventory(paths=(runtime,)))
+    try:
+        assert svc.info()['workspace_count']==2
+        assert svc.get('a').pinned_root.ancestor_ids[-1]==(a.stat().st_dev,a.stat().st_ino)
+        assert svc.get('a').settings.allow_write is True
+        assert svc.get('b').settings.allow_write is False
+    finally:
+        svc.close()

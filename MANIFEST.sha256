@@ -1,4 +1,4 @@
-84badfb5d62bc995fc2e5debf0b7761ea05107e031726525da429c4a117a3076  ./.github/workflows/controlled-exec-tests.yml
+339ad2ce207bf03316af4ee41e006a0dfc1da281efad8d481df8421c852329d8  ./.github/workflows/controlled-exec-tests.yml
 ef06acea97a3c12d0a236a36d6d1bd74b735c62b712e3ad69e50c6f87ac90b90  ./.gitignore
 82f36c9f3945a204b821c1d5314c9a62c8886d9c28d45f44268643dff1b5210d  ./BUILD_INFO.json
 5bbc9310525dd4907e61ee007951bb34de021576ec2daac40d5bcb99e80fe7a3  ./README.md
@@ -114,4 +114,4 @@ d4c009b8db994234522713addff672089869728d0ac81788dc27effba3168fdb  ./tools/check_
 9c2fe6459eed7ef8fffe08891971c25ec3d142c859fba6386c161ac97bb8c120  ./tools/collect_local_skill_policy.py
 6b0a5f1252e90d7b3479993a37bf9be265bb28680f0aff62552c6f4f863b23ab  ./tools/diagnose_lock.py
 5048106bee7348de64bcaaf9c7cab93d8c1277f73bf287ae9afc31a45ada1a81  ./tunnel.sh
-01a9145e327a81cfdc942c8e750b94d6cf2f538c89fd8915def63fd3cb75a32e  ./verify.sh
+58a4ea64428fffb42863cbc301086774cf209ce1a40ebc91453ca69d28dbd227  ./verify.sh

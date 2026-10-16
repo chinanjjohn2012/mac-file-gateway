@@ -85,6 +85,8 @@ def create_multi_app(service: WorkspaceService, *, enable_mcp: bool = True,
                                              *(args[field] for field in order))
             return JSONResponse(result)
         except GatewayError as exc:
+            if exc.code == 'service_closing':
+                return JSONResponse({'error': exc.code}, status_code=503)
             if exc.code in {'workspace_not_found', 'workspace_required'}:
                 return JSONResponse({'error': exc.code}, status_code=404 if exc.code == 'workspace_not_found' else 400)
             return _error(exc)
@@ -99,6 +101,8 @@ def create_multi_app(service: WorkspaceService, *, enable_mcp: bool = True,
             result = await run_in_threadpool(service.invoke, workspace, operation, **args)
             return JSONResponse(result)
         except GatewayError as exc:
+            if exc.code == 'service_closing':
+                return JSONResponse({'error': exc.code}, status_code=503)
             if exc.code in {'workspace_not_found', 'workspace_required'}:
                 return JSONResponse({'error': exc.code}, status_code=404 if exc.code == 'workspace_not_found' else 400)
             return _error(exc)

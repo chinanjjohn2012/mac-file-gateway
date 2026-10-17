@@ -1,8 +1,8 @@
 # Multi-Workspace Phase 2：Controlled Exec 设计规格（评审稿）
 
-**日期：**2026-10-17  
-**当前状态：**设计阶段，等待用户审阅及独立安全/架构评审；**不是实施、启用或部署授权**。  
-**基线：**`release/ms1` — `e32cb5124bbd8b08a79c75b4940799e041dd1295`（Phase 1 已通过 PR #3 合并）。  
+**日期：**2026-10-17
+**当前状态：**2026-10-17 独立设计评审为 **BLOCK（D1/P1、D2–D5/P2）**。本稿补充合同但**未修复共享执行器代码**，尚待重新独立复审与用户审批，非实施/启用/合并/部署授权。
+**基线：**`release/ms1` — `e32cb5124bbd8b08a79c75b4940799e041dd1295`（Phase 1 已通过 PR #3 合并）。
 **现有参考：**`docs/CONTROLLED_EXEC.md`、`docs/PHASE1_LOCAL_TRUST_BOUNDARY.md`、`gateway/executor.py`、`gateway/workspaces.py`、`gateway/multi_cli.py`。
 
 ## 1. 用户已确认的决策
@@ -21,6 +21,8 @@ Phase 2 采用 **方案 A：复用现有单根 `CommandRunner` 并加入 Multi-W
 目的：在不破坏 Phase 1 文件工具和单根 Legacy 模式的情况下，为 Multi 模式添加按 Workspace 启用的 `run_command`；继续支持 Python、pytest、Go test/vet 与 pipenv，真实管理超时、取消、服务停止和子进程资源回收。
 
 命令白名单与单根模式一致：`pytest ...`、`python -m pytest ...`、`python -m compileall ...`、`python relative/script.py ...`、`go test ...`、`go vet ...`。保持 `subprocess.Popen(shell=False)`，stdin 为 DEVNULL，不启用交互式 `pipenv shell`。
+
+**复用约束：**共享 `CommandRunner` 的 Go hook 同义参数和 pytest/Go 路径型选项缺陷须先修复并通过 Legacy 负控；具体可测合同见 §12（D1/D2）。`shell=False` 不能阻止 Go 启动外部工具；仅凭逐 token 斜线切分也无法正确验证带路径值的命令选项。对任意受信任脚本的自定义参数，不宣称 OS 沙箱级路径限制。
 
 本期不支持：通用 Shell/PTY、任意命令、`python -c`、任意环境变量透传、持久任务队列、后台任务、远程 Job 查询与取消 API、实时流式终端、Local Skill Bridge、动态策略热更新、远程主机执行、OS 级多租户沙箱、自动切换生产 Gateway。默认关闭 Phase 2。
 
@@ -104,6 +106,8 @@ Phase 2 采用 **方案 A：复用现有单根 `CommandRunner` 并加入 Multi-W
 
 ## 7. 执行监督、超时与取消
 
+> **独立复审补充：**本节为总体原则；§12 的 D3/D4 终态、drain、容量和 PGID 所有权合同是额外强制条件。直接子进程退出 ≠ 受监管作业完成，输出截断上限 ≠ drain 时间上限。
+
 第一版保持同步请求/结果（不发布可查询的 job ID，也不提供显式 `cancel_command`）；取消源仅包括**实际观察到**的请求取消/连接断开、超时、Gateway 关闭。网络/隧道未传播断开事件时不保证即时取消，但真实命令仍应受最大 300 秒 timeout 管束。
 
 增加内部 `ExecSupervisor`（作为复用 `CommandRunner` 的协作对象，而非独立 OS Worker 服务），登记 `STARTING/RUNNING/STOPPING/FINISHED`、执行进程与 process group、取消标志、同步 worker FD 租约。拟议资源上限：每个 Workspace **1** 个活跃执行、单 Gateway **4** 个；超额立即 `busy` 拒绝，不排队，不占用文件读写的全局互斥锁，A 的长任务不阻塞 B 的文件操作。
@@ -124,9 +128,11 @@ Phase 2 采用 **方案 A：复用现有单根 `CommandRunner` 并加入 Multi-W
 
 命令环境继续采用小型白名单，不继承 `GATEWAY_TOKEN`、`VIRTUAL_ENV` 或任意自定义敏感环境变量；Pipenv 仅设置明确的 `PIPENV_PIPFILE` 与必要选项。日志可记 Workspace ID、命令类别、状态、耗时、超时/取消、容量命中，但不得打印 Token、完整 argv、stdout/stderr 原文或配置/项目绝对路径。
 
-执行结果中的 stdout/stderr **可能包含机密数据**，原有 best-effort 文本脱敏不是通用 DLP；通过 Tunnel 提供 exec 必须由管理员只对可信项目显式授权。Gateway 不得因鉴权错误、解析错误、工具重试或内部异常重复执行实际命令。
+执行结果中的 stdout/stderr **可能包含机密数据**，原有 best-effort 文本脱敏不是通用 DLP；通过 Tunnel 提供 exec 必须由管理员只对可信项目显式授权。Gateway 不得因鉴权错误、解析错误或**同一已接纳请求的内部重试/异常恢复**重复启动实际命令。跨独立请求的重试不提供 exactly-once，见 §12 D5。
 
 ## 9. 强制验收矩阵
+
+> 原有测试类别仍适用；§12 中 M01–M15 的状态/计数/负控断言是本次 BLOCK 复审要求的附加验收门槛。原有 CI、Manifest 或基线探针均不能替代尚未实现的 Phase 2 REST/MCP 动态验收。
 
 | 范围 | 必测项 |
 | --- | --- |
@@ -138,9 +144,11 @@ Phase 2 采用 **方案 A：复用现有单根 `CommandRunner` 并加入 Multi-W
 | 生命周期 | 真实 macOS 监听器接收 SIGINT 与 **SIGTERM**，取消活跃任务并等待真实 worker，避免泄漏或提前关闭 FD；测试断连能被观察到和未能观察到的区别。 |
 | 完整回归 | Phase 1 F1–F7/N1 的既有回归、文件读写/备份/旧 Legacy exec+Skill、原生 macOS 全量、REST/MCP live smoke、GitHub Actions、Manifest SHA 校验。 |
 
-只要出现未授权启动、越权 Workspace 入口、进程残留、受监管进程取消失效、SIGTERM 不进入清理路径、Local Skill Bridge 被顺带启用、无法通过原生 macOS 安全回归、或者任何独立复审的 P0/P1 阻断项，则**不得合并 Phase 2**。
+只要出现未授权启动、越权 Workspace 入口、**受监管进程**残留、受监管进程取消失效、SIGTERM 不进入清理路径、Local Skill Bridge 被顺带启用、无法通过原生 macOS 安全回归、或者任何独立复审的 P0/P1 阻断项，则**不得合并 Phase 2**。
 
 ## 10. 实施顺序、发布与回退（尚非实施授权）
+
+必须先在共享 `CommandRunner` 中安排 D1/D2 的语义修复和 Legacy 负控，再允许 Multi exec 的实际启动入口；D3/D4 监督器、可中断 drain 与 D5 至多一次内部启动是另外的独立实施/验收任务。**本轮仅修订设计、不实现这些修复。**
 
 用户批准本规格后，才起草可审阅的详细实施计划。计划应按“先失败测试，后配置解析、授权路由、执行监督、REST/MCP 表面、真实 macOS 回归”拆分，功能分支不修改运行中的 Gateway。独立安全/架构审查与用户最终合并批准是另外的门槛。
 
@@ -153,3 +161,73 @@ Phase 2 采用 **方案 A：复用现有单根 `CommandRunner` 并加入 Multi-W
 **拟议、需随文批准后才能冻结：**继续扩展 `schema_version:1`、`paths:["."]` 的明确语义、1/Workspace 与 4/进程的并发限额、2 秒终止宽限、Phase 2 首版不提供远端主动取消 API。以上给出了可执行测试合同，但**用户当前的“接受”仅批准方案 A 的隔离边界，不代表这些细项已自动获批**。
 
 用户审阅并批准本文件后，下一步才调用实施计划工作流。此时不得修改功能源码、启用 Multi exec、执行真实命令或调整生产 Gateway。
+## 12. 2026-10-17 独立 BLOCK 复审补充合同（规范性）
+
+**原受审设计 Commit：**`23a579df7dcacae4490e492a557fe8460f369bfa`，Tree `11d2a185c75a28972a8757623eda5a77a2999e7e`。独立报告判定 1 项 P1（D1）、4 项 P2（D2–D5），设计不能冻结。本节细化前文而不改变已确认的方案 A、可信本机项目及**无 OS 沙箱**边界。本节修订**不等于**共享执行器漏洞修复或 Phase 2 功能验收。
+
+### D1 / P1 — Go 外部工具 hook 等价选项（实现仍 OPEN）
+
+复用共享 `CommandRunner` 之前，必须按 Go 实际解析语义规范化 flag 名：单横线与双横线、`flag=value` 与 `flag value`、参数位置变体。至少对 `exec`、`toolexec`、`vettool` 等可指定外部命令的 hook 全部拒绝。当前只检查 `-exec` 等单横线前缀会放行等价形式，直接 `Popen(shell=False)` 不能限制 Go 之后启动的程序。不得把“可信项目代码可读写宿主机”当作放行**远程 argv hook** 的理由。
+
+**关闭条件：**修改 Legacy/Multi 共用解析器；所有 hook 等价写法在 dry-run 和 apply 均于 `Popen` 前拒绝，`Popen` 计数严格为 0；原生合成 Go marker 不能被触发；合法 `go test`/`go vet` 及常用非 hook 参数继续可用。未完成代码修复前，此项保持 **OPEN / P1 阻断**。
+
+### D2 / P2 — 提取路径型选项值后校验（实现仍 OPEN）
+
+不能仅对整个 argv token 的斜线切分来校验 `..`/绝对路径；选项名前缀会隐藏真实路径。对**明确支持的命令和已知携带路径的选项**，必须先按各 CLI 文法分离 option 与 path value，再对真实值应用相对路径、无父目录、无宿主绝对路径和允许 scope 规则。首批必测 pytest `-cVALUE`、`-c VALUE`、`--config-file=VALUE`、`--config-file VALUE`，以及 Go `-modfile=VALUE`、`-modfile VALUE` 等受支持等价形式；明确验证外部兄弟配置和绝对配置被拒绝，项目内合法配置仍允许。自定义可信 Python 脚本未识别的自由参数仍为非沙箱风险，不应声称都能静态约束。
+
+**关闭条件：**Legacy 与 Multi 共享安全修复；非法形式 dry-run/apply 的 `Popen=0`，并以独立合成 pytest 配置读取、Go 模块参数反例及正常控制用例验收。
+
+### D3 / P2 — 正常 leader 退出不能立即 FINISHED
+
+独立的内部作业 ticket 拥有 `STARTING/RUNNING/STOPPING/FINISHED`、进程组、可取消信号权限、同步 worker root FD 租约和 permit。前三个状态均占执行名额。即使 leader `wait` 返回 0，原进程组可能仍有受监管后代且继续持有 reader 管道；须检查并终止/收尾该**原进程组**，不可直接释放名额。可以保留 leader 的 `exit_code=0`、`timed_out=false`，将清理结果另记为 `group_cleanup`，不误报原命令失败。
+
+只有当直接子进程已 `wait`、所监管原组完成结束/清理、输出读端已按 D4 合同回收、实际 worker 租约释放后，才能进入 `FINISHED` 并释放计数。取消/延迟计时器从终态起撤销信号权限，不能用已经失去所有权的数字 PGID 误杀后来的复用进程；使用假系统调用和代际 ticket 验证，不在真实机上误杀无关进程。自建 `setsid` 的逃组后代不在“必须杀尽”的范围，但其继承管道必须由本服务安全处理。
+
+### D4 / P2 — 可中断输出读取、独立 drain 截止时间
+
+原始组清理、主进程 `wait` 和每流 48k 字符留存限制均不保证管道 EOF。逃组后代可能继续持有 stdout/stderr 写端，阻塞式 `BufferedReader.read` 及跨线程 `close` 均不可作为可靠的停止方案。采用**单一 FD owner**负责读取与关闭：例如 `os.set_blocking(fd, False)` 加 `selectors.DefaultSelector`/有限 poll 与显式停止通知；其它线程只能通知 owner，不能跨线程关闭正在阻塞读取的同一 FD。实现可以选择等价可证明机制，但必须有独立测试。
+
+**时限草案（待审批）：**进程 TERM 宽限 2 秒后升级 KILL；输出 drain **另设最多 2 秒**，即使没有 EOF 也结束本服务读端并回收 reader/FD/permit。两种预算分开计时；`timeout_graceful_shutdown=10` 不是这些阶段安全收尾的证据。超过 drain 预算保留已经捕获的部分输出，并明确 `drain_incomplete` 或相应 `stdout_truncated`/`stderr_truncated` 标记。强制 KILL、断电或任意不可中断内核 I/O 不承诺绝对收尾时限，但可控合成管道与线程应满足预算。逃组 helper 的生命由测试自身管理，不得以其仍存活判定“受监管原组残留”。
+
+### D5 / P2 — 选择“单次服务端接纳至多一次启动”（待用户批准）
+
+**建议采用评审选项 A，避免首版引入幂等键和持久 Job 系统：**同一个服务端已接纳的 REST/MCP 请求内部有一个唯一 ticket，整个服务处理链中最多一次真实 `Popen` 尝试。授权失败、解析失败、失败重试或异常恢复不能在同 ticket 内再次启动，尤其禁止捕获执行器异常后无意重新调用。
+
+**不承诺跨独立请求去重或 exactly-once。** 若命令产生副作用但 HTTP/MCP 响应丢失，调用者不知道它是否完成；把同样五个参数重新发送（即使同 MCP request ID）是**新的执行请求**，可以再次产生副作用。`idempotentHint=false` 仅提示非幂等性，不是服务端去重保护。合成副作用 marker 负控：同一 ticket 内异常/处理重入至多 1 个 marker；丢弃第一次响应后独立重传可以有第 2 个 marker；主动再次执行也合法。此选择须经用户在正式设计审批时确认。
+
+### 资源、路径与 SIGTERM 交接条件（独立复审 I3–I8）
+
+- `_cwd()` 当前只是暂时打开 no-follow FD，交给 `Popen(cwd=...)` 时未必保持目录 pin；执行授权应保持根与实际 cwd 身份在最后校验→启动交接期间有效，并验证子进程真正工作的 Workspace/cwd；不可在多线程 macOS 用不安全的 `preexec_fn` 偷渡。
+- Exec 的名额在提交到耗时同步线程池前通过 `WorkspaceService/ExecSupervisor` 原子 admission 取得；同一 Workspace 拟 1 个、全局拟 4 个。名额满时业务服务立即 busy 而不是先排队；已取消的等待者不得晚启动。长期 exec 不能耗尽 Phase 1 文件 API 的 worker，也不能持有全局文件锁。
+- 请求取消必须分别验证 asyncio Task.cancel、AnyIO CancelScope、MCP SDK 取消通知与 REST 实际可观察断连；AnyIO 屏蔽等待者取消不等于同步 worker 终止。不能观察到的网络中断，只保证最长执行期限。
+- SIGINT 与 **SIGTERM** 均须通过原生 macOS **真实 Gateway** 活跃任务测试，证明关闭路径抵达、停止接受新请求、受监管进程组停止、实际 worker 收尾、root FD 最后关闭；现有 `uvicorn.run` 的 SIGTERM 最小监听器负控仍是待解决风险。
+
+### M01–M15 强制验收断言（细化 `9）
+
+- **M01 配置：**旧配置到新代码正常且 exec 关闭；新 enabled 配置到旧代码 fail-closed；非法配置 listener=0/Popen=0。
+- **M02 授权：**A 开启 B 关闭，Service 直接、REST、MCP 三路 B 均 Popen=0；无 Workspace 不回退；Skills 未启用。
+- **M03 CLI 语义：**D1 hook 与 D2 路径值每一种等价写法均拒绝且 Popen=0，原生 Go/pytest 合成 marker 和合法控制通过。
+- **M04 协议：**Host/Origin/Bearer、MIME、重复键、非法 Unicode/非有限数、未知字段及超限 payload 都在 dispatch/Popen 前拒绝，REST/MCP 各自错误封装正确。
+- **M05 合法行为：**direct、pipenv、Python、pytest、Go、dry-run=零进程、非零退出、缺失 runner、cwd/输出绑定正确。
+- **M06 启动竞态：**ticket→permit→授权→Popen→handle 注册→drain→终态各屏障取消/异常，单 owner 清理且计数、FD 恢复。
+- **M07 容量：**STARTING/RUNNING/STOPPING 均占额度，超额立即 busy 不排队；A 长 exec 不阻塞 B 文件读写；取消等待者绝不再启动。
+- **M08 正常结束：**leader 0 退出、原组后代持管道和重定向管道两种，组清理后 FINISHED，旧 exit_code 不改变，FD/permit 为 0。
+- **M09 逃组持管道：**stderr 单独持有、stdout/stderr 共同持有，drain 预算内回收自身 reader/FD，helper 测试后安全清理。
+- **M10 超时取消：**TERM 被忽略后 KILL；Task.cancel、CancelScope、MCP cancel、REST 可观察/不可观察断连分别验收。
+- **M11 生命周期身份：**重复 close/cancel、leader 提前退出、旧 PGID 信号、FD 数字复用的模拟均不得错杀或跨 Workspace 误用。
+- **M12 真实监听器：**macOS SIGINT/SIGTERM 的 idle/spawn/active/drain/并发 close，验证顺序与实际 worker/FD 收尾。
+- **M13 输出与凭据：**合成敏感变量不继承/泄漏，stdout/stderr 巨量/无效 UTF-8、reader 错误，输出有界且错误无绝对路径。
+- **M14 重试：**有副作用 marker 后丢弃响应；同一 ticket 至多启动一次，外部独立重传可产生第二次副作用并被明确记录。
+- **M15 完整回归：**Phase 1 F1–F7/N1、文件/备份、Legacy exec/Skill、macOS 全量、REST/MCP live smoke、CI 与 Manifest 分别给结果；旧 CI 不替代未实现的功能验收。
+
+### 处置状态及保留的批准门槛
+
+| Finding | 本稿处置 | 不可提前宣称的结论 |
+| --- | --- | --- |
+| D1 / P1 | 明确 Go 同义 hook 共享执行器前置修复与 Popen=0。 | **代码仍存在基线漏洞；OPEN / 阻断。** |
+| D2 / P2 | 明确路径型选项值提取、正反控制与 Legacy/Multi 复测。 | **代码尚未修复；OPEN。** |
+| D3 / P2 | 明确正常 leader 退出后的组清理/终态/PGID 回收。 | 未完成真实 Supervisor 实现及验证。 |
+| D4 / P2 | 明确单 owner 非阻塞 drain、期限、部分输出。 | 未完成真实管道/关闭验证。 |
+| D5 / P2 | 推荐单 ticket 至多一次；跨独立请求不保证去重。 | **需用户批准该合同；没有跨请求幂等保证。** |
+
+本次仅保留外部独立复审的编号、风险与逻辑结论；不将报告中含本机私有路径的证据 ZIP、日志或任何真实配置发布到公开仓库。规格须先通过新的独立设计复审并获用户批准，之后才可编写详细实施计划；D1/D2 代码修复和 D3/D4 原生验收又是另行的合并门槛。**本次文字修订不是设计 PASS，更不是 Phase 2 功能 PASS。**

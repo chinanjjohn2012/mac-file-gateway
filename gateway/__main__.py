@@ -39,7 +39,9 @@ def main(argv: list[str] | None = None) -> int:
         'local_skill_root': None, 'local_skill_policy_dir': None,
     }
     args = parser.parse_args(argv)
-    if args.config:
+    if args.config is not None:
+        if not args.config.strip():
+            parser.error("--config requires a nonempty path")
         if any(hasattr(args, name) for name in legacy_defaults):
             parser.error("--config cannot be combined with legacy project or permission arguments")
         if args.transport != "http":

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import ctypes
 import errno
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -194,6 +195,21 @@ def _prune_expired_backups(directory: int, retention_days: int) -> None:
                         or not isinstance(record.get("sha256"), str)
                         or re.fullmatch(r"[0-9a-f]{64}", record["sha256"]) is None):
                     continue
+                # Inspect the content through the already validated no-follow FD.
+                # Matching size and a syntactically valid SHA are not integrity proof.
+                payload_hash = hashlib.sha256()
+                read_bytes = 0
+                while True:
+                    chunk = os.read(backup_fd, 64 * 1024)
+                    if not chunk:
+                        break
+                    read_bytes += len(chunk)
+                    if read_bytes > backup_info.st_size:
+                        break
+                    payload_hash.update(chunk)
+                if (read_bytes != backup_info.st_size
+                        or payload_hash.hexdigest() != record["sha256"]):
+                    continue  # Preserve mismatched/corrupt backup and metadata.
                 os.unlink(backup_name, dir_fd=directory)
                 dirty = True
                 os.unlink(metadata_name, dir_fd=directory)

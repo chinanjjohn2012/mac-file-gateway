@@ -46,5 +46,5 @@ jobs:
             ! -path '*/__pycache__/*' \
             ! -path './MANIFEST.sha256' \
             ! -name '*.pyc' ! -name '*.pyo' -print0 \
-          | sort -z | xargs -0 sha256sum > /tmp/MANIFEST.sha256
+          | LC_ALL=C sort -z | xargs -0 sha256sum > /tmp/MANIFEST.sha256
           diff -u MANIFEST.sha256 /tmp/MANIFEST.sha256

@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 if [ "$#" -eq 0 ]; then
-    echo 'Usage: bash run.sh /absolute/path/to/project [--allow-hidden-path src/.scratch] [--allow-write] [--write-path src] [--backup-retention-days 15] [--allow-exec --exec-path service-c] [--exec-runner service-c=pipenv] [--local-skill-root agent-runtime --local-skill-policy-dir /private/policy] [--exclude PATTERN] [--port 8765]' >&2
+    echo 'Usage: bash run.sh --config /private/gateway.json  OR  bash run.sh /absolute/path/to/project [--allow-hidden-path src/.scratch] [--allow-write] [--write-path src] [--backup-retention-days 15] [--allow-exec --exec-path service-c] [--exec-runner service-c=pipenv] [--local-skill-root agent-runtime --local-skill-policy-dir /private/policy] [--exclude PATTERN] [--port 8765]' >&2
     exit 2
+fi
+# Multi-Workspace mode takes a private JSON config; keep legacy positional-root
+# handling unchanged for existing deployments and rollback.
+if [ "$1" = "--config" ] || [[ "$1" == --config=* ]]; then
+    cd "$(dirname "$0")"
+    if [ ! -x .venv/bin/python ]; then
+        echo 'Run bash setup.sh first.' >&2
+        exit 2
+    fi
+    exec .venv/bin/python -m gateway "$@"
 fi
 ROOT="$1"
 shift

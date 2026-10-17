@@ -11,10 +11,22 @@ from pydantic import Field, StrictBool
 from starlette.concurrency import run_in_threadpool
 
 from .core import Gateway, GatewayError
+from .multi_fields import validate_tool_arguments
+
+
+class StrictLegacyMCP(FastMCP):
+    """Reject unknown arguments before SDK/Pydantic may silently discard them."""
+    async def call_tool(self, name: str, arguments: dict[str, Any]):
+        try:
+            validate_tool_arguments(name, arguments, multi=False)
+        except GatewayError as exc:
+            raise ToolError(f"{exc.code}: {exc}") from None
+        return await super().call_tool(name, arguments)
+
 
 
 def build_mcp(gateway: Gateway, *, port: int = 8765, local_skill_bridge: Any | None = None) -> FastMCP:
-    mcp = FastMCP(
+    mcp = StrictLegacyMCP(
         "Mac File Gateway",
         instructions=(
             "Access to one user-selected local project. Start with gateway_info and list_files to check the policy. "

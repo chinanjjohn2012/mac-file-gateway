@@ -35,7 +35,7 @@ verify_manifest() {
         while IFS= read -r -d '' file; do
             [ "$file" = "MANIFEST.sha256" ] && continue
             printf '%s  ./%s\n' "$(sha256_file "$file")" "$file"
-        done < <(git ls-files -z | sort -z) > "$candidate"
+        done < <(git ls-files -z | LC_ALL=C sort -z) > "$candidate"
     else
         while IFS= read -r line; do
             [ -z "$line" ] && continue

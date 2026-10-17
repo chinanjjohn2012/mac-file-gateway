@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "server": {
+    "port": 8765,
+    "transport": "http"
+  },
+  "workspaces": {
+    "project-a": {
+      "root": "/absolute/path/to/project-a",
+      "read": { "enabled": true, "excludes": [] },
+      "hidden_paths": [".scratch"],
+      "write": {
+        "enabled": true,
+        "paths": ["src", ".scratch"],
+        "backup_retention_days": 15
+      },
+      "exec": { "enabled": false },
+      "local_skills": { "enabled": false }
+    },
+    "project-b": {
+      "root": "/absolute/path/to/project-b",
+      "read": { "enabled": true },
+      "write": { "enabled": false },
+      "exec": { "enabled": false },
+      "local_skills": { "enabled": false }
+    }
+  }
+}

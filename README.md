@@ -737,3 +737,34 @@ Ctrl+C
 - `samples/local-skill-policy/skill-compatibility.json`：虚构的配置格式示例
 - `tests/fixtures/skill-rejections.json`：必须允许/拒绝的策略测试向量
 - `samples/local-skill-policy/hook-selftests.json`：虚构的 Hook 自检格式示例
+
+
+---
+
+## Multi-Workspace Phase 1 (development branch; not yet released)
+
+The optional `--config` mode selects **multiple explicitly named local project roots** using one Gateway HTTP process and one MCP tunnel. This mode is under implementation and is not included in the published `release/ms1` deployment until tests and security review pass. Do not use the draft branch for production access.
+
+Configuration stays **private and local**, never in the public Git repository. Start from [samples/gateway.example.json](./samples/gateway.example.json), substitute your own absolute project directories, then place the final file at `~/.config/mac-file-gateway/gateway.json`. On a personal Mac, a `0700` config directory and `0600` JSON file are **recommended but not enforced**. Phase 1 trusts local OS accounts and does not use ownership, POSIX mode or extended ACLs as startup admission gates. Symlinks, multiply-linked config files, unexpected file types, ambiguous JSON, control-plane/Workspace overlaps and API authorization errors are still rejected. See [Phase 1 local trust boundary amendment](./docs/PHASE1_LOCAL_TRUST_BOUNDARY.md) for the accepted local-user risk.
+
+```bash
+mkdir -p "$HOME/.config/mac-file-gateway"
+chmod 700 "$HOME/.config/mac-file-gateway"
+chmod 600 "$HOME/.config/mac-file-gateway/gateway.json"
+
+# Phase-1 validation: no listeners and no file writes.
+bash run.sh --config "$HOME/.config/mac-file-gateway/gateway.json" --check
+
+# Run after validation.
+bash run.sh --config "$HOME/.config/mac-file-gateway/gateway.json"
+```
+
+In Multi mode, `list_workspaces` enumerates **IDs only**, and every file tool requires an explicit `workspace` argument. REST `GET /workspaces` lists the same IDs; REST GET file methods use `workspace` in the query, and POST mutations require it in the JSON body. There is no implicit default or cross-workspace move/rename. Per-root permissions, backups and locks are independent. A writable Workspace cannot modify a read-only Workspace through file tools.
+
+**Phase-1 restriction:** Multi mode supports file APIs only. It does **not** expose `run_command` or Local Skill Bridge. Those require later independent security reviews. Existing single-root CLI, HTTP and stdio modes remain available and use their original arguments. Do not combine `--config` with legacy root/write/exec flags or stdio.
+
+The Multi HTTP listener validates every POST before invoking REST or the MCP SDK. Only one JSON media type (optionally `charset=UTF-8`) is accepted; duplicate JSON keys, unknown tool arguments, excessive decoded data and unsupported multi-mode methods fail closed. This mode assumes a trusted local OS environment: Workspace boundaries are remote API capability routing, not OS-level multi-tenant sandboxing. Other local accounts with write access to configuration, runtime code, or source files can change Gateway behavior; that risk is outside the Phase 1 threat model.
+
+Recognized credentials and configured protected paths are hidden consistently from file reads, search results and diff previews. This is **best-effort content protection**, not general DLP. Whole-file overwrite of sources containing hidden lines is refused; exact replacement can target only visible source spans and never reconstruct a redacted display as source content. Backup retention remains 15 UTC days / 10,000 backups / 5,120 MiB **per root**, with opportunistic pruning during actual writes.
+
+To revert, stop the Multi listener and start the previous positional-root command. Existing files and backups need no conversion.

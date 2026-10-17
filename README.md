@@ -730,7 +730,8 @@ Ctrl+C
 
 ## 八、相关文档
 
-- `docs/CONTROLLED_EXEC.md`：受控项目命令执行规则
+- `docs/CONTROLLED_EXEC.md`：受控项目命令执行规则（当前仅适用于单根模式；Multi 模式 Phase 2 尚未启用）
+- `docs/PHASE1_ACCEPTANCE_2026-10-17.md`：Multi-Workspace Phase 1 验收版本、证据范围及已知限制
 - `docs/2026-10-01-local-skill-bridge.md`：Local Skill Bridge v1 冻结规格
 - `docs/LOCAL_SKILL_BRIDGE_IMPLEMENTATION_PLAN.md`：实现计划
 - `docs/PHASE0_LOCAL_SKILL_AUDIT.md`：Phase 0 compatibility audit
@@ -741,9 +742,9 @@ Ctrl+C
 
 ---
 
-## Multi-Workspace Phase 1 (development branch; not yet released)
+## Multi-Workspace Phase 1 (merged in `release/ms1`; file APIs only)
 
-The optional `--config` mode selects **multiple explicitly named local project roots** using one Gateway HTTP process and one MCP tunnel. This mode is under implementation and is not included in the published `release/ms1` deployment until tests and security review pass. Do not use the draft branch for production access.
+The optional `--config` mode selects **multiple explicitly named local project roots** using one Gateway HTTP process and one MCP tunnel. Phase 1 was merged into `release/ms1` via [PR #3](https://github.com/chinanjjohn2012/mac-file-gateway/pull/3) on 2026-10-17, after independent security re-review and native macOS acceptance. The accepted source tree is `cbd826312cc83300e4a5e85f64c7746d8ac90e7f`. This merge does **not** start, restart, or deploy any existing Gateway. The operator confirmed a separate local pilot; that confirmation is not a production deployment record. See [Phase 1 acceptance and boundaries](./docs/PHASE1_ACCEPTANCE_2026-10-17.md).
 
 Configuration stays **private and local**, never in the public Git repository. Start from [samples/gateway.example.json](./samples/gateway.example.json), substitute your own absolute project directories, then place the final file at `~/.config/mac-file-gateway/gateway.json`. On a personal Mac, a `0700` config directory and `0600` JSON file are **recommended but not enforced**. Phase 1 trusts local OS accounts and does not use ownership, POSIX mode or extended ACLs as startup admission gates. Symlinks, multiply-linked config files, unexpected file types, ambiguous JSON, control-plane/Workspace overlaps and API authorization errors are still rejected. See [Phase 1 local trust boundary amendment](./docs/PHASE1_LOCAL_TRUST_BOUNDARY.md) for the accepted local-user risk.
 
@@ -758,6 +759,8 @@ bash run.sh --config "$HOME/.config/mac-file-gateway/gateway.json" --check
 # Run after validation.
 bash run.sh --config "$HOME/.config/mac-file-gateway/gateway.json"
 ```
+
+When the server was started with `GATEWAY_TOKEN`, **every** HTTP route, including `/health` and `/workspaces`, requires `Authorization: Bearer <token>`; an unauthenticated request returns `401 {"error":"unauthorized"}`. For a client shell with the same token exported, use `curl --noproxy '*' -fsS -H "Authorization: Bearer $GATEWAY_TOKEN" http://127.0.0.1:8765/health`. Do not print the token in diagnostics. An isolated pilot can use a separate port and synthetic Workspace roots; do not point it at a running Gateway's private config or active code.
 
 In Multi mode, `list_workspaces` enumerates **IDs only**, and every file tool requires an explicit `workspace` argument. REST `GET /workspaces` lists the same IDs; REST GET file methods use `workspace` in the query, and POST mutations require it in the JSON body. There is no implicit default or cross-workspace move/rename. Per-root permissions, backups and locks are independent. A writable Workspace cannot modify a read-only Workspace through file tools.
 

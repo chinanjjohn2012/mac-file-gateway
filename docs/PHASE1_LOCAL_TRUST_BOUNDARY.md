@@ -1,6 +1,7 @@
 # Phase 1: local OS trust boundary amendment
 
-Status: **implementation proposal, independent security review required before merge**.
+Status: **accepted Phase 1 trust-boundary amendment; merged into `release/ms1` on 2026-10-17**.
+The implementation and follow-up review record is [Phase 1 acceptance](./PHASE1_ACCEPTANCE_2026-10-17.md). This amendment does not enable Phase 2 or Phase 3.
 This document updates the previously frozen Multi-Workspace Phase 1 design's
 local multi-user tampering assumptions. It does not authorize Phase 2 or Phase 3.
 

@@ -1,5 +1,7 @@
 # Phase 1 Multi-Workspace: source security / architecture review
 
+> **Historical snapshot only (2026-10-16).** The pending gates and Draft status below describe the repository **at the time of this source review**; they are not the current PR status. Subsequent independent native macOS re-reviews closed the reviewed findings, and PR #3 was merged on 2026-10-17. See [Phase 1 acceptance and residual limits](./PHASE1_ACCEPTANCE_2026-10-17.md). The original assessment is preserved unchanged below.
+
 Review date: 2026-10-16. Scope: `feature/multi-workspace-phase1`.
 **Status: pre-merge source review; not an independent second-person approval.**
 Do not infer GitHub Actions success or external reviewer approval from this report.

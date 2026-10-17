@@ -1,0 +1,157 @@
+{
+  "artifact_kind": "sanitized historical research summary, not raw evidence or product acceptance",
+  "gateway_review_baseline": "b82a4755a7713c2584dbb538088e59e1214ff293",
+  "gateway_review_tree": "04db26fc8181d34cfa8f2e6b2e677d8c910e6b94",
+  "matrix_sha256": "422c81bc646a032438e349d00f1c5413c41ccfc169ead12c1c0d7d57d29f4f6f",
+  "environment": {
+    "os": "macOS 26.6.2 / Darwin 25.6.0 arm64",
+    "python": "3.14.7",
+    "mcp": "1.30.0",
+    "starlette": "0.52.1",
+    "anyio": "4.15.1",
+    "httpx": "0.28.1",
+    "uvicorn": "0.54.0"
+  },
+  "runs": {
+    "original": {
+      "historical_run": "original-v3",
+      "exit_code": 0,
+      "SDK_file_sha256": "bea279ba402b95c1bb3f3c2566db39c972ac76355b80719fb3b8fc356319b29f",
+      "Popen_attempts": 0,
+      "listener_started": false,
+      "Gateway_started": false,
+      "cases": [
+        {
+          "case": "integer_positive",
+          "passed": true
+        },
+        {
+          "case": "string_positive",
+          "passed": true
+        },
+        {
+          "case": "mixed_ID_response_and_cleanup",
+          "passed": false
+        },
+        {
+          "case": "mixed_cancel_integer",
+          "passed": false
+        },
+        {
+          "case": "mixed_cancel_string",
+          "passed": false
+        },
+        {
+          "case": "concurrent_duplicate_before_any_route_write",
+          "passed": false
+        },
+        {
+          "case": "completed_and_initialize_ID_reuse",
+          "passed": false
+        },
+        {
+          "case": "cross_session_same_ID_cancel_owned",
+          "passed": true
+        },
+        {
+          "case": "GET_and_reserved_spelling_coexist",
+          "passed": false
+        },
+        {
+          "case": "late_GET_cleanup_cannot_delete_successor",
+          "passed": false
+        },
+        {
+          "case": "GET_outer_ASGI_send_exception_is_owned",
+          "passed": false
+        },
+        {
+          "case": "router_old_closed_send_cannot_remove_successor",
+          "passed": false
+        },
+        {
+          "case": "seen_cap_owner_and_session_retirement",
+          "not_run": "Unmodified SDK has no seen-ID policy/cap; candidate-only policy test"
+        },
+        {
+          "case": "stateless_independent_same_ID_compat",
+          "passed": true
+        },
+        {
+          "case": "legal_ID_domain_roundtrips",
+          "passed": true
+        }
+      ]
+    },
+    "candidate": {
+      "historical_run": "candidate-v4",
+      "exit_code": 0,
+      "SDK_file_sha256": "6b9fef82b68c070c6f66f9181ac91221832655c1abd80d3a7afe498ed5a5a3ef",
+      "Popen_attempts": 0,
+      "listener_started": false,
+      "Gateway_started": false,
+      "cases": [
+        {
+          "case": "integer_positive",
+          "passed": true
+        },
+        {
+          "case": "string_positive",
+          "passed": true
+        },
+        {
+          "case": "mixed_ID_response_and_cleanup",
+          "passed": true
+        },
+        {
+          "case": "mixed_cancel_integer",
+          "passed": true
+        },
+        {
+          "case": "mixed_cancel_string",
+          "passed": true
+        },
+        {
+          "case": "concurrent_duplicate_before_any_route_write",
+          "passed": true
+        },
+        {
+          "case": "completed_and_initialize_ID_reuse",
+          "passed": true
+        },
+        {
+          "case": "cross_session_same_ID_cancel_owned",
+          "passed": true
+        },
+        {
+          "case": "GET_and_reserved_spelling_coexist",
+          "passed": true
+        },
+        {
+          "case": "late_GET_cleanup_cannot_delete_successor",
+          "passed": true
+        },
+        {
+          "case": "GET_outer_ASGI_send_exception_is_owned",
+          "passed": true
+        },
+        {
+          "case": "router_old_closed_send_cannot_remove_successor",
+          "passed": true
+        },
+        {
+          "case": "seen_cap_owner_and_session_retirement",
+          "passed": true
+        },
+        {
+          "case": "stateless_independent_same_ID_compat",
+          "passed": true
+        },
+        {
+          "case": "legal_ID_domain_roundtrips",
+          "passed": true
+        }
+      ]
+    }
+  }
+}

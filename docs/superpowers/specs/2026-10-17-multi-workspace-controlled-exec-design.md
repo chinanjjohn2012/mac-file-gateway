@@ -1,7 +1,7 @@
 # Multi-Workspace Phase 2：Controlled Exec 设计规格（评审稿）
 
 **日期：**2026-10-17
-**当前状态：**2026-10-17 独立设计评审为 **BLOCK（D1/P1、D2–D5/P2）**。本稿补充合同但**未修复共享执行器代码**，尚待重新独立复审与用户审批，非实施/启用/合并/部署授权。
+**当前状态：**首次审查为 BLOCK（D1/P1、D2–D5/P2）；第二轮固定修订 `557c6a8ba06678052a228c954f810dfc19165db3` 新增 **R1/P2、R2/P2**，设计仍 **BLOCK**。本文只更新设计合同，**没有修复现有执行器或实现 Phase 2**；仍需独立复审与用户批准，非实施、启用、合并或部署授权。
 **基线：**`release/ms1` — `e32cb5124bbd8b08a79c75b4940799e041dd1295`（Phase 1 已通过 PR #3 合并）。
 **现有参考：**`docs/CONTROLLED_EXEC.md`、`docs/PHASE1_LOCAL_TRUST_BOUNDARY.md`、`gateway/executor.py`、`gateway/workspaces.py`、`gateway/multi_cli.py`。
 
@@ -106,7 +106,7 @@ Phase 2 采用 **方案 A：复用现有单根 `CommandRunner` 并加入 Multi-W
 
 ## 7. 执行监督、超时与取消
 
-> **独立复审补充：**本节为总体原则；§12 的 D3/D4 终态、drain、容量和 PGID 所有权合同是额外强制条件。直接子进程退出 ≠ 受监管作业完成，输出截断上限 ≠ drain 时间上限。
+> **独立复审补充：**本节为总体原则；§12 的 D3/D4 终态、drain、容量和 PGID 所有权合同是额外强制条件。直接子进程退出 ≠ 受监管作业完成；观察退出 ≠ 最终 reap；输出截断上限 ≠ drain 时间上限。§13 R2 规定了信号与回收的强制顺序。
 
 第一版保持同步请求/结果（不发布可查询的 job ID，也不提供显式 `cancel_command`）；取消源仅包括**实际观察到**的请求取消/连接断开、超时、Gateway 关闭。网络/隧道未传播断开事件时不保证即时取消，但真实命令仍应受最大 300 秒 timeout 管束。
 
@@ -115,7 +115,7 @@ Phase 2 采用 **方案 A：复用现有单根 `CommandRunner` 并加入 Multi-W
 要求：
 
 1. 先登记执行租约及状态，再启动进程；取消与 `Popen` 交界的前后竞态都必须安全：已取消不能漏启动，已启动必须被跟踪和回收。
-2. 子进程采用 `shell=False`、`stdin=DEVNULL`、`start_new_session=True`。在超时、已观察到的取消或服务关闭时，向进程组发送 SIGTERM，给予有界宽限（**建议 2 秒**），再用 SIGKILL 兜底，并 `wait()` 回收直接子进程；不能只停止 await 而留下子进程。
+2. 子进程采用 `shell=False`、`stdin=DEVNULL`、`start_new_session=True`。在超时、已观察到的取消或服务关闭时，向进程组发送 SIGTERM，给予有界宽限（**建议 2 秒**），再用 SIGKILL 兜底，**并在撤销所有后续发信号资格、排空在途信号操作之后**，才按 §13 R2 的唯一 reaper 合同最终 `wait/reap`；不能先释放内核身份再对旧 PGID 发信号，也不能只停止 await 而留下子进程。
 3. stdout/stderr 同时持续 drain，限制缓冲与输出长度，异常/超时亦须关闭管道和完成 reader 清理。必须先完成子进程终态和资源回收，最后释放持有 Workspace root FD 的同步 worker 租约。
 4. `WorkspaceService.close` 拒绝新文件与 exec 调用，通知 supervisor 停止活跃执行，等待真实工作线程及子进程收尾，**最后**关闭 Gateway 和 pin FD。不得使用强制超时关闭仍由 worker 使用的 FD。
 5. SIGINT **和 SIGTERM** 都必须经真实监听器验证进入上述关闭路径；单靠 `uvicorn.run(...timeout_graceful_shutdown=10)` 或 SIGINT 的旧验收不能覆盖 SIGTERM。验证关闭并发、取消发生在 spawn 前/后、读写 worker 与 exec 共享关闭状态、真实进程组及 FD 泄漏。
@@ -173,15 +173,15 @@ Phase 2 采用 **方案 A：复用现有单根 `CommandRunner` 并加入 Multi-W
 
 ### D2 / P2 — 提取路径型选项值后校验（实现仍 OPEN）
 
-不能仅对整个 argv token 的斜线切分来校验 `..`/绝对路径；选项名前缀会隐藏真实路径。对**明确支持的命令和已知携带路径的选项**，必须先按各 CLI 文法分离 option 与 path value，再对真实值应用相对路径、无父目录、无宿主绝对路径和允许 scope 规则。首批必测 pytest `-cVALUE`、`-c VALUE`、`--config-file=VALUE`、`--config-file VALUE`，以及 Go `-modfile=VALUE`、`-modfile VALUE` 等受支持等价形式；明确验证外部兄弟配置和绝对配置被拒绝，项目内合法配置仍允许。自定义可信 Python 脚本未识别的自由参数仍为非沙箱风险，不应声称都能静态约束。
+不能仅对整个 argv token 的斜线切分来校验 `..`/绝对路径；选项名前缀会隐藏真实路径。对**明确支持的命令和已知携带路径的选项**，必须先按各 CLI 文法分离 option 与 path value，再对真实值应用相对路径、无父目录、无宿主绝对路径和允许 scope 规则。首批必测 pytest `-cVALUE`、`-c VALUE`、`--config-file=VALUE`、`--config-file VALUE`，以及 Go `-modfile=VALUE`、`-modfile VALUE` 等受支持等价形式；明确验证外部兄弟配置和绝对配置被拒绝，项目内合法配置仍允许。**此外，pytest 的 `@argfile`、`-o/--override-ini` 修改 `addopts` 属于间接有效 argv，首版按 §13 R1 直接拒绝，不读取、展开或执行参数文件作校验。**自定义可信 Python 脚本未识别的自由参数仍为非沙箱风险，不应声称都能静态约束。
 
 **关闭条件：**Legacy 与 Multi 共享安全修复；非法形式 dry-run/apply 的 `Popen=0`，并以独立合成 pytest 配置读取、Go 模块参数反例及正常控制用例验收。
 
 ### D3 / P2 — 正常 leader 退出不能立即 FINISHED
 
-独立的内部作业 ticket 拥有 `STARTING/RUNNING/STOPPING/FINISHED`、进程组、可取消信号权限、同步 worker root FD 租约和 permit。前三个状态均占执行名额。即使 leader `wait` 返回 0，原进程组可能仍有受监管后代且继续持有 reader 管道；须检查并终止/收尾该**原进程组**，不可直接释放名额。可以保留 leader 的 `exit_code=0`、`timed_out=false`，将清理结果另记为 `group_cleanup`，不误报原命令失败。
+独立的内部作业 ticket 拥有 `STARTING/RUNNING/STOPPING/FINISHED`、进程组、可取消信号权限、同步 worker root FD 租约和 permit。前三个状态均占执行名额。即使通过**不 reap** 的 `waitid(..., WNOWAIT)` 观察到 leader 退出 0，原组仍可能有受监管后代；必须在 §13 R2 规定的 **OS 身份锚点仍有效** 时清理原组，禁止先 `wait/reap` 释放身份再向旧数字 PGID 发信号，也不能提前释放名额。可以保留 leader 的 `exit_code=0`、`timed_out=false`，将清理结果另记为 `group_cleanup`，不误报原命令失败。
 
-只有当直接子进程已 `wait`、所监管原组完成结束/清理、输出读端已按 D4 合同回收、实际 worker 租约释放后，才能进入 `FINISHED` 并释放计数。取消/延迟计时器从终态起撤销信号权限，不能用已经失去所有权的数字 PGID 误杀后来的复用进程；使用假系统调用和代际 ticket 验证，不在真实机上误杀无关进程。自建 `setsid` 的逃组后代不在“必须杀尽”的范围，但其继承管道必须由本服务安全处理。
+只有当在 **OS 身份锚点有效期间**完成全部原组信号，**先撤销并排空在途/延迟信号**，再由唯一 owner 最终 `wait/reap` 释放锚点、完成 D4 输出读端清理和真实 worker 租约后，才可标记 `FINISHED`、释放名额。**不能等到 FINISHED 才撤销发信号资格**；代际 ticket/mutex 无法锁住内核 PGID，详见 §13 R2。自建 `setsid` 的逃组后代不在“必须杀尽”的范围，但其继承管道必须由本服务安全处理。
 
 ### D4 / P2 — 可中断输出读取、独立 drain 截止时间
 
@@ -202,11 +202,11 @@ Phase 2 采用 **方案 A：复用现有单根 `CommandRunner` 并加入 Multi-W
 - 请求取消必须分别验证 asyncio Task.cancel、AnyIO CancelScope、MCP SDK 取消通知与 REST 实际可观察断连；AnyIO 屏蔽等待者取消不等于同步 worker 终止。不能观察到的网络中断，只保证最长执行期限。
 - SIGINT 与 **SIGTERM** 均须通过原生 macOS **真实 Gateway** 活跃任务测试，证明关闭路径抵达、停止接受新请求、受监管进程组停止、实际 worker 收尾、root FD 最后关闭；现有 `uvicorn.run` 的 SIGTERM 最小监听器负控仍是待解决风险。
 
-### M01–M15 强制验收断言（细化 `9）
+### M01–M15 强制验收断言（细化 §9）
 
 - **M01 配置：**旧配置到新代码正常且 exec 关闭；新 enabled 配置到旧代码 fail-closed；非法配置 listener=0/Popen=0。
 - **M02 授权：**A 开启 B 关闭，Service 直接、REST、MCP 三路 B 均 Popen=0；无 Workspace 不回退；Skills 未启用。
-- **M03 CLI 语义：**D1 hook 与 D2 路径值每一种等价写法均拒绝且 Popen=0，原生 Go/pytest 合成 marker 和合法控制通过。
+- **M03 CLI 语义：**D1 Go hook、D2 直接路径值及 §13 R1 的 pytest `@argfile`/`-o addopts` 各等价形式均须拒绝且 `Popen_attempts=0`；交叉测试 `pytest`/`python -m pytest`、direct/pipenv、Legacy/Multi、dry/apply，同时保留合法命令正控。
 - **M04 协议：**Host/Origin/Bearer、MIME、重复键、非法 Unicode/非有限数、未知字段及超限 payload 都在 dispatch/Popen 前拒绝，REST/MCP 各自错误封装正确。
 - **M05 合法行为：**direct、pipenv、Python、pytest、Go、dry-run=零进程、非零退出、缺失 runner、cwd/输出绑定正确。
 - **M06 启动竞态：**ticket→permit→授权→Popen→handle 注册→drain→终态各屏障取消/异常，单 owner 清理且计数、FD 恢复。
@@ -214,7 +214,7 @@ Phase 2 采用 **方案 A：复用现有单根 `CommandRunner` 并加入 Multi-W
 - **M08 正常结束：**leader 0 退出、原组后代持管道和重定向管道两种，组清理后 FINISHED，旧 exit_code 不改变，FD/permit 为 0。
 - **M09 逃组持管道：**stderr 单独持有、stdout/stderr 共同持有，drain 预算内回收自身 reader/FD，helper 测试后安全清理。
 - **M10 超时取消：**TERM 被忽略后 KILL；Task.cancel、CancelScope、MCP cancel、REST 可观察/不可观察断连分别验收。
-- **M11 生命周期身份：**重复 close/cancel、leader 提前退出、旧 PGID 信号、FD 数字复用的模拟均不得错杀或跨 Workspace 误用。
+- **M11 生命周期身份：**ticket 仍处 `STOPPING` 时，原组最后成员在“检查→TERM”“TERM→宽限→KILL”之间自然退出、旧数字 PGID 被假内核复用，旧 ticket 的任何路径对新 owner 发信号次数必须为 0；另测 §13 R2 身份锚点、在途信号排空→唯一 reap、重复 close/cancel、迟到 timer 和 FD 复用。
 - **M12 真实监听器：**macOS SIGINT/SIGTERM 的 idle/spawn/active/drain/并发 close，验证顺序与实际 worker/FD 收尾。
 - **M13 输出与凭据：**合成敏感变量不继承/泄漏，stdout/stderr 巨量/无效 UTF-8、reader 错误，输出有界且错误无绝对路径。
 - **M14 重试：**有副作用 marker 后丢弃响应；同一 ticket 至多启动一次，外部独立重传可产生第二次副作用并被明确记录。
@@ -231,3 +231,38 @@ Phase 2 采用 **方案 A：复用现有单根 `CommandRunner` 并加入 Multi-W
 | D5 / P2 | 推荐单 ticket 至多一次；跨独立请求不保证去重。 | **需用户批准该合同；没有跨请求幂等保证。** |
 
 本次仅保留外部独立复审的编号、风险与逻辑结论；不将报告中含本机私有路径的证据 ZIP、日志或任何真实配置发布到公开仓库。规格须先通过新的独立设计复审并获用户批准，之后才可编写详细实施计划；D1/D2 代码修复和 D3/D4 原生验收又是另行的合并门槛。**本次文字修订不是设计 PASS，更不是 Phase 2 功能 PASS。**
+
+## 13. 2026-10-17 第二轮 BLOCK 复审补充合同：R1 / R2
+
+第二轮固定设计 Commit `557c6a8ba06678052a228c954f810dfc19165db3`（Tree `902c93d55be0c138c8ac3ccbf3f061ddb1c08292`）复审结果为 **BLOCK、2 项新增/细化 P2**。R1 属于 D2 参数语义未闭合，R2 属于 D3 PGID 内核身份未闭合。本节是约束性修订，**优先于前文任何较宽松的清理或验证表述**。不是对尚未修复代码的测试通过声明。
+
+### R1 / P2 — 首版拒绝 pytest 的远程间接有效参数
+
+**固定选择：拒绝而不是递归展开。** 对作为 `pytest` 或 `python -m pytest` 执行的远程 argv，Legacy/Multi 共用解析器在 dry-run 和 apply 阶段、任何 `Popen` 之前完成以下判断：
+
+1. **`@argument-file`：**pytest 参数中任何以 `@` 开头的 token 都拒绝，包括 `@args.txt`、`--` 后的 token、嵌套文件引用、相对与绝对文件名。无论文件是否存在/位于授权目录，都不得为了判断而读取、递归展开、执行 pytest。拒绝文件入口，避免额外引入深度、大小、循环和文件身份验证子系统。
+2. **`addopts` 覆盖：**按 pytest 文法识别 `-o KEY=VALUE`、`-oKEY=VALUE`、`--override-ini=KEY=VALUE`、`--override-ini KEY=VALUE` 以及重复或不同参数位置，**解析 ini key** 后，只要 key 为 `addopts` 就拒绝，无论 VALUE 是否显式出现 `--pdb`/`--trace`，即使 VALUE 为空也拒绝；缺失或不合法的取值 fail-closed。不能只在原字符串里查找 `--pdb`/`--trace` 或 `addopts` 子串。合法的其它安全 ini 覆盖、`-q`、授权目录内 `-c pytest.ini` 继续支持，其它路径型选项仍走 D2 实际值校验。
+3. **环境边界：**传入子进程的最小环境不得继承远程可控 `PYTEST_ADDOPTS`。可信项目自身的 ini/addopts、插件、测试代码仍属于既定可信项目代码边界，不构成 OS 沙箱保证；此处仅阻断远程 argv/环境制造的等价参数入口。
+
+**负控：**`pytest`/`python -m pytest` × direct/pipenv × Legacy/Multi Service/REST/MCP × dry/apply，覆盖 `--override-ini=addopts=--pdb`、`-oaddopts=--trace`、分离/粘连、重复、`@args.txt` 中跨目录 `-c../b/pytest.ini` 或交互模式及嵌套。所有拒绝项必须 `Popen_attempts=0`、没有副作用 marker。普通 `-c`、`-q`、安全非 addopts 覆盖为正控。pytest 9.1.1 的独立解析探针只说明机制存在，**不替代未来 Gateway 接口验收**。
+
+### R2 / P2 — STOPPING 期间的 OS PGID 身份与最终回收
+
+**必须保护内核身份，而非仅检查数字。** 用户态 `ticket/generation/mutex`、`killpg(pgid,0)` 和启动时间检查都不能消除检查到信号之间数字 PGID 被复用的竞态。凡是可能发送 `killpg(old_pgid, SIGTERM/SIGKILL)`，均需仍持有**可证明占用原组身份的内核锚点**；如果锚点丢失，禁止按旧数字继续发信号。不能靠“当前仍 STOPPING”或 FINISHED 后才撤权保证安全。
+
+**首选（条件性）机制：**`Popen(start_new_session=True)` 创建 `pgid=leader_pid` 的原 group/session leader。Supervisor 是该 leader 的**唯一 reaper**，先用 `waitid(P_PID, leader_pid, WEXITED|WNOHANG|WNOWAIT)` 或等效“不 reap”的机制**观察**退出状态（包括正常 exit 0），在最后可能发给原组的 TERM/KILL 完成以前**保留 leader 为未 reap 的内核对象**。观察退出 ≠ `wait/reap` 回收身份。必须核对 `Popen.poll/wait/communicate`、SIGCHLD handler、其它 reaper、对象析构等不会在发信号窗口抢先 reap；不能将 WNOWAIT 可用或 `killpg(...,0)` 返回 EPERM 直接说成“已证明内核身份不复用”。该锚点在目标 macOS/受支持平台上保持原 PGID 不可复用的性质**必须先由原生可控测试证明**；若不能证明，Phase 2 继续 BLOCK，并重新评审同等可证明的内核身份机制，**不得 fallback 到裸数字 killpg**。
+
+**唯一 owner 的严格顺序：**
+
+1. 原子登记 ticket、leader、原 PGID、身份锚点及 permit/root FD 租约。所有 timeout、cancel、shutdown、自然结束后的原组清理、TERM→KILL 升级都只向唯一 owner 投递事件；**延迟 timer 不直接 killpg**。
+2. 每次信号操作前确认该 owner 仍持有有效 OS 锚点，**保持锚点直至最后一个发信号操作结束**；leader 或原组最后成员在检查后、TERM 宽限中自然退出，也不得释放锚点。任何路径抢先 reap/丢失身份时必须撤销后续按原 PGID 发信号资格。
+3. 完成所有可能的原组 TERM/KILL 后，**先撤销全部信号资格、取消延迟 timer 并排空所有在途信号临界区**；只有单一 owner 此时才最终 `wait/reap` 并释放锚点。释放后无论是否收到迟到的 cancel/close，**绝不再对原 PGID 发信号**。然后完成 D4 reader/FD 回收、同步 worker 释放与 permit/FINISHED；不得将异步 KILL 放到 reap 之后。
+4. 如果选择额外辅助进程等替代方案，必须先说明如何保留 OS 身份及符合 D5 **每个已接纳请求最多一次真实 Popen 尝试** 的合同，禁止暗中扩大执行能力或仅靠用户态代际标识。
+
+**验收：**受控假内核令 ticket **仍为 STOPPING**，使最后成员在“检查→TERM”和“TERM→宽限→KILL”之间自然退出，强制数字 PGID 由新 owner 占用；所有旧事件必须 `signal_to_new_owner=0`。覆盖取消与关闭并发、延迟 timer、锚点释放/抢先 reap、FD 复用。原生 macOS 只使用自造进程组，验证 WNOWAIT 只观察、维持 OS 身份、原组清理、在途信号排空→唯一 reap、leader 正常退出、忽略 TERM、逃组持管道和租约释放；**不得通过给真实无关进程发信号测试**。Linux CI 补充但不能代替原生 macOS 证据。
+
+### 设计状态与后续门槛
+
+- 本稿仅给出 R1/R2 的明确可审查合同，**第二轮复审 BLOCK 状态未因文字修订自动转为 PASS**；待新独立审查与用户批准。
+- D1/P1 Go hook 与 D2/P2 直接路径参数的**共享执行器实现**仍 OPEN；R1 同样需要代码实现及 Legacy/Multi 测试。R2/D3/D4 的 Supervisor、SIGTERM 和原生 PGID/FD 测试尚未开展。
+- 尚待产品批准的设定不变：schema v1、`paths:["."]`、每 Workspace 1/全局 4、TERM 宽限 2 秒、drain 预算 2 秒、无远端主动 cancel，以及 D5 同请求一次 Popen/独立重传可再执行。设计通过复审与用户批准后，才可进入实施计划；执行代码修改、功能合并与部署各有独立门槛。

@@ -1,7 +1,7 @@
 # Multi-Workspace Phase 2：Controlled Exec 设计规格（评审稿）
 
 **日期：**2026-10-17
-**当前状态：**首次审查为 BLOCK（D1/P1、D2–D5/P2）；第二轮固定修订 `557c6a8ba06678052a228c954f810dfc19165db3` 新增 **R1/P2、R2/P2**，设计仍 **BLOCK**。本文只更新设计合同，**没有修复现有执行器或实现 Phase 2**；仍需独立复审与用户批准，非实施、启用、合并或部署授权。
+**状态同步：**2026-10-18。第三轮设计 `a7a3f87772ad13545facff48620db68f12ac8ef3` 获 **CONDITIONAL**，安全/API 原则及下述产品值已由用户条件冻结；这不代表原生机制或实现合格。第六轮计划固定提交 `b82a4755a7713c2584dbb538088e59e1214ff293` 仍 **BLOCK（PR3/P2）**；其后 `553a221240ed5f1678c949c29fe150305fd95d28` 及本次文档修订未获独立复审通过。**Phase 2 功能资格仍 BLOCK**；D1/D2/R1 未修复，cwd、进程身份和 SDK/真实集成仍待相应验收。本次仅同步用户决策与状态，非代码实施、启用、合并或部署授权。
 **基线：**`release/ms1` — `e32cb5124bbd8b08a79c75b4940799e041dd1295`（Phase 1 已通过 PR #3 合并）。
 **现有参考：**`docs/CONTROLLED_EXEC.md`、`docs/PHASE1_LOCAL_TRUST_BOUNDARY.md`、`gateway/executor.py`、`gateway/workspaces.py`、`gateway/multi_cli.py`。
 
@@ -15,6 +15,20 @@ Phase 2 采用 **方案 A：复用现有单根 `CommandRunner` 并加入 Multi-W
 - **不承诺进程的 OS 沙箱：**`pytest`、Python 脚本和 `go test` 都能运行可信项目代码；进程拥有 Gateway 所在 OS 账户的文件与网络权限，可能访问其他 Workspace 或其他本机路径。`write.enabled=false` 只禁用 Gateway 文件修改 API，不能禁止这些受信任的子进程改写文件。
 
 接受 Phase 1 的可信本机 OS 用户/进程威胁模型：不重新添加 UID、POSIX mode 或 ACL 启动准入。绝不能把 Multi-Workspace 称作恶意本机账户或恶意代码之间的隔离沙箱。
+
+### 1.1 固定目标、可替换机制与证据（2026-10-18 用户确认）
+
+| 固定目标 | 仍须兑现的可测试合同 |
+| --- | --- |
+| 运行正确 | 显式 Workspace 授权、实际 cwd 身份与 runner/Pipfile 绑定；同一候选正常启动成功，再验证竞态安全；拒绝与 dry-run 不启动。 |
+| 停止正确 | 超时、实际可观察取消及关闭时清理受监管任务；不误伤其他任务；保持信号/回收顺序和 FD、permit、worker 租约，保留既定逃组后代边界。 |
+| 结果正确 | 请求、响应、取消与异步清理归属一致，外部合法 ID 的类型和值不丢失；保留真实执行状态和 D5 重试语义。 |
+
+`/dev/fd/<fd>`、`WNOWAIT` 和特定 SDK 补丁是候选实现，不是必须坚持的产品需求。失败候选保留反例并退出；替代机制须映射到相同的具体断言、明确平台/版本及所有权，并经独立评审与用户批准后才能接入。不得用三个概括目标替换 §6–§13、实施计划 LC1/PR2/PR3 和 M01–M15 的具体合同。更换机制不自动修改 Popen 尝试计数、Python 版本边界、接口、兼容性、产品范围或发布门槛；涉及这些变化须另行明确批准。裸路径 fallback、不安全 preexec、无身份保障的数字 PGID 信号及静默收窄合法 ID 域仍不允许。
+
+分别记录**设计合同、机制资格、正式实现验收、发布授权**；条件冻结不等于实现通过，文档同步不解除 BLOCK。候选未合格只阻断依赖它的执行接入；Task 2 共享安全修复及获准的静态工作仍可独立推进。
+
+每项风险分别报告**缺陷复现、目标链路可触发性、影响/阻断范围、处置与剩余证据**。PR3 的真实 SDK 隔离反例及限定候选矩阵见[固定研究报告](https://github.com/chinanjjohn2012/mac-file-gateway/blob/7a72acb86c404f1853e51b2d7addb344d4613d28/docs/research/2026-10-18-pr3-sdk-routing/REVIEW_REPORT.md)；它们不证明目标 Web/代理链路已发生日常故障，也不代表完整产品资格。目标链路的客户端/SDK 版本、ID 生成与改写、会话复用及 GET/取消行为尚待验证；没有观察到反例不等于证明不可达。实际可触发性用于评估优先级和影响，不能单凭常见客户端只用整数而取消合法 ID 保真、重复请求、GET 重连和清理断言。任何范围缩减或风险接受均须显式评审与批准，当前 BLOCK 不变。
 
 ## 2. 目的与非目标
 
@@ -41,7 +55,7 @@ Phase 2 采用 **方案 A：复用现有单根 `CommandRunner` 并加入 Multi-W
 
 ## 4. 设计配置契约
 
-建议继续使用 `schema_version: 1` 并以可选键扩展 `exec`；Phase 1 的原始 JSON 配置在新版本中原样有效，旧版本读到新启用的执行配置仍 fail-closed。
+已批准继续使用 `schema_version: 1` 并以可选键扩展 `exec`；Phase 1 的原始 JSON 配置在新版本中原样有效，旧版本读到新启用的执行配置仍 fail-closed。
 
 ```json
 {
@@ -110,12 +124,12 @@ Phase 2 采用 **方案 A：复用现有单根 `CommandRunner` 并加入 Multi-W
 
 第一版保持同步请求/结果（不发布可查询的 job ID，也不提供显式 `cancel_command`）；取消源仅包括**实际观察到**的请求取消/连接断开、超时、Gateway 关闭。网络/隧道未传播断开事件时不保证即时取消，但真实命令仍应受最大 300 秒 timeout 管束。
 
-增加内部 `ExecSupervisor`（作为复用 `CommandRunner` 的协作对象，而非独立 OS Worker 服务），登记 `STARTING/RUNNING/STOPPING/FINISHED`、执行进程与 process group、取消标志、同步 worker FD 租约。拟议资源上限：每个 Workspace **1** 个活跃执行、单 Gateway **4** 个；超额立即 `busy` 拒绝，不排队，不占用文件读写的全局互斥锁，A 的长任务不阻塞 B 的文件操作。
+增加内部 `ExecSupervisor`（作为复用 `CommandRunner` 的协作对象，而非独立 OS Worker 服务），登记 `STARTING/RUNNING/STOPPING/FINISHED`、执行进程与 process group、取消标志、同步 worker FD 租约。已批准资源上限：每个 Workspace **1** 个活跃执行、单 Gateway **4** 个；超额立即 `busy` 拒绝，不排队，不占用文件读写的全局互斥锁，A 的长任务不阻塞 B 的文件操作。
 
 要求：
 
 1. 先登记执行租约及状态，再启动进程；取消与 `Popen` 交界的前后竞态都必须安全：已取消不能漏启动，已启动必须被跟踪和回收。
-2. 子进程采用 `shell=False`、`stdin=DEVNULL`、`start_new_session=True`。在超时、已观察到的取消或服务关闭时，向进程组发送 SIGTERM，给予有界宽限（**建议 2 秒**），再用 SIGKILL 兜底，**并在撤销所有后续发信号资格、排空在途信号操作之后**，才按 §13 R2 的唯一 reaper 合同最终 `wait/reap`；不能先释放内核身份再对旧 PGID 发信号，也不能只停止 await 而留下子进程。
+2. 子进程采用 `shell=False`、`stdin=DEVNULL`、`start_new_session=True`。在超时、已观察到的取消或服务关闭时，向进程组发送 SIGTERM，给予有界宽限（**已批准 2 秒**），再用 SIGKILL 兜底，**并在撤销所有后续发信号资格、排空在途信号操作之后**，才按 §13 R2 的唯一 reaper 合同最终 `wait/reap`；不能先释放内核身份再对旧 PGID 发信号，也不能只停止 await 而留下子进程。
 3. stdout/stderr 同时持续 drain，限制缓冲与输出长度，异常/超时亦须关闭管道和完成 reader 清理。必须先完成子进程终态和资源回收，最后释放持有 Workspace root FD 的同步 worker 租约。
 4. `WorkspaceService.close` 拒绝新文件与 exec 调用，通知 supervisor 停止活跃执行，等待真实工作线程及子进程收尾，**最后**关闭 Gateway 和 pin FD。不得使用强制超时关闭仍由 worker 使用的 FD。
 5. SIGINT **和 SIGTERM** 都必须经真实监听器验证进入上述关闭路径；单靠 `uvicorn.run(...timeout_graceful_shutdown=10)` 或 SIGINT 的旧验收不能覆盖 SIGTERM。验证关闭并发、取消发生在 spawn 前/后、读写 worker 与 exec 共享关闭状态、真实进程组及 FD 泄漏。
@@ -150,17 +164,17 @@ Phase 2 采用 **方案 A：复用现有单根 `CommandRunner` 并加入 Multi-W
 
 必须先在共享 `CommandRunner` 中安排 D1/D2 的语义修复和 Legacy 负控，再允许 Multi exec 的实际启动入口；D3/D4 监督器、可中断 drain 与 D5 至多一次内部启动是另外的独立实施/验收任务。**本轮仅修订设计、不实现这些修复。**
 
-用户批准本规格后，才起草可审阅的详细实施计划。计划应按“先失败测试，后配置解析、授权路由、执行监督、REST/MCP 表面、真实 macOS 回归”拆分，功能分支不修改运行中的 Gateway。独立安全/架构审查与用户最终合并批准是另外的门槛。
+第三轮设计条件冻结后已形成[七任务实施计划](../plans/2026-10-17-multi-workspace-controlled-exec.md)，后续修订按固定提交独立复审，不重新假设全部计划已获批。Task 2 共享安全修复在单独授权后优先、独立推进；cwd、进程身份与 SDK 机制分别取得证据，再按既有依赖进入执行器和真实集成。功能分支不修改运行中的 Gateway；代码实施、独立安全/架构验收与用户最终合并批准仍是不同门槛。
 
 保持 `exec.enabled=false` 为默认，Phase 2 程序合并不自动修改私有配置/Tunnel/部署。回退可在受控维护窗口关闭 exec 授权、`--check` 后切换回文件模式；不需要改变 Phase 1 的 Workspace 数据或备份。
 
-## 11. 本稿需审阅的细节
+## 11. 已批准产品值与待验收事项
 
 **已确认：**复用方案 A、可信本机进程、无 OS 沙箱、显式 Workspace exec 授权、Legacy 兼容、Local Skill Bridge 不在 Phase 2。
 
-**拟议、需随文批准后才能冻结：**继续扩展 `schema_version:1`、`paths:["."]` 的明确语义、1/Workspace 与 4/进程的并发限额、2 秒终止宽限、Phase 2 首版不提供远端主动取消 API。以上给出了可执行测试合同，但**用户当前的“接受”仅批准方案 A 的隔离边界，不代表这些细项已自动获批**。
+**2026-10-17 已批准：**扩展 `schema_version:1`；`paths:["."]` 需显式授权；1/Workspace 与单 Gateway 全局 4；TERM 宽限 2 秒、独立 drain 预算 2 秒；无公开远端 cancel/job API；每个已接纳请求最多一次真实 Popen 尝试，跨独立请求不去重。macOS Multi exec 为 Python 3.13+ 且需原生机制资格，Legacy/文件模式保持 Python 3.11+。本次不修改这些产品值。
 
-用户审阅并批准本文件后，下一步才调用实施计划工作流。此时不得修改功能源码、启用 Multi exec、执行真实命令或调整生产 Gateway。
+**仍待完成：**候选机制选择与资格、共享安全修复、正式实现及真实客户端/原生验收；本次文档授权不允许修改功能源码、启用 Multi exec、执行项目命令或调整生产 Gateway。
 ## 12. 2026-10-17 独立 BLOCK 复审补充合同（规范性）
 
 **原受审设计 Commit：**`23a579df7dcacae4490e492a557fe8460f369bfa`，Tree `11d2a185c75a28972a8757623eda5a77a2999e7e`。独立报告判定 1 项 P1（D1）、4 项 P2（D2–D5），设计不能冻结。本节细化前文而不改变已确认的方案 A、可信本机项目及**无 OS 沙箱**边界。本节修订**不等于**共享执行器漏洞修复或 Phase 2 功能验收。
@@ -187,18 +201,18 @@ Phase 2 采用 **方案 A：复用现有单根 `CommandRunner` 并加入 Multi-W
 
 原始组清理、主进程 `wait` 和每流 48k 字符留存限制均不保证管道 EOF。逃组后代可能继续持有 stdout/stderr 写端，阻塞式 `BufferedReader.read` 及跨线程 `close` 均不可作为可靠的停止方案。采用**单一 FD owner**负责读取与关闭：例如 `os.set_blocking(fd, False)` 加 `selectors.DefaultSelector`/有限 poll 与显式停止通知；其它线程只能通知 owner，不能跨线程关闭正在阻塞读取的同一 FD。实现可以选择等价可证明机制，但必须有独立测试。
 
-**时限草案（待审批）：**进程 TERM 宽限 2 秒后升级 KILL；输出 drain **另设最多 2 秒**，即使没有 EOF 也结束本服务读端并回收 reader/FD/permit。两种预算分开计时；`timeout_graceful_shutdown=10` 不是这些阶段安全收尾的证据。超过 drain 预算保留已经捕获的部分输出，并明确 `drain_incomplete` 或相应 `stdout_truncated`/`stderr_truncated` 标记。强制 KILL、断电或任意不可中断内核 I/O 不承诺绝对收尾时限，但可控合成管道与线程应满足预算。逃组 helper 的生命由测试自身管理，不得以其仍存活判定“受监管原组残留”。
+**已批准时限（2026-10-17）：**进程 TERM 宽限 2 秒后升级 KILL；输出 drain **另设最多 2 秒**，即使没有 EOF 也结束本服务读端并回收 reader/FD/permit。两种预算分开计时；`timeout_graceful_shutdown=10` 不是这些阶段安全收尾的证据。超过 drain 预算保留已经捕获的部分输出，并明确 `drain_incomplete` 或相应 `stdout_truncated`/`stderr_truncated` 标记。强制 KILL、断电或任意不可中断内核 I/O 不承诺绝对收尾时限，但可控合成管道与线程应满足预算。逃组 helper 的生命由测试自身管理，不得以其仍存活判定“受监管原组残留”。
 
-### D5 / P2 — 选择“单次服务端接纳至多一次启动”（待用户批准）
+### D5 / P2 — 单次服务端接纳至多一次启动（产品合同已批准，实现待验收）
 
-**建议采用评审选项 A，避免首版引入幂等键和持久 Job 系统：**同一个服务端已接纳的 REST/MCP 请求内部有一个唯一 ticket，整个服务处理链中最多一次真实 `Popen` 尝试。授权失败、解析失败、失败重试或异常恢复不能在同 ticket 内再次启动，尤其禁止捕获执行器异常后无意重新调用。
+**已批准采用评审选项 A，避免首版引入幂等键和持久 Job 系统：**同一个服务端已接纳的 REST/MCP 请求内部有一个唯一 ticket，整个服务处理链中最多一次真实 `Popen` 尝试。授权失败、解析失败、失败重试或异常恢复不能在同 ticket 内再次启动，尤其禁止捕获执行器异常后无意重新调用。
 
-**不承诺跨独立请求去重或 exactly-once。** 若命令产生副作用但 HTTP/MCP 响应丢失，调用者不知道它是否完成；重新发送同样五个业务参数的**另一合法请求**可能再次产生副作用。**协议澄清（2026-10-18，PR2/PR3）：启用有状态 MCP 后，同一会话内客户端 request ID 整个会话生命周期都不得复用（包括原请求已完成时）；同会话重试必须分配新 wire ID，或在新会话中才可合法使用此前的数字 ID。重复 ID 必须在 SDK **首次 ID 索引传输状态写入前**拒绝，而不仅在 responder 登记前；请求、响应、related message、取消与清理必须对所有合法 ID 保持**类型和值无碰撞**，整数 `71` 与字符串 `"71"` 不能共用传输通道，合法字符串 ID `"_GET_stream"` 也不得与 GET sentinel 冲突。该完整传输路由资格尚未验证，MCP 1.30.0 旧行为已暴露混合类型错投；不能靠内部 ticket generation 区分不带 generation 的迟到 wire cancel。验证失败必须继续 STOP，替代 SDK/路由机制需独立评审与用户批准。**这是 MCP 请求身份规则，不是跨请求业务去重；不同合法请求均可能产生副作用。`idempotentHint=false` 仅提示非幂等性。合成 marker 负控：同一 ticket 内部重入至多 1 个 marker；独立合法重试可产生第 2 个 marker；非法同会话重复 ID 则 dispatch=0、Popen=0。该澄清保持用户已批准的“单请求至多一次、跨独立请求不去重”产品决定。
+**不承诺跨独立请求去重或 exactly-once。** 若命令产生副作用但 HTTP/MCP 响应丢失，调用者不知道它是否完成；重新发送同样五个业务参数的**另一合法请求**可能再次产生副作用。**协议澄清（2026-10-18，PR2/PR3）：启用有状态 MCP 后，同一会话内客户端 request ID 整个会话生命周期都不得复用（包括原请求已完成时）；同会话重试必须分配新 wire ID，或在新会话中才可合法使用此前的数字 ID。重复 ID 必须在 SDK **首次 ID 索引传输状态写入前**拒绝，而不仅在 responder 登记前；请求、响应、related message、取消与清理必须对所有合法 ID 保持**类型和值无碰撞**，整数 `71` 与字符串 `"71"` 不能共用传输通道，合法字符串 ID `"_GET_stream"` 也不得与 GET sentinel 冲突。正式 Gateway/客户端的完整传输路由资格仍未通过；§1.1 所引 PR3 限定研究结果不替代产品验收，MCP 1.30.0 旧行为已暴露混合类型错投；不能靠内部 ticket generation 区分不带 generation 的迟到 wire cancel。验证失败必须继续 STOP，替代 SDK/路由机制需独立评审与用户批准。**这是 MCP 请求身份规则，不是跨请求业务去重；不同合法请求均可能产生副作用。`idempotentHint=false` 仅提示非幂等性。合成 marker 负控：同一 ticket 内部重入至多 1 个 marker；独立合法重试可产生第 2 个 marker；非法同会话重复 ID 则 dispatch=0、Popen=0。该澄清保持用户已批准的“单请求至多一次、跨独立请求不去重”产品决定。
 
 ### 资源、路径与 SIGTERM 交接条件（独立复审 I3–I8）
 
 - `_cwd()` 当前只是暂时打开 no-follow FD，交给 `Popen(cwd=...)` 时未必保持目录 pin；执行授权应保持根与实际 cwd 身份在最后校验→启动交接期间有效，并验证子进程真正工作的 Workspace/cwd；不可在多线程 macOS 用不安全的 `preexec_fn` 偷渡。
-- Exec 的名额在提交到耗时同步线程池前通过 `WorkspaceService/ExecSupervisor` 原子 admission 取得；同一 Workspace 拟 1 个、全局拟 4 个。名额满时业务服务立即 busy 而不是先排队；已取消的等待者不得晚启动。长期 exec 不能耗尽 Phase 1 文件 API 的 worker，也不能持有全局文件锁。
+- Exec 的名额在提交到耗时同步线程池前通过 `WorkspaceService/ExecSupervisor` 原子 admission 取得；同一 Workspace 1 个、全局 4 个（已批准）。名额满时业务服务立即 busy 而不是先排队；已取消的等待者不得晚启动。长期 exec 不能耗尽 Phase 1 文件 API 的 worker，也不能持有全局文件锁。
 - 请求取消必须分别验证 asyncio Task.cancel、AnyIO CancelScope、MCP SDK 取消通知与 REST 实际可观察断连；AnyIO 屏蔽等待者取消不等于同步 worker 终止。不能观察到的网络中断，只保证最长执行期限。
 - SIGINT 与 **SIGTERM** 均须通过原生 macOS **真实 Gateway** 活跃任务测试，证明关闭路径抵达、停止接受新请求、受监管进程组停止、实际 worker 收尾、root FD 最后关闭；现有 `uvicorn.run` 的 SIGTERM 最小监听器负控仍是待解决风险。
 
@@ -228,9 +242,9 @@ Phase 2 采用 **方案 A：复用现有单根 `CommandRunner` 并加入 Multi-W
 | D2 / P2 | 明确路径型选项值提取、正反控制与 Legacy/Multi 复测。 | **代码尚未修复；OPEN。** |
 | D3 / P2 | 明确正常 leader 退出后的组清理/终态/PGID 回收。 | 未完成真实 Supervisor 实现及验证。 |
 | D4 / P2 | 明确单 owner 非阻塞 drain、期限、部分输出。 | 未完成真实管道/关闭验证。 |
-| D5 / P2 | 推荐单 ticket 至多一次；跨独立请求不保证去重。 | **需用户批准该合同；没有跨请求幂等保证。** |
+| D5 / P2 | 已批准单 ticket 至多一次；跨独立请求不保证去重。 | **正式实现仍待验收；没有跨请求幂等保证。** |
 
-本次仅保留外部独立复审的编号、风险与逻辑结论；不将报告中含本机私有路径的证据 ZIP、日志或任何真实配置发布到公开仓库。规格须先通过新的独立设计复审并获用户批准，之后才可编写详细实施计划；D1/D2 代码修复和 D3/D4 原生验收又是另行的合并门槛。**本次文字修订不是设计 PASS，更不是 Phase 2 功能 PASS。**
+本次仅保留外部独立复审的编号、风险与逻辑结论；不将报告中含本机私有路径的证据 ZIP、日志或任何真实配置发布到公开仓库。以上保留历史风险与规范性断言；当前分层状态见页首和 §11，不倒写历史报告。第三轮条件冻结及已有计划不关闭 D1/D2 代码修复和 D3/D4 原生验收门槛；后续修订仍需相应独立复审。**本次文字修订不是设计 PASS，更不是 Phase 2 功能 PASS。**
 
 ## 13. 2026-10-17 第二轮 BLOCK 复审补充合同：R1 / R2
 
@@ -250,7 +264,7 @@ Phase 2 采用 **方案 A：复用现有单根 `CommandRunner` 并加入 Multi-W
 
 **必须保护内核身份，而非仅检查数字。** 用户态 `ticket/generation/mutex`、`killpg(pgid,0)` 和启动时间检查都不能消除检查到信号之间数字 PGID 被复用的竞态。凡是可能发送 `killpg(old_pgid, SIGTERM/SIGKILL)`，均需仍持有**可证明占用原组身份的内核锚点**；如果锚点丢失，禁止按旧数字继续发信号。不能靠“当前仍 STOPPING”或 FINISHED 后才撤权保证安全。
 
-**首选（条件性）机制：**`Popen(start_new_session=True)` 创建 `pgid=leader_pid` 的原 group/session leader。Supervisor 是该 leader 的**唯一 reaper**，先用 `waitid(P_PID, leader_pid, WEXITED|WNOHANG|WNOWAIT)` 或等效“不 reap”的机制**观察**退出状态（包括正常 exit 0），在最后可能发给原组的 TERM/KILL 完成以前**保留 leader 为未 reap 的内核对象**。观察退出 ≠ `wait/reap` 回收身份。必须核对 `Popen.poll/wait/communicate`、SIGCHLD handler、其它 reaper、对象析构等不会在发信号窗口抢先 reap；不能将 WNOWAIT 可用或 `killpg(...,0)` 返回 EPERM 直接说成“已证明内核身份不复用”。该锚点在目标 macOS/受支持平台上保持原 PGID 不可复用的性质**必须先由原生可控测试证明**；若不能证明，Phase 2 继续 BLOCK，并重新评审同等可证明的内核身份机制，**不得 fallback 到裸数字 killpg**。
+**当前待资格验证的候选（不是唯一允许机制）：**`Popen(start_new_session=True)` 创建 `pgid=leader_pid` 的原 group/session leader。Supervisor 是该 leader 的**唯一 reaper**，先用 `waitid(P_PID, leader_pid, WEXITED|WNOHANG|WNOWAIT)` 或等效“不 reap”的机制**观察**退出状态（包括正常 exit 0），在最后可能发给原组的 TERM/KILL 完成以前**保留 leader 为未 reap 的内核对象**。观察退出 ≠ `wait/reap` 回收身份。必须核对 `Popen.poll/wait/communicate`、SIGCHLD handler、其它 reaper、对象析构等不会在发信号窗口抢先 reap；不能将 WNOWAIT 可用或 `killpg(...,0)` 返回 EPERM 直接说成“已证明内核身份不复用”。该锚点在目标 macOS/受支持平台上保持原 PGID 不可复用的性质**必须先由原生可控测试证明**；若不能证明，Phase 2 继续 BLOCK，并重新评审同等可证明的内核身份机制，**不得 fallback 到裸数字 killpg**。
 
 **唯一 owner 的严格顺序：**
 
@@ -261,8 +275,8 @@ Phase 2 采用 **方案 A：复用现有单根 `CommandRunner` 并加入 Multi-W
 
 **验收：**受控假内核令 ticket **仍为 STOPPING**，使最后成员在“检查→TERM”和“TERM→宽限→KILL”之间自然退出，强制数字 PGID 由新 owner 占用；所有旧事件必须 `signal_to_new_owner=0`。覆盖取消与关闭并发、延迟 timer、锚点释放/抢先 reap、FD 复用。原生 macOS 只使用自造进程组，验证 WNOWAIT 只观察、维持 OS 身份、原组清理、在途信号排空→唯一 reap、leader 正常退出、忽略 TERM、逃组持管道和租约释放；**不得通过给真实无关进程发信号测试**。Linux CI 补充但不能代替原生 macOS 证据。
 
-### 设计状态与后续门槛
+### 设计状态与后续门槛（2026-10-18 同步）
 
-- 本稿仅给出 R1/R2 的明确可审查合同，**第二轮复审 BLOCK 状态未因文字修订自动转为 PASS**；待新独立审查与用户批准。
+- 第二轮固定提交的历史 BLOCK 结论保留；第三轮 `a7a3f87772ad13545facff48620db68f12ac8ef3` 已获设计 CONDITIONAL 与用户条件冻结，不能与原生机制、正式实现或发布许可混同。后续计划及本次修订的独立复审状态见页首。
 - D1/P1 Go hook 与 D2/P2 直接路径参数的**共享执行器实现**仍 OPEN；R1 同样需要代码实现及 Legacy/Multi 测试。R2/D3/D4 的 Supervisor、SIGTERM 和原生 PGID/FD 测试尚未开展。
-- 尚待产品批准的设定不变：schema v1、`paths:["."]`、每 Workspace 1/全局 4、TERM 宽限 2 秒、drain 预算 2 秒、无远端主动 cancel，以及 D5 同请求一次 Popen/独立重传可再执行。设计通过复审与用户批准后，才可进入实施计划；执行代码修改、功能合并与部署各有独立门槛。
+- §11 的产品值已批准，本次没有扩大实施权限。候选机制可替换但须兑现具体合同并完成对应评审；Phase 2 功能资格仍 BLOCK，代码修改、功能合并、部署与启用各有独立门槛。

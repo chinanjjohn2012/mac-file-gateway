@@ -1,0 +1,291 @@
+--- sdk-original/mcp/server/streamable_http.py
++++ sdk-candidate/mcp/server/streamable_http.py
+@@ -61,6 +61,16 @@
+ 
+ # Special key for the standalone GET stream
+ GET_STREAM_KEY = "_GET_stream"
++
++
++def _probe_rpc_route_key(request_id: RequestId) -> str:
++    """THROWAWAY: injective internal key; never rewrite external JSON-RPC IDs."""
++    if type(request_id) is int:
++        return "rpc:i:" + str(request_id)
++    if type(request_id) is str:
++        return "rpc:s:" + json.dumps(request_id, ensure_ascii=True, separators=(",", ":"))
++    raise ValueError("Invalid request ID type")
++
+ 
+ # Buffer for the per-request `_request_streams` so the serial `message_router`
+ # can deposit a response and move on instead of head-of-line blocking the
+@@ -186,6 +196,11 @@
+         if idle_timeout is not None and not (math.isfinite(idle_timeout) and idle_timeout > 0):
+             raise ValueError("idle_timeout must be a positive, finite number of seconds")
+ 
++        # Research scope only. Unqualified modes must fail rather than silently work.
++        if not is_json_response_enabled or event_store is not None:
++            raise ValueError("Throwaway candidate requires JSON response and no EventStore")
++        self._probe_seen_ids: set[str] = set()
++        self._probe_max_seen_ids = 1024  # Probe parameter, NOT an approved product value.
+         self.mcp_session_id = mcp_session_id
+         self.is_json_response_enabled = is_json_response_enabled
+         self._event_store = event_store
+@@ -229,6 +244,10 @@
+             Requires event_store to be configured for events to be stored during
+             the disconnect.
+         """
++        self._probe_close_route(_probe_rpc_route_key(request_id))
++
++    def _probe_close_route(self, request_id: str) -> None:
++        """Internal route keys and public wire IDs are separate domains."""
+         writer = self._sse_stream_writers.pop(request_id, None)
+         if writer:
+             writer.close()
+@@ -256,7 +275,7 @@
+             Currently, client reconnection for standalone GET streams is NOT
+             implemented - this is a known gap (see test_standalone_get_stream_reconnection).
+         """
+-        self.close_sse_stream(GET_STREAM_KEY)
++        self._probe_close_route(GET_STREAM_KEY)
+ 
+     def _create_session_message(  # pragma: no cover
+         self,
+@@ -401,19 +420,20 @@
+ 
+         return event_data
+ 
+-    async def _clean_up_memory_streams(self, request_id: RequestId) -> None:  # pragma: no cover
+-        """Clean up memory streams for a given request ID."""
+-        if request_id in self._request_streams:
++    async def _clean_up_memory_streams(self, request_id: RequestId, expected_entry=None) -> None:
++        """THROWAWAY: close only the captured owner, compare-remove after awaits."""
++        entry = expected_entry if expected_entry is not None else self._request_streams.get(request_id)
++        if entry is None:
++            return
++        # Only in-memory close operations are shielded; this says nothing about
++        # Gateway sync workers or OS-process cancellation qualification.
++        with anyio.CancelScope(shield=True):
+             try:
+-                # Close the request stream
+-                await self._request_streams[request_id][0].aclose()
+-                await self._request_streams[request_id][1].aclose()
+-            except Exception:
+-                # During cleanup, we catch all exceptions since streams might be in various states
+-                logger.debug("Error closing memory streams - may already be closed")
++                await entry[0].aclose()
++                await entry[1].aclose()
+             finally:
+-                # Remove the request stream from the mapping
+-                self._request_streams.pop(request_id, None)
++                if self._request_streams.get(request_id) is entry:
++                    self._request_streams.pop(request_id, None)
+ 
+     async def handle_request(self, scope: Scope, receive: Receive, send: Send) -> None:
+         """Application entry point that handles all HTTP requests"""
+@@ -538,6 +558,13 @@
+                 await response(scope, receive, send)
+                 return
+ 
++            # Preserve the wire type before Pydantic can coerce bool/float IDs.
++            if (isinstance(raw_message, dict) and "method" in raw_message and "id" in raw_message
++                    and type(raw_message["id"]) not in (str, int)):
++                response = Response('{"error":"invalid_request_id_type"}', status_code=400,
++                                    media_type="application/json")
++                await response(scope, receive, send)
++                return
+             try:  # pragma: no cover
+                 message = JSONRPCMessage.model_validate(raw_message)
+             except ValidationError as e:  # pragma: no cover
+@@ -596,18 +623,31 @@
+                 else request.headers.get(MCP_PROTOCOL_VERSION_HEADER, DEFAULT_NEGOTIATED_VERSION)
+             )
+ 
+-            request_id = str(message.root.id)
++            request_id = _probe_rpc_route_key(message.root.id)
++            # Session/credential/header validation above already succeeded. Single
++            # event-loop owner: no await from check through reservation/first route write.
++            if request_id in self._probe_seen_ids:
++                response = Response('{"error":"duplicate_request_id"}', status_code=409,
++                                    media_type="application/json")
++                await response(scope, receive, send)
++                return
++            if len(self._probe_seen_ids) >= self._probe_max_seen_ids:
++                response = Response('{"error":"session_request_limit"}', status_code=429,
++                                    media_type="application/json")
++                await response(scope, receive, send)
++                return
++            self._probe_seen_ids.add(request_id)
+ 
+             if self.is_json_response_enabled:  # pragma: no cover
+-                self._request_streams[request_id] = anyio.create_memory_object_stream[EventMessage](
+-                    REQUEST_STREAM_BUFFER_SIZE
+-                )
+-                request_stream_reader = self._request_streams[request_id][1]
+-                # Process the message
++                # Construct the message BEFORE registering transport state.
+                 metadata = ServerMessageMetadata(request_context=request)
+                 session_message = SessionMessage(message, metadata=metadata)
+-                await writer.send(session_message)
++                route_entry = anyio.create_memory_object_stream[EventMessage](REQUEST_STREAM_BUFFER_SIZE)
++                self._request_streams[request_id] = route_entry
++                request_stream_reader = route_entry[1]
+                 try:
++                    # This first cancellable dispatch must already be under cleanup.
++                    await writer.send(session_message)
+                     # Process messages from the request-specific stream
+                     # We need to collect all messages until we get a response
+                     response_message = None
+@@ -644,7 +684,7 @@
+                     )
+                     await response(scope, receive, send)
+                 finally:
+-                    await self._clean_up_memory_streams(request_id)
++                    await self._clean_up_memory_streams(request_id, route_entry)
+             else:  # pragma: no cover
+                 # Mint the priming event before any per-request state exists:
+                 # `EventStore.store_event` is user code and may raise, in which
+@@ -679,7 +719,7 @@
+                     async with anyio.create_task_group() as tg:
+                         tg.start_soon(response, scope, receive, send)
+                         # Then send the message to be processed by the server
+-                        session_message = self._create_session_message(message, request, request_id, protocol_version)
++                        session_message = self._create_session_message(message, request, message.root.id, protocol_version)
+                         await writer.send(session_message)
+                 except Exception:
+                     logger.exception("SSE response error")
+@@ -750,15 +790,14 @@
+ 
+         # Create SSE stream
+         sse_stream_writer, sse_stream_reader = anyio.create_memory_object_stream[SSEEvent](0)
++        standalone_stream_entry = anyio.create_memory_object_stream[EventMessage](REQUEST_STREAM_BUFFER_SIZE)
++        self._request_streams[GET_STREAM_KEY] = standalone_stream_entry
+ 
+         async def standalone_sse_writer():
+             try:
+                 # Create a standalone message stream for server-initiated messages
+ 
+-                self._request_streams[GET_STREAM_KEY] = anyio.create_memory_object_stream[EventMessage](
+-                    REQUEST_STREAM_BUFFER_SIZE
+-                )
+-                standalone_stream_reader = self._request_streams[GET_STREAM_KEY][1]
++                standalone_stream_reader = standalone_stream_entry[1]
+ 
+                 async with sse_stream_writer, standalone_stream_reader:
+                     # Process messages from the standalone stream
+@@ -775,7 +814,7 @@
+                 logger.exception("Error in standalone SSE writer")
+             finally:
+                 logger.debug("Closing standalone SSE writer")
+-                await self._clean_up_memory_streams(GET_STREAM_KEY)
++                await self._clean_up_memory_streams(GET_STREAM_KEY, standalone_stream_entry)
+ 
+         # Create and start EventSourceResponse
+         response = EventSourceResponse(
+@@ -789,10 +828,12 @@
+             await response(request.scope, request.receive, send)
+         except Exception:
+             logger.exception("Error in standalone SSE response")
+-            await self._clean_up_memory_streams(GET_STREAM_KEY)
++            await self._clean_up_memory_streams(GET_STREAM_KEY, standalone_stream_entry)
+         finally:
+-            await sse_stream_writer.aclose()
+-            await sse_stream_reader.aclose()
++            await self._clean_up_memory_streams(GET_STREAM_KEY, standalone_stream_entry)
++            with anyio.CancelScope(shield=True):
++                await sse_stream_writer.aclose()
++                await sse_stream_reader.aclose()
+ 
+     async def _handle_delete_request(self, request: Request, send: Send) -> None:  # pragma: no cover
+         """Handle DELETE requests for explicit session termination."""
+@@ -828,6 +869,7 @@
+             return
+ 
+         self._terminated = True
++        self._probe_seen_ids.clear()  # Session is now invalid; never clear a live history.
+         logger.info(f"Terminating session: {self.mcp_session_id}")
+ 
+         # We need a copy of the keys to avoid modification during iteration
+@@ -1060,7 +1102,7 @@
+                         target_request_id = None
+                         # Check if this is a response
+                         if isinstance(message.root, JSONRPCResponse | JSONRPCError):
+-                            response_id = str(message.root.id)
++                            response_id = _probe_rpc_route_key(message.root.id)
+                             # If this response is for an existing request stream,
+                             # send it there
+                             target_request_id = response_id
+@@ -1073,7 +1115,7 @@
+                             )
+                             and session_message.metadata.related_request_id is not None
+                         ):
+-                            target_request_id = str(session_message.metadata.related_request_id)
++                            target_request_id = _probe_rpc_route_key(session_message.metadata.related_request_id)
+ 
+                         request_stream_id = target_request_id if target_request_id is not None else GET_STREAM_KEY
+ 
+@@ -1088,13 +1130,15 @@
+                         if request_stream_id in self._request_streams:
+                             try:
+                                 # Send both the message and the event ID
+-                                await self._request_streams[request_stream_id][0].send(EventMessage(message, event_id))
++                                route_entry = self._request_streams[request_stream_id]
++                                await route_entry[0].send(EventMessage(message, event_id))
+                             except (
+                                 anyio.BrokenResourceError,
+                                 anyio.ClosedResourceError,
+                             ):
+                                 # Stream might be closed, remove from registry
+-                                self._request_streams.pop(request_stream_id, None)
++                                if self._request_streams.get(request_stream_id) is route_entry:
++                                    self._request_streams.pop(request_stream_id, None)
+                         else:
+                             logger.debug(
+                                 f"""Request stream {request_stream_id} not found 
+--- sdk-original/mcp/server/fastmcp/server.py
++++ sdk-candidate/mcp/server/fastmcp/server.py
+@@ -1212,7 +1212,7 @@
+             progress=progress,
+             total=total,
+             message=message,
+-            related_request_id=self.request_id,
++            related_request_id=self.request_context.request_id,
+         )
+ 
+     async def read_resource(self, uri: str | AnyUrl) -> Iterable[ReadResourceContents]:
+@@ -1258,7 +1258,7 @@
+             session=self.request_context.session,
+             message=message,
+             schema=schema,
+-            related_request_id=self.request_id,
++            related_request_id=self.request_context.request_id,
+         )
+ 
+     async def elicit_url(
+@@ -1293,7 +1293,7 @@
+             message=message,
+             url=url,
+             elicitation_id=elicitation_id,
+-            related_request_id=self.request_id,
++            related_request_id=self.request_context.request_id,
+         )
+ 
+     async def log(
+@@ -1315,7 +1315,7 @@
+             level=level,
+             data=message,
+             logger=logger_name,
+-            related_request_id=self.request_id,
++            related_request_id=self.request_context.request_id,
+         )
+ 
+     # TODO(maxisbey): see if this is needed otherwise remove
+--- sdk-original/mcp/shared/session.py
++++ sdk-candidate/mcp/shared/session.py
+@@ -330,7 +330,7 @@
+         )
+         session_message = SessionMessage(  # pragma: no cover
+             message=JSONRPCMessage(jsonrpc_notification),
+-            metadata=ServerMessageMetadata(related_request_id=related_request_id) if related_request_id else None,
++            metadata=ServerMessageMetadata(related_request_id=related_request_id) if related_request_id is not None else None,
+         )
+         await self._write_stream.send(session_message)
+ 

@@ -1,0 +1,45 @@
+{
+  "kind": "PR3 v2 research only; Phase 2 BLOCK",
+  "review_baseline": "b82a4755a7713c2584dbb538088e59e1214ff293",
+  "original_matrix": {
+    "cases": 15,
+    "passed": 5,
+    "not_run": 1
+  },
+  "candidate_matrix": {
+    "cases": 15,
+    "passed": 15,
+    "not_run": 0
+  },
+  "extra_cases": {
+    "fullchain_probe_v2.py": {
+      "passed": true,
+      "SDK_process_spawns": 0
+    },
+    "falsey_probe_v2.py": {
+      "passed": true,
+      "SDK_process_spawns": 0
+    }
+  },
+  "date": "2026-10-18",
+  "environment": "Linux x86_64, Python 3.13, official MCP 1.30.0 source plus test-only SSE import/GET adapters",
+  "full_official_dependencies_qualified": false,
+  "native_macos_qualified": false,
+  "F1": {
+    "context_log_owned": true,
+    "progress_owned": true,
+    "falsey_0_empty_none_correct": true
+  },
+  "F2": {
+    "cancelled_route_retained": false,
+    "open_send_streams": 0,
+    "open_receive_streams": 0,
+    "unaffected_A_success": true,
+    "subsequent_request_success": true
+  },
+  "F3": {
+    "local_synthetic_regressions_passed": 3
+  },
+  "SDK_or_Gateway_production_changed": false,
+  "Phase2": "BLOCK"
+}

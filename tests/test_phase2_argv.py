@@ -201,6 +201,10 @@ def test_pytest_addopts_from_gateway_environment_is_never_inherited(project, fak
     ["pytest", "-c../other/pytest.ini"],
     ["python", "-m", "pytest", "-qoaddopts=--pdb"],
     ["pytest", "--", "@args.txt"],
+    ["pytest", "-k", "@args.txt"],
+    ["go", "test", "-C=../outside", "-v"],
+    ["pytest", "-o", "cache_dir=../outside-cache"],
+    ["pytest", "--junit-xml=../outside/report.xml"],
 ])
 @pytest.mark.parametrize("runner", ["direct", "pipenv"])
 @pytest.mark.parametrize("dry_run", [True, False])
@@ -220,6 +224,10 @@ def test_legacy_rest_rejects_remote_indirection(project, fake_tools, argv, runne
     ["go", "test", "--exec=external"],
     ["pytest", "-o=addopts=--trace"],
     ["pytest", "-c../outside/pytest.ini"],
+    ["pytest", "-k", "@args.txt"],
+    ["go", "test", "-C=../outside", "-v"],
+    ["pytest", "-o", "cache_dir=../outside-cache"],
+    ["pytest", "--junit-xml=../outside/report.xml"],
 ])
 @pytest.mark.parametrize("dry_run", [True, False])
 def test_legacy_mcp_rejects_remote_indirection(project, fake_tools, argv, dry_run):
@@ -247,3 +255,76 @@ def test_legacy_mcp_rejects_remote_indirection(project, fake_tools, argv, dry_ru
             assert result.get("isError") is True, result
             assert "command_not_allowed" in str(result.get("content")), result
     assert not fake_tools.exists()
+
+
+# PR #10 independent macOS review: P1 x2, P2 x2.
+# These are intentionally exercised via the real Gateway/CommandRunner in
+# both dry-run and apply modes, and each rejection must happen before Popen.
+_REVIEW_REMAINING_DENIED = (
+    ["pytest", "-k", "@args.txt"],
+    ["pytest", "-m", "@args.txt"],
+    ["python", "-m", "pytest", "-k", "@args.txt"],
+    ["go", "test", "-C=../outside", "-v"],
+    ["go", "test", "-C=subdir", "-v"],  # changes the Gateway-authorized cwd
+    ["go", "vet", "--C=../outside"],
+    ["go", "test", "-test.outputdir=../outside"],
+    ["go", "test", "-test.coverprofile=../outside"],
+    ["go", "test", "-test.cpuprofile=../outside"],
+    ["go", "test", "-test.gocoverdir=../outside"],
+    ["go", "test", "-test.fuzzcachedir=../outside"],
+    ["go", "test", "-test.testlogfile=../outside"],
+    ["pytest", "-o", "cache_dir=../outside-cache"],
+    ["pytest", "-o=cache_dir=../outside-cache"],
+    ["pytest", "-ocache_dir=../outside-cache"],
+    ["pytest", "--override-ini=cache_dir=../outside-cache"],
+    ["pytest", "-qo=cache_dir=../outside-cache"],
+    ["pytest", "-o", "log_file=../outside.log"],
+    ["pytest", "-o", 'testpaths="../outside"'],
+    ["pytest", "-o", 'pythonpath="../outside"'],
+    ["pytest", "--junit-xml=../outside/report.xml"],
+    ["pytest", "--junit-xml", "../outside/report.xml"],
+    ["python", "-m", "pytest", "--junit-xml=../outside/report.xml"],
+)
+
+
+@pytest.mark.parametrize("argv", _REVIEW_REMAINING_DENIED)
+@pytest.mark.parametrize("runner", ["direct", "pipenv"])
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_review_remaining_bypasses_rejected_before_popen(
+    project, fake_tools, monkeypatch, argv, runner, dry_run
+):
+    attempts = []
+
+    def forbidden(*args, **kwargs):
+        attempts.append(args)
+        raise AssertionError("Rejected CLI reached Popen")
+
+    monkeypatch.setattr("gateway.executor.subprocess.Popen", forbidden)
+    with _gateway(project, runner) as g:
+        with pytest.raises(GatewayError) as error:
+            g.run_command("service", argv, dry_run=dry_run)
+        assert error.value.code == "command_not_allowed"
+    assert attempts == []
+    assert not fake_tools.exists()
+
+
+@pytest.mark.parametrize("argv", (
+    ["pytest", "-k", "not slow"],
+    ["pytest", "-o", "cache_dir=.pytest_cache"],
+    ["pytest", "-o", "log_cli=true"],
+    ["pytest", "--junit-xml=reports.xml"],
+    ["pytest", "--junit-xml", "reports.xml"],
+    ["go", "test", "-test.outputdir=reports"],
+    ["go", "test", "./...", "-coverprofile=coverage.out"],
+))
+@pytest.mark.parametrize("runner", ["direct", "pipenv"])
+def test_review_safe_options_preserved(project, fake_tools, argv, runner):
+    with _gateway(project, runner) as g:
+        preview = g.run_command("service", argv)
+        assert preview["executed"] is False
+        assert not fake_tools.exists()
+        result = g.run_command("service", argv, dry_run=False)
+        assert result["exit_code"] == 0, result
+        assert result["timed_out"] is False
+        assert fake_tools.exists()
+        fake_tools.unlink()

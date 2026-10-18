@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
+import shlex
 import signal
 import stat
 import subprocess
@@ -91,11 +92,16 @@ _GO_DENIED_HOOKS = frozenset({"exec", "toolexec", "vettool", "test.exec", "test.
 _GO_PATH_OPTIONS = frozenset({
     "modfile", "overlay", "coverprofile", "cpuprofile", "memprofile",
     "mutexprofile", "blockprofile", "trace", "outputdir", "pkgdir", "o",
+    "gocoverdir", "fuzzcachedir", "testlogfile",
 })
 _PYTEST_PATH_OPTIONS = frozenset({
-    "--config-file", "--basetemp", "--junitxml", "--rootdir",
+    "--config-file", "--basetemp", "--junitxml", "--junit-xml", "--rootdir",
     "--confcutdir", "--ignore", "--log-file", "--cache-dir",
 })
+_PYTEST_INI_PATH_KEYS = frozenset({
+    "cache_dir", "log_file", "testpaths", "pythonpath", "norecursedirs",
+})
+_PYTEST_INI_LIST_PATH_KEYS = frozenset({"testpaths", "pythonpath", "norecursedirs"})
 _PYTEST_SHORT_SWITCHES = frozenset("qvsxlf")
 _PYTEST_SHORT_VALUES = frozenset("kmWpr")
 
@@ -118,6 +124,8 @@ def _option_value(tokens: list[str], index: int, inline: str | None) -> tuple[st
         value = inline[1:] if inline.startswith("=") else inline
     if not value:
         raise GatewayError("command_not_allowed", "Command option requires a nonempty value.")
+    if value.startswith("@"):
+        raise GatewayError("command_not_allowed", "Indirect @argument files are disabled.")
     return value, index
 
 
@@ -130,21 +138,44 @@ def _validate_go_flags(tokens: list[str]) -> None:
             name, equal, inline = token.lstrip("-").partition("=")
             if name in _GO_DENIED_HOOKS:
                 raise GatewayError("command_not_allowed", "Go external tool hooks are not allowed.")
-            if name in _GO_PATH_OPTIONS:
+            if name == "C":
+                # Go's -C changes process cwd after Gateway scope verification.
+                # No safe handoff for this second cwd exists; use Gateway cwd.
+                raise GatewayError("command_not_allowed", "Go -C cannot override Gateway's working directory.")
+            path_name = name.removeprefix("test.")
+            if path_name in _GO_PATH_OPTIONS:
                 value, i = _option_value(tokens, i, inline if equal else None)
                 _relative_option_path(value)
         i += 1
 
 
 def _validate_pytest_override(value: str) -> None:
-    key, separator, _ = value.partition("=")
+    key, separator, override = value.partition("=")
     if not separator or not key.strip():
         raise GatewayError("command_not_allowed", "pytest -o requires a KEY=VALUE pair.")
-    if key.strip().casefold() == "addopts":
+    normalized_key = key.strip().casefold()
+    if normalized_key == "addopts":
         raise GatewayError("command_not_allowed", "Remote pytest addopts overrides are disabled.")
+    if normalized_key in _PYTEST_INI_PATH_KEYS:
+        # pytest treats path-list INI values as shlex-style strings, where
+        # quotes can hide an initial ../ from a naive whitespace split.
+        if "\\" in override:
+            raise GatewayError("command_not_allowed", "Backslashes in pytest path overrides are disabled.")
+        try:
+            values = shlex.split(override)
+        except ValueError:
+            raise GatewayError("command_not_allowed", "Malformed pytest path override.") from None
+        if not values or (normalized_key not in _PYTEST_INI_LIST_PATH_KEYS and len(values) != 1):
+            raise GatewayError("command_not_allowed", "Invalid path-valued pytest INI override.")
+        for item in values:
+            _relative_option_path(item)
 
 
 def _validate_pytest_flags(tokens: list[str]) -> None:
+    # Scan ALL tokens first: consuming -k/-m/-W/-p or other values must not
+    # hide a subsequent @file before the main parser reaches it.
+    if any(token.startswith("@") for token in tokens):
+        raise GatewayError("command_not_allowed", "pytest argument files are disabled.")
     i = 0
     positional = False
     while i < len(tokens):

@@ -38,7 +38,7 @@ f6494926bed7235ffceecaf9af8bbd8a569a01036b47259cfb6a355afeb26d96  ./docs/researc
 eb98ffa03cd487073a2cdd8c8fa8d053aee24c809c61f7b255d00c086ededf85  ./docs/research/2026-10-18-pr3-sdk-routing/build_throwaway_candidate.py
 1dd985caa92d8d213ba4fa1063d077048a9410ce163dbeeba4a5df84179df536  ./docs/research/2026-10-18-pr3-sdk-routing/build_throwaway_candidate_v2.py
 eb0edaeeff2d08563d555c6b921e8237bab28906ae56e29061b2d0721eeff583  ./docs/research/2026-10-18-pr3-sdk-routing/falsey_probe_v2.py
-d021c86571aef25b6028b8a89f9322449f00b573439de04116bba134f021e6d8  ./docs/research/2026-10-18-pr3-sdk-routing/fullchain_probe_v2.py
+83b87e3c4276a75f5bed982150107fff770b9472f2aff071766c4ed07dd0490f  ./docs/research/2026-10-18-pr3-sdk-routing/fullchain_probe_v2.py
 5a911037691f98cd4fe0dc4c3711002435f96b7e7cf9e92404986fc809e2f8a7  ./docs/research/2026-10-18-pr3-sdk-routing/history/sdk_typed_id_routing_probe.py
 bededd87141953ece4404cb52f3180a1ba6a0dafcb61d72212859543f1aa6165  ./docs/research/2026-10-18-pr3-sdk-routing/patches/mcp-1.30.0-routing-prototype.patch
 6271e33c68599d8ea451c8332c57262f6ee4f83cbbf8052e5ca6f830421534d3  ./docs/research/2026-10-18-pr3-sdk-routing/patches/mcp-1.30.0-routing-v2-prototype.patch
@@ -50,7 +50,8 @@ e59b7b605931b8db6bf39b402fa6b5acaf6561cd7695e02239d60824df9355dc  ./docs/researc
 f8f55258ee23d8bfaf2a0348a2426a5c10dd21e9b7b12c1162238398736701b4  ./docs/research/2026-10-18-pr3-sdk-routing/run_research.py
 7c2eb2dbe00dee04a6c3a47369dbb05572280725ac88d5ef101134c3cc3bd8bb  ./docs/research/2026-10-18-pr3-sdk-routing/run_research_v2.py
 422c81bc646a032438e349d00f1c5413c41ccfc169ead12c1c0d7d57d29f4f6f  ./docs/research/2026-10-18-pr3-sdk-routing/sdk_asgi_matrix.py
-7b86bb687b21ce0574b47274bcbfe063a0bf1f504116d53fb006dafa792325bf  ./docs/research/2026-10-18-pr3-sdk-routing/tests/test_f2_public_gate_v2.py
+ea5166e5e52b649c1a2a130f3f9053e7afe316a578dcef387729acad67cc49dc  ./docs/research/2026-10-18-pr3-sdk-routing/tests/test_f2_late_replay_gate_v2.py
+f5e8b0f1b696b3577595265e1ca204862dbd7b4339b545e5ccabb72c8ecf7fcf  ./docs/research/2026-10-18-pr3-sdk-routing/tests/test_f2_public_gate_v2.py
 c14784976982936c4a9d7a54682154ce8629209aacd9c77aa491d8d0569db391  ./docs/research/2026-10-18-pr3-sdk-routing/tests/test_runner_v2.py
 1e95a8424b5cae7d8c47cbb30269ea0b773edc50df03eb78151f93553f5ee284  ./docs/superpowers/plans/2026-09-22-guarded-writes.md
 747823b992574fd8d4cffb658f8b41918e92eccd0da661eaf69a472ac00b32f3  ./docs/superpowers/plans/2026-10-17-multi-workspace-controlled-exec.md

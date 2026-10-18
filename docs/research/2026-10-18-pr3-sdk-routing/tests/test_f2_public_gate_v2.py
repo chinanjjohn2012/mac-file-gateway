@@ -29,6 +29,7 @@ def f2_result(**patch):
         "replay_route_writes": 0,
         "replay_responder_registrations": 0,
         "replay_business_dispatch_delta": 0,
+        "replay_business_dispatch_final": 0,
         "route_absent_after_replay": True,
         "A_positive_succeeded": True,
         "subsequent_positive_succeeded": True,
@@ -45,6 +46,7 @@ def f2_result(**patch):
     {"replay_route_writes": 1},
     {"replay_responder_registrations": 1},
     {"replay_business_dispatch_delta": 1},
+    {"replay_business_dispatch_final": 1},
     {"route_absent_after_replay": False},
 ])
 def test_public_main_must_reject_invalid_f2_even_when_routes_and_streams_closed(monkeypatch, tmp_path, changes):

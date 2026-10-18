@@ -132,6 +132,10 @@ async def predispatch_cancel():
         record['A_positive_succeeded']=matrix.correct(responseA,901,'A')
         # Check the tombstone after the positive request, BEFORE session DELETE.
         record['cancelled_id_seen_before_DELETE']=key in transport._probe_seen_ids
+        # Observe replay-labelled work again AFTER A and the new request have
+        # both finished. The earlier delta predates reader release and cannot
+        # detect delayed dispatch; do not count legitimate A/903 calls here.
+        record['replay_business_dispatch_final']=f.calls.count('REPLAY_CANCELLED_ID')
         # Explicitly retire this fixture and prove eventual session cleanup still works.
         retired=await f.client.delete('/mcp',headers={'Mcp-Session-Id':f.sid})
         record['retire_status']=retired.status_code
@@ -243,6 +247,7 @@ async def main():
         assert cleanup['replay_route_writes'] == 0, 'F2: replay changed active request route'
         assert cleanup['replay_responder_registrations'] == 0, 'F2: replay registered a responder'
         assert cleanup['replay_business_dispatch_delta'] == 0, 'F2: replay dispatched business work'
+        assert cleanup['replay_business_dispatch_final'] == 0, 'F2: replay business dispatched after reader resumed'
         assert cleanup['route_absent_after_replay'] is True, 'F2: replay created or retained a route'
         assert cleanup['A_positive_succeeded'] and cleanup['subsequent_positive_succeeded'], 'F2: positive controls failed'
 

@@ -75,11 +75,12 @@ async def related_context_collision():
 
 async def predispatch_cancel():
     f=matrix.Fixture(); server_gate=anyio.Event(); release_reader=anyio.Event()
-    done=anyio.Event(); scope_holder={}; responseA={}
+    done=anyio.Event(); scope_holder={}; responseA={}; server_context={}
     original_received=ServerSession._received_request
     async def gated_received(session,responder):
         # Real SDK receive loop is held after receiving A, before it can receive B.
         if responder.request_id==901:
+            server_context['session']=session
             server_gate.set(); await release_reader.wait()
         return await original_received(session,responder)
     async with f.run():
@@ -109,10 +110,28 @@ async def predispatch_cancel():
                         'route_entry_retained_after_ASGI_exit':remained,
                         'open_send_streams':stats.open_send_streams,'open_receive_streams':stats.open_receive_streams,
                         'safety_assertion_no_abandoned_predispatch_route':not remained}
-                release_reader.set()
+                # A cancelled, pre-dispatch request must remain unavailable for
+                # reuse until the SESSION retires; its active route is removed.
+                seen_before_replay=key in transport._probe_seen_ids
+                session=server_context['session']
+                session._in_flight=matrix.TrackedDict(session._in_flight)
+                route_writes_before=len(transport._request_streams.writes)
+                calls_before=len(f.calls)
+                try:
+                    replay=await f.post(902,'REPLAY_CANCELLED_ID',False)
+                finally:
+                    release_reader.set()
+                record['cancelled_id_seen_before_replay']=seen_before_replay
+                record['replay_status']=replay.get('status')
+                record['replay_route_writes']=len(transport._request_streams.writes)-route_writes_before
+                record['replay_responder_registrations']=len(session._in_flight.writes)
+                record['replay_business_dispatch_delta']=len(f.calls)-calls_before
+                record['route_absent_after_replay']=key not in transport._request_streams
         positive=await f.post(903,'AFTER_CANCEL',False)
         record['subsequent_positive_succeeded']=matrix.correct(positive,903,'AFTER_CANCEL')
         record['A_positive_succeeded']=matrix.correct(responseA,901,'A')
+        # Check the tombstone after the positive request, BEFORE session DELETE.
+        record['cancelled_id_seen_before_DELETE']=key in transport._probe_seen_ids
         # Explicitly retire this fixture and prove eventual session cleanup still works.
         retired=await f.client.delete('/mcp',headers={'Mcp-Session-Id':f.sid})
         record['retire_status']=retired.status_code
@@ -214,8 +233,17 @@ async def main():
         assert all(related['final_HTTP_results_correct'].values()), 'F1: final HTTP positive control failed'
         assert progress['safety_assertion_progress_owner_preserved'], 'F1: progress misrouted'
         assert all(progress['final_HTTP_results_correct'].values()), 'F1: progress positive control failed'
+        assert cleanup['real_zero_buffer_send_blocked'] is True, 'F2: zero-buffer backpressure not observed'
         assert cleanup['safety_assertion_no_abandoned_predispatch_route'], 'F2: route retained after cancelled ASGI request'
         assert cleanup['open_send_streams'] == 0 and cleanup['open_receive_streams'] == 0, 'F2: stream endpoints remain open'
+        assert cleanup['cancelled_request_dispatched'] is False, 'F2: cancelled request dispatched'
+        assert cleanup['cancelled_id_seen_before_replay'] is True, 'F2: cancelled request ID tombstone missing before replay'
+        assert cleanup['cancelled_id_seen_before_DELETE'] is True, 'F2: cancelled request ID tombstone missing before DELETE'
+        assert cleanup['replay_status'] == 409, 'F2: same-session replay not rejected'
+        assert cleanup['replay_route_writes'] == 0, 'F2: replay changed active request route'
+        assert cleanup['replay_responder_registrations'] == 0, 'F2: replay registered a responder'
+        assert cleanup['replay_business_dispatch_delta'] == 0, 'F2: replay dispatched business work'
+        assert cleanup['route_absent_after_replay'] is True, 'F2: replay created or retained a route'
         assert cleanup['A_positive_succeeded'] and cleanup['subsequent_positive_succeeded'], 'F2: positive controls failed'
 
 if __name__=='__main__': anyio.run(main)

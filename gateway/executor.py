@@ -87,17 +87,126 @@ def _relative_script(argv: list[str]) -> str | None:
     return "/".join(parts)
 
 
+_GO_DENIED_HOOKS = frozenset({"exec", "toolexec", "vettool", "test.exec", "test.toolexec", "test.vettool"})
+_GO_PATH_OPTIONS = frozenset({
+    "modfile", "overlay", "coverprofile", "cpuprofile", "memprofile",
+    "mutexprofile", "blockprofile", "trace", "outputdir", "pkgdir", "o",
+})
+_PYTEST_PATH_OPTIONS = frozenset({
+    "--config-file", "--basetemp", "--junitxml", "--rootdir",
+    "--confcutdir", "--ignore", "--log-file", "--cache-dir",
+})
+_PYTEST_SHORT_SWITCHES = frozenset("qvsxlf")
+_PYTEST_SHORT_VALUES = frozenset("kmWpr")
+
+
+def _relative_option_path(value: str) -> None:
+    """Validate the *extracted* CLI path, not the token that hides it."""
+    if (not value or value.startswith(("/", "~", "-")) or "\\" in value or
+            any(component == ".." for component in value.split("/"))):
+        raise GatewayError("command_not_allowed", "Command option must use an in-project relative path.")
+
+
+def _option_value(tokens: list[str], index: int, inline: str | None) -> tuple[str, int]:
+    """Return a consumed option value and its last argv index."""
+    if inline is None:
+        if index + 1 >= len(tokens) or tokens[index + 1].startswith("-"):
+            raise GatewayError("command_not_allowed", "Command option requires a value.")
+        index += 1
+        value = tokens[index]
+    else:
+        value = inline[1:] if inline.startswith("=") else inline
+    if not value:
+        raise GatewayError("command_not_allowed", "Command option requires a nonempty value.")
+    return value, index
+
+
+def _validate_go_flags(tokens: list[str]) -> None:
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token.startswith("-") and token != "--":
+            # Go's recognized long/short flag spellings can be equivalent.
+            name, equal, inline = token.lstrip("-").partition("=")
+            if name in _GO_DENIED_HOOKS:
+                raise GatewayError("command_not_allowed", "Go external tool hooks are not allowed.")
+            if name in _GO_PATH_OPTIONS:
+                value, i = _option_value(tokens, i, inline if equal else None)
+                _relative_option_path(value)
+        i += 1
+
+
+def _validate_pytest_override(value: str) -> None:
+    key, separator, _ = value.partition("=")
+    if not separator or not key.strip():
+        raise GatewayError("command_not_allowed", "pytest -o requires a KEY=VALUE pair.")
+    if key.strip().casefold() == "addopts":
+        raise GatewayError("command_not_allowed", "Remote pytest addopts overrides are disabled.")
+
+
+def _validate_pytest_flags(tokens: list[str]) -> None:
+    i = 0
+    positional = False
+    while i < len(tokens):
+        token = tokens[i]
+        # @files are forbidden even after --; never read or recursively expand them.
+        if token.startswith("@"):
+            raise GatewayError("command_not_allowed", "pytest argument files are disabled.")
+        if positional:
+            i += 1
+            continue
+        if token == "--":
+            positional = True
+            i += 1
+            continue
+        if token.startswith("--"):
+            name, equal, inline = token.partition("=")
+            if name in {"--pdb", "--trace"}:
+                raise GatewayError("command_not_allowed", "Interactive pytest modes are disabled.")
+            if name == "--override-ini":
+                value, i = _option_value(tokens, i, inline if equal else None)
+                _validate_pytest_override(value)
+            elif name in _PYTEST_PATH_OPTIONS:
+                value, i = _option_value(tokens, i, inline if equal else None)
+                _relative_option_path(value)
+            i += 1
+            continue
+        if token.startswith("-") and token != "-":
+            cluster = token[1:]
+            j = 0
+            while j < len(cluster):
+                flag = cluster[j]
+                if flag in {"o", "c"}:
+                    inline = cluster[j + 1:] or None
+                    value, i = _option_value(tokens, i, inline)
+                    if flag == "o":
+                        _validate_pytest_override(value)
+                    else:
+                        _relative_option_path(value)
+                    break
+                if flag in _PYTEST_SHORT_VALUES:
+                    # -k/-m/-W/-p/-r take a value; do not interpret
+                    # an embedded 'o' in their expression as -o.
+                    if j + 1 == len(cluster):
+                        _, i = _option_value(tokens, i, None)
+                    break
+                if flag not in _PYTEST_SHORT_SWITCHES:
+                    # Unknown options remain under the existing trusted-project
+                    # CLI boundary. No unsafe override is inferred from text.
+                    break
+                j += 1
+        i += 1
+
+
 def _validate_command(argv: list[str]) -> str | None:
     _reject_external_path_args(argv)
     program = argv[0]
     if program == "pytest":
-        if any(arg in {"--pdb", "--trace"} for arg in argv[1:]):
-            raise GatewayError("command_not_allowed", "Interactive pytest modes are not allowed.")
+        _validate_pytest_flags(argv[1:])
         return None
     if _PYTHON.fullmatch(program):
         if len(argv) >= 3 and argv[1:3] == ["-m", "pytest"]:
-            if any(arg in {"--pdb", "--trace"} for arg in argv[3:]):
-                raise GatewayError("command_not_allowed", "Interactive pytest modes are not allowed.")
+            _validate_pytest_flags(argv[3:])
             return None
         if len(argv) >= 3 and argv[1:3] == ["-m", "compileall"]:
             return None
@@ -106,9 +215,7 @@ def _validate_command(argv: list[str]) -> str | None:
             return script
         raise GatewayError("command_not_allowed", "Allowed Python forms are -m pytest, -m compileall, or a relative .py script.")
     if program == "go" and len(argv) >= 2 and argv[1] in {"test", "vet"}:
-        denied = ("-exec", "-toolexec", "-vettool")
-        if any(arg == flag or arg.startswith(flag + "=") for arg in argv[2:] for flag in denied):
-            raise GatewayError("command_not_allowed", "External Go tool hooks are not allowed.")
+        _validate_go_flags(argv[2:])
         return None
     raise GatewayError("command_not_allowed", "Command is outside the configured execution allowlist.")
 

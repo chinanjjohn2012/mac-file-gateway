@@ -29,6 +29,7 @@ c60ae6bfd5272614ba62d2232dbd1a1ab26bba70d2795f411cb96bb9cceb7e95  ./docs/legacy-
 1e95a8424b5cae7d8c47cbb30269ea0b773edc50df03eb78151f93553f5ee284  ./docs/superpowers/plans/2026-09-22-guarded-writes.md
 9844da6b4c1cd80fdc462b86d39654108b07d163802c622d380e56f301610942  ./docs/superpowers/specs/2026-09-22-guarded-writes.md
 f84dea87213cee9cfd27ffcb72074c61a6dd682f86bf6061cf46e775cbbe53d2  ./docs/superpowers/specs/2026-10-18-phase2-lite-stateless-controlled-exec-design.md
+7b84066d929c4026506aa05df86b468f91a4aa8f46fa453f38b66b92a533a73d  ./docs/superpowers/specs/2026-10-19-phase2-lite-parallel-gates-design.md
 e2b20ae4529dc9bee34e6a6373f4e6592b2ae8e16d4a67e9a5da91ac13a2d920  ./gateway/__init__.py
 74e6388f59e280ca9ceeca805fa22792447f291ded7651903a7fe8e1040a0e8a  ./gateway/__main__.py
 a388cc15d1c1ebdf81336923e2433581109ac80e08394e7298b8f2da5e7a70fd  ./gateway/core.py

@@ -328,3 +328,127 @@ def test_review_safe_options_preserved(project, fake_tools, argv, runner):
         assert result["timed_out"] is False
         assert fake_tools.exists()
         fake_tools.unlink()
+
+
+# Independent P2 review of a58a83e7: scalar pytest INI path types, cache
+# environment expansion and Go's PGO build flag. These run through Gateway.
+@pytest.mark.parametrize("ini", (
+    "cache_dir=cache files",
+    "log_file=reports/test results.log",
+))
+@pytest.mark.parametrize("style", ("-o", "--override-ini", "-o=", "--override-ini="))
+@pytest.mark.parametrize("runner", ("direct", "pipenv"))
+def test_review3_scalar_ini_paths_accept_spaces(project, fake_tools, ini, style, runner):
+    args = [style, ini] if not style.endswith("=") else [style + ini]
+    with _gateway(project, runner) as g:
+        preview = g.run_command("service", ["pytest", *args])
+        assert preview["executed"] is False
+        assert not fake_tools.exists()
+        result = g.run_command("service", ["pytest", *args], dry_run=False)
+        assert result["exit_code"] == 0, result
+        assert fake_tools.exists()
+        fake_tools.unlink()
+
+
+@pytest.mark.parametrize("ini", (
+    'testpaths=tests "more tests"',
+    'pythonpath=src "generated code"',
+    'norecursedirs="build dir" temp',
+))
+@pytest.mark.parametrize("runner", ("direct", "pipenv"))
+def test_review3_quoted_ini_pathlists_still_work(project, fake_tools, ini, runner):
+    with _gateway(project, runner) as g:
+        preview = g.run_command("service", ["pytest", "-o", ini])
+        assert preview["executed"] is False
+        result = g.run_command("service", ["pytest", "-o", ini], dry_run=False)
+        assert result["exit_code"] == 0, result
+        assert fake_tools.exists()
+        fake_tools.unlink()
+
+
+@pytest.mark.parametrize("ini", (
+    "cache_dir=${HOME}/.pytest_cache",
+    "cache_dir=$HOME/.pytest_cache",
+    "log_file=reports/$TEST_LOG.log",
+    'testpaths=tests "${HOME}/outside"',
+    "pythonpath=$HOME/src",
+))
+@pytest.mark.parametrize("style", ("short", "long"))
+@pytest.mark.parametrize("runner", ("direct", "pipenv"))
+@pytest.mark.parametrize("dry_run", (True, False))
+def test_review3_ini_environment_refs_block_before_spawn(
+    project, fake_tools, tmp_path, monkeypatch, ini, style, runner, dry_run
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "outside-virtual-home"))
+    invoked = []
+    def forbidden(*args, **kwargs):
+        invoked.append(args)
+        raise AssertionError("Popen reached for unsafe INI expansion")
+    monkeypatch.setattr("gateway.executor.subprocess.Popen", forbidden)
+    args = ["-o", ini] if style == "short" else ["--override-ini=" + ini]
+    with _gateway(project, runner) as g:
+        with pytest.raises(GatewayError) as error:
+            g.run_command("service", ["pytest", *args], dry_run=dry_run)
+        assert error.value.code == "command_not_allowed"
+    assert invoked == []
+    assert not fake_tools.exists()
+
+
+@pytest.mark.parametrize("flag_args", (
+    ["-pgo=../review-fixture/profile.pprof"],
+    ["--pgo=../review-fixture/profile.pprof"],
+    ["-pgo", "../review-fixture/profile.pprof"],
+    ["--pgo", "../review-fixture/profile.pprof"],
+))
+@pytest.mark.parametrize("operation", ("test", "vet"))
+@pytest.mark.parametrize("runner", ("direct", "pipenv"))
+@pytest.mark.parametrize("dry_run", (True, False))
+def test_review3_pgo_external_profile_blocked_before_spawn(
+    project, fake_tools, monkeypatch, flag_args, operation, runner, dry_run
+):
+    invoked = []
+    def forbidden(*args, **kwargs):
+        invoked.append(args)
+        raise AssertionError("Go -pgo external path reached Popen")
+    monkeypatch.setattr("gateway.executor.subprocess.Popen", forbidden)
+    with _gateway(project, runner) as g:
+        with pytest.raises(GatewayError) as error:
+            g.run_command("service", ["go", operation, *flag_args], dry_run=dry_run)
+        assert error.value.code == "command_not_allowed"
+    assert invoked == []
+    assert not fake_tools.exists()
+
+
+@pytest.mark.parametrize("flag_args", (
+    ["-pgo=auto"], ["-pgo=off"], ["-pgo", "auto"], ["-pgo", "off"],
+    ["--pgo=auto"], ["--pgo", "off"], ["-pgo=profiles/local.pprof"],
+))
+@pytest.mark.parametrize("runner", ("direct", "pipenv"))
+def test_review3_pgo_special_modes_and_relative_paths_work(
+    project, fake_tools, flag_args, runner
+):
+    with _gateway(project, runner) as g:
+        preview = g.run_command("service", ["go", "test", *flag_args])
+        assert preview["executed"] is False
+        assert not fake_tools.exists()
+        result = g.run_command("service", ["go", "test", *flag_args], dry_run=False)
+        assert result["exit_code"] == 0, result
+        assert fake_tools.exists()
+        fake_tools.unlink()
+
+
+def test_review3_real_pytest_accepts_scalar_space_paths(project):
+    # Verify the actual pytest interpretation, not only synthetic argv echoes.
+    (project / "service" / "tests" / "test_review3_real.py").write_text(
+        "def test_ok():\n    assert True\n"
+    )
+    (project / "service" / "reports").mkdir()
+    argv = ["python3", "-m", "pytest", "-q",
+            "-o", "cache_dir=cache files",
+            "-o", "log_file=reports/test results.log",
+            "tests/test_review3_real.py"]
+    with _gateway(project, "direct") as g:
+        result = g.run_command("service", argv, dry_run=False)
+    assert result["exit_code"] == 0, result
+    assert (project / "service" / "cache files").is_dir()
+    assert (project / "service" / "reports" / "test results.log").is_file()

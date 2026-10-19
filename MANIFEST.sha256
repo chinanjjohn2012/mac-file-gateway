@@ -27,6 +27,7 @@ c60ae6bfd5272614ba62d2232dbd1a1ab26bba70d2795f411cb96bb9cceb7e95  ./docs/legacy-
 385c209c06c762cab998f5f572fb5d861ba290ad1d425858326209a6bdcff616  ./docs/legacy-v2/TEST_REPORT.md
 488a6704e497b8b37d25ab3e0a3e27c53355ef051dba824116eb557a2c7039d9  ./docs/legacy-v2/UPGRADE.md
 1e95a8424b5cae7d8c47cbb30269ea0b773edc50df03eb78151f93553f5ee284  ./docs/superpowers/plans/2026-09-22-guarded-writes.md
+4bc3f8ee2c59ab7a6fab7db0f7f383f5e69bc9a2bfb88adfc50390b6a0325f9b  ./docs/superpowers/plans/2026-10-19-phase2-lite-core-foundation.md
 9844da6b4c1cd80fdc462b86d39654108b07d163802c622d380e56f301610942  ./docs/superpowers/specs/2026-09-22-guarded-writes.md
 f84dea87213cee9cfd27ffcb72074c61a6dd682f86bf6061cf46e775cbbe53d2  ./docs/superpowers/specs/2026-10-18-phase2-lite-stateless-controlled-exec-design.md
 7b84066d929c4026506aa05df86b468f91a4aa8f46fa453f38b66b92a533a73d  ./docs/superpowers/specs/2026-10-19-phase2-lite-parallel-gates-design.md

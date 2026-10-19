@@ -1,4 +1,4 @@
-"""Real FastMCP transport, strict raw JSON and Workspace args."""
+"""Real MCPServer transport, strict raw JSON and Workspace args."""
 import pytest
 pytest.importorskip('mcp', reason='The official MCP SDK is needed')
 from starlette.testclient import TestClient

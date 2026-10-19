@@ -1,4 +1,4 @@
-# Stable SDK v1 API. Not a claim that v1 is the latest major version.
-mcp==1.30.0  # Reviewed FastMCP.call_tool + max_request_body_size contract
+# SDK v2 API, exact release pinned for MCP adapter and transport compatibility.
+mcp==2.3.0  # Reviewed MCPServer.call_tool(context) and streamable_http_app contract
 starlette>=0.50,<1
 uvicorn>=0.34,<1

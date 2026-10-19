@@ -112,7 +112,10 @@ def create_multi_app(service: WorkspaceService, *, enable_mcp: bool = True,
     routes.extend(Route(path, write_endpoint, methods=['POST']) for path in _POST_ROUTES)
     if enable_mcp:
         from .mcp_multi import build_multi_mcp
-        app = build_multi_mcp(service, port=port).streamable_http_app()
+        from .mcp_transport import build_streamable_http_app
+        app = build_streamable_http_app(
+            build_multi_mcp(service, port=port), port=port, max_request_body_size=MAX_RAW_BODY
+        )
         app.router.routes.extend(routes)
     else:
         app = Starlette(routes=routes)

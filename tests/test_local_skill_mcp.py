@@ -1,3 +1,5 @@
+import asyncio
+
 from gateway.core import Gateway
 from gateway.mcp_adapter import build_mcp
 
@@ -17,7 +19,7 @@ class FakeBridge:
 
 
 def _tool_names(mcp):
-    return {tool.name for tool in mcp._tool_manager.list_tools()}
+    return {tool.name for tool in asyncio.run(mcp.list_tools())}
 
 
 def test_local_skill_tools_are_opt_in(tmp_path):

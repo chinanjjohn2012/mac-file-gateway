@@ -59,7 +59,7 @@ verify_manifest() {
 }
 
 if [ "${1:-}" = '--require-mcp' ]; then
-    .venv/bin/python -c 'from mcp.server.fastmcp import FastMCP; from gateway.mcp_adapter import build_mcp; print("Official MCP SDK import: OK")'
+    .venv/bin/python -c 'from mcp.server.mcpserver import MCPServer; from gateway.mcp_adapter import build_mcp; from gateway.mcp_multi import build_multi_mcp; print("Official MCP SDK v2 import: OK")'
 fi
 .venv/bin/python -m compileall -q gateway
 .venv/bin/python -m pytest -q

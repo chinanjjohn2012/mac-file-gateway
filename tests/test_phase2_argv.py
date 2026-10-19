@@ -450,5 +450,5 @@ def test_review3_real_pytest_accepts_scalar_space_paths(project):
     with _gateway(project, "direct") as g:
         result = g.run_command("service", argv, dry_run=False)
     assert result["exit_code"] == 0, result
-    assert (project / "service" / "cache files").is_dir()
+    assert (project / "service" / "tests" / "cache files").is_dir()
     assert (project / "service" / "reports" / "test results.log").is_file()

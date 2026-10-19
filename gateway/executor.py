@@ -89,6 +89,9 @@ def _relative_script(argv: list[str]) -> str | None:
 
 
 _GO_DENIED_HOOKS = frozenset({"exec", "toolexec", "vettool", "test.exec", "test.toolexec", "test.vettool"})
+# Internal go command diagnostics can write to caller-selected files and
+# are unnecessary for Gateway's allowlisted test/vet execution.
+_GO_DENIED_DIAGNOSTICS = frozenset({"debug-actiongraph", "debug-trace"})
 _GO_PATH_OPTIONS = frozenset({
     "modfile", "overlay", "coverprofile", "cpuprofile", "memprofile",
     "mutexprofile", "blockprofile", "trace", "outputdir", "pkgdir", "o",
@@ -143,6 +146,8 @@ def _validate_go_flags(tokens: list[str]) -> None:
                 # No safe handoff for this second cwd exists; use Gateway cwd.
                 raise GatewayError("command_not_allowed", "Go -C cannot override Gateway's working directory.")
             path_name = name.removeprefix("test.")
+            if path_name in _GO_DENIED_DIAGNOSTICS:
+                raise GatewayError("command_not_allowed", "Go diagnostic output flags are disabled.")
             if path_name in _GO_PATH_OPTIONS:
                 value, i = _option_value(tokens, i, inline if equal else None)
                 _relative_option_path(value)

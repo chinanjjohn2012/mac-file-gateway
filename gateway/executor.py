@@ -92,7 +92,7 @@ _GO_DENIED_HOOKS = frozenset({"exec", "toolexec", "vettool", "test.exec", "test.
 _GO_PATH_OPTIONS = frozenset({
     "modfile", "overlay", "coverprofile", "cpuprofile", "memprofile",
     "mutexprofile", "blockprofile", "trace", "outputdir", "pkgdir", "o",
-    "gocoverdir", "fuzzcachedir", "testlogfile",
+    "gocoverdir", "fuzzcachedir", "testlogfile", "pgo",
 })
 _PYTEST_PATH_OPTIONS = frozenset({
     "--config-file", "--basetemp", "--junitxml", "--junit-xml", "--rootdir",
@@ -157,15 +157,22 @@ def _validate_pytest_override(value: str) -> None:
     if normalized_key == "addopts":
         raise GatewayError("command_not_allowed", "Remote pytest addopts overrides are disabled.")
     if normalized_key in _PYTEST_INI_PATH_KEYS:
-        # pytest treats path-list INI values as shlex-style strings, where
-        # quotes can hide an initial ../ from a naive whitespace split.
-        if "\\" in override:
-            raise GatewayError("command_not_allowed", "Backslashes in pytest path overrides are disabled.")
-        try:
-            values = shlex.split(override)
-        except ValueError:
-            raise GatewayError("command_not_allowed", "Malformed pytest path override.") from None
-        if not values or (normalized_key not in _PYTEST_INI_LIST_PATH_KEYS and len(values) != 1):
+        # pytest expands environment references in cache_dir while the
+        # Gateway's command scope is fixed. Keep these path values literal,
+        # rejecting references that could resolve outside that scope.
+        if "\\" in override or "$" in override:
+            raise GatewayError("command_not_allowed", "Variable references and backslashes in pytest paths are disabled.")
+        if normalized_key in _PYTEST_INI_LIST_PATH_KEYS:
+            # Only the list-valued INI options apply shell-style splitting.
+            try:
+                values = shlex.split(override)
+            except ValueError:
+                raise GatewayError("command_not_allowed", "Malformed pytest path override.") from None
+        else:
+            # cache_dir and log_file are scalar str options. A space is
+            # a valid part of their relative file/directory name.
+            values = [override]
+        if not values:
             raise GatewayError("command_not_allowed", "Invalid path-valued pytest INI override.")
         for item in values:
             _relative_option_path(item)

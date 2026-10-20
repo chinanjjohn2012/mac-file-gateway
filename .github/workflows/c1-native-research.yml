@@ -1,0 +1,64 @@
+name: C1 native macOS research (not G2 qualification)
+
+on:
+  pull_request:
+    branches:
+      - release/ms1
+    paths:
+      - ".github/workflows/c1-native-research.yml"
+      - "tools/research/c1_fd_spawn.c"
+      - "tools/research/run_c1_fd_probe.py"
+      - "tests/test_c1_fd_probe.py"
+      - "docs/research/phase2-lite-c1/README.md"
+
+permissions:
+  contents: read
+
+jobs:
+  c1-native:
+    if: >-
+      github.event.pull_request.head.ref == 'research/phase2-lite-c1-fdspawn-20261020' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-15
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Verify native arm64 and fixed commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = "Darwin"
+          test "$(uname -m)" = "arm64"
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          sw_vers -productVersion
+          xcrun --find cc
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          architecture: arm64
+      - name: Run synthetic C1 probe, never qualify G2
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="$(mktemp -d)"
+          chmod 700 "$evidence_dir"
+          trap 'rm -rf "$evidence_dir"' EXIT
+          python -VV
+          python tools/research/run_c1_fd_probe.py --evidence-dir "$evidence_dir"
+          python - "$evidence_dir/c1_fd_probe_private.json" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as file:
+              data = json.load(file)
+          assert data["g2_qualified"] is False
+          assert data["decision"] == "PARTIAL_NATIVE_OBSERVATION_NOT_G2"
+          assert [c["status"] for c in data["cases"]] == ["POSITIVE_EXPERIMENT"] * 2
+          print("C1_NATIVE_RESULT=PARTIAL_NATIVE_OBSERVATION_NOT_G2")
+          PY

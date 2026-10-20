@@ -15,7 +15,7 @@ from starlette.routing import Route
 from starlette.types import ASGIApp
 
 from .core import GatewayError
-from .http import Boundary, _params, _int, _bool, _json_params, _error
+from .http import Boundary, _params, _int, _bool, _json_params, _error, MAX_GIT_BODY
 from .multi_admission import StrictPostAdmission, MAX_RAW_BODY
 from .multi_fields import validate_tool_arguments
 from .workspaces import WorkspaceService
@@ -26,6 +26,9 @@ _GET_ROUTES: dict[str, tuple[str, set[str], set[str]]] = {
     '/search': ('search_files', {'workspace', 'q', 'path', 'file_glob', 'max_results', 'case_sensitive'}, {'workspace', 'q'}),
 }
 _POST_ROUTES: dict[str, tuple[str, set[str], set[str]]] = {
+    '/git/run': ('run_git',
+                 {'command', 'cwd', 'options', 'paths', 'timeout_seconds', 'dry_run'},
+                 {'command'}),
     '/mkdir': ('create_directory', {'path', 'parents', 'exist_ok', 'dry_run'}, {'path'}),
     '/rmdir': ('delete_directory', {'path', 'dry_run'}, {'path'}),
     '/create': ('create_file', {'path', 'content', 'dry_run'}, {'path', 'content'}),
@@ -94,11 +97,19 @@ def create_multi_app(service: WorkspaceService, *, enable_mcp: bool = True,
     async def write_endpoint(request: Request) -> JSONResponse:
         try:
             operation, fields, required = _POST_ROUTES[request.url.path]
+            if operation == 'run_git' and len(await request.body()) > MAX_GIT_BODY:
+                raise GatewayError('too_large', 'Git request body exceeds its fixed limit.')
             args = await _json_params(request, fields | {'workspace'}, required | {'workspace'})
             validate_tool_arguments(operation, args, multi=True)
             workspace = args.pop('workspace')
-            # Apply authorization and guarded file change at the service boundary.
-            result = await run_in_threadpool(service.invoke, workspace, operation, **args)
+            if operation == 'run_git':
+                # Each actual synchronous Git Worker repeats global/Workspace
+                # authorization and retains root FD until terminal cleanup.
+                command = args.pop('command')
+                result = await run_in_threadpool(service.invoke_git, workspace, command, **args)
+            else:
+                # Do not route Git through the File-only service.invoke().
+                result = await run_in_threadpool(service.invoke, workspace, operation, **args)
             return JSONResponse(result)
         except GatewayError as exc:
             if exc.code == 'service_closing':

@@ -192,6 +192,8 @@ def test_queued_git_add_cannot_follow_branch_switched_cwd_symlink(tmp_path, monk
 
     _git("switch", "-c", "symlink-branch", cwd=repo)
     _git("rm", "-qr", "ws/sub", cwd=repo)
+    # git rm may prune the now-empty ws parent before the symlink is created.
+    a_root.mkdir(exist_ok=True)
     (a_root / "sub").symlink_to("../outside", target_is_directory=True)
     _git("add", "ws/sub", cwd=repo)
     _git("commit", "-qm", "symlink cwd", cwd=repo)

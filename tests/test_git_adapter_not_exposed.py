@@ -1,4 +1,4 @@
-"""C boundary: Git internal permission must NOT publish D-phase API tools."""
+"""D boundary: Git grants publish only independently authorized Git adapters."""
 from __future__ import annotations
 
 import json
@@ -26,7 +26,7 @@ def rpc(client, method, params=None):
     })
 
 
-def assert_git_absent(client):
+def assert_git_adapters_enabled(client, *, multi):
     init = rpc(client, "initialize", {
         "protocolVersion": "2025-11-25", "capabilities": {},
         "clientInfo": {"name": "git-phase-c", "version": "1"},
@@ -38,13 +38,21 @@ def assert_git_absent(client):
     assert reply.status_code == 200, reply.text
     names = {tool["name"] for tool in reply.json()["result"]["tools"]}
     assert "gateway_info" in names
-    assert "run_git" not in names
+    assert "run_git" in names
     assert "run_command" not in names
-    assert client.get("/git/run").status_code == 404
-    assert client.post("/git/run", json={"command": "status"}).status_code == 404
+    assert client.get("/git/run").status_code == 405
+    payload = {"command": "status"}
+    if multi:
+        assert client.post("/git/run", json=payload).status_code == 400
+        payload["workspace"] = "a"
+    response = client.post("/git/run", json=payload)
+    assert response.status_code == 200, response.text
+    assert response.json()["dry_run"] is True
+    assert response.json()["execute_started"] is False
+    assert response.json()["repository_checked"] is False
 
 
-def test_legacy_git_internal_grant_does_not_register_mcp_or_rest(tmp_path):
+def test_legacy_git_grant_registers_reviewed_mcp_and_rest(tmp_path):
     root = tmp_path / "project"
     root.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
@@ -56,15 +64,16 @@ def test_legacy_git_internal_grant_does_not_register_mcp_or_rest(tmp_path):
         assert gateway.info()["git_policy"]["enabled"] is True
         assert gateway.info()["git_policy"]["adapter_exposed"] is False
         with TestClient(create_app(gateway, port=8765), base_url="http://127.0.0.1:8765") as client:
-            assert_git_absent(client)
+            assert_git_adapters_enabled(client, multi=False)
             reply = client.get("/info")
             assert reply.status_code == 200
             assert reply.json()["git_policy"]["enabled"] is True
+            assert reply.json()["git_policy"]["adapter_exposed"] is True
     finally:
         gateway.close()
 
 
-def test_multi_git_internal_grant_does_not_register_mcp_or_rest(tmp_path):
+def test_multi_git_grant_requires_explicit_workspace_on_mcp_and_rest(tmp_path):
     a = tmp_path / "project"
     a.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=a, check=True)
@@ -84,7 +93,8 @@ def test_multi_git_internal_grant_does_not_register_mcp_or_rest(tmp_path):
         assert svc.any_git
         assert svc.info()["git_policy"]["adapter_exposed"] is False
         with TestClient(create_multi_app(svc, port=8765), base_url="http://127.0.0.1:8765") as client:
-            assert_git_absent(client)
+            assert_git_adapters_enabled(client, multi=True)
             assert client.get("/info").json()["git_policy"]["enabled"] is True
+            assert client.get("/info").json()["git_policy"]["adapter_exposed"] is True
     finally:
         svc.close()

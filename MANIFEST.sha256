@@ -28,7 +28,9 @@ c60ae6bfd5272614ba62d2232dbd1a1ab26bba70d2795f411cb96bb9cceb7e95  ./docs/legacy-
 385c209c06c762cab998f5f572fb5d861ba290ad1d425858326209a6bdcff616  ./docs/legacy-v2/TEST_REPORT.md
 488a6704e497b8b37d25ab3e0a3e27c53355ef051dba824116eb557a2c7039d9  ./docs/legacy-v2/UPGRADE.md
 1e95a8424b5cae7d8c47cbb30269ea0b773edc50df03eb78151f93553f5ee284  ./docs/superpowers/plans/2026-09-22-guarded-writes.md
+77333802c894044a1f4c6e63ec37fc8b50a8616f1e9a0c818206014f34ad4e00  ./docs/superpowers/plans/2026-10-17-multi-workspace-controlled-exec.md
 9844da6b4c1cd80fdc462b86d39654108b07d163802c622d380e56f301610942  ./docs/superpowers/specs/2026-09-22-guarded-writes.md
+d946867a0b645c3da874c14261481432623e2471e28aedb248901ef8fc78baea  ./docs/superpowers/specs/2026-10-17-multi-workspace-controlled-exec-design.md
 e2b20ae4529dc9bee34e6a6373f4e6592b2ae8e16d4a67e9a5da91ac13a2d920  ./gateway/__init__.py
 74e6388f59e280ca9ceeca805fa22792447f291ded7651903a7fe8e1040a0e8a  ./gateway/__main__.py
 a388cc15d1c1ebdf81336923e2433581109ac80e08394e7298b8f2da5e7a70fd  ./gateway/core.py

@@ -60,3 +60,40 @@ still cannot satisfy real Gateway cancellation.
 A separate independent descendant-exit witness and a false-EOF native negative control
 are required before the C2 research finding can be closed. Neither the `SIGCHLD` follow-up
 nor CI GREEN alone grants G2, G3, ExecSupervisor, merge, deploy or Multi exec activation.
+
+## T02/T03 independent descendant exit and causality research
+
+**New negative-case rule:** stdout EOF and the direct Leader's SIGTERM exit code cannot
+establish termination of an orphaned descendant. The native C2 Helper registers
+`EVFILT_PROC / NOTE_EXIT` for the **single known synthetic descendant PID**, while that
+descendant is still blocked on a second stdin arm byte. Only after successful
+registration does the helper send `A`, at which point the synthetic TTL can start.
+This avoids the registration-vs-self-expiry race in this particular cooperative test;
+the event is a process-exit observation, **not** an atomic PGID identity credential
+or reliable exit status for arbitrary non-child processes.
+
+Positive cases require both independent descendant exit notification and stdout
+EOF. A single monotonic deadline starts **before sending the arm byte** and caps the
+entire signal, drain, witness and direct-Leader reap path (including escalation).
+The synthetic positive-case TTL is 5 seconds after the arm is received, while the
+positive proof deadline is 2.5 seconds from arm emission. A delayed scheduling
+path therefore BLOCKS rather than attributing eventual self-expiry to TERM/KILL.
+
+The adversarial `close-stdout` control has exactly one synthetic descendant
+install SIGTERM ignore and close its own stdout after the arm. The independently
+owned Leader still receives TERM, its inherited stdout pipe reaches EOF, but a
+valid pre-registered NOTE_EXIT witness has **not** fired and the descendant is
+still in the group. This is an intentional **`EXPECTED_BLOCK`**, never a success
+signal for termination; the test also waits for bounded synthetic self-expiry
+after recording the negative evidence.
+
+Only the synthetic PID is monitored. Observation of one descendant's NOTE_EXIT
+does not imply all arbitrary descendants exited; a process escaping its group,
+closing an inherited descriptor, or executing untrusted Workspace code is not
+covered. The `stale` case still checks an invalid expected identity, **not PGID
+reuse**. The original Group Leader's premature exit still prevents safe production
+group cancellation, and a trusted Relay remains a separate G2 research topic.
+
+**Gate:** C2 T02/T03 native outcomes are limited experimental observations;
+independent code review and macOS lifecycle verification remain mandatory.
+**G2 BLOCK; G3 separate; ExecSupervisor and REST/MCP Multi exec BLOCK.**

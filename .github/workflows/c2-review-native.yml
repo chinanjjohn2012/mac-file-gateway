@@ -73,3 +73,21 @@ jobs:
           chmod 700 "$private_dir"
           trap 'rm -rf "$private_dir"' EXIT
           python tools/research/run_c2_pgid_probe.py --evidence-dir "$private_dir"
+          python - "$private_dir/c2_pgid_private.json" <<'PY'
+          import json, sys
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              data = json.load(stream)
+          assert data["g2_qualified"] is False
+          assert data["decision"] == "PARTIAL_NATIVE_OBSERVATION_NOT_G2"
+          expected = [
+              ("term", "POSITIVE_EXPERIMENT"),
+              ("kill", "POSITIVE_EXPERIMENT"),
+              ("worker-first", "POSITIVE_EXPERIMENT"),
+              ("leader-exit", "SAFE_REFUSAL"),
+              ("stale", "SAFE_REFUSAL"),
+              ("close-stdout", "EXPECTED_BLOCK"),
+          ]
+          assert [(case["mode"], case["status"]) for case in data["cases"]] == expected
+          assert data["cases"][-1]["reason"] == "descendant_still_alive"
+          print("C2_EXIT_WITNESS_NATIVE_RESULT=PARTIAL_NATIVE_OBSERVATION_NOT_G2")
+          PY

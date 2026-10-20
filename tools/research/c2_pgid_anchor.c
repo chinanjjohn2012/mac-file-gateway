@@ -16,6 +16,8 @@ int main(void) { fputs("C2_NOT_RUN_NON_DARWIN\n", stderr); return 77; }
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/event.h>
+#include <stdint.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -111,6 +113,45 @@ static int read_ready(int fd, pid_t group, pid_t *descendant) {
     *descendant = (pid_t)descendant_id;
     return getpgid(*descendant) == group;
 }
+/* NOTE_EXIT for a known synthetic descendant. This event is not a group identity handle. */
+static long remaining_ms(long long until) {
+    long long now = monotonic_ms();
+    if (now < 0 || now >= until) return 0;
+    long long left = until - now;
+    return left > LONG_MAX ? LONG_MAX : (long)left;
+}
+static int register_descendant_exit(int *watcher, pid_t descendant) {
+    if (descendant <= 0) return -1;
+    int fd = kqueue();
+    if (fd < 0) return -1;
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) { close(fd); return -1; }
+    struct kevent change;
+    EV_SET(&change, (uintptr_t)descendant, EVFILT_PROC,
+           EV_ADD | EV_ENABLE | EV_ONESHOT, NOTE_EXIT, 0, NULL);
+    if (kevent(fd, &change, 1, NULL, 0, NULL) != 0) { close(fd); return -1; }
+    *watcher = fd;
+    return 0;
+}
+/* 1=NOTE_EXIT, 0=no exit before deadline, -1=error; no status or group identity claim. */
+static int wait_descendant_exit(int watcher, pid_t descendant, long budget_ms) {
+    if (watcher < 0 || descendant <= 0 || budget_ms < 0) return -1;
+    long long until = monotonic_ms() + budget_ms;
+    do {
+        long left = remaining_ms(until);
+        struct timespec timeout = {.tv_sec = left / 1000,
+                                   .tv_nsec = (left % 1000) * 1000000L};
+        struct kevent event;
+        int count = kevent(watcher, NULL, 0, &event, 1, &timeout);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) return -1;
+        if (count == 0) return 0;
+        if ((event.flags & EV_ERROR) != 0 ||
+            event.filter != EVFILT_PROC || event.ident != (uintptr_t)descendant ||
+            (event.fflags & NOTE_EXIT) == 0) return -1;
+        return 1;
+    } while (remaining_ms(until) > 0);
+    return 0;
+}
 static int drain_to_eof(int fd, long timeout_ms) {
     char bytes[256];
     long long until = monotonic_ms() + timeout_ms;
@@ -163,7 +204,7 @@ int main(int argc, char **argv) {
     const char *mode = argv[1], *root = argv[2], *python = argv[3];
     if (strcmp(mode, "term") && strcmp(mode, "kill") &&
         strcmp(mode, "worker-first") && strcmp(mode, "leader-exit") &&
-        strcmp(mode, "stale")) return block("unknown_mode");
+        strcmp(mode, "stale") && strcmp(mode, "close-stdout")) return block("unknown_mode");
     if (python[0] != '/') return block("python_path");
 
     int dirfd = -1;
@@ -174,6 +215,7 @@ int main(int argc, char **argv) {
     posix_spawnattr_t attr;
     int actions_ready = 0, attr_ready = 0, error = 0;
     Owner owner = {.pid = -1, .reaped = 0, .status = 0};
+    int exit_watcher = -1;
     const char *failure = "setup";
     failure = "sigchld_policy";
     if (configure_waitable_sigchld() != 0) goto done;
@@ -215,11 +257,21 @@ int main(int argc, char **argv) {
     if (!owner_live(&owner)) goto done;
     failure = "release";
     if (write(gate[1], "R", 1) != 1) goto done;
-    close(gate[1]); gate[1] = -1;
+    /* Keep stdin gate writable for the descendant arm barrier. */
 
     pid_t descendant = -1;
     failure = "descendant_identity";
     if (!read_ready(output[0], owner.pid, &descendant)) goto done;
+    failure = "descendant_exit_registration";
+    if (register_descendant_exit(&exit_watcher, descendant) != 0) goto done;
+    /* The descendant cannot self-expire before this arm byte. */
+    if (getpgid(descendant) != owner.pid) goto done;
+    long long arm_deadline = monotonic_ms() +
+        (strcmp(mode, "close-stdout") == 0 ? 7000 :
+         (strcmp(mode, "leader-exit") == 0 || strcmp(mode, "stale") == 0) ? 4200 : 2500);
+    failure = "descendant_arm";
+    if (write(gate[1], "A", 1) != 1) goto done;
+    close(gate[1]); gate[1] = -1;
     int descendant_verified = 1, term_sent = 0, kill_sent = 0, refused = 0, held = 0;
 
     if (strcmp(mode, "leader-exit") == 0) {
@@ -231,6 +283,32 @@ int main(int argc, char **argv) {
         failure = "leader_exit_refusal";
         refused = signal_owned_group(&owner, owner.pid, SIGTERM) == 0;
         if (!refused) goto done;
+    } else if (strcmp(mode, "close-stdout") == 0) {
+        /* Adversarial control: leader dies, stdout EOF, but descendant ignores TERM. */
+        failure = "close_stdout_anchor";
+        if (!owner_live(&owner)) goto done;
+        held = 1;
+        failure = "close_stdout_term";
+        if (signal_owned_group(&owner, owner.pid, SIGTERM) != 1) goto done;
+        term_sent = 1;
+        failure = "close_stdout_eof";
+        if (!drain_to_eof(output[0], 1000)) goto done;
+        failure = "close_stdout_owner_reap";
+        if (bounded_reap(&owner, 1200) != 0 || !owner.reaped ||
+            !WIFSIGNALED(owner.status) || WTERMSIG(owner.status) != SIGTERM) goto done;
+        failure = "close_stdout_early_exit";
+        if (wait_descendant_exit(exit_watcher, descendant, 200) != 0) goto done;
+        failure = "descendant_still_alive";
+        if (getpgid(descendant) != owner.pid) goto done;
+        failure = "negative_self_expiry_cleanup";
+        if (wait_descendant_exit(exit_watcher, descendant,
+                                 remaining_ms(arm_deadline)) != 1) goto done;
+        /* This is a required BLOCK observation, never a positive termination. */
+        fputs("C2_EXPECTED_BLOCK phase=descendant_still_alive stdout_eof=1 "
+              "witness_before_eof=0 descendant_alive=1\n", stdout);
+        close(exit_watcher); exit_watcher = -1;
+        close(output[0]); output[0] = -1;
+        return 0;
     } else if (strcmp(mode, "stale") == 0) {
         failure = "stale_anchor";
         if (!owner_live(&owner)) goto done;
@@ -255,9 +333,16 @@ int main(int argc, char **argv) {
 
     failure = "pipe_eof";
     long drain_budget_ms = refused ? 4000 : 2000;
+    long left = remaining_ms(arm_deadline);
+    if (left <= 0) goto done;
+    if (drain_budget_ms > left) drain_budget_ms = left;
     if (!drain_to_eof(output[0], drain_budget_ms)) goto done;
+    failure = "descendant_exit_witness";
+    if (wait_descendant_exit(exit_watcher, descendant,
+                             remaining_ms(arm_deadline)) != 1) goto done;
     failure = "owned_reap";
-    if (bounded_reap(&owner, 2000) != 0 || !owner.reaped) goto done;
+    left = remaining_ms(arm_deadline);
+    if (left <= 0 || bounded_reap(&owner, left) != 0 || !owner.reaped) goto done;
     failure = "owned_exit_status";
     if (term_sent && !kill_sent &&
         (!WIFSIGNALED(owner.status) || WTERMSIG(owner.status) != SIGTERM)) goto done;
@@ -269,6 +354,7 @@ int main(int argc, char **argv) {
     printf("C2_RESULT mode=%s term=%d kill=%d refused=%d held=%d reaped=1 drain=1 descendant_verified=%d\n",
            mode, term_sent, kill_sent, refused, held, descendant_verified);
     if (output[0] >= 0) close(output[0]);
+    if (exit_watcher >= 0) close(exit_watcher);
     return 0;
 
 done:
@@ -279,6 +365,7 @@ done:
     if (output[0] >= 0) close(output[0]);
     if (output[1] >= 0) close(output[1]);
     if (dirfd >= 0) close(dirfd);
+    if (exit_watcher >= 0) close(exit_watcher);
     if (owner.pid > 0 && !owner.reaped) (void)bounded_reap(&owner, 2500);
     return block(failure);
 }

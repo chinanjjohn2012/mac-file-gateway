@@ -22,6 +22,9 @@ HERE = Path(__file__).resolve().parent
 NATIVE = HERE / "c2_pgid_anchor.c"
 CHILD = HERE / "c2_group_child.py"
 MODES = ("term", "kill", "worker-first", "leader-exit", "stale")
+NEGATIVE_MODES = ("close-stdout",)
+_NEGATIVE_EOF = ("C2_EXPECTED_BLOCK phase=descendant_still_alive "
+                 "stdout_eof=1 witness_before_eof=0 descendant_alive=1\n")
 _RE = re.compile(
     r"\AC2_RESULT mode=(term|kill|worker-first|leader-exit|stale)"
     r" term=([01]) kill=([01]) refused=([01]) held=([01])"
@@ -70,10 +73,19 @@ def run_case(binary: Path, root: Path, mode: str) -> dict:
     if proc.returncode != 0:
         stage = re.search(r"C2_BLOCK phase=([a-z_]+)", proc.stderr)
         return {"mode": mode, "status": "BLOCK", "reason": stage.group(1) if stage else "native_exit"}
+    if mode == "close-stdout":
+        # Native negative control must prove EOF while the child is alive.
+        # Never report a negative case as successful descendant termination.
+        if proc.stdout != _NEGATIVE_EOF or proc.stderr:
+            return {"mode": mode, "status": "BLOCK", "reason": "negative_evidence_invalid"}
+        return {"mode": mode, "status": "EXPECTED_BLOCK",
+                "reason": "descendant_still_alive", "g2_qualified": False}
     try:
         data = parse_native_result(proc.stdout)
     except ValueError:
         return {"mode": mode, "status": "BLOCK", "reason": "invalid_evidence"}
+    if proc.stderr:
+        return {"mode": mode, "status": "BLOCK", "reason": "unexpected_native_stderr"}
     result = classify_observation(mode, data)
     return {"mode": mode, "status": result, "signals": {
         "term": data["term"], "kill": data["kill"], "refused": data["refused"]
@@ -119,8 +131,8 @@ def main() -> int:
         if compiler.returncode != 0:
             print("BLOCK_NATIVE_COMPILE: private compiler details omitted")
             return 2
-        cases = [run_case(binary, root, mode) for mode in MODES]
-        wanted = ["POSITIVE_EXPERIMENT"] * 3 + ["SAFE_REFUSAL"] * 2
+        cases = [run_case(binary, root, mode) for mode in MODES + NEGATIVE_MODES]
+        wanted = ["POSITIVE_EXPERIMENT"] * 3 + ["SAFE_REFUSAL"] * 2 + ["EXPECTED_BLOCK"]
         decision = ("PARTIAL_NATIVE_OBSERVATION_NOT_G2"
                     if [case["status"] for case in cases] == wanted
                     else "BLOCK_NATIVE_EXPERIMENT")
@@ -130,6 +142,7 @@ def main() -> int:
             "cases": cases,
             "g2_qualified": False,
             "not_proved": [
+                "known synthetic descendant NOTE_EXIT does not prove arbitrary cleanup",
                 "real PGID reuse under hostile timing",
                 "detached/out-of-group descendants",
                 "Gateway-owned process integration and lifecycle",

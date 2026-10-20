@@ -66,5 +66,6 @@ fi
 .venv/bin/python tests/smoke_live.py
 if [ "${1:-}" = '--require-mcp' ]; then
     .venv/bin/python tests/smoke_mcp_live.py
+    .venv/bin/python tests/smoke_mcp_stdio.py
 fi
 verify_manifest

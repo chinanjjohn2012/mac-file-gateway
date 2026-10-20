@@ -37,6 +37,7 @@ jobs:
       - run: python -m pytest -q
       - run: python tests/smoke_live.py
       - run: python tests/smoke_mcp_live.py
+      - run: python tests/smoke_mcp_stdio.py
       - run: python -m compileall -q gateway tests tools
       - run: bash -n setup.sh run.sh verify.sh tunnel.sh
       - name: Verify release manifest

@@ -130,7 +130,10 @@ def create_multi_app(service: WorkspaceService, *, enable_mcp: bool = True,
         app.router.routes.extend(routes)
     else:
         app = Starlette(routes=routes)
-    return Boundary(StrictPostAdmission(app), port=port, token=token, max_body=MAX_RAW_BODY)
+    built = Boundary(StrictPostAdmission(app), port=port, token=token, max_body=MAX_RAW_BODY)
+    if service.any_git:
+        service._git_adapter_exposed = True
+    return built
 
 
 __all__ = ['create_multi_app']

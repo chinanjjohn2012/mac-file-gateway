@@ -117,10 +117,22 @@ class GitProcessRunner:
                 os.set_blocking(pipe.fileno(), False)
                 selector.register(pipe, selectors.EVENT_READ, num)
 
+            def group_gone() -> bool:
+                # A hook/filter child can close both pipes while staying in
+                # Git's process group. EOF + reaped leader is NOT enough.
+                try:
+                    os.killpg(child.pid, 0)
+                except ProcessLookupError:
+                    return True
+                except PermissionError:
+                    return False
+                return False
+
             def pump(until: float) -> bool:
                 nonlocal truncated
                 while True:
-                    if not selector.get_map() and child.poll() is not None:
+                    if (not selector.get_map() and child.poll() is not None
+                            and group_gone()):
                         return True
                     remaining = until - time.monotonic()
                     if remaining <= 0:
@@ -162,7 +174,8 @@ class GitProcessRunner:
                         child.wait(timeout=max(0.0, deadline - time.monotonic()))
                     except subprocess.TimeoutExpired:
                         pass
-                clean = child.poll() is not None and not selector.get_map()
+                clean = (child.poll() is not None and not selector.get_map()
+                         and group_gone())
         except BaseException:
             _signal_group(child.pid, signal.SIGTERM)
             _signal_group(child.pid, signal.SIGKILL)

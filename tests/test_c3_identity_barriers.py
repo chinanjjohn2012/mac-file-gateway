@@ -21,10 +21,10 @@ MODES = (
     "stale-after-reap",
 )
 EXPECTED = {
-    "exit-unreaped": (1, 1, 0, 0, 0, 1, "SAFE_REFUSAL"),
-    "competing-reap": (1, 0, 0, 0, 0, 1, "EXPECTED_BLOCK"),
-    "group-isolation": (1, 1, 1, 0, 1, 0, "POSITIVE_EXPERIMENT"),
-    "stale-after-reap": (1, 1, 0, 0, 1, 1, "EXPECTED_BLOCK"),
+    "exit-unreaped": (1, 1, 0, 0, 0, 0, 0, 1, "SAFE_REFUSAL"),
+    "competing-reap": (1, 0, 0, 0, 0, 0, 0, 1, "EXPECTED_BLOCK"),
+    "group-isolation": (1, 1, 1, 1, 0, 0, 1, 0, "POSITIVE_EXPERIMENT"),
+    "stale-after-reap": (1, 1, 0, 0, 0, 0, 1, 1, "EXPECTED_BLOCK"),
 }
 
 
@@ -38,12 +38,12 @@ def _module():
 
 
 def _record(mode):
-    observed, owned_reap, signals, late, canary, refused, _ = EXPECTED[mode]
+    observed, owned_reap, signals, attempts, late_attempts, late, canary, refused, _ = EXPECTED[mode]
     return {
         "mode": mode, "exit_observed": observed, "owner_reaped": owned_reap,
-        "group_signals": signals, "after_loss_signals": late,
-        "canary_alive": canary, "refused": refused,
-        "reuse_proven": 0,
+        "group_signals": signals, "group_attempts": attempts,
+        "after_loss_attempts": late_attempts, "after_loss_signals": late,
+        "canary_alive": canary, "refused": refused, "reuse_proven": 0,
     }
 
 
@@ -62,8 +62,8 @@ def test_strict_contract_and_no_pg_reuse_promotion():
 def test_native_line_requires_single_exact_unforgeable_schema():
     m = _module()
     exact = ("C3_ID_RESULT mode=competing-reap exit_observed=1 owner_reaped=0 "
-             "group_signals=0 after_loss_signals=0 canary_alive=0 "
-             "refused=1 reuse_proven=0\n")
+             "group_signals=0 group_attempts=0 after_loss_attempts=0 "
+             "after_loss_signals=0 canary_alive=0 refused=1 reuse_proven=0\n")
     assert m.parse_native(exact) == _record("competing-reap")
     for invalid in ("", exact + exact, "fake\n" + exact, exact + "garbage",
                     exact.replace("refused=1", "refused=2"),

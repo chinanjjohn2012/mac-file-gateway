@@ -22,22 +22,25 @@ NATIVE = HERE / "c3_identity_probe.c"
 MODES = (
     "exit-unreaped", "competing-reap", "group-isolation", "stale-after-reap",
 )
-# exact tuple: exit_observed, owner_reaped, signals, after_loss, canary, refused, verdict
+# exit_observed, owner_reaped, successful_group_signals, attempted_group_calls,
+# attempts_after_identity_loss, successful_calls_after_loss, canary, refused, verdict
 EXPECTED = {
-    "exit-unreaped": (1, 1, 0, 0, 0, 1, "SAFE_REFUSAL"),
-    "competing-reap": (1, 0, 0, 0, 0, 1, "EXPECTED_BLOCK"),
-    "group-isolation": (1, 1, 1, 0, 1, 0, "POSITIVE_EXPERIMENT"),
-    "stale-after-reap": (1, 1, 0, 0, 1, 1, "EXPECTED_BLOCK"),
+    "exit-unreaped": (1, 1, 0, 0, 0, 0, 0, 1, "SAFE_REFUSAL"),
+    "competing-reap": (1, 0, 0, 0, 0, 0, 0, 1, "EXPECTED_BLOCK"),
+    "group-isolation": (1, 1, 1, 1, 0, 0, 1, 0, "POSITIVE_EXPERIMENT"),
+    "stale-after-reap": (1, 1, 0, 0, 0, 0, 1, 1, "EXPECTED_BLOCK"),
 }
 _RE = re.compile(
     r"\AC3_ID_RESULT mode=(exit-unreaped|competing-reap|group-isolation|stale-after-reap)"
     r" exit_observed=([01]) owner_reaped=([01]) group_signals=([01])"
+    r" group_attempts=([01]) after_loss_attempts=([01])"
     r" after_loss_signals=([01]) canary_alive=([01]) refused=([01])"
     r" reuse_proven=([01])\n\Z"
 )
 _FIELDS = (
     "exit_observed", "owner_reaped", "group_signals",
-    "after_loss_signals", "canary_alive", "refused", "reuse_proven",
+    "group_attempts", "after_loss_attempts", "after_loss_signals",
+    "canary_alive", "refused", "reuse_proven",
 )
 
 
@@ -56,7 +59,7 @@ def classify(mode: str, record: dict) -> str:
     values = EXPECTED[mode]
     expected = {
         "mode": mode,
-        **dict(zip(_FIELDS, values[:6] + (0,))),
+        **dict(zip(_FIELDS, values[:-1] + (0,))),
     }
     if record.keys() != expected.keys() or any(
         type(record[k]) is not type(v) or record[k] != v
@@ -143,11 +146,14 @@ def main() -> int:
     # Public CI prints only exact, strictly parsed enums and flags. Never real PIDs.
     for c in cases:
         print("C3_ID_CASE mode={mode} status={status} refused={refused} "
-              "group_signals={group_signals} after_loss_signals={late} "
+              "group_signals={group_signals} group_attempts={attempts} "
+              "after_loss_attempts={late_attempts} after_loss_signals={late} "
               "reuse_proven=0".format(
                   mode=c["mode"], status=c["status"],
                   refused=c.get("refused", -1),
                   group_signals=c.get("group_signals", -1),
+                  attempts=c.get("group_attempts", -1),
+                  late_attempts=c.get("after_loss_attempts", -1),
                   late=c.get("after_loss_signals", -1)))
     print("C3_ID_NATIVE_RESULT=" + decision)
     return 0 if decision == "PARTIAL_C3_IDENTITY_NOT_G2" else 2

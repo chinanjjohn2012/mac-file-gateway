@@ -64,8 +64,9 @@ def test_real_native_result_reports_group_attempts_not_only_success():
         expected = driver.EXPECTED[mode]
         evidence = {
             "mode": mode,
-            **dict(zip(driver._FIELDS, expected[:len(driver._FIELDS)])),
+            **dict(zip(driver._FIELDS, expected[:-1] + (0,))),
         }
+        assert driver.classify(mode, evidence) == expected[-1]
         assert driver.classify(mode, {**evidence, "after_loss_attempts": 1}) == "BLOCK"
         assert driver.classify(mode, {**evidence, "group_attempts": 1 if mode != "group-isolation" else 2}) == "BLOCK"
 
@@ -144,6 +145,7 @@ def test_fault_driver_no_native_side_effect_on_linux(tmp_path):
 @pytest.mark.skipif(sys.platform != "darwin", reason="requires real Darwin synthetic tests")
 def test_native_fault_modes_block_and_bound_cleanup(tmp_path):
     # This runs only newly created native test children; no existing PID/PGID.
+    tmp_path.chmod(0o700)
     proc = subprocess.run(
         [sys.executable, str(FAULTS), "--evidence-dir", str(tmp_path)],
         capture_output=True, text=True, timeout=75, check=False,
@@ -153,6 +155,7 @@ def test_native_fault_modes_block_and_bound_cleanup(tmp_path):
     data = json.loads((tmp_path / "c3_identity_faults_private.json").read_text())
     assert data["g2_qualified"] is False
     assert data["decision"] == "FAULT_CONTROLS_PASS_NOT_G2"
+    assert data["mutation_detected"] is True
     assert [c["mode"] for c in data["cases"]] == list(MODES)
     assert all(c["status"] == "EXPECTED_BLOCK" for c in data["cases"])
     assert all(c["pid_signals"] == 0 for c in data["cases"])

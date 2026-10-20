@@ -96,6 +96,7 @@ jobs:
           data = json.loads(Path(sys.argv[1]).read_text())
           assert data["g2_qualified"] is False
           assert data["decision"] == "FAULT_CONTROLS_PASS_NOT_G2"
+          assert data["mutation_detected"] is True
           expected = [
               "fault-unauthorized-esrch",
               "fault-broken-pipe",

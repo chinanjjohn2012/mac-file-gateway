@@ -123,3 +123,11 @@ def test_exited_group_leader_refusal_still_has_live_descendant():
     assert "bounded_reap(&owner, 2500)" in branch
     assert "getpgid(descendant) != owner.pid" in branch
     assert branch.index("getpgid(descendant) != owner.pid") < branch.index("signal_owned_group(")
+
+
+def test_positive_drain_cannot_wait_for_synthetic_self_expiry():
+    helper = NATIVE.read_text()
+    synthetic = CHILD.read_text()
+    assert "MAX_LIFETIME_SECONDS = 5.0" in synthetic
+    assert "long drain_budget_ms = refused ? 4000 : 2000;" in helper
+    assert "drain_to_eof(output[0], drain_budget_ms)" in helper

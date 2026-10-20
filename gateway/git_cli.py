@@ -21,7 +21,7 @@ from .git_policy import compile_git_command, preview_git
 from .git_repository import (
     GitRepositoryCoordinator, RepositoryIdentity, check_git_paths,
 )
-from .git_state import GitStateStore
+from .git_state import GitStateStore, GitLaunchNotAttempted
 
 _GIT_PATH = "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
 _REV_PARSE = (
@@ -99,6 +99,10 @@ class GitProcessRunner:
         if time.monotonic() >= min(execute_until, deadline - _CLEANUP_RESERVE):
             raise GatewayError("git_timeout", "Not enough time to start Git safely.")
         def spawn() -> subprocess.Popen[bytes]:
+            # Persisting DISCOVERING/RUNNING may itself consume the deadline.
+            # This check runs INSIDE the short admission gate after fsync.
+            if time.monotonic() >= min(execute_until, deadline - _CLEANUP_RESERVE):
+                raise GitLaunchNotAttempted()
             return subprocess.Popen(
                 [self.binary, *argv], cwd=cwd, env=self.environment,
                 shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,

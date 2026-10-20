@@ -138,6 +138,7 @@ def test_legacy_mcp_git_tool_registers_only_with_independent_grant(tmp_path, pro
             assert status["execute_started"] is True
             assert status["repository_checked"] is True
             assert status["cleanup_status"] == "complete"
+            assert rpc(client, "tools/call", {"name": "gateway_info", "arguments": {}})["structuredContent"]["git_policy"]["adapter_exposed"] is True
 
             for arguments in (
                 {"command": "push"},
@@ -201,6 +202,7 @@ def test_multi_mcp_git_is_workspace_scoped_and_no_other_exec(tmp_path, protocol)
             assert actual.get("isError") is not True, actual
             assert actual["structuredContent"]["exit_code"] == 0
             assert actual["structuredContent"]["cleanup_status"] == "complete"
+            assert rpc(client, "tools/call", {"name": "gateway_info", "arguments": {}})["structuredContent"]["git_policy"]["adapter_exposed"] is True
 
             # L0 rejects duplicate JSON object keys BEFORE reaching SDK.
             raw = (b'{"jsonrpc":"2.0","id":43,"method":"tools/call",'

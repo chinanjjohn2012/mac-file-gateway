@@ -210,7 +210,8 @@ def assert_http_git_mode(tmp: Path, *, multi: bool) -> None:
         assert staged["structuredContent"]["exit_code"] == 0
         tracked = git(repo, "diff", "--cached", "--name-only")
         assert tracked == ("a/smoke-new.txt" if multi else "smoke-new.txt"), tracked
-        assert not any((control / "git-state").iterdir()) if multi else True
+        if multi:
+            assert not list((control / "git-state").iterdir())
     finally:
         if server.poll() is None:
             server.terminate()
@@ -224,7 +225,6 @@ def assert_http_git_mode(tmp: Path, *, multi: bool) -> None:
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="gateway-git-cli-e-") as name:
         base = Path(name)
-        assert_http_git_mode(base / "legacy", multi=False) if False else None
         legacy, multi = base / "legacy", base / "multi"
         legacy.mkdir()
         multi.mkdir()

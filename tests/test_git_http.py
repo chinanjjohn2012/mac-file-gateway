@@ -116,7 +116,7 @@ def test_multi_git_rest_requires_workspace_and_enforces_exact_allowlist(tmp_path
             assert result["workspace"] == "a"
             assert result["cleanup_status"] == "complete"
             assert svc.info()["read_only"] is True
-            assert client.get("/info").json()["git_policy"]["adapter_exposed"] is False or True
+            assert client.get("/info").json()["git_policy"]["adapter_exposed"] is True
     finally:
         svc.close()
 
@@ -163,7 +163,7 @@ def test_rest_git_rejects_nested_and_envelope_arguments_before_popen(
                 ({"command": "status", "cwd": "../escape"}, 403, "git_path_blocked"),
                 ({"command": "status", "paths": ["../escape"]}, 403, "git_path_blocked"),
                 ({"command": "status", "options": {"unknown": 1}}, 400, "git_option_invalid"),
-                ({"command": "status", "paths": "some-path"}, 400, "git_option_invalid"),
+                ({"command": "status", "paths": "some-path"}, 400, "invalid_argument"),
                 ({"command": "status", "options": ["not a dict"]}, 400, "invalid_argument"),
                 ({"command": "status", "timeout_seconds": True}, 400, "invalid_argument"),
                 ({"command": "status", "dry_run": 0}, 400, "invalid_argument"),
@@ -273,13 +273,14 @@ def test_multi_rest_git_actual_threadpool_worker_owns_root_fd_until_close(
     response = []
     errors = []
     fd = svc.get("a").gateway._root_fd
+    pinned_ino = os.fstat(fd).st_ino
 
     def blocked_run(**kwargs):
         assert kwargs["root_fd"] == fd
         entered.set()
         if not release.wait(timeout=10):
             raise AssertionError("worker timed out")
-        assert os.fstat(fd).st_ino == os.stat(svc.get("a").gateway._root_path).st_ino if False else True
+        assert os.fstat(fd).st_ino == pinned_ino
         return {"execute_started": True, "cleanup_status": "complete", "exit_code": 0}
 
     monkeypatch.setattr(svc._git_executor, "run", blocked_run)

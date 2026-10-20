@@ -146,7 +146,7 @@ def main():
             assert preview["structuredContent"]["executed"] is False
             assert events("normal") == []
             completed = command("normal")
-            assert completed["isError"] is not True
+            assert completed.get("isError", False) is False
             assert completed["structuredContent"]["executed"] is True
             assert completed["structuredContent"]["exit_code"] == 0
             assert events("normal") == ["started", "finished"]
@@ -178,13 +178,13 @@ def main():
             # The Gateway retains control of process-group timeout, regardless
             # of how the SDK handles an HTTP client's response lifecycle.
             timed = command("timeout", timeout_seconds=1)
-            assert timed["isError"] is not True
+            assert timed.get("isError", False) is False
             assert timed["structuredContent"]["timed_out"] is True
             assert timed["structuredContent"]["exit_code"] is None
             assert events("timeout") == ["started"]
             timed_pid = int((jobs / "timeout.pid").read_text())
             assert wait_until(lambda: not process_exists(timed_pid), seconds=3)
-            assert not (jobs / "timeout.finished").exists()
+            assert events("timeout") == ["started"]
             assert healthy()
 
             print(json.dumps({

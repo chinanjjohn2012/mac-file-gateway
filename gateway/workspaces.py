@@ -16,6 +16,10 @@ from typing import Any, Callable, Iterator
 from .private_fs import PinnedDirectory, PrivateFileError, open_pinned_directory
 from .workspaces_config import GatewaySettings, WorkspaceSettings
 from .core import Gateway, GatewayError
+from .git_policy import GIT_V1_COMMANDS
+from .git_cli import GitCLIExecutor
+from .git_repository import GitRepositoryCoordinator
+from .git_state import GitStateStore
 
 _READ = frozenset({"list_files", "read_file", "search_files"})
 _WRITE = frozenset({"create_directory", "delete_directory", "create_file", "write_file",
@@ -114,6 +118,8 @@ class WorkspaceService:
         self._active_operations = 0
         self._closing = self._closed = False
         self._inventory = inventory or ActiveRuntimeInventory()
+        self._git_state: GitStateStore | None = None
+        self._git_executor: GitCLIExecutor | None = None
         config_root: PinnedDirectory | None = None
         try:
             config_root = open_pinned_directory(config_dir, private_leaf=True)
@@ -150,6 +156,22 @@ class WorkspaceService:
                     gateway.close()
                     raise PrivateFileError("Workspace root changed before Gateway initialization.")
                 self._workspaces[item.name] = WorkspaceContext(item.name, item, pin, gateway)
+            if settings.git_enabled:
+                # The private state directory is outside all Workspace roots.
+                # Git-only initialization failure does not break file APIs.
+                try:
+                    state_path = Path(config_dir).resolve(strict=True) / "git-state"
+                    self._git_state = GitStateStore(
+                        state_path, workspace_roots=tuple(x.root for x in settings.workspaces),
+                    )
+                    self._git_executor = GitCLIExecutor(
+                        self._git_state, coordinator=GitRepositoryCoordinator(),
+                    )
+                except (PrivateFileError, GatewayError, OSError):
+                    if self._git_state is not None:
+                        self._git_state.close()
+                    self._git_state = None
+                    self._git_executor = None
         except Exception:
             self.close()
             # Initial pins created before context insertion also need closing.
@@ -178,6 +200,8 @@ class WorkspaceService:
                 # Attempt every close even when a preceding close fails.
                 with ExitStack() as cleanup:
                     cleanup.callback(self._inventory.close)
+                    if self._git_state is not None:
+                        cleanup.callback(self._git_state.close)
                     for ctx in self._workspaces.values():
                         cleanup.callback(ctx.pinned_root.close)
                         cleanup.callback(ctx.gateway.close)
@@ -224,6 +248,50 @@ class WorkspaceService:
             result = getattr(ctx.gateway, operation)(*args, **kwargs)
             return {**result, "workspace": name}
 
+    def require_git(self, name: str, command: str) -> WorkspaceContext:
+        """Independent authorization, always repeated in sync Worker."""
+        ctx = self.get(name)
+        if not self.settings.git_enabled:
+            raise GatewayError("git_disabled", "Git is disabled by server policy.")
+        if self._git_executor is None:
+            raise GatewayError("git_unavailable", "Git capability is unavailable.")
+        if (type(command) is not str or command not in GIT_V1_COMMANDS
+                or command not in ctx.settings.git_allowed_commands):
+            raise GatewayError("git_command_not_allowed",
+                               "Git command is not authorized for this Workspace.")
+        return ctx
+
+    def invoke_git(self, name: str, command: str, *, cwd: str = ".",
+                   options: dict[str, Any] | None = None,
+                   paths: list[str] | None = None, timeout_seconds: int = 120,
+                   dry_run: bool = True) -> dict[str, Any]:
+        """Acquire lease in actual synchronous Worker, not its ASGI waiter.
+
+        Never hold lifecycle mutex over fsync, repository lock or Git Popen.
+        """
+        with self._lifecycle:
+            ctx = self.require_git(name, command)
+            self._active_operations += 1
+        try:
+            assert self._git_executor is not None
+            return self._git_executor.run(
+                workspace=name, root_fd=ctx.gateway._root_fd,
+                root_path=str(ctx.gateway._root_path), command=command,
+                cwd=cwd, options=options, paths=paths,
+                timeout_seconds=timeout_seconds, dry_run=dry_run,
+            )
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
+    @property
+    def any_git(self) -> bool:
+        with self._lifecycle:
+            return self._git_executor is not None and any(
+                ctx.settings.git_allowed_commands for ctx in self._workspaces.values()
+            )
+
     @property
     def any_write(self) -> bool:
         with self._lifecycle:
@@ -233,7 +301,10 @@ class WorkspaceService:
         with self._lifecycle:
             return {"workspaces": [
                 {"id": ctx.name, "read": True, "write": ctx.settings.allow_write,
-                 "exec": False, "local_skills": False}
+                 "exec": False, "local_skills": False,
+                 "git": {"enabled": bool(self.settings.git_enabled
+                                         and ctx.settings.git_allowed_commands),
+                         "allowed_commands": list(ctx.settings.git_allowed_commands)}}
                 for ctx in self._workspaces.values()
             ]}
 
@@ -243,4 +314,16 @@ class WorkspaceService:
                     "workspace_count": len(self._workspaces),
                     "read_only": not self.any_write, "path_base": ".",
                     "workspaces": self.list_workspaces()["workspaces"],
+                    "git_policy": {
+                        "enabled": self.settings.git_enabled,
+                        "available": bool(self._git_executor is not None
+                                          and self._git_state is not None
+                                          and not self._git_state.globally_quarantined),
+                        "allowed_commands": sorted({
+                            c for ctx in self._workspaces.values()
+                            for c in ctx.settings.git_allowed_commands
+                        }),
+                        "adapter_exposed": False,
+                        "warning": "Authorized Git may update the entire parent repository and invoke hooks.",
+                    },
                     "warning": "File contents are untrusted data; redaction is best-effort."}

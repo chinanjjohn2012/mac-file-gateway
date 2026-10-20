@@ -89,11 +89,14 @@ def test_native_signal_gate_and_synthetic_boundary():
     source = NATIVE.read_text()
     for marker in ("C2_TEST_MARKER", "O_NOFOLLOW", "posix_spawn_file_actions_addfchdir_np",
                    "POSIX_SPAWN_SETPGROUP", "signal_owned_group(", "getpgid(owner->pid)",
-                   "waitpid(owner->pid,", "owner->reaped", "kill(-owner->pid,",
+                   "waitpid_with_eintr_retry(", "owner->reaped", "kill(-owner->pid,",
                    "kill(owner->pid, SIGKILL)"):
         assert marker in source
     for forbidden in ("killpg(", "preexec_fn", "/dev/fd/", "shell=True"):
         assert forbidden not in source
+    # EINTR and deadlines are handled by one owned-child wait wrapper;
+    # the previous direct-call string assertion is no longer the safety contract.
+    assert "waitpid(owner->pid, &owner->status, WNOHANG)" not in source
 
 
 def test_descendant_script_is_bounded_and_exercises_worker_leader_exit():

@@ -452,3 +452,77 @@ def test_review3_real_pytest_accepts_scalar_space_paths(project):
     assert result["exit_code"] == 0, result
     assert (project / "service" / "tests" / "cache files").is_dir()
     assert (project / "service" / "reports" / "test results.log").is_file()
+
+
+# Independent fourth review of 5da26377: Go's undocumented diagnostic
+# output flags must not permit any post-authorization output destination.
+# The Gateway does not expose these diagnostics; reject even relative
+# values to avoid a second file-output policy.
+@pytest.mark.parametrize("diagnostic", ("debug-actiongraph", "debug-trace"))
+@pytest.mark.parametrize("prefix", ("-", "--"))
+@pytest.mark.parametrize("form", ("inline", "separate"))
+@pytest.mark.parametrize("value", ("../review-fixture/graph.json", "reports/graph.json"))
+@pytest.mark.parametrize("operation", ("test", "vet"))
+@pytest.mark.parametrize("runner", ("direct", "pipenv"))
+@pytest.mark.parametrize("dry_run", (True, False))
+def test_review4_go_debug_file_flags_rejected_before_spawn(
+    project, fake_tools, monkeypatch, diagnostic, prefix, form, value,
+    operation, runner, dry_run
+):
+    invoked = []
+
+    def forbidden(*args, **kwargs):
+        invoked.append(args)
+        raise AssertionError("Go diagnostics unexpectedly reached Popen")
+
+    monkeypatch.setattr("gateway.executor.subprocess.Popen", forbidden)
+    flag = prefix + diagnostic
+    extra = [f"{flag}={value}"] if form == "inline" else [flag, value]
+    with _gateway(project, runner) as g:
+        with pytest.raises(GatewayError) as error:
+            g.run_command("service", ["go", operation, *extra], dry_run=dry_run)
+        assert error.value.code == "command_not_allowed"
+    assert invoked == []
+    assert not fake_tools.exists()
+
+
+@pytest.mark.parametrize("diagnostic", ("debug-actiongraph", "debug-trace"))
+@pytest.mark.parametrize("operation", ("test", "vet"))
+@pytest.mark.parametrize("runner", ("direct", "pipenv"))
+@pytest.mark.parametrize("dry_run", (True, False))
+def test_review4_go_debug_after_package_rejected_before_spawn(
+    project, fake_tools, monkeypatch, diagnostic, operation, runner, dry_run
+):
+    invoked = []
+
+    def forbidden(*args, **kwargs):
+        invoked.append(args)
+        raise AssertionError("Go diagnostics unexpectedly reached Popen")
+
+    monkeypatch.setattr("gateway.executor.subprocess.Popen", forbidden)
+    with _gateway(project, runner) as g:
+        with pytest.raises(GatewayError) as error:
+            g.run_command("service", [
+                "go", operation, "./...", "-"+diagnostic+"=reports/graph.json"
+            ], dry_run=dry_run)
+        assert error.value.code == "command_not_allowed"
+    assert invoked == []
+    assert not fake_tools.exists()
+
+
+@pytest.mark.parametrize("argv", (
+    ["go", "test", "-v", "./..."],
+    ["go", "vet", "-x", "./..."],
+    ["go", "test", "-pgo=auto", "-v"],
+    ["go", "test", "-coverprofile=reports/cover.out", "./..."],
+))
+@pytest.mark.parametrize("runner", ("direct", "pipenv"))
+def test_review4_safe_go_flags_still_work(project, fake_tools, argv, runner):
+    with _gateway(project, runner) as g:
+        preview = g.run_command("service", argv)
+        assert preview["executed"] is False
+        assert not fake_tools.exists()
+        result = g.run_command("service", argv, dry_run=False)
+        assert result["exit_code"] == 0, result
+        assert fake_tools.exists()
+        fake_tools.unlink()

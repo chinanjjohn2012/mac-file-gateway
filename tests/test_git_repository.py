@@ -1,6 +1,7 @@
 """T04 pinned Workspace local-path scope and physical Git common-dir keys."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import subprocess
@@ -10,6 +11,8 @@ import time
 import pytest
 
 from gateway.core import GatewayError
+from gateway.git_cli import GitCLIExecutor
+from gateway.git_state import GitStateStore
 from gateway.git_repository import (
     RepositoryIdentity, GitRepositoryCoordinator, check_git_paths,
 )
@@ -159,3 +162,145 @@ def _try_busy(locks, results):
             results.append("unexpected")
     except GatewayError as exc:
         results.append(exc.code)
+
+
+
+def test_queued_git_add_cannot_follow_branch_switched_cwd_symlink(tmp_path, monkeypatch):
+    """A and B are real internal Git requests sharing one common-dir lock.
+
+    B legitimately switches branches while A is waiting. The new branch
+    replaces A's previously validated cwd directory with a symlink into a
+    parent-repository sibling outside A's authorized Workspace. A MUST
+    revalidate after acquiring the lock, before starting any lock-held Git.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git("init", "-q", cwd=repo)
+    _git("config", "user.name", "Fixture", cwd=repo)
+    _git("config", "user.email", "fixture@example.invalid", cwd=repo)
+
+    a_root = repo / "ws"
+    (a_root / "sub").mkdir(parents=True)
+    b_root = repo / "switch-workspace"
+    b_root.mkdir()
+    outside = repo / "outside"
+    outside.mkdir()
+    (a_root / "sub" / "target.txt").write_text("inside\n")
+    _git("add", "ws/sub/target.txt", cwd=repo)
+    _git("commit", "-qm", "directory cwd", cwd=repo)
+    original_branch = _git("branch", "--show-current", cwd=repo)
+
+    _git("switch", "-c", "symlink-branch", cwd=repo)
+    _git("rm", "-qr", "ws/sub", cwd=repo)
+    (a_root / "sub").symlink_to("../outside", target_is_directory=True)
+    _git("add", "ws/sub", cwd=repo)
+    _git("commit", "-qm", "symlink cwd", cwd=repo)
+    _git("switch", original_branch, cwd=repo)
+    (outside / "target.txt").write_text("outside should remain untracked\n")
+    assert (a_root / "sub").is_dir() and not (a_root / "sub").is_symlink()
+    assert _git("diff", "--cached", "--name-only", cwd=repo) == ""
+
+    state_path = tmp_path / "state"
+    store = GitStateStore(state_path, workspace_roots=(str(a_root), str(b_root)))
+    executor = GitCLIExecutor(store)
+    actual_run = executor.runner.run
+    actual_hold = executor.coordinator.hold
+    b_inside_lock = threading.Event()
+    allow_b_switch = threading.Event()
+    a_waiting_on_lock = threading.Event()
+    a_started_git: list[tuple[str, ...]] = []
+    results: dict[str, object] = {}
+
+    @contextmanager
+    def watched_hold(key, deadline):
+        if threading.current_thread().name == "request-A-add":
+            # Reaching this point implies initial path check and actual
+            # discovery have both completed, but lock acquisition has not.
+            a_waiting_on_lock.set()
+        with actual_hold(key, deadline):
+            yield
+
+    def watched_run(cwd, argv, *, spawn_admitted, execute_until, deadline):
+        name = threading.current_thread().name
+        if name == "request-B-switch" and argv[0] == "switch":
+            # B is inside the repository lock, about to change branch.
+            b_inside_lock.set()
+            assert allow_b_switch.wait(timeout=10), "B switch not released"
+        if name == "request-A-add":
+            a_started_git.append(tuple(argv))
+        return actual_run(
+            cwd, argv, spawn_admitted=spawn_admitted,
+            execute_until=execute_until, deadline=deadline,
+        )
+
+    monkeypatch.setattr(executor.coordinator, "hold", watched_hold)
+    monkeypatch.setattr(executor.runner, "run", watched_run)
+
+    def request_b():
+        fd = _fd(b_root)
+        try:
+            results["B"] = executor.run(
+                workspace="switch-workspace", root_fd=fd, root_path=str(b_root),
+                command="switch", options={"name": "symlink-branch"},
+                timeout_seconds=30, dry_run=False,
+            )
+        except BaseException as exc:
+            results["B_error"] = exc
+        finally:
+            os.close(fd)
+
+    def request_a():
+        fd = _fd(a_root)
+        try:
+            results["A"] = executor.run(
+                workspace="ws", root_fd=fd, root_path=str(a_root),
+                cwd="sub", command="add", paths=["target.txt"],
+                timeout_seconds=30, dry_run=False,
+            )
+        except BaseException as exc:
+            results["A_error"] = exc
+        finally:
+            os.close(fd)
+
+    thread_b = threading.Thread(target=request_b, name="request-B-switch", daemon=True)
+    thread_a = threading.Thread(target=request_a, name="request-A-add", daemon=True)
+    try:
+        thread_b.start()
+        assert b_inside_lock.wait(timeout=10), results
+        thread_a.start()
+        assert a_waiting_on_lock.wait(timeout=10), results
+        assert (a_root / "sub").is_dir() and not (a_root / "sub").is_symlink()
+    finally:
+        allow_b_switch.set()
+        if thread_b.ident is not None:
+            thread_b.join(timeout=12)
+        if thread_a.ident is not None:
+            thread_a.join(timeout=12)
+        assert not thread_b.is_alive() and not thread_a.is_alive(), results
+        store.close()
+
+    assert "B_error" not in results, results
+    assert isinstance(results.get("B"), dict) and results["B"]["exit_code"] == 0
+    assert (a_root / "sub").is_symlink()
+    assert "A" not in results, results
+    assert isinstance(results.get("A_error"), GatewayError), results
+    assert results["A_error"].code == "git_path_blocked"
+    # A's first Git process is discovery; no lock-held recheck or business
+    # command was permitted to start with the displaced cwd.
+    assert a_started_git and all(argv[0] == "rev-parse" for argv in a_started_git)
+    assert _git("diff", "--cached", "--name-only", cwd=repo) == ""
+    assert (outside / "target.txt").read_text() == "outside should remain untracked\n"
+    assert not list(state_path.iterdir()), "Clean error must release state/lock"
+
+    # A rejected request must not poison normal subsequent same-repo access.
+    fd = _fd(b_root)
+    store = GitStateStore(state_path, workspace_roots=(str(a_root), str(b_root)))
+    try:
+        response = GitCLIExecutor(store).run(
+            workspace="switch-workspace", root_fd=fd, root_path=str(b_root),
+            command="status", timeout_seconds=30, dry_run=False,
+        )
+        assert response["exit_code"] == 0
+    finally:
+        os.close(fd)
+        store.close()

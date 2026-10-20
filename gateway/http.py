@@ -249,7 +249,12 @@ def create_app(gateway: Gateway, *, enable_mcp: bool = True, port: int = 8765, t
     routes += [Route(path, write_endpoint, methods=["POST"]) for path in ("/create", "/write", "/replace", "/mkdir", "/rmdir", "/delete", "/remove", "/unlink", "/rename", "/move", "/run")]
     if enable_mcp:
         from .mcp_adapter import build_mcp
-        app = build_mcp(gateway, port=port, local_skill_bridge=local_skill_bridge).streamable_http_app()
+        from .mcp_transport import build_streamable_http_app
+        app = build_streamable_http_app(
+            build_mcp(gateway, port=port, local_skill_bridge=local_skill_bridge),
+            port=port,
+            max_request_body_size=MAX_WRITE_BODY if (gateway.allow_write or gateway.allow_exec) else MAX_BODY,
+        )
         app.router.routes.extend(routes)
     else:
         app = Starlette(routes=routes)

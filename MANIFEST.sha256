@@ -1,6 +1,7 @@
 a8e317838b00e2905a24b927075490d60aaf993dbee4335385ca3f4001c8709e  ./.github/workflows/c1-native-research.yml
 9260a8a0b3a6660b66f7034b8a63e2b1b849ae12d83a6316694c865fcecc4560  ./.github/workflows/c2-native-research.yml
 b6b5c72a5ce2050fa1bb6a80b9aced547bbdb4a1ef47fe9457764eae9ad0eadc  ./.github/workflows/c2-review-native.yml
+3844b0325963f49cc6fd435c83073530eceddd67093ad5ce55163409acf9acc6  ./.github/workflows/c3-native-research.yml
 0dadaf6bd4f57a24546f103bfb110685ad12964dc442f9d41bdb8d72cfd05e56  ./.github/workflows/controlled-exec-tests.yml
 ef06acea97a3c12d0a236a36d6d1bd74b735c62b712e3ad69e50c6f87ac90b90  ./.gitignore
 82f36c9f3945a204b821c1d5314c9a62c8886d9c28d45f44268643dff1b5210d  ./BUILD_INFO.json
@@ -34,6 +35,7 @@ c60ae6bfd5272614ba62d2232dbd1a1ab26bba70d2795f411cb96bb9cceb7e95  ./docs/legacy-
 563ab0aafcded6af3befc6833d03d80f557e1c0c89bc0d246fc855fbdfb1221a  ./docs/research/phase2-lite-c1/README.md
 b97c5a9aa89894f1ea4002ec351b3d0bd02c97f47b9dcd21915315947ac254e8  ./docs/research/phase2-lite-c2/README.md
 a6ef8f7b8ef516853d4c15fa73c6e3c81ee1088a251248bc8c069c3a6d5123e6  ./docs/research/phase2-lite-c3/README.md
+5549e679e6add8a9f64dc3d9367cec0980c49bda0ee409abc9142f1a0e4dc39f  ./docs/research/phase2-lite-c3/xnu-identity-observations.md
 1e95a8424b5cae7d8c47cbb30269ea0b773edc50df03eb78151f93553f5ee284  ./docs/superpowers/plans/2026-09-22-guarded-writes.md
 9844da6b4c1cd80fdc462b86d39654108b07d163802c622d380e56f301610942  ./docs/superpowers/specs/2026-09-22-guarded-writes.md
 e2b20ae4529dc9bee34e6a6373f4e6592b2ae8e16d4a67e9a5da91ac13a2d920  ./gateway/__init__.py
@@ -89,6 +91,7 @@ fbd3446dd228380c5f37696a7dddc551a8064d62e0677e9f6e994cd5a6f26246  ./tests/test_c
 ba9bf6180bde9aeb18b433e13860949ae5628a3187fe5e27d4e1afa52440fd88  ./tests/test_c2_pgid_probe.py
 51729ca9b2e169df545cd1d6585159a501ed8b8e1c3c72bcb41655549122f354  ./tests/test_c2_round2_review.py
 0b362b21d5394632189ddb4c2f73c117cfd7500feddf3111ddedf5c16abde5d7  ./tests/test_c2_sigchld_review.py
+8323158379476521b43f755747853f8a6cff83f7166a23bc59f9f4f9c6f4d2c8  ./tests/test_c3_relay_research.py
 199ec7e6958c1f21aa8ca14ac1af8b9868490621e02f67e9a3926eaf5957cef1  ./tests/test_cli.py
 599bdd040fa4fd89f1baa9a431e5fe230e6f4509938008cda22d86caccc1db37  ./tests/test_command_http.py
 d1a2fc1207cd40038c8d9ad85ac7813f3907371aa5e6df67c2932196a2564dea  ./tests/test_command_runner.py

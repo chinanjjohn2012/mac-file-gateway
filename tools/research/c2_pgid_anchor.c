@@ -209,6 +209,8 @@ int main(int argc, char **argv) {
     if (strcmp(mode, "leader-exit") == 0) {
         failure = "leader_exit_reap";
         if (bounded_reap(&owner, 2500) != 0 || !owner.reaped) goto done;
+        failure = "leader_exit_descendant_still_alive";
+        if (getpgid(descendant) != owner.pid) goto done;
         held = 0;
         failure = "leader_exit_refusal";
         refused = signal_owned_group(&owner, owner.pid, SIGTERM) == 0;

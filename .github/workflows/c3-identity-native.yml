@@ -10,6 +10,8 @@ on:
       - "tools/research/c3_identity_probe.c"
       - "tools/research/run_c3_identity_probe.py"
       - "tests/test_c3_identity_barriers.py"
+      - "tests/test_c3_identity_review_fixes.py"
+      - "tools/research/run_c3_identity_faults.py"
       - "docs/research/phase2-lite-c3/identity-barriers.md"
 
 permissions:
@@ -53,7 +55,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install pytest==8.4.2
-          python -m pytest -q tests/test_c3_identity_barriers.py
+          python -m pytest -q tests/test_c3_identity_barriers.py tests/test_c3_identity_review_fixes.py
       - name: Run disposable identity barriers, never G2
         shell: bash
         run: |
@@ -78,4 +80,35 @@ jobs:
           assert all(c["after_loss_signals"] == 0 for c in data["cases"])
           assert all(c["reuse_proven"] == 0 for c in data["cases"])
           print("C3_ID_NATIVE_RESULT=PARTIAL_C3_IDENTITY_NOT_G2")
+          PY
+      - name: Negative injections — blocked signals, SIGPIPE, bounded waiter
+        shell: bash
+        run: |
+          set -euo pipefail
+          private_dir="$(mktemp -d)"
+          chmod 700 "$private_dir"
+          trap 'rm -rf "$private_dir"' EXIT
+          python tools/research/run_c3_identity_faults.py --evidence-dir "$private_dir"
+          python - "$private_dir/c3_identity_faults_private.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          data = json.loads(Path(sys.argv[1]).read_text())
+          assert data["g2_qualified"] is False
+          assert data["decision"] == "FAULT_CONTROLS_PASS_NOT_G2"
+          expected = [
+              "fault-unauthorized-esrch",
+              "fault-broken-pipe",
+              "fault-waiter-ready",
+              "fault-waiter-timeout",
+              "fault-waiter-result",
+          ]
+          assert [x["mode"] for x in data["cases"]] == expected
+          assert all(x["status"] == "EXPECTED_BLOCK" for x in data["cases"])
+          assert all(x["pid_signals"] == 0 for x in data["cases"])
+          assert all(x["elapsed_ms"] < 6500 for x in data["cases"])
+          assert data["cases"][0]["attempts"] == 1
+          assert data["cases"][0]["after_loss_attempts"] == 1
+          assert data["cases"][1]["epipe"] == 1
+          print("C3_ID_FAULT_RESULT=FAULT_CONTROLS_PASS_NOT_G2")
           PY

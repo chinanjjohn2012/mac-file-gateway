@@ -86,8 +86,8 @@ def test_legacy_git_rest_is_independently_enabled_and_returns_native_schema(tmp_
             assert actual["repository_checked"] is True
             assert actual["exit_code"] == 0
             assert actual["cleanup_status"] == "complete"
-            assert "workspace" not in actual
-            assert request(client, {"command": "push"}, status=403)["error"] == "git_command_not_allowed"
+            assert actual["workspace"] == "legacy"  # Engine uses an implicit Legacy Workspace.
+            assert request(client, {"command": "push", "options": {"remote": "origin", "branch": "main"}}, status=403)["error"] == "git_command_not_allowed"
             assert request(client, {"command": "checkout"}, status=403)["error"] == "git_command_not_allowed"
             assert request(client, {"command": "status", "workspace": "a"},
                            status=400)["error"] == "invalid_argument"
@@ -105,7 +105,8 @@ def test_multi_git_rest_requires_workspace_and_enforces_exact_allowlist(tmp_path
                            status=404)["error"] == "workspace_not_found"
             assert request(client, {"workspace": "b", "command": "status"},
                            status=403)["error"] == "git_command_not_allowed"
-            assert request(client, {"workspace": "a", "command": "pull"},
+            assert request(client, {"workspace": "a", "command": "pull",
+                                    "options": {"remote": "origin", "branch": "main"}},
                            status=403)["error"] == "git_command_not_allowed"
             prev = request(client, {"workspace": "a", "command": "status"})
             assert prev["workspace"] == "a"

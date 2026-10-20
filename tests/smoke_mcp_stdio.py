@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 
@@ -70,6 +72,57 @@ async def exercise_stdio(root: Path, *, mode: str) -> None:
                 assert from_modern.structured_content["content"] == "1: created = True"
 
 
+
+
+async def exercise_git_stdio(root: Path, *, mode: str) -> None:
+    """E/T14: actual independently opted-in Git CLI over real stdio MCP."""
+    server = StdioServerParameters(
+        command=sys.executable,
+        args=[
+            "-m", "gateway", "--root", str(root), "--transport", "stdio",
+            "--allow-git", "--git-command", "status",
+        ],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        env={**os.environ, "HOME": str(root.parent)},
+    )
+    with anyio.fail_after(30):
+        async with Client(server, mode=mode) as client:
+            assert client.protocol_version == (
+                LEGACY_VERSION if mode == "legacy" else MODERN_VERSION
+            )
+            tools = {tool.name for tool in (await client.list_tools()).tools}
+            assert "run_git" in tools
+            assert "run_command" not in tools
+            preview = await client.call_tool("run_git", {"command": "status"})
+            assert preview.is_error is not True, preview
+            assert preview.structured_content is not None
+            assert preview.structured_content["execute_started"] is False
+            result = await client.call_tool(
+                "run_git", {"command": "status", "dry_run": False},
+            )
+            assert result.is_error is not True, result
+            assert result.structured_content["exit_code"] == 0
+            assert result.structured_content["cleanup_status"] == "complete"
+            for args in (
+                {"command": "status", "options": None},
+                {"command": "push",
+                 "options": {"remote": "origin", "branch": "main"}},
+            ):
+                refused = await client.call_tool("run_git", args)
+                assert refused.is_error is True, args
+
+
+def assert_multi_stdio_still_refused(base: Path) -> None:
+    """No hidden multi-Workspace stdio server may appear during Git opt-in."""
+    completed = subprocess.run(
+        [sys.executable, "-m", "gateway", "--config",
+         str(base / "never-selected.json"), "--transport", "stdio", "--check"],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True, capture_output=True, timeout=10,
+    )
+    assert completed.returncode == 2, completed
+    assert not completed.stdout
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="gateway-stdio-live-") as tmp:
         root = Path(tmp) / "project"
@@ -78,6 +131,13 @@ def main() -> None:
         (root / ".env").write_text("private-value", encoding="utf-8")
         asyncio.run(exercise_stdio(root, mode="auto"))
         asyncio.run(exercise_stdio(root, mode="legacy"))
+        git_root = Path(tmp) / "git-project"
+        git_root.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=git_root, check=True,
+                       capture_output=True, text=True)
+        asyncio.run(exercise_git_stdio(git_root, mode="auto"))
+        asyncio.run(exercise_git_stdio(git_root, mode="legacy"))
+        assert_multi_stdio_still_refused(Path(tmp))
     print(json.dumps({
         "real_mcp_stdio": "PASS",
         "stdio_verified": True,
@@ -92,6 +152,10 @@ def main() -> None:
             "stdio_hidden_file_denied",
             "stdio_no_exec_or_skills",
             "stdio_process_cleanup",
+            "git_modern_auto_preview_and_apply",
+            "git_legacy_stdio_preview_and_apply",
+            "git_rejected_null_and_unauthorized",
+            "git_multi_stdio_denied",
         ],
     }, indent=2))
 

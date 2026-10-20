@@ -113,3 +113,13 @@ def test_runner_never_claims_g2_and_workflow_is_native():
     for marker in ("macos-15", "arm64", '"3.13"', '"3.14"',
                    "run_c2_pgid_probe.py", "G2", "persist-credentials: false"):
         assert marker in flow
+
+
+def test_exited_group_leader_refusal_still_has_live_descendant():
+    source = NATIVE.read_text()
+    start = source.index('if (strcmp(mode, "leader-exit") == 0) {')
+    end = source.index('} else if (strcmp(mode, "stale") == 0)', start)
+    branch = source[start:end]
+    assert "bounded_reap(&owner, 2500)" in branch
+    assert "getpgid(descendant) != owner.pid" in branch
+    assert branch.index("getpgid(descendant) != owner.pid") < branch.index("signal_owned_group(")

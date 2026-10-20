@@ -69,8 +69,8 @@ def build_mcp(gateway: Gateway, *, port: int = 8765, local_skill_bridge: Any | N
         async def run_git(
             command: Annotated[str, Field(strict=True, min_length=1, max_length=32)],
             cwd: Annotated[str, Field(strict=True, min_length=1, max_length=2048)] = ".",
-            options: dict[str, Any] | None = None,
-            paths: list[str] | None = None,
+            options: dict[str, Any] = Field(default_factory=dict),
+            paths: list[str] = Field(default_factory=list),
             timeout_seconds: Annotated[int, Field(strict=True, ge=10, le=900)] = 120,
             dry_run: StrictBool = True,
         ) -> dict[str, Any]:

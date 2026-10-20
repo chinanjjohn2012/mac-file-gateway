@@ -128,6 +128,16 @@ def check_git_schema(tool, *, multi):
     assert ("workspace" in schema["required"]) is multi
     assert schema["properties"]["dry_run"]["default"] is True
     assert schema["properties"]["timeout_seconds"]["default"] == 120
+    # P2 regression: externally advertised JSON Schema must reject explicit
+    # null, exactly like the strict pre-SDK validator. Omitting either field
+    # remains valid; Pydantic supplies an independent empty container.
+    for name, kind in (("options", "object"), ("paths", "array")):
+        field_schema = schema["properties"][name]
+        assert name not in schema["required"], (name, schema)
+        assert field_schema["type"] == kind, (name, field_schema)
+        assert "anyOf" not in field_schema, (name, field_schema)
+        assert "oneOf" not in field_schema, (name, field_schema)
+        assert field_schema.get("default", "absent") is not None
 
 
 @pytest.mark.parametrize("protocol", PROTOCOLS)
@@ -154,6 +164,20 @@ def test_legacy_mcp_git_tool_registers_only_with_independent_grant(tmp_path, pro
             assert value["branch_checked"] is False
             assert value["remote_checked"] is False
             assert value["effective_argv"][0] == "status"
+
+            empty_containers = rpc(client, "tools/call", {
+                "name": "run_git",
+                "arguments": {"command": "status", "options": {}, "paths": []},
+            })
+            assert empty_containers.get("isError") is not True, empty_containers
+            assert empty_containers["structuredContent"]["execute_started"] is False
+            for null_field in ("options", "paths"):
+                null_request = rpc(client, "tools/call", {
+                    "name": "run_git",
+                    "arguments": {"command": "status", null_field: None},
+                })
+                assert null_request.get("isError") is True, (null_field, null_request)
+                assert "invalid_argument" in str(null_request)
 
             actual = rpc(client, "tools/call", {
                 "name": "run_git", "arguments": {"command": "status", "dry_run": False},
@@ -220,6 +244,22 @@ def test_multi_mcp_git_is_workspace_scoped_and_no_other_exec(tmp_path, protocol)
             assert preview["dry_run"] is True
             assert preview["execute_started"] is False
             assert preview["repository_checked"] is False
+
+            empty_containers = rpc(client, "tools/call", {
+                "name": "run_git",
+                "arguments": {"workspace": "a", "command": "status",
+                              "options": {}, "paths": []},
+            })
+            assert empty_containers.get("isError") is not True, empty_containers
+            assert empty_containers["structuredContent"]["execute_started"] is False
+            for null_field in ("options", "paths"):
+                null_request = rpc(client, "tools/call", {
+                    "name": "run_git",
+                    "arguments": {"workspace": "a", "command": "status",
+                                  null_field: None},
+                })
+                assert null_request.get("isError") is True, (null_field, null_request)
+                assert "invalid_argument" in str(null_request)
 
             actual = rpc(client, "tools/call", {
                 "name": "run_git",

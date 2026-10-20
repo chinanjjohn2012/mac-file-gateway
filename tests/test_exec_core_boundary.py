@@ -5,7 +5,7 @@ import threading
 
 import pytest
 from starlette.testclient import TestClient
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 
 from gateway.core import GatewayError
 from gateway.exec_contracts import ExecutionOutcome

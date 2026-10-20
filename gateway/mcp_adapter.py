@@ -294,4 +294,6 @@ def build_mcp(gateway: Gateway, *, port: int = 8765, local_skill_bridge: Any | N
             """Run one allowlisted project command without a shell. Preview by default. Supported shapes are pytest, python -m pytest, python -m compileall, a relative Python script, go test, and go vet. A configured/auto-detected Pipfile wraps the command with pipenv run. stdin is disabled, the environment is minimized, output is redacted/bounded, and timeout kills the process group."""
             return await invoke(gateway.run_command, cwd, argv, timeout_seconds, dry_run)
 
+    if gateway.allow_git and gateway.git_allowed_commands and gateway._git_executor is not None:
+        gateway._git_adapter_exposed = True
     return mcp

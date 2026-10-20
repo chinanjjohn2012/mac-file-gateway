@@ -26,9 +26,10 @@ Base: release/ms1 (e32cb5124bbd8b08a79c75b4940799e041dd1295).
 1. Use Python 3.11+ (CI uses 3.13) and run bash setup.sh, bash verify.sh --require-mcp.
 2. Run existing legacy MCP protocol tests for initialize, list, read, preview, apply, stale hashes, schema, command, Local Skill and multi-workspace.
 3. Run test_mcp_sdk_v2.py for modern server/discover, tools/list, tools/call, strict errors and 4-8 MiB wire request admission.
-4. Verify stdio by real SDK client and live Tunnel with ChatGPT. Confirm exposed tools and returns match existing client contracts.
-5. Check GitHub Actions success, release manifest integrity, and independent architecture/security review.
-6. Do not merge into release/ms1 before the above have passed. Never treat source review as CI or live-environment evidence.
+4. Run `python tests/smoke_mcp_live.py` for a separate real HTTP listener with modern and legacy MCP tool exchange. The REST-only smoke intentionally reports `mcp_verified: false` for its own subprocess.
+5. Verify stdio by real SDK client and live Tunnel with ChatGPT. Confirm exposed tools and returns match existing client contracts.
+6. Check GitHub Actions success, release manifest integrity, and independent architecture/security review.
+7. Do not merge into release/ms1 before the above have passed. Never treat source review as CI or live-environment evidence.
 
 ## Rollback
 

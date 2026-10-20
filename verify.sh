@@ -64,4 +64,7 @@ fi
 .venv/bin/python -m compileall -q gateway
 .venv/bin/python -m pytest -q
 .venv/bin/python tests/smoke_live.py
+if [ "${1:-}" = '--require-mcp' ]; then
+    .venv/bin/python tests/smoke_mcp_live.py
+fi
 verify_manifest

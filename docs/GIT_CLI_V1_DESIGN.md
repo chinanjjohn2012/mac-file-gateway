@@ -135,7 +135,7 @@ gateway_info 和 list_workspaces 可以公开 Git 是否启用、允许的命令
 - command：固定已实现的 Git 内建子命令枚举，并校验 Workspace 权限。
 - options：只允许该子命令已声明的字段与类型；无 raw_argv、extra_args、flags 等通道。
 - paths：用于有本地路径操作数的子命令；相对已校验 cwd，且每项必须在 Workspace 内。默认 []。
-- timeout_seconds：严格整数，建议默认 120，上限 900 秒（需 macOS 生命周期验收后冻结）。
+- timeout_seconds：严格整数，建议默认 120 秒，允许范围 10..900 秒。至少预留 5 秒用于进程终止和回收；低于 10 秒直接拒绝。
 - dry_run：严格布尔，默认 true。仅在纯内存中做严格 Schema、权限、显式路径验证并编译预览；**不启动任何 Git 进程，包含内部 rev-parse/check-ref-format/show-ref**，也不取得仓库锁。预览必须返回 repository_checked=false、branch_checked=false、remote_checked=false、execute_started=false。执行分支才进行仓库、Remote 与引用存在性检查；预览不是成功承诺。
 - 未知字段、重复或无效 JSON、错误类型、NUL、控制字符、不支持的参数及尺寸超限必须拒绝。
 - MCP 注解：readOnlyHint=false、destructiveHint=true、idempotentHint=false、openWorldHint=true。
@@ -226,8 +226,8 @@ gateway_info 和 list_workspaces 可以公开 Git 是否启用、允许的命令
 
 ### 8.2 精确生命周期
 
-- timeout_seconds 是**从同步 Worker 被准入开始**计算的单个端到端总预算，建议默认 120 秒、有效范围 1..900 秒。预算包括仓库发现、锁等待、锁内检查、Git 执行、stdout/stderr drain、超时终止和 reap，不得为每阶段重新给满 timeout。
-- 仓库发现最多 5 秒；仓库锁等待最多 10 秒，均受剩余总预算限制；无法在上限内获得锁返回 git_busy。执行阶段不得使用已耗尽的超时预算。
+- timeout_seconds 是**从同步 Worker 被准入开始**计算的单个端到端总预算，建议默认 120 秒、有效范围 10..900 秒。预算包括仓库发现、锁等待、锁内检查、Git 执行、stdout/stderr drain、超时终止和 reap，不得为每阶段重新给满 timeout。
+- 仓库发现最多 5 秒；仓库锁等待最多 10 秒，二者均取与（总截止期限减去 5 秒清理预留之后）的剩余时间较小值；无法在限定时间内取得锁返回 git_busy。业务 Git 不得在清理预留时间不足时启动。
 - 预留最后 5 秒用于进程清理：终止时向进程组发 TERM，最多 2 秒；未退出则发 KILL，剩余时间用于并发 drain/reap；若无法确认主进程及受控子进程已清理，返回 git_cleanup_incomplete，不能声称成功。对故意脱离进程组或无法杀死的内核态进程不作绝对保证。
 - stdout/stderr 必须持续并发读取，限制原始字节及最终响应字节；超过上限应标明被截断或明确返回失败，不允许对不完整机器输出给出成功/完整语义。
 - 已进入 closing 时拒绝新调用；已准入 Git 请求可在连接断开后继续受总超时限制。Gateway 不得在同步 Worker 尚在使用目录 FD 时释放该 FD；仓库锁和 Worker 租约始终通过 finally 释放。

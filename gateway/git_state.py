@@ -32,6 +32,13 @@ class GitLaunchNotAttempted(Exception):
     """Only the trusted runner may signal a deadline before calling Popen."""
 
 
+class GitNoProcessStarted(GatewayError):
+    """Trusted no-Popen evidence; no Git child exists to clean up."""
+
+    def __init__(self) -> None:
+        super().__init__("git_timeout", "Git deadline expired before subprocess startup.")
+
+
 class GitStateStore:
     """All mutable state is protected by a SHORT global admission mutex."""
 
@@ -196,7 +203,7 @@ class GitStateStore:
                     raise GatewayError("git_state_unavailable",
                                        "Git discovery intent could not be cleared.") from None
                 self._discoveries.discard(call_id)
-                raise GatewayError("git_timeout", "Git deadline expired before subprocess startup.") from None
+                raise GitNoProcessStarted() from None
             except BaseException:
                 # Treat ambiguous Popen failures conservatively; marker stays.
                 self._quarantine_global()
@@ -241,8 +248,7 @@ class GitStateStore:
                 return spawn()
             except GitLaunchNotAttempted:
                 # RUNNING persists until the caller's locked finally clears it.
-                raise GatewayError("git_timeout",
-                                   "Git deadline expired before subprocess startup.") from None
+                raise GitNoProcessStarted() from None
             except BaseException:
                 self._bad_repos.add(key)
                 try:

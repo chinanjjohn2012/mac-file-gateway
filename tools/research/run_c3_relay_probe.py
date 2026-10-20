@@ -128,6 +128,15 @@ def main() -> int:
     path = evidence_dir / "c3_relay_private.json"
     path.write_text(json.dumps(evidence, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     os.chmod(path, 0o600)
+    # Public Actions logs are intentionally sanitized: no PIDs, paths, pipe bytes
+    # or private task data. All displayed fields come from exact native parsing.
+    for case in cases:
+        print("C3_CASE mode={mode} status={status} worker={worker} "
+              "cleanup={cleanup} after_loss_signals={late}".format(
+                  mode=case["mode"], status=case["status"],
+                  worker=case.get("worker", "UNKNOWN"),
+                  cleanup=case.get("cleanup", "UNRESOLVED"),
+                  late=case.get("after_loss_signals", -1)))
     print("C3_NATIVE_RESULT=" + decision)
     return 0 if decision == "PARTIAL_NATIVE_C3_ONLY_NOT_G2" else 2
 

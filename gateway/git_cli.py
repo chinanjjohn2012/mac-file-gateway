@@ -21,7 +21,7 @@ from .git_policy import compile_git_command, preview_git
 from .git_repository import (
     GitRepositoryCoordinator, RepositoryIdentity, check_git_paths,
 )
-from .git_state import GitStateStore, GitLaunchNotAttempted
+from .git_state import GitStateStore, GitLaunchNotAttempted, GitNoProcessStarted
 
 _GIT_PATH = "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
 _REV_PARSE = (
@@ -40,6 +40,16 @@ class GitProcessResult:
     timed_out: bool
     output_truncated: bool
     cleanup_complete: bool
+
+
+@dataclass
+class _RepoCleanupEvidence:
+    """One synchronous call's proof; false means cleanup is unknown.
+
+    A trusted, explicit no-Popen exception is the only exception that may
+    restore this flag. Preflight semantic errors after a clean result are safe.
+    """
+    confirmed: bool = True
 
 
 def git_environment(source: dict[str, str] | None = None) -> dict[str, str]:
@@ -97,7 +107,7 @@ class GitProcessRunner:
             execute_until: float, deadline: float) -> GitProcessResult:
         """Must be called only inside T05's discover/repo intent protocol."""
         if time.monotonic() >= min(execute_until, deadline - _CLEANUP_RESERVE):
-            raise GatewayError("git_timeout", "Not enough time to start Git safely.")
+            raise GitNoProcessStarted()
         def spawn() -> subprocess.Popen[bytes]:
             # Persisting DISCOVERING/RUNNING may itself consume the deadline.
             # This check runs INSIDE the short admission gate after fsync.
@@ -113,8 +123,11 @@ class GitProcessRunner:
         truncated = False
         timed_out = False
         clean = False
-        selector = selectors.DefaultSelector()
+        selector = None
         try:
+            # Selector allocation can fail with EMFILE *after* Popen. Keep
+            # it inside cleanup handling so we still attempt group termination.
+            selector = selectors.DefaultSelector()
             for num, pipe in ((1, child.stdout), (2, child.stderr)):
                 if pipe is None:
                     raise OSError("Git output pipe unavailable.")
@@ -189,7 +202,8 @@ class GitProcessRunner:
                 pass
             clean = False  # Unexpected drain failure must quarantine.
         finally:
-            selector.close()
+            if selector is not None:
+                selector.close()
             for pipe in (child.stdout, child.stderr):
                 if pipe is not None and not pipe.closed:
                     pipe.close()
@@ -239,18 +253,34 @@ class GitCLIExecutor:
 
     def _repo_command(self, key: tuple[int, int], call_id: str, cwd: str,
                       argv: tuple[str, ...] | list[str], deadline: float,
+                      evidence: _RepoCleanupEvidence,
                       *, maximum_seconds: float | None = None) -> GitProcessResult:
+        # Fail closed by default before every possibly launching operation.
+        # A nonzero Git exit only changes business status, not cleanup proof.
+        if not evidence.confirmed:
+            raise _CleanupIncomplete()
         until = deadline - _CLEANUP_RESERVE
         if maximum_seconds is not None:
             until = min(until, time.monotonic() + maximum_seconds)
         admitted = lambda spawn: self.state.start_repo_process(key, call_id, spawn)
-        return self.runner.run(cwd, argv, spawn_admitted=admitted,
-                               execute_until=until, deadline=deadline)
+        evidence.confirmed = False
+        try:
+            result = self.runner.run(cwd, argv, spawn_admitted=admitted,
+                                     execute_until=until, deadline=deadline)
+        except GitNoProcessStarted:
+            # The trusted admission/runner confirmed Popen was never attempted.
+            # A regular GatewayError, OSError or other exception proves nothing.
+            evidence.confirmed = True
+            raise
+        evidence.confirmed = result.cleanup_complete
+        return result
 
     def _checked_git(self, key: tuple[int, int], call_id: str, cwd: str,
                      argv: tuple[str, ...] | list[str], deadline: float,
+                     evidence: _RepoCleanupEvidence,
                      *, allow_failure: bool = False) -> GitProcessResult:
-        result = self._repo_command(key, call_id, cwd, argv, deadline, maximum_seconds=5)
+        result = self._repo_command(key, call_id, cwd, argv, deadline, evidence,
+                                    maximum_seconds=5)
         if not result.cleanup_complete:
             raise _CleanupIncomplete()
         if result.timed_out:
@@ -261,34 +291,34 @@ class GitCLIExecutor:
 
     def _check_prerequisites(self, key: tuple[int, int], call_id: str, cwd: str,
                              command: str, values: dict[str, Any],
-                             deadline: float) -> None:
+                             deadline: float, evidence: _RepoCleanupEvidence) -> None:
         if command in {"fetch", "pull", "push"}:
             remote = values["remote"]
-            r = self._checked_git(key, call_id, cwd, ["remote"], deadline)
+            r = self._checked_git(key, call_id, cwd, ["remote"], deadline, evidence)
             if remote not in r.stdout.splitlines():
                 raise GatewayError("git_remote_unknown", "Requested Git remote is not configured.")
         if command == "switch":
             ref = "refs/heads/" + values["name"]
             found = self._checked_git(key, call_id, cwd,
                                       ["show-ref", "--verify", "--quiet", ref],
-                                      deadline, allow_failure=True)
+                                      deadline, evidence, allow_failure=True)
             if values["create"] and found.exit_code == 0:
                 raise GatewayError("git_branch_exists", "Local Git branch already exists.")
             if not values["create"] and found.exit_code != 0:
                 raise GatewayError("git_branch_unknown", "Local Git branch does not exist.")
             if values["create"]:
                 self._checked_git(key, call_id, cwd,
-                                  ["rev-parse", "--verify", "HEAD"], deadline)
+                                  ["rev-parse", "--verify", "HEAD"], deadline, evidence)
         if command == "push":
             ref = "refs/heads/" + values["branch"]
             present = self._checked_git(key, call_id, cwd,
                                         ["show-ref", "--verify", "--quiet", ref],
-                                        deadline, allow_failure=True)
+                                        deadline, evidence, allow_failure=True)
             if present.exit_code != 0:
                 raise GatewayError("git_branch_unknown", "Local Git branch does not exist.")
             if values["force_with_lease"]:
                 obj = self._checked_git(key, call_id, cwd,
-                                        ["rev-parse", "--show-object-format"], deadline)
+                                        ["rev-parse", "--show-object-format"], deadline, evidence)
                 expected = {"sha1": 40, "sha256": 64}.get(obj.stdout.strip())
                 if expected is None or len(values["expected_remote_oid"]) != expected:
                     raise GatewayError("git_option_invalid", "Git object ID has wrong format.")
@@ -319,31 +349,24 @@ class GitCLIExecutor:
         with self.coordinator.hold(identity.common_key, deadline):
             key = identity.common_key
             self.state.begin_repo(key, call_id)
-            complete = True
+            evidence = _RepoCleanupEvidence()
             result: GitProcessResult | None = None
             try:
-                # This second rev-parse is itself protected by RUNNING.
+                # Every internal/selected Git child updates per-call cleanup
+                # evidence. Unknown child state must quarantine BEFORE unlock.
                 checked = self._checked_git(key, call_id, physical_cwd,
-                                            _REV_PARSE, deadline)
+                                            _REV_PARSE, deadline, evidence)
                 current = RepositoryIdentity.from_rev_parse(checked.stdout)
                 if current != identity:
                     raise GatewayError("git_repository_changed",
                                        "Git repository identity changed during admission.")
                 self._check_prerequisites(key, call_id, physical_cwd, command,
-                                          dict(compiled.options), deadline)
+                                          dict(compiled.options), deadline, evidence)
                 result = self._repo_command(key, call_id, physical_cwd,
-                                            compiled.argv, deadline)
-                if not result.cleanup_complete:
-                    complete = False
-            except _CleanupIncomplete:
-                complete = False
-            except BaseException:
-                # An interrupted runner may still have an uncontrolled child.
-                # Only ordinary preflight GatewayError paths are known clean.
-                raise
+                                            compiled.argv, deadline, evidence)
             finally:
-                self.state.finish_repo(key, call_id, clean=complete)
-            if not complete or result is None:
+                self.state.finish_repo(key, call_id, clean=evidence.confirmed)
+            if not evidence.confirmed or result is None:
                 raise GatewayError("git_cleanup_incomplete", "Git process cleanup was not confirmed.")
             return {
                 **preview, "dry_run": False, "repository_checked": True,

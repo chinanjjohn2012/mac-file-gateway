@@ -1,6 +1,6 @@
 # Mac File Gateway — Git CLI V1 设计与独立评审规格
 
-状态：**DRAFT / 待独立 Standards 与 Spec 评审**  
+状态：**DRAFT / Standards PASS、Spec FAIL（依据独立复审 P1×2、P2×1 修订，待复审）**  
 日期：2026-10-20  
 代码基线：release/ms1 @ ba8634f24cdc26904d1c80951df7173e429240c7  
 MCP Python SDK：2.3.0  
@@ -15,7 +15,7 @@ MCP Python SDK：2.3.0
 5. Git 从 cwd 原生向上发现仓库。仓库根目录可以在 Workspace 的父目录，不额外要求仓库根目录位于 Workspace 内。
 6. Git 执行已授权命令时可修改整个实际仓库，包括 Workspace 外的文件；不受 Gateway 普通文件 API 读写路径、隐藏文件、文件类型、备份或敏感内容规则限制。
 7. .gitignore、子目录 .gitignore、.git/info/exclude 和用户全局 ignore 由 Git 自身处理；Gateway 不重新实现。忽略规则不保证已跟踪文件免于 pull 等操作的更新。
-8. 多 Workspace 需要独立命令授权；如多个 Workspace 共享同一仓库，需要按实际 Git 仓库身份协调并发操作。
+8. 多 Workspace 需要独立命令授权；如多个 Workspace 共享同一仓库，需要按实际 Git 仓库身份协调并发操作。V1 延后 checkout 和 clone，避免双模式参数歧义和创建中仓库的锁窗口。
 9. Git 原生 Hook、Filter、Credential Helper、配置及远程操作可能访问 Workspace 外部或执行其他程序。这属于用户接受的高权限 Git 模型，并非 OS 沙箱。
 10. 现有普通 File API、受控 run_command、Local Skill Bridge、Multi-Workspace Phase 1 路径边界及 MCP SDK 2.3.0 传输契约均保持原样。
 
@@ -136,43 +136,56 @@ gateway_info 和 list_workspaces 可以公开 Git 是否启用、允许的命令
 - options：只允许该子命令已声明的字段与类型；无 raw_argv、extra_args、flags 等通道。
 - paths：用于有本地路径操作数的子命令；相对已校验 cwd，且每项必须在 Workspace 内。默认 []。
 - timeout_seconds：严格整数，建议默认 120，上限 900 秒（需 macOS 生命周期验收后冻结）。
-- dry_run：严格布尔，默认 true，仅预览规范化后的命令和相对 cwd，不启动 Git；false 真正执行。
+- dry_run：严格布尔，默认 true。仅在纯内存中做严格 Schema、权限、显式路径验证并编译预览；**不启动任何 Git 进程，包含内部 rev-parse/check-ref-format/show-ref**，也不取得仓库锁。预览必须返回 repository_checked=false、branch_checked=false、remote_checked=false、execute_started=false。执行分支才进行仓库、Remote 与引用存在性检查；预览不是成功承诺。
 - 未知字段、重复或无效 JSON、错误类型、NUL、控制字符、不支持的参数及尺寸超限必须拒绝。
 - MCP 注解：readOnlyHint=false、destructiveHint=true、idempotentHint=false、openWorldHint=true。
 - REST 建议 POST /git/run；Legacy/Multi 的 REST 与 MCP 最终进入同一 GitService 和参数编译器。
 - 返回 workspace、command、是否 preview、退出码、受限 stdout/stderr、超时和截断状态；仅返回脱敏的仓库身份信息。
 - 无响应不代表未执行；不得对 commit/pull/push 自动重试。
 
-## 5. 每个子命令的结构化 Schema
+## 5. V1 命令 Schema（执行前冻结）
 
-**命令名允许并不意味着可以传全部 Git 参数。** 只有已实现并测试的参数形式才能执行。初版候选：
+**V1 仅支持 status、diff、log、branch、switch、add、commit、fetch、pull、push。checkout、clone 不属于 V1，配置或调用均应拒绝。** 每个 Git 参数由服务端严格结构化编译，不存在 raw argv、任意额外选项或 Git 全局参数透传。未完成本节全部约束和测试的命令不能进入可配置命令列表。
 
-| 子命令 | 允许的结构化参数 | 显式本地路径 | 说明 |
+所有 options 为严格对象；除下面列出的字段外任何键均拒绝，布尔字段不接受 0/1 或字符串代替；路径参数未定义的命令必须 paths=[]；错误和互斥参数必须在启动业务 Git 前拒绝。
+
+| 子命令 | options 字段与固定默认值 | paths | 精确 argv 模板（省略 false 对应的可选 flag） |
 |---|---|---|---|
-| status | short:bool, branch:bool | 可选 paths | 不传 paths 时可查询父级完整仓库 |
-| diff | cached:bool, stat:bool | 可选 paths | 不接受任意 revision、--no-index 或输出文件 |
-| log | limit:int(1..50), oneline:bool | 无 | 暂不接受任意 rev:path、format |
-| branch | action:list/create/delete, name, 受控 start_point | 无 | 分支名、引用名需要专用验证 |
-| switch | name, create:bool | 无 | 可切换整个父级仓库的工作树 |
-| checkout | branch | 无 | 初版仅分支切换，不开放 checkout 文件模式 |
-| add | all:bool, update:bool | 可选 paths | 无路径的 -A/-u 可以覆盖父级完整仓库 |
-| commit | message:str, amend:bool | 无 | Hook 可运行；默认由 Git 决定提交范围 |
-| fetch | remote:已配置名称, prune:bool | 无 | Remote 配置的间接路径和网络访问允许 |
-| pull | remote:已配置名称, branch:受控 ref, ff_only:bool | 无 | 允许父级仓库整体更新 |
-| push | remote:已配置名称, branch:受控 ref, force_with_lease:bool | 无 | 可能影响远程仓库 |
-| clone | url:远程 URI, destination:本地目标目录 | destination 必须在 Workspace 内 | 初版不支持本地路径源及 --separate-git-dir |
+| status | short=false, branch=false | 可选 | git status [--short] [--branch] [-- <literal-paths>] |
+| diff | cached=false, stat=false | 可选 | git diff [--cached] [--stat] [-- <literal-paths>] |
+| log | limit=20（1..50）, oneline=false | 必须 [] | git log --max-count=N [--oneline] |
+| branch | action 必填且为 list/create/delete；create/delete 必填 name，list 必须不提供 name | 必须 [] | git branch --list；git branch -- <name>；git branch -d -- <name> |
+| switch | name 必填, create=false | 必须 [] | git switch --no-guess <name>；新建时 git switch --no-guess --no-track -c <name> HEAD |
+| add | all=false, update=false；两者不得同时 true；都为 false 时必须提供非空 paths | 可选 | git add [-A 或 -u] [-- <literal-paths>] |
+| commit | message 必填且非空, amend=false | 必须 [] | git commit [--amend] -m <message> |
+| fetch | remote 必填且为已配置 Remote 名称, prune=false | 必须 [] | git fetch [--prune] <remote> |
+| pull | remote 必填，branch 必填，ff_only=true 且 V1 不允许 false | 必须 [] | git pull --ff-only <remote> refs/heads/<branch> |
+| push | remote 必填，branch 必填，force_with_lease=false，expected_remote_oid 只在 force_with_lease=true 时必填 | 必须 [] | 普通：git push <remote> refs/heads/<branch>:refs/heads/<branch>；lease：git push --force-with-lease=refs/heads/<branch>:<expected_remote_oid> <remote> refs/heads/<branch>:refs/heads/<branch> |
 
-实施前必须冻结同一命令的互斥选项、必选字段、默认值、Ref 校验、Remote 名称存在性和 argv 生成顺序。若单个 Schema 暂时不能安全明确实现，就从实际 V1 可配置命令中移除，不能退回任意 argv。
+冻结约束：
 
-restore、reset、clean、rm、config、remote、rebase、merge、worktree、submodule、apply、archive、show 等其他命令需独立 Schema 和测试后才能作为后续功能开放。不存在 "高级模式" 绕过结构化参数检查。
+1. **checkout 延后。** git checkout <name> 在同名本地分支不存在但 tracked 文件存在时可能退化为文件恢复。V1 只用 git switch 执行分支切换。对任何 checkout 配置与请求直接拒绝，不执行。
+2. **switch 默认禁用猜测。** create=false 在仓库独占锁内查验 refs/heads/<name> 为真实存在的本地分支，然后运行 --no-guess；不得从远程同名分支自动创建。create=true 在锁内确认目标不存在且 HEAD 有效，只能从 HEAD 以 -c 新建且明确 --no-track；禁止 -C、--force、--detach、--discard-changes、隐式重置。
+3. **push 完整 refspec。** 不能把用户 branch 值原样用作 refspec；名称只可嵌入服务端拼接的 refs/heads/<name>:refs/heads/<name>，并在锁内确认源本地分支存在。branch="+main" 必须准确指向名为 +main 的分支，绝不能得到裸 +main 强制推送。不能通过任何输入形成前导 +、--force 或任意额外 refspec。
+4. **精确 lease。** force_with_lease=false 禁止提供 expected_remote_oid；force_with_lease=true 则 expected_remote_oid 必须是匹配该仓库对象格式的完整旧 Commit OID（SHA-1 40 位或 SHA-256 64 位，运行时核验），只允许 --force-with-lease=refs/heads/<branch>:<expected_remote_oid>。显式旧 OID 与远端不一致必须由 Git 拒绝；禁止无 expected 值的 --force-with-lease 变体与普通 --force。
+5. **分支名与 Remote 名分开验证。** 纯词法预检用于 Dry-run，运行时在仓库锁内用固定 Git ref 检查，拒绝任意 Revision 表达式、REV:PATH、选项注入、缩写强制标记。Git check-ref-format --branch 通过不代表值可直接作 refspec，必须由编译器包裹完整 ref。
+6. **branch action 冻结。** list 禁止 name 和任何 paths；create 只从当前 HEAD，V1 不接受 start_point；delete 仅 -d（不可 -D 强删）；create/delete 必须 name。
+7. **fetch/pull/push Remote** 只能从 Git 已配置 Remote 名称选择，不能由本轮客户端提供本地目录、Remote URL、额外 refspec 或 SSH 命令；已配置 Remote 本身指向 Workspace 外的地址属于已接受的间接行为。pull.branch 与 push.branch 分别用受控本地 Branch 名语法，编译完整 refs/heads/<branch>。
+8. **add 互斥。** all 和 update 不能同为 true；二者均 false 且 paths 为空报错。无 paths 的 git add -A / -u 按 Git 原生语义可覆盖整个父级仓库，这是用户已接受行为。
+9. Commit Message 可由 Hook 进一步解释，Git Remote 和 Hook/Filter 可能执行其他程序；这是有意接受的高权限 Git 语义，而非参数白名单可提供的 OS 隔离。
 
-### 5.1 Remote 与 Revision
+### 5.1 预览与实际执行
 
-- fetch/pull/push 的 remote 只能是 Git 已配置且名称经过验证的 Remote；不允许本轮客户端直接指定本地路径或任意 URL。
-- 已配置 Remote 可能本身指向 Workspace 外本地仓库，这是 Git 配置的**间接行为**，按用户需求允许。
-- clone.url 是远程 URL，而非本地路径；初版候选仅严格支持 https:// 和 ssh://，不支持 local path 或 scp 风格简写（后续评审可扩展）。
-- Revision/Ref 单独定义类型，不能接受任意 Git Revision 表达式；明确拒绝 REV:PATH、以 - 开头的值、Pathspec Magic 和选项注入。
-- Git Hook 可能重新解释 Commit Message、Branch Name 等数据：Gateway 无法限制自定义 Hook 对这些文本的处理，作为高权限 Git 风险记录。
+- Dry-run（默认）只执行纯服务端 JSON/Schema/Workspace 路径校验和内存 argv 编译；任何 git rev-parse、git remote、git check-ref-format、git show-ref 均不得启动。输出注明未执行仓库、Remote 或 Branch 的运行时验证。
+- Apply 在实际同步 Worker 中重新执行授权与路径验证，执行有界仓库发现，获取同仓库锁，在锁内重查仓库身份及 Remote/Branch 前置条件，再启动业务 Git。
+- 预览与执行之间的 Git 状态、Remote、Branch 或文件均可能变化；预览不是已获得一次性执行许可，也不能保证未来 Git 操作成功。
+
+### 5.2 后续命令
+
+**V1 明确延后 checkout 和 clone。** 其他 restore、reset、clean、rm、config、remote、rebase、merge、worktree、submodule、apply、archive、show、cherry-pick 等亦不能通过通用 argv 执行。
+
+- checkout 后续独立解决分支/文件模式歧义，不能只依赖 check-ref-format --branch。
+- clone 后续须在其全部创建/checkout/错误清理期间保留目标目录及其子目录的独占预留，并与后来发现的仓库锁协调，防止 .git 出现但 clone 未结束时第二请求进入。
 
 ## 6. 显式路径参数的范围保证
 
@@ -187,29 +200,44 @@ restore、reset、clean、rm、config、remote、rebase、merge、worktree、sub
 7. 没有显式路径的命令照 Git 原生语义运行。git add -A 不带 paths 时仍允许作用到父级整个仓库。
 8. 这是**受信任本地 OS 用户模型下**的服务端 API 参数范围控制，不宣称对恶意本地进程并发篡改文件或 Hook 间接解释提供 OS 沙箱级保证。
 
-## 7. Git 仓库识别与多 Workspace 协调
+## 7. Git 仓库发现和同仓库执行锁
 
-- Gateway 按请求选择 workspace 和 cwd，Git 自行向上查找最近的仓库；不要拒绝位于 Workspace 父级的 Repository。
-- 使用固定内部 git rev-parse 调用获取 worktree root、gitdir、common Git dir 等用于协调的信息，不对客户端提供任意 rev-parse argv。
-- 对发现的同一 common Git dir 采用稳定身份键（例如规范化目录的 dev/inode），使不同 Workspace 发起到同一个父级仓库的 Git 调用落在同一协调锁。
-- V1 可以保守串行化同仓库全部 Git 请求；至少所有可能修改仓库状态的操作必须串行化。等待锁不得一直持有 WorkspaceService 的全局条件互斥锁。
-- 单独的 git clone 尚无目标 Repository：使用已校验的 Workspace 内 destination 协调，并在创建完成后再识别新仓库。
-- Worktree 模式若共用 common Git dir，可以保守串行化，避免把两个共享 Common Dir 的工作树误当成无关仓库。
-- 只协调 Gateway 自身发起的 Git 调用。普通 shell/IDE 自行执行的 Git 不参与此锁，不能宣称全仓库原子一致性。
-- 可以返回安全的 repo identity / repo_is_ancestor 标记，但不要在 capability 列表中公开绝对路径。
+- Git 按所选 Workspace + 已校验 cwd 向上发现父级仓库。父级 Repository 不要求位于 Workspace 内。
+- V1 不允许 clone，因此取消旧方案中目标目录创建期的锁转换；实现 PR 不需提前设计双锁。
+- dry_run=true 时**完全跳过 Git 仓库发现、前置 Ref/Remote 校验及仓库锁**。
+- Apply 在活动同步 Worker 中用固定 Git argv 和与业务命令相同的受控环境执行有界 git rev-parse，获得 worktree root、gitdir 和 common Git dir；无需将用户输入传给原始 Git 参数。
+- 使用实际 common Git dir 的规范化目录身份（例如 st_dev/st_ino）作为 Gateway 内部统一仓库锁键，保证多个 Workspace 访问同一个父级仓库及 linked worktree 时协调为同一把锁；独立仓库保持并行能力。
+- **V1 同仓库的全部 Git 命令保守串行化。** 等待锁有上限并可能返回 git_busy；不能在等待或执行过程中持有 WorkspaceService 的全局生命周期 mutex。申请 Workspace 同步 Worker 租约在等待锁之前；关闭时拒绝新的租约。
+- 在获得锁后重新识别并校验 Git 仓库身份，发生变化报 git_repository_changed，不能静默换用另一仓库或在两把仓库锁之间执行。
+- 释放顺序：执行命令及其有界清理/输出 drain → 释放仓库锁 → 释放 Workspace 操作租约 → 允许关闭关联 FD；所有失败路径均需 finally 清理。
+- 只能协调 Gateway 发起的进程，不能阻止终端、IDE、其他 Gateway 实例的 Git 操作；既有本地 OS 信任边界不变。
+- 错误/能力列表不泄漏绝对仓库根路径；Git 本身有界 stdout/stderr 仍可能返回父级仓库内容，这是已接受的特权能力。
 
-## 8. Runner、SDK 2.3 与运行生命周期
+## 8. Runner 环境、端到端预算与 MCP SDK 2.3
 
-- 专用 GitCLIExecutor 负责构造固定 Git executable + 结构化参数形成的 argv，以 shell=False 运行；不经过旧受控 executor 的 pytest/python/go allowlist，不自动使用 Pipenv。
-- Git executable 由服务端确定，不能由客户端选择；保留 Git 正常运行必要的 HOME、SSH Agent、Credential Helper 上下文。
-- 不把 Gateway Token、Tunnel 密钥和 Gateway 私有控制凭据作为 Git 子进程环境变量继承；日志不打印环境、原始带凭据的 URL、Commit Message 和无限制 stdout/stderr。
-- 不提供交互式 TTY；V1 不接受任意 stdin 文本。非交互式操作需要明确失败语义。
-- 超时、输出预算、进程组结束和 reap 必须经过实际 macOS 测试；不能保证任意故意脱离进程组的 Hook 子孙进程都可被终止。
-- Multi-Workspace 的执行须获取 WorkspaceService._operation 同步 Worker 生命期租约；不能在操作结束前释放所依赖 FD。
-- 对 Legacy 需确保 Gateway.close 不会提前释放运行中的 Git 所需资源，不改变原 run_command/Local Skill 的既有契约。
-- 沿用 MCP SDK 2.3.0 的 MCPServer、Context 转发、gateway/mcp_transport.py、双协议 2025-11-25 / 2026-07-28、subscriptions=False 和现有 Host/Origin/Token 校验。
-- HTTP 断连**不能被当作取消已开始的 Git 操作**；执行由服务端明确超时终止，响应丢失意味着调用者结果未知，不自动重试写操作。
-- Legacy MCP 原始 JSON 重复 Key 的遗留差异须评审与测试，但不得把现有历史限制误称为新增 Git 漏洞。
+### 8.1 冻结进程环境
+
+- Git Binary 由可信服务端配置选定，禁止客户端指定可执行文件、原始 argv、PATH 或任意 GIT_*。固定 shell=False，不经过原 executor 的 pytest/python/go 命令白名单，也不使用 Pipenv。
+- 从**允许列表**构造子进程环境，不直接继承整个 os.environ。显式保留必要的 HOME、USER、LOGNAME、经服务端控制的 PATH、TMPDIR、LANG/LC_*、SSH_AUTH_SOCK，以支持 Git 全局配置、SSH Agent、macOS Keychain 及正常 Credential Helper。
+- 清理父环境中的 GIT_DIR、GIT_WORK_TREE、GIT_COMMON_DIR、GIT_INDEX_FILE、GIT_OBJECT_DIRECTORY、GIT_ALTERNATE_OBJECT_DIRECTORIES、GIT_CONFIG_*、GIT_CEILING_DIRECTORIES、GIT_DISCOVERY_ACROSS_FILESYSTEM、GIT_EXEC_PATH、GIT_PREFIX、GIT_SSH、GIT_SSH_COMMAND、GIT_ASKPASS 等可能重定向仓库、Index、配置、对象库、Helper 或命令的变量；Git 内部需要的固定选项必须由 Gateway 唯一生成。
+- 仓库发现、锁内 Ref/Remote 校验、业务 Git 命令必须使用相同 Git Binary 和环境策略，确保检查与执行针对同一仓库与 Index。正常磁盘 Git config、Hook、Filter 和 Remote 仍然生效，不把环境清理误写成禁止 Git 扩展。
+- 非交互式使用 stdin=DEVNULL 和 GIT_TERMINAL_PROMPT=0；V1 不提供任意 stdin_text/PTY。Gateway Token、Tunnel 凭据和私有策略密钥不得继承到子进程，日志不打印环境、Commit Message、远端凭据或原始 Git 输出。
+- stderr/stdout 是不可信且可能含 Workspace 外路径与秘密的 Git 数据。对调用方提供有界响应但不能保证零信息泄漏；日志只记录非敏感操作标识及状态。
+
+### 8.2 精确生命周期
+
+- timeout_seconds 是**从同步 Worker 被准入开始**计算的单个端到端总预算，建议默认 120 秒、有效范围 1..900 秒。预算包括仓库发现、锁等待、锁内检查、Git 执行、stdout/stderr drain、超时终止和 reap，不得为每阶段重新给满 timeout。
+- 仓库发现最多 5 秒；仓库锁等待最多 10 秒，均受剩余总预算限制；无法在上限内获得锁返回 git_busy。执行阶段不得使用已耗尽的超时预算。
+- 预留最后 5 秒用于进程清理：终止时向进程组发 TERM，最多 2 秒；未退出则发 KILL，剩余时间用于并发 drain/reap；若无法确认主进程及受控子进程已清理，返回 git_cleanup_incomplete，不能声称成功。对故意脱离进程组或无法杀死的内核态进程不作绝对保证。
+- stdout/stderr 必须持续并发读取，限制原始字节及最终响应字节；超过上限应标明被截断或明确返回失败，不允许对不完整机器输出给出成功/完整语义。
+- 已进入 closing 时拒绝新调用；已准入 Git 请求可在连接断开后继续受总超时限制。Gateway 不得在同步 Worker 尚在使用目录 FD 时释放该 FD；仓库锁和 Worker 租约始终通过 finally 释放。
+- 在 SDK 2.3.0 的 stateless JSON 传输中，HTTP 断连并不等于取消执行，也不保证 exactly-once。commit、pull、push 响应丢失属于结果未知，禁止自动重试。
+
+### 8.3 MCP 与前置验证
+
+- 沿用现有 MCPServer、Context、gateway/mcp_transport.py、subscriptions=False、Host/Origin/Token、2025-11-25 / 2026-07-28 双协议；不能恢复 FastMCP 或自实现 JSON-RPC。
+- Multi-Workspace 使用已有 StrictPostAdmission；Legacy 原始 JSON 重复键是旧版遗留风险，须明确测试，但不是本次新增的权限授权源。
+- dry_run=true 返回 execute_started=false、repository_checked=false、branch_checked=false、remote_checked=false，且实际不调用 Git；dry_run=false 在锁内执行所有需要仓库状态的校验，并区分发现失败、业务命令未启动、业务命令启动后失败、超时、清理未完成。
 
 ## 9. 修改范围（实现阶段，不属于本设计 PR）
 
@@ -236,23 +264,26 @@ restore、reset、clean、rm、config、remote、rebase、merge、worktree、sub
 | 启用与授权 | 默认 Git 禁用；server enabled + Workspace allowlist 双门禁；未知命令与缺失 Schema 拒绝；Legacy/Multi 行为一致 |
 | Workspace 绑定 | 多 Workspace 明确指定；跨 Workspace ID 不能回退；cwd 选取正确 |
 | 显式路径 | 正常子路径允许；../、绝对路径、symlink 跳出、Pathspec Magic、REV:PATH、隐式路径参数拒绝 |
-| 命令 Schema | 每个支持命令正常执行；未知 options、参数类型错误、互斥选项、Git 全局参数及 raw argv 均拒绝 |
+| 命令 Schema | 逐命令必填项、默认值、互斥项和 argv；未知 options、错误类型、不支持 paths、checkout/clone 和原始 Git argv 必须拒绝 |
 | 父级仓库 | 在子目录 Workspace pull 更新父级仓库其他兄弟目录；不阻断、不回滚 |
 | Git 原生行为 | .gitignore 原生规则；tracked 文件 pull 更新；Hook/Filter 执行及外部副作用按设计允许 |
-| 共享仓库 | 两个 Workspace 不同命令权限、相同仓库身份、协调锁正确且不死锁 |
-| 网络和 clone | Remote 名称限制；clone 目标路径限制；外部本地 Git Remote 经既有配置间接访问允许 |
-| 生命周期 | dry_run 不执行；输出上限；超时与进程回收；Gateway 关闭等待/终止；HTTP 断连状态未知不自动重试 |
-| 协议 | 2025-11-25 和 2026-07-28 真实 MCP HTTP/stdio，Tool discovery 与严格入参，subscriptions 关闭 |
+| 共享仓库 | 两个 Workspace 的共享父级仓库同一把锁，linked worktree 共用 common-dir 锁，独立仓库并行；锁等待不持有生命周期互斥锁 |
+| 网络和延后功能 | Remote 名称限制；clone/checkout 直接拒绝；已配置的外部本地 Git Remote 作为间接行为允许 |
+| 生命周期 | dry_run 连 rev-parse 都不启动；单一端到端预算覆盖锁/发现/drain/reap；超时 TERM/KILL 和同步 Worker 资源回收，断连状态未知不自动重试 |
+| 环境和输出 | 污染 GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE/GIT_COMMON_DIR 不可重定向仓库/Index；保留认证环境，Gateway Token 不继承，stdout/stderr 持续 drain | 
+| 协议 | 2025-11-25 和 2026-07-28 × HTTP/stdio × Legacy/Multi，严格参数、Context 和 subscriptions 关闭 |
 | 回归 | File API、普通 Exec、Local Skills、Workspace 配置、隐私与备份功能不被改变 |
 
-实现完成后必须运行 bash verify.sh --require-mcp、真实 macOS Git/MCP/Tunnel smoke、完整 pytest 回归、GitHub Actions、Release Manifest 一致性校验和独立代码安全评审。仅设计文档 PR 不能声称实现测试通过。
+新增复审要求的**精确回归断言**：临时仓库同时存在 tracked 文件 victim、却没有 victim 分支时，checkout 及相关配置拒绝且文件的未暂存内容不变；switch 在仅有远程同名分支时 --no-guess 必须失败，在新建分支时不猜测远程；branch="+main" 的 push 只定位 refs/heads/+main，普通 push 不得非快进强推，lease 旧 OID 不匹配远端必须拒绝；继承 GIT_DIR、GIT_WORK_TREE、GIT_INDEX_FILE、GIT_COMMON_DIR 污染时仍定位正确仓库/Index；Dry-run 不启动任何 Git 子进程；路径覆盖绝对、..、symlink 祖先/叶节点、缺失叶、Pathspec Magic、REV:PATH 和特殊文件名 literal 行为；同仓库锁在真实 linked worktree 下共享，独立仓库可并行；锁等待、断连、超时、关闭及 output drain/reap 有清晰状态。
+
+实现完成后必须运行 bash verify.sh --require-mcp、真实 macOS Git/MCP/Tunnel smoke、完整 pytest 回归、GitHub Actions、Release Manifest 一致性校验和独立代码安全评审。仅设计文档 PR 不能声称实现测试通过.
 
 ## 11. 分阶段交付与独立评审
 
 1. **设计 PR（本次）：** 冻结上述用户决定、配置/接口、命令 Schema 和接受的非沙箱边界；独立 Standards 与 Spec 评审，不修改运行代码。
 2. **实现 PR A：** 参数编译器、双层授权、Workspace/Legacy 接入、最小命令子集及测试。只暴露已经完成 Schema 的命令。
-3. **实现 PR B：** 同仓库身份协调、父级仓库整体同步及 Git Hook/Filter 的真实 macOS 验收；必要时合并到 A，但验收门禁不省略。
-4. **发布门禁：** 完整回归、MCP SDK 2.3.0 双协议、真实 Tunnel、Manifest、独立审查、运营者明确同意后再合并 release/ms1。
+3. **实现 PR B：** 父级仓库整体同步、真实 Git Hook/Filter、macOS 及 MCP 生命周期验收；**同仓库身份协调需随 PR A 首批可执行 Git 能力一同交付**，不能延后到 B。checkout 与 clone 不在 V1。
+4. **发布门禁：** 修订版设计独立 Standards/Spec 复审 PASS 后才能进入逐文件实施计划；实现后进行完整回归、MCP SDK 2.3.0 双协议、真实 Tunnel、Manifest、独立代码审查与运营者批准，再合并 release/ms1。
 
 独立评审必须回答：
 - 每个计划开放的 Git 命令是否还有被遗漏的显式本地路径入口？
@@ -265,7 +296,16 @@ restore、reset、clean、rm、config、remote、rebase、merge、worktree、sub
 
 评审输出：Standards PASS/FAIL、Spec PASS/FAIL、P0/P1/P2 问题（附代码/设计位置、触发前提、证据、修复建议）、建议补充的测试和进入代码实施计划的条件。
 
-## 12. 依据
+## 12. 独立复审反馈的设计修订记录
+
+本轮依据 PR #15 Base ba8634f → Head 64e1305 的独立评审（Standards PASS，Spec FAIL，P1×2、P2×1）：
+- P1 checkout 可能退化为文件恢复：V1 延后 checkout，仅通过带 --no-guess 的 switch 切换分支。
+- P1 push branch="+main" 可能触发强推：完整 refs/heads/<branch>:refs/heads/<branch>，force-with-lease 必须显式指定目标与旧 OID。
+- P2 clone 创建期目标锁/仓库锁衔接缺口：V1 延后 clone。
+- 原 P2 后续约束：冻结逐命令 Schema、Git 环境清理、预览零 Git 运行、锁等待与总超时/输出 drain/reap 顺序。
+- 这只是一轮设计修订，**仍待独立复审**；不声称已实现、测试或发布 Git 能力。
+
+## 13. 依据
 
 - 本仓库 gateway/workspaces.py、gateway/workspaces_config.py、gateway/multi_fields.py、gateway/mcp_adapter.py、gateway/mcp_multi.py、gateway/mcp_transport.py。
 - docs/PHASE1_LOCAL_TRUST_BOUNDARY.md。

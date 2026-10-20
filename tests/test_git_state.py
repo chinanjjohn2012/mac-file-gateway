@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import threading
 import time
 
@@ -32,31 +33,54 @@ def test_discovery_intent_precedes_spawn_and_is_removed_after_cleanup(tmp_path):
         state.close()
 
 
-@pytest.mark.parametrize("failure", ["write", "rename", "fsync"])
+@pytest.mark.parametrize("failure", [
+    "write", "file_fsync", "rename", "directory_fsync",
+])
 def test_discovery_durable_intent_failure_never_launches(tmp_path, monkeypatch, failure):
+    """Each genuine durability syscall fails independently BEFORE any Popen."""
     state = GitStateStore(tmp_path / "state")
     launched = []
+    faults = []
     try:
-        if failure == "write":
-            original = state._atomic_write
-            def broken(name, record):
-                if name.startswith("d-"):
-                    raise OSError("injected")
-                return original(name, record)
-            monkeypatch.setattr(state, "_atomic_write", broken)
-        elif failure == "rename":
-            original = os.rename
-            def broken(*args, **kwargs):
-                raise OSError("injected rename")
-            monkeypatch.setattr(os, "rename", broken)
-        else:
-            original = os.fsync
-            def broken(fd):
-                raise OSError("injected fsync")
-            monkeypatch.setattr(os, "fsync", broken)
-        with pytest.raises(GatewayError) as exc:
-            state.start_discovery(state.new_call_id(), "a", lambda: launched.append(1))
+        with monkeypatch.context() as m:
+            if failure == "write":
+                orig = os.write
+
+                def fail_write(fd, payload):
+                    if stat.S_ISREG(os.fstat(fd).st_mode):
+                        faults.append("write")
+                        raise OSError("injected actual file write failure")
+                    return orig(fd, payload)
+
+                m.setattr(os, "write", fail_write)
+            elif failure in ("file_fsync", "directory_fsync"):
+                orig = os.fsync
+                expected_dir = failure == "directory_fsync"
+
+                def fail_fsync(fd):
+                    is_dir = stat.S_ISDIR(os.fstat(fd).st_mode)
+                    if is_dir == expected_dir:
+                        faults.append(failure)
+                        raise OSError("injected targeted fsync failure")
+                    return orig(fd)
+
+                m.setattr(os, "fsync", fail_fsync)
+            else:
+                orig = os.rename
+
+                def fail_rename(*args, **kwargs):
+                    faults.append("rename")
+                    raise OSError("injected atomic rename failure")
+
+                m.setattr(os, "rename", fail_rename)
+
+            with pytest.raises(GatewayError) as exc:
+                state.start_discovery(
+                    state.new_call_id(), "a",
+                    lambda: launched.append("forbidden Popen"),
+                )
         assert exc.value.code == "git_state_unavailable"
+        assert faults, "the intended syscall must actually be reached"
         assert not launched
         assert state.globally_quarantined
     finally:
@@ -195,4 +219,57 @@ def test_concurrent_discovery_records_do_not_override_each_other(tmp_path):
         state.finish_discovery(call2, clean=True)
         assert not state.globally_quarantined
     finally:
+        state.close()
+
+
+def test_concurrent_discovery_interleaving_and_global_quarantine_gate(tmp_path):
+    """Real threads coexist; global quarantine blocks all later admissions."""
+    state_dir = tmp_path / "state"
+    state = GitStateStore(state_dir)
+    calls = [state.new_call_id(), state.new_call_id()]
+    ready = threading.Barrier(3)
+    release = threading.Event()
+    errors = []
+    children = []
+
+    def worker(call, workspace):
+        try:
+            state.start_discovery(call, workspace, lambda: children.append(workspace))
+            ready.wait(timeout=5)
+            assert release.wait(timeout=5)
+            state.finish_discovery(call, clean=True)
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=worker, args=(call, "ws-" + str(i)))
+        for i, call in enumerate(calls)
+    ]
+    try:
+        for t in threads:
+            t.start()
+        ready.wait(timeout=5)
+        assert set(children) == {"ws-0", "ws-1"}
+        assert len(list(state_dir.glob("d-*.json"))) == 2
+        release.set()
+        for t in threads:
+            t.join(timeout=5)
+        assert all(not t.is_alive() for t in threads)
+        assert not errors
+        assert not list(state_dir.iterdir())
+
+        # An actual second admission following a global failure cannot spawn.
+        state.start_discovery(calls[0], "a", lambda: "tracked first")
+        with state._gate:  # Test-only fault injection at the global admission gate.
+            state._quarantine_global()
+        launched = []
+        with pytest.raises(GatewayError) as exc:
+            state.start_discovery(state.new_call_id(), "b",
+                                  lambda: launched.append("not permitted"))
+        assert exc.value.code == "git_global_quarantined"
+        assert not launched
+    finally:
+        release.set()
+        for t in threads:
+            t.join(timeout=5)
         state.close()

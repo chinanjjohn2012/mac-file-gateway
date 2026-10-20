@@ -347,6 +347,12 @@ class GitCLIExecutor:
         call_id = self.state.new_call_id()
         identity = self._run_discovery(call_id, workspace, physical_cwd, deadline)
         with self.coordinator.hold(identity.common_key, deadline):
+            # A preceding Git request can change cwd or explicit path
+            # components while this request waits for the common-dir lock
+            # (for example, switch can replace a directory with a symlink).
+            # Recheck both with pinned Workspace root BEFORE any lock-held
+            # Git process or RUNNING state is admitted.
+            locked_cwd = check_git_paths(root_fd, root_path, cwd, compiled.paths)
             key = identity.common_key
             self.state.begin_repo(key, call_id)
             evidence = _RepoCleanupEvidence()
@@ -354,15 +360,15 @@ class GitCLIExecutor:
             try:
                 # Every internal/selected Git child updates per-call cleanup
                 # evidence. Unknown child state must quarantine BEFORE unlock.
-                checked = self._checked_git(key, call_id, physical_cwd,
+                checked = self._checked_git(key, call_id, locked_cwd,
                                             _REV_PARSE, deadline, evidence)
                 current = RepositoryIdentity.from_rev_parse(checked.stdout)
                 if current != identity:
                     raise GatewayError("git_repository_changed",
                                        "Git repository identity changed during admission.")
-                self._check_prerequisites(key, call_id, physical_cwd, command,
+                self._check_prerequisites(key, call_id, locked_cwd, command,
                                           dict(compiled.options), deadline, evidence)
-                result = self._repo_command(key, call_id, physical_cwd,
+                result = self._repo_command(key, call_id, locked_cwd,
                                             compiled.argv, deadline, evidence)
             finally:
                 self.state.finish_repo(key, call_id, clean=evidence.confirmed)

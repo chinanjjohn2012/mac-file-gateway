@@ -223,3 +223,61 @@ def test_closed_pipes_do_not_hide_a_live_git_process_group(tmp_path):
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+def test_deadline_expiring_during_intent_fsync_starts_no_git(tmp_path, monkeypatch):
+    """Intent is persisted BEFORE Popen, so the budget must be rechecked after it."""
+    state = GitStateStore(tmp_path / "state")
+    runner = GitProcessRunner()
+    launched = []
+    original_write = state._atomic_write
+
+    def slow_write(name, record):
+        if name.startswith("d-"):
+            time.sleep(0.5)
+        return original_write(name, record)
+
+    def spy(*args, **kwargs):
+        launched.append(1)
+        raise AssertionError("Git must not start after its deadline.")
+
+    monkeypatch.setattr(state, "_atomic_write", slow_write)
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    call = state.new_call_id()
+    try:
+        with pytest.raises(GatewayError) as exc:
+            runner.run(str(tmp_path), ["status"],
+                       spawn_admitted=lambda spawn: state.start_discovery(call, "a", spawn),
+                       execute_until=time.monotonic() + 0.3,
+                       deadline=time.monotonic() + 9)
+        assert exc.value.code == "git_timeout"
+        assert not launched
+        assert not state.globally_quarantined
+        assert not list((tmp_path / "state").iterdir())
+    finally:
+        state.close()
+
+
+def test_deadline_expiring_inside_repo_admission_clears_running(tmp_path, monkeypatch):
+    state = GitStateStore(tmp_path / "state")
+    runner = GitProcessRunner()
+    key = (212, 313)
+    call = state.new_call_id()
+    state.begin_repo(key, call)
+    launched = []
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_k: launched.append(1))
+    try:
+        def delayed(spawn):
+            time.sleep(0.5)
+            return state.start_repo_process(key, call, spawn)
+        with pytest.raises(GatewayError) as exc:
+            runner.run(str(tmp_path), ["status"], spawn_admitted=delayed,
+                       execute_until=time.monotonic() + 0.3,
+                       deadline=time.monotonic() + 9)
+        assert exc.value.code == "git_timeout"
+        assert not launched
+        state.finish_repo(key, call, clean=True)
+        assert not state.is_repo_quarantined(key)
+        assert not list((tmp_path / "state").iterdir())
+    finally:
+        state.close()

@@ -41,6 +41,16 @@ Base: release/ms1 (e32cb5124bbd8b08a79c75b4940799e041dd1295).
 - `tests/smoke_mcp_disconnect.py` uses only temporary paths and a harmless script to verify an already-started `run_command` can complete after a client disconnect, alongside normal completion, timeout termination and listener survival. `tests/test_local_skill_mcp.py` uses a fake Bridge to test the cancellation boundary without invoking real Skill scripts; the real SkillScriptExecutor timeout is separately covered by `tests/test_local_skill_executor.py`.
 - Immediate cancellation on disconnect, server-managed operation IDs, definitive post-disconnect delivery and retry deduplication are **not** features of this SDK migration. Any such changes require a separate lifecycle design and review.
 
-## Rollback
+## Deferred existing boundary (P3, outside this SDK migration)
 
-Switch deployment back to unchanged release/ms1 and re-run its existing verification. Do not alter the stable branch or the external client connector as part of this change.
+- The original single-workspace MCP raw JSON path is decoded by the SDK using ordinary `json.loads`, which accepts duplicate object names using the last occurrence. Single-workspace REST writes and multi-workspace MCP L0 admission instead reject duplicate JSON names. This inconsistency was already present on `release/ms1`; no new permission bypass caused by SDK 2.3.0 has been demonstrated.
+- Strict argument validation cannot recover duplicate keys after JSON decoding collapses them. Unifying the single-workspace MCP raw JSON admission for both legacy and modern clients requires a separate security-hardening change; this is an acknowledged, deferred risk, **not** fixed by PR #14. Keep the existing loopback/private-Tunnel deployment boundary.
+
+## Rollback procedure (operator sign-off required)
+
+1. Stop the Tunnel Client and Gateway cleanly when no authorized writes, commands, or Skill scripts are intentionally in flight. Record the current launch arguments, port, local policy locations, and backup state.
+2. In a separate worktree (preferred), or after stopping the active process, switch to unchanged `release/ms1`. Run `bash setup.sh` to install its pinned SDK `mcp==1.30.0`; verify with `.venv/bin/python -m pip show mcp` and `bash verify.sh --require-mcp`. Never reuse a running process with mismatched dependencies.
+3. Restart the baseline Gateway with the original project root/Workspace configuration and permissions. Restart the same private Tunnel Client; verify `/health`, ChatGPT tool discovery, a safe read, a write preview where enabled, and Local Skill visibility where enabled. Switching code without checking client reconnection is not a completed rollback.
+4. The SDK migration changes neither local business files nor Skill policies or backups. Preserve them; do not delete them on rollback.
+
+PR #14 remains Draft until the post-fix macOS tests, independent delta re-review, and rollback sign-off are finished.

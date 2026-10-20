@@ -192,7 +192,7 @@ brew install python@3.13
 4. 检查官方 MCP SDK
 5. 运行 `compileall`
 6. 运行完整 pytest
-7. 运行 REST-only HTTP、真实 MCP HTTP（双协议）和 MCP stdio（双协议）smoke test
+7. 运行 REST-only HTTP、真实 MCP HTTP（双协议）、MCP stdio（双协议）和受控命令断连/超时 smoke test
 8. 核验 `MANIFEST.sha256`
 
 安装和验证过程不会修改你准备让 ChatGPT 操作的目标项目。
@@ -700,7 +700,7 @@ bash verify.sh --require-mcp
 
 `verify.sh` 会在 Git 工作树中按已跟踪文件重新计算发布清单；文件内容、文件集合或 `MANIFEST.sha256` 任一发生漂移都会失败。GitHub Actions 也会检查同一发布清单。
 
-其中 REST-only 的 `tests/smoke_live.py` 输出 `mcp_verified: false` 是预期行为（它以 `--http-only` 启动）；独立的 `tests/smoke_mcp_live.py` 成功后才输出 `mcp_verified: true`，`tests/smoke_mcp_stdio.py` 则验证官方 SDK 客户端与真实 stdio 子进程交互，成功后输出 `stdio_verified: true`。
+其中 REST-only 的 `tests/smoke_live.py` 输出 `mcp_verified: false` 是预期行为（它以 `--http-only` 启动）；独立的 `tests/smoke_mcp_live.py` 成功后才输出 `mcp_verified: true`，`tests/smoke_mcp_stdio.py` 验证真实 stdio 子进程交互并输出 `stdio_verified: true`。新增的 `tests/smoke_mcp_disconnect.py` 使用临时项目和无害脚本验证现代 MCP 的执行中断连、正常完成及服务端超时。Gateway 已禁用未使用的 `subscriptions/listen` 长连接接口。断连后的执行与重试契约详见 `docs/MCP_SDK_V2_MIGRATION.md`；断连不表示已启动的操作被撤销。
 
 只检查启动策略：
 

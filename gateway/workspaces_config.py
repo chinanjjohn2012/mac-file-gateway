@@ -1,4 +1,4 @@
-"""Strict Phase-1 Multi-Workspace JSON schema (no exec or Skill activation)."""
+"""Strict Multi-Workspace JSON schema; Git is separately opt-in."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from .private_fs import PrivateFileError, read_private_json
+from .git_policy import GIT_V1_COMMANDS
 
 _ID = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _DENIED_ROOT_PARTS = frozenset({
@@ -26,12 +27,14 @@ class WorkspaceSettings:
     allow_write: bool
     write_paths: tuple[str, ...]
     backup_retention_days: int
+    git_allowed_commands: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class GatewaySettings:
     port: int
     workspaces: tuple[WorkspaceSettings, ...]
+    git_enabled: bool = False
 
 
 def _keys(obj: Any, allowed: set[str], context: str) -> dict[str, Any]:
@@ -85,7 +88,9 @@ def parse_workspace_config(config: dict[str, Any]) -> GatewaySettings:
     obj = _keys(config, {"schema_version", "server", "workspaces"}, "top-level")
     if type(obj.get("schema_version")) is not int or obj["schema_version"] != 1:
         raise PrivateFileError("Unsupported workspace schema version.")
-    server = _keys(obj.get("server", {}), {"port", "transport"}, "server")
+    server = _keys(obj.get("server", {}), {"port", "transport", "git"}, "server")
+    git = _keys(server.get("git", {}), {"enabled"}, "server.git")
+    git_enabled = _bool_field(git, "enabled", False)
     port = server.get("port", 8765)
     if type(port) is not int or not 1024 <= port <= 65535:
         raise PrivateFileError("Invalid Gateway port.")
@@ -98,7 +103,7 @@ def parse_workspace_config(config: dict[str, Any]) -> GatewaySettings:
     for name, raw in workspaces.items():
         if type(name) is not str or _ID.fullmatch(name) is None:
             raise PrivateFileError("Invalid Workspace ID.")
-        item = _keys(raw, {"root", "read", "hidden_paths", "write", "exec", "local_skills"}, "workspace")
+        item = _keys(raw, {"root", "read", "hidden_paths", "write", "exec", "local_skills", "git"}, "workspace")
         root = _absolute_root(item.get("root"))
         read = _keys(item.get("read", {}), {"enabled", "excludes"}, "read")
         if not _bool_field(read, "enabled", True):
@@ -127,8 +132,16 @@ def parse_workspace_config(config: dict[str, Any]) -> GatewaySettings:
             access = _keys(item.get(option, {}), {"enabled"}, option)
             if _bool_field(access, "enabled", False):
                 raise PrivateFileError("Phase 1 rejects unreviewed execution capabilities.")
-        result.append(WorkspaceSettings(name, root, excludes, hidden, allow_write, write_paths, retention))
-    return GatewaySettings(port, tuple(result))
+        git = _keys(item.get("git", {}), {"allowed_commands"}, "workspace.git")
+        commands = _bounded_tuple(git.get("allowed_commands", []), "git.allowed_commands",
+                                  count=len(GIT_V1_COMMANDS))
+        if any(command not in GIT_V1_COMMANDS for command in commands):
+            raise PrivateFileError("Unsupported Git command in Workspace allowlist.")
+        if commands and not git_enabled:
+            raise PrivateFileError("Git command grants require server.git.enabled=true.")
+        result.append(WorkspaceSettings(name, root, excludes, hidden, allow_write,
+                                        write_paths, retention, commands))
+    return GatewaySettings(port, tuple(result), git_enabled)
 
 
 def read_workspace_config(path: str) -> GatewaySettings:

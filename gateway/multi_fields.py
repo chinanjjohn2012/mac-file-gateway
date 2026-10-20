@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 from .core import GatewayError
+from .git_policy import compile_git_command, validate_git_relative_path
 
 # required arguments, optional arguments, and strict runtime types
 # (not Pydantic coercions). Numeric bounds also enforced by Gateway.
@@ -29,6 +30,8 @@ _SPECS: dict[str, tuple[dict[str, type], dict[str, type]]] = {
     'move': ({'source': str, 'destination': str, 'expected_sha256': str}, {'dry_run': bool}),
     'rename': ({'source': str, 'destination': str, 'expected_sha256': str}, {'dry_run': bool}),
     'run_command': ({'cwd': str, 'argv': list}, {'timeout_seconds': int, 'dry_run': bool}),
+    'run_git': ({'command': str}, {'cwd': str, 'options': dict, 'paths': list,
+                                  'timeout_seconds': int, 'dry_run': bool}),
     'local_skill_info': ({}, {}),
     'begin_local_skill': ({'skill': str, 'request': str}, {}),
     'read_skill_file': ({'skill_run_id': str, 'skill': str, 'path': str}, {}),
@@ -63,6 +66,15 @@ def validate_tool_arguments(name: str, arguments: Any, *, multi: bool) -> dict[s
     if 'argv' in arguments and (len(arguments['argv']) > 64 or
                                 any(type(x) is not str for x in arguments['argv'])):
         raise GatewayError('invalid_argument', 'Invalid argv argument.')
+    if name == 'run_git':
+        # Strict nested input validation occurs before SDK/Pydantic coercion.
+        # It is pure: no Git process, repository read or symlink dereference.
+        validate_git_relative_path(arguments.get('cwd', '.'))
+        compile_git_command(arguments['command'], options=arguments.get('options', {}),
+                            paths=arguments.get('paths', []))
+        seconds = arguments.get('timeout_seconds', 120)
+        if not 10 <= seconds <= 900:
+            raise GatewayError('git_option_invalid', 'Git timeout must be from 10 to 900.')
     return arguments
 
 

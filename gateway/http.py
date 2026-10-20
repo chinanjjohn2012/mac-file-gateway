@@ -13,8 +13,11 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .core import Gateway, GatewayError
+from .multi_fields import validate_tool_arguments
 
 MAX_BODY = 65_536
+# An opt-in Git endpoint must not inherit the File Writer's much larger budget.
+MAX_GIT_BODY = 65_536
 MAX_WRITE_BODY = 7 * 1024 * 1024
 
 
@@ -153,6 +156,15 @@ def _error(exc: GatewayError) -> JSONResponse:
               "not_empty": 409, "cross_device": 409, "move_unavailable": 501,
               "exec_disabled": 403, "exec_scope": 403, "command_not_allowed": 403,
               "runner_unavailable": 503, "exec_failed": 500,
+              "git_disabled": 403, "git_command_not_allowed": 403,
+              "git_path_blocked": 403,
+              "git_repository_quarantined": 409, "git_busy": 409,
+              "git_repository_changed": 409, "git_repository_invalid": 409,
+              "git_not_repository": 409, "git_branch_exists": 409,
+              "git_branch_unknown": 404, "git_remote_unknown": 404,
+              "git_global_quarantined": 503, "git_cleanup_incomplete": 503,
+              "git_state_unavailable": 503, "git_unavailable": 503,
+              "service_closing": 503, "git_timeout": 504,
               "write_failed": 500, "json_required": 415}.get(exc.code, 400)
     payload = {"error": exc.code, "message": str(exc)}
     if exc.details is not None:
@@ -210,6 +222,20 @@ def create_app(gateway: Gateway, *, enable_mcp: bool = True, port: int = 8765, t
     async def write_endpoint(request: Request) -> JSONResponse:
         try:
             route = request.url.path
+            if route == "/git/run":
+                if len(await request.body()) > MAX_GIT_BODY:
+                    raise GatewayError("too_large", "Git request body exceeds its fixed limit.")
+                args = await _json_params(
+                    request,
+                    {"command", "cwd", "options", "paths", "timeout_seconds", "dry_run"},
+                    {"command"},
+                )
+                # Pure, strict parsing before work is scheduled; true Git
+                # authorization and activity lease happen again INSIDE Worker.
+                validate_tool_arguments("run_git", args, multi=False)
+                command = args.pop("command")
+                result = await run_in_threadpool(gateway.invoke_git, command, **args)
+                return JSONResponse(result)
             if route == "/run":
                 if not gateway.allow_exec:
                     raise GatewayError("exec_disabled", "Command execution is disabled. Restart locally with --allow-exec.")
@@ -246,7 +272,7 @@ def create_app(gateway: Gateway, *, enable_mcp: bool = True, port: int = 8765, t
             return _error(exc)
 
     routes = [Route(path, endpoint, methods=["GET"]) for path in ("/health", "/info", "/list", "/read", "/search")]
-    routes += [Route(path, write_endpoint, methods=["POST"]) for path in ("/create", "/write", "/replace", "/mkdir", "/rmdir", "/delete", "/remove", "/unlink", "/rename", "/move", "/run")]
+    routes += [Route(path, write_endpoint, methods=["POST"]) for path in ("/create", "/write", "/replace", "/mkdir", "/rmdir", "/delete", "/remove", "/unlink", "/rename", "/move", "/run", "/git/run")]
     if enable_mcp:
         from .mcp_adapter import build_mcp
         from .mcp_transport import build_streamable_http_app

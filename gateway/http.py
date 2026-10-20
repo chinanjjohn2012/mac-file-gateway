@@ -284,4 +284,7 @@ def create_app(gateway: Gateway, *, enable_mcp: bool = True, port: int = 8765, t
         app.router.routes.extend(routes)
     else:
         app = Starlette(routes=routes)
-    return Boundary(app, port=port, token=token, max_body=MAX_WRITE_BODY if (gateway.allow_write or gateway.allow_exec) else MAX_BODY)
+    built = Boundary(app, port=port, token=token, max_body=MAX_WRITE_BODY if (gateway.allow_write or gateway.allow_exec) else MAX_BODY)
+    if gateway.allow_git and gateway.git_allowed_commands and gateway._git_executor is not None:
+        gateway._git_adapter_exposed = True
+    return built

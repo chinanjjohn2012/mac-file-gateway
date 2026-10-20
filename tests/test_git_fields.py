@@ -52,9 +52,17 @@ def test_nested_command_specific_validation_and_paths():
         assert exc.value.code == "git_option_invalid"
 
 
-def test_no_git_tool_is_registered_in_phase_a():
+def test_phase_d_git_adapters_use_only_the_reviewed_sync_git_service():
+    # A's pure compiler remains separate; D intentionally registers run_git.
+    # Neither adapter may turn the structured schema into a raw command
+    # execution fallback, and authorization is repeated by invoke_git.
     from pathlib import Path
     root = Path(__file__).resolve().parents[1] / "gateway"
-    for name in ("mcp_adapter.py", "mcp_multi.py"):
-        text = (root / name).read_text(encoding="utf-8")
-        assert "async def run_git(" not in text
+    legacy = (root / "mcp_adapter.py").read_text(encoding="utf-8")
+    multi = (root / "mcp_multi.py").read_text(encoding="utf-8")
+    assert "async def run_git(" in legacy
+    assert "async def run_git(" in multi
+    assert "run_in_threadpool(\n                    gateway.invoke_git" in legacy
+    assert "run_in_threadpool(\n                    service.invoke_git" in multi
+    assert "run_in_threadpool(gateway.run_command" not in legacy
+    assert "run_in_threadpool(service.invoke, workspace, 'run_git'" not in multi

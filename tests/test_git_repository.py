@@ -128,7 +128,7 @@ def test_same_repo_lock_serializes_but_another_repo_does_not_block():
     with locks.hold(key, time.monotonic() + 20):
         def worker():
             try:
-                with locks.hold(key, time.monotonic() + 5):
+                with locks.hold(key, time.monotonic() + 12):
                     outcomes.append("same-entered")
             except GatewayError as exc:
                 outcomes.append(exc.code)

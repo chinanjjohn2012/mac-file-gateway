@@ -187,3 +187,39 @@ def test_timeout_with_confirmed_cleanup_does_not_quarantine(tmp_path):
     assert result.timed_out
     assert result.cleanup_complete
     assert result.exit_code is not None
+
+
+def test_closed_pipes_do_not_hide_a_live_git_process_group(tmp_path):
+    """A hook's non-detached child may close inherited pipes but remain alive."""
+    import signal
+    pidfile = tmp_path / "group-child-pid"
+    child_script = (
+        "from pathlib import Path; import os, time; "
+        "Path(" + repr(str(pidfile)) + ").write_text(str(os.getpid())); "
+        "time.sleep(45)"
+    )
+    fake_source = (
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', " + repr(child_script) + "], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+        "stderr=subprocess.DEVNULL, start_new_session=False)\n"
+    )
+    fake_git = _fake_git(tmp_path, fake_source)
+    runner = GitProcessRunner(binary=str(fake_git))
+    try:
+        result = runner.run(str(tmp_path), ["status"],
+                            spawn_admitted=lambda spawn: spawn(),
+                            execute_until=time.monotonic() + 0.8,
+                            deadline=time.monotonic() + 9)
+        # Main Git process exits and its two pipes reach EOF almost
+        # immediately; the group's child must still prevent a clean success.
+        assert pidfile.exists()
+        assert result.timed_out
+        assert result.exit_code is not None
+    finally:
+        if pidfile.exists():
+            pid = int(pidfile.read_text())
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass

@@ -226,6 +226,7 @@ class Gateway:
         self._git_closing = self._git_closed = False
         self._git_state = None
         self._git_executor = None
+        self._git_adapter_exposed = False
         self.backup_retention_days = backup_retention_days
         self.allow_write = allow_write
         self.allow_exec = allow_exec
@@ -359,7 +360,7 @@ class Gateway:
                 "available": bool(self._git_state is not None
                                   and not self._git_state.globally_quarantined),
                 "allowed_commands": list(self.git_allowed_commands),
-                "adapter_exposed": False,
+                "adapter_exposed": self._git_adapter_exposed,
                 "warning": "Authorized Git can update the parent repository and invoke native hooks.",
             },
             "limits": asdict(self.limits),

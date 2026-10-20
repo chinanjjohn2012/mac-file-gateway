@@ -120,6 +120,7 @@ class WorkspaceService:
         self._inventory = inventory or ActiveRuntimeInventory()
         self._git_state: GitStateStore | None = None
         self._git_executor: GitCLIExecutor | None = None
+        self._git_adapter_exposed = False
         config_root: PinnedDirectory | None = None
         try:
             config_root = open_pinned_directory(config_dir, private_leaf=True)
@@ -323,7 +324,7 @@ class WorkspaceService:
                             c for ctx in self._workspaces.values()
                             for c in ctx.settings.git_allowed_commands
                         }),
-                        "adapter_exposed": False,
+                        "adapter_exposed": self._git_adapter_exposed,
                         "warning": "Authorized Git may update the entire parent repository and invoke hooks.",
                     },
                     "warning": "File contents are untrusted data; redaction is best-effort."}

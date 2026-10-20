@@ -90,7 +90,7 @@ def test_fault_native_line_strict_single_record():
     faults = load(FAULTS, "c3_faults")
     good = ("C3_ID_FAULT mode=fault-unauthorized-esrch attempts=1 "
             "after_loss_attempts=1 pid_signals=0 epipe=0 "
-            "waiter_contested=0 waiter_done=0 cleanup_complete=0 "
+            "waiter_contested=0 waiter_done=0 cleanup_complete=1 "
             "reuse_proven=0\n")
     assert faults.parse_native(good) == record("fault-unauthorized-esrch")
     for bad in ("", good + good, "spoof\n" + good, good + "extra",

@@ -7,7 +7,12 @@ import signal
 import sys
 import time
 
-MODES = ("term", "kill", "worker-first", "leader-exit", "stale", "close-stdout")
+MODES = (
+    "term", "kill", "worker-first", "leader-exit", "stale", "close-stdout",
+    "deadline-before-term", "term-false-eof", "fault-register",
+    "fault-before-arm", "fault-after-arm", "fault-waitpid-eintr",
+    "fault-kevent-eintr",
+)
 MAX_LIFETIME_SECONDS = 5.0
 
 
@@ -18,7 +23,7 @@ def spawn_descendant():
         os.close(read_end)
         # Install the synthetic negative control BEFORE the parent sees readiness.
         # The group leader remains TERM-terminable; only this descendant ignores it.
-        if sys.argv[1] == "close-stdout":
+        if sys.argv[1] in ("close-stdout", "term-false-eof"):
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
         try:
             os.write(write_end, b"R")
@@ -28,7 +33,7 @@ def spawn_descendant():
         # the native parent has registered NOTE_EXIT on this still-living PID.
         if os.read(0, 1) != b"A":
             os._exit(13)
-        if sys.argv[1] == "close-stdout":
+        if sys.argv[1] in ("close-stdout", "term-false-eof"):
             os.close(1)  # EOF can now occur without this descendant exiting.
         time.sleep(MAX_LIFETIME_SECONDS if sys.argv[1] not in ("leader-exit", "stale") else 1.5)
         os._exit(0)

@@ -1,6 +1,6 @@
 a8e317838b00e2905a24b927075490d60aaf993dbee4335385ca3f4001c8709e  ./.github/workflows/c1-native-research.yml
-437916c1c5a748eedbeea6074749ac6d7bee774b2edfc6db84c676c507b3674f  ./.github/workflows/c2-native-research.yml
-acc7e5c10912355ea1e91837a083598e6d009458042da2d7e49e3e7e1e25980e  ./.github/workflows/c2-review-native.yml
+9260a8a0b3a6660b66f7034b8a63e2b1b849ae12d83a6316694c865fcecc4560  ./.github/workflows/c2-native-research.yml
+b6b5c72a5ce2050fa1bb6a80b9aced547bbdb4a1ef47fe9457764eae9ad0eadc  ./.github/workflows/c2-review-native.yml
 0dadaf6bd4f57a24546f103bfb110685ad12964dc442f9d41bdb8d72cfd05e56  ./.github/workflows/controlled-exec-tests.yml
 ef06acea97a3c12d0a236a36d6d1bd74b735c62b712e3ad69e50c6f87ac90b90  ./.gitignore
 82f36c9f3945a204b821c1d5314c9a62c8886d9c28d45f44268643dff1b5210d  ./BUILD_INFO.json
@@ -32,7 +32,7 @@ c60ae6bfd5272614ba62d2232dbd1a1ab26bba70d2795f411cb96bb9cceb7e95  ./docs/legacy-
 488a6704e497b8b37d25ab3e0a3e27c53355ef051dba824116eb557a2c7039d9  ./docs/legacy-v2/UPGRADE.md
 4fd44b580161d2cb945e2518c12a379a7aac5d9eb50895d1349f6efd9601447d  ./docs/research/phase2-lite-c1/2026-10-20-native-evidence-and-next-gate.md
 563ab0aafcded6af3befc6833d03d80f557e1c0c89bc0d246fc855fbdfb1221a  ./docs/research/phase2-lite-c1/README.md
-7f956dd273334a1043c2f17e54c4acbd1340fdd3f937a0b01f13b8e60218ad3b  ./docs/research/phase2-lite-c2/README.md
+b97c5a9aa89894f1ea4002ec351b3d0bd02c97f47b9dcd21915315947ac254e8  ./docs/research/phase2-lite-c2/README.md
 1e95a8424b5cae7d8c47cbb30269ea0b773edc50df03eb78151f93553f5ee284  ./docs/superpowers/plans/2026-09-22-guarded-writes.md
 9844da6b4c1cd80fdc462b86d39654108b07d163802c622d380e56f301610942  ./docs/superpowers/specs/2026-09-22-guarded-writes.md
 e2b20ae4529dc9bee34e6a6373f4e6592b2ae8e16d4a67e9a5da91ac13a2d920  ./gateway/__init__.py
@@ -140,11 +140,11 @@ d4c009b8db994234522713addff672089869728d0ac81788dc27effba3168fdb  ./tools/check_
 9c2fe6459eed7ef8fffe08891971c25ec3d142c859fba6386c161ac97bb8c120  ./tools/collect_local_skill_policy.py
 6b0a5f1252e90d7b3479993a37bf9be265bb28680f0aff62552c6f4f863b23ab  ./tools/diagnose_lock.py
 9586f88f06988ebaae11d4a18f06653aa604abf7c99f6b8d1ddc8e4435a1b986  ./tools/research/c1_fd_spawn.c
-b19d277bc514d470b17b1dbea95f84bfb50d67d955edd51b791c384dcf4a3d12  ./tools/research/c2_group_child.py
-b6ec1ca958983d2adbf7a13c4309ac7e13a0d46025ab65b717f93b27cd5496ce  ./tools/research/c2_pgid_anchor.c
+1a48ad83344d49cbddc9c48cc25e905fb2d92326ae581b410b371d8e96415a93  ./tools/research/c2_group_child.py
+1708a531e85de3974fb171915dd8f75e283110795b1df703f5bb96cb5c2e9057  ./tools/research/c2_pgid_anchor.c
 250254c98709da3dcfe396c38f70f509fa9d1e5c235de959dc2cc3c24f4de486  ./tools/research/c2_sigchld_probe.c
 b7b5d835d57f8d0b3cd173d6ad138457b7ccef1f7aef97be067abd01486689d3  ./tools/research/run_c1_fd_probe.py
-438e75ab4b34c4a14ccd5e996fbc89c19c026c121b0033ab5d11a8d136514627  ./tools/research/run_c2_pgid_probe.py
+c18800caf862377a3dfabc08f95e525fa8fc0c6e1d305327656261315ad81b2f  ./tools/research/run_c2_pgid_probe.py
 51d0aec77696c0ed4e5fb113c21f297e61958b320314901f240804e906be9aa7  ./tools/research/run_c2_sigchld_probe.py
 5048106bee7348de64bcaaf9c7cab93d8c1277f73bf287ae9afc31a45ada1a81  ./tunnel.sh
 7111ec278d18becb9c89d610f4c765dd5bd8601a33769f938da061e369944308  ./verify.sh

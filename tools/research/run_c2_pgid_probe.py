@@ -23,10 +23,23 @@ NATIVE = HERE / "c2_pgid_anchor.c"
 CHILD = HERE / "c2_group_child.py"
 MODES = ("term", "kill", "worker-first", "leader-exit", "stale")
 NEGATIVE_MODES = ("close-stdout",)
+REVIEW_NEGATIVE_MODES = (
+    "deadline-before-term", "term-false-eof", "fault-register",
+    "fault-before-arm", "fault-after-arm",
+)
+FAULT_POSITIVE_MODES = ("fault-waitpid-eintr", "fault-kevent-eintr")
+EXPECTED_REVIEW_EVIDENCE = {
+    "deadline-before-term": ("deadline_before_term", 0),
+    "term-false-eof": ("descendant_exit_witness", 1),
+    "fault-register": ("fault_register", 0),
+    "fault-before-arm": ("fault_before_arm", 0),
+    "fault-after-arm": ("fault_after_arm", 0),
+}
+
 _NEGATIVE_EOF = ("C2_EXPECTED_BLOCK phase=descendant_still_alive "
                  "stdout_eof=1 witness_before_eof=0 descendant_alive=1\n")
 _RE = re.compile(
-    r"\AC2_RESULT mode=(term|kill|worker-first|leader-exit|stale)"
+    r"\AC2_RESULT mode=(term|kill|worker-first|leader-exit|stale|fault-waitpid-eintr|fault-kevent-eintr)"
     r" term=([01]) kill=([01]) refused=([01]) held=([01])"
     r" reaped=([01]) drain=([01]) descendant_verified=([01])\n\Z"
 )
@@ -42,11 +55,11 @@ def parse_native_result(stdout: str) -> dict:
 
 
 def classify_observation(mode: str, actual: dict) -> str:
-    if mode not in MODES or not isinstance(actual, dict):
+    if mode not in MODES + FAULT_POSITIVE_MODES or not isinstance(actual, dict):
         return "BLOCK"
     expected = {
         "mode": mode,
-        "term": int(mode in ("term", "kill", "worker-first")),
+        "term": int(mode in ("term", "kill", "worker-first") + FAULT_POSITIVE_MODES),
         "kill": int(mode == "kill"),
         "refused": int(mode in ("leader-exit", "stale")),
         "held": int(mode != "leader-exit"),
@@ -70,6 +83,16 @@ def run_case(binary: Path, root: Path, mode: str) -> dict:
         )
     except subprocess.TimeoutExpired:
         return {"mode": mode, "status": "BLOCK", "reason": "helper_deadline"}
+    if mode in REVIEW_NEGATIVE_MODES:
+        label, signals = EXPECTED_REVIEW_EVIDENCE[mode]
+        exact = ("C2_EXPECTED_BLOCK phase=" + label + " group_signals=" +
+                 str(signals) + " owner_reaped=1 descendant_exit=1\n")
+        if proc.returncode == 0 and proc.stdout == exact and not proc.stderr:
+            return {"mode": mode, "status": "EXPECTED_BLOCK",
+                    "reason": label, "g2_qualified": False}
+        # C2_BLOCK phase=descendant_exit_witness is a failure, not a valid
+        # attestation that the known synthetic descendant was cleaned up.
+        return {"mode": mode, "status": "BLOCK", "reason": "cleanup_incomplete"}
     if proc.returncode != 0:
         stage = re.search(r"C2_BLOCK phase=([a-z_]+)", proc.stderr)
         return {"mode": mode, "status": "BLOCK", "reason": stage.group(1) if stage else "native_exit"}
@@ -90,6 +113,39 @@ def run_case(binary: Path, root: Path, mode: str) -> dict:
     return {"mode": mode, "status": result, "signals": {
         "term": data["term"], "kill": data["kill"], "refused": data["refused"]
     }, "owned_reaped": data["reaped"] == 1, "stdout_eof": data["drain"] == 1}
+
+
+def run_mutation_check(root: Path) -> dict:
+    """Detect the counterfactual unsafe success if normal NOTE_EXIT is removed.
+
+    The mutated binary ONLY targets our own disposable synthetic processes.
+    It is forbidden to use this variant in any Gateway product runtime.
+    """
+    mutated = root / "c2_mutated_omit_positive_witness"
+    try:
+        compile_result = subprocess.run(
+            ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
+             "-DC2_TEST_OMIT_POSITIVE_WITNESS", str(NATIVE), "-o", str(mutated)],
+            text=True, capture_output=True, timeout=30, check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return {"mutation_detected": False, "reason": "mutant_compile_not_run"}
+    if compile_result.returncode != 0:
+        return {"mutation_detected": False, "reason": "mutant_compile_failure"}
+    try:
+        proc = subprocess.run(
+            [str(mutated), "term-false-eof", str(root), sys.executable],
+            text=True, capture_output=True, timeout=18, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {"mutation_detected": False, "reason": "mutant_deadline"}
+    unsafe = ("C2_RESULT mode=term-false-eof term=1 kill=0 refused=0 "
+              "held=1 reaped=1 drain=1 descendant_verified=1\n")
+    # A real positive-path omission would print an unearned C2_RESULT.
+    # The ordinary (non-mutated) binary is required to report EXPECTED_BLOCK.
+    if proc.returncode == 0 and proc.stdout == unsafe and not proc.stderr:
+        return {"mutation_detected": True}
+    return {"mutation_detected": False, "reason": "counterfactual_not_observed"}
 
 
 def main() -> int:
@@ -131,15 +187,21 @@ def main() -> int:
         if compiler.returncode != 0:
             print("BLOCK_NATIVE_COMPILE: private compiler details omitted")
             return 2
-        cases = [run_case(binary, root, mode) for mode in MODES + NEGATIVE_MODES]
-        wanted = ["POSITIVE_EXPERIMENT"] * 3 + ["SAFE_REFUSAL"] * 2 + ["EXPECTED_BLOCK"]
+        cases = [run_case(binary, root, mode)
+                 for mode in MODES + NEGATIVE_MODES + REVIEW_NEGATIVE_MODES + FAULT_POSITIVE_MODES]
+        mutation = run_mutation_check(root)
+        wanted = (["POSITIVE_EXPERIMENT"] * 3 + ["SAFE_REFUSAL"] * 2 +
+                  ["EXPECTED_BLOCK"] * (1 + len(REVIEW_NEGATIVE_MODES)) +
+                  ["POSITIVE_EXPERIMENT"] * len(FAULT_POSITIVE_MODES))
         decision = ("PARTIAL_NATIVE_OBSERVATION_NOT_G2"
-                    if [case["status"] for case in cases] == wanted
+                    if [case["status"] for case in cases] == wanted and mutation["mutation_detected"]
                     else "BLOCK_NATIVE_EXPERIMENT")
         data = {
             "source": "C2_OWNED_GROUP_RESEARCH_ONLY",
             "python": f"{sys.version_info.major}.{sys.version_info.minor}",
             "cases": cases,
+            "mutation": mutation,
+            "mutation_detected": True if mutation["mutation_detected"] else False,
             "g2_qualified": False,
             "not_proved": [
                 "known synthetic descendant NOTE_EXIT does not prove arbitrary cleanup",
@@ -157,7 +219,7 @@ def main() -> int:
                 json.dump(data, stream, indent=2, sort_keys=True)
                 stream.write("\n")
         print(json.dumps({
-            "decision": decision, "g2_qualified": False,
+            "decision": decision, "g2_qualified": False, "mutation_detected": mutation["mutation_detected"],
             "cases": [{"mode": x["mode"], "status": x["status"],
                        **({"reason": x["reason"]} if "reason" in x else {})} for x in cases],
         }, sort_keys=True))

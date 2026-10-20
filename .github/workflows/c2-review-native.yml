@@ -11,6 +11,10 @@ on:
       - "tools/research/run_c2_sigchld_probe.py"
       - "tools/research/c2_pgid_anchor.c"
       - "tests/test_c2_sigchld_review.py"
+      - "tests/test_c2_round2_review.py"
+      - "tools/research/run_c2_pgid_probe.py"
+      - "tools/research/c2_group_child.py"
+      - "docs/research/phase2-lite-c2/**"
 
 permissions:
   contents: read
@@ -65,7 +69,7 @@ jobs:
           assert all(case["status"] == "POSITIVE_EXPERIMENT" for case in data["cases"])
           print("C2_SIGCHLD_NATIVE_RESULT=PARTIAL_NATIVE_SIGCHLD_ONLY_NOT_G2")
           PY
-      - name: Recheck existing C2 synthetic lifetime contract
+      - name: Recheck C2 six-case suite, fault injection and run_mutation_check
         shell: bash
         run: |
           set -euo pipefail
@@ -86,8 +90,18 @@ jobs:
               ("leader-exit", "SAFE_REFUSAL"),
               ("stale", "SAFE_REFUSAL"),
               ("close-stdout", "EXPECTED_BLOCK"),
+              ("deadline-before-term", "EXPECTED_BLOCK"),
+              ("term-false-eof", "EXPECTED_BLOCK"),
+              ("fault-register", "EXPECTED_BLOCK"),
+              ("fault-before-arm", "EXPECTED_BLOCK"),
+              ("fault-after-arm", "EXPECTED_BLOCK"),
+              ("fault-waitpid-eintr", "POSITIVE_EXPERIMENT"),
+              ("fault-kevent-eintr", "POSITIVE_EXPERIMENT"),
           ]
           assert [(case["mode"], case["status"]) for case in data["cases"]] == expected
-          assert data["cases"][-1]["reason"] == "descendant_still_alive"
-          print("C2_EXIT_WITNESS_NATIVE_RESULT=PARTIAL_NATIVE_OBSERVATION_NOT_G2")
+          assert data["cases"][5]["reason"] == "descendant_still_alive"
+          assert data["cases"][6]["reason"] == "deadline_before_term"
+          assert data["cases"][7]["reason"] == "descendant_exit_witness"
+          assert data["mutation_detected"] is True
+          print("C2_REVIEW_NATIVE_RESULT=PARTIAL_NATIVE_OBSERVATION_NOT_G2")
           PY

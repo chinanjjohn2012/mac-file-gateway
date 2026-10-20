@@ -19,6 +19,7 @@ The helper reads an exact, one-line readiness handshake from its synthetic desce
 | `worker-first` | Intermediate workload leader exits and is reaped; original group anchor stays live; TERM then drain | `POSITIVE_EXPERIMENT` |
 | `leader-exit` | Original group leader exits *and is reaped* while a grandchild remains; refuse all group signals; bounded self-expiry | `SAFE_REFUSAL` |
 | `stale` | Still-live anchor supplied with an intentionally invalid expected identity; refuse signals and self-expire | `SAFE_REFUSAL` |
+| `close-stdout` | Synthetic TERM-resistant descendant closes stdout while alive; independent witness prevents false positive | `EXPECTED_BLOCK` |
 
 These outcomes are *anticipated contracts*, not proof until native Actions logs are captured. The extra failure controls are designed to fail closed; the experiment deliberately does not attempt to force real PGID reuse or address processes outside the synthetic owned group.
 
@@ -97,3 +98,61 @@ group cancellation, and a trusted Relay remains a separate G2 research topic.
 **Gate:** C2 T02/T03 native outcomes are limited experimental observations;
 independent code review and macOS lifecycle verification remain mandatory.
 **G2 BLOCK; G3 separate; ExecSupervisor and REST/MCP Multi exec BLOCK.**
+
+## Round 2 review repairs: six-case primary suite and fault controls
+
+**Review input:** PR #21 fixed `fb28130626d0d0dbec4b3c3316421ddd2ebf05db`
+was independently assessed as Standards CONDITIONAL, Spec FAIL: P2-01
+user-space deadline before TERM/KILL, P2-02 a shared-success-path false-EOF
+negative control with mutation proof, P2-03 bounded failure cleanup and EINTR
+faults, and P3-01 obsolete five-case descriptions. This section states the
+**research contract**; implementation must be verified against a new exact SHA
+and native macOS logs before claiming these findings closed.
+
+The **six-case primary suite** is `term`, `kill`, `worker-first`,
+`leader-exit`, `stale`, `close-stdout`. The additional review fault modes
+are not silently counted as original primary cases.
+
+- **Deadline before every group signal.** The Helper checks the monotonic arm
+  deadline before TERM, before KILL, and within the owned-group signaling
+  function immediately before the kernel call. `deadline-before-term` releases
+  the synthetic process then injects a 3-second pause against a 2.5-second
+  deadline. It may return `EXPECTED_BLOCK` only if **zero group signals** were
+  sent, the directly owned Leader was accounted for, and the known synthetic
+  descendant's eventual exit was independently witnessed. This is a
+  user-space admission gate, **not** an atomic kernel identity guarantee or
+  proof of bounded scheduler latency between check and syscall.
+- **Same positive branch / mutation.** `term-false-eof` uses the normal TERM
+  success path while its single known synthetic descendant ignores TERM,
+  closes stdout and remains alive. Missing `NOTE_EXIT` must lead to
+  `EXPECTED_BLOCK` after safe synthetic cleanup; it must never produce
+  `C2_RESULT`. A throwaway test compilation with
+  `C2_TEST_OMIT_POSITIVE_WITNESS` intentionally removes the positive guard.
+  `run_mutation_check` requires it to demonstrate the would-be false positive
+  **only in this synthetic environment**; the unmodified binary is required
+  to reject the same observation. The mutant is never installed in Gateway.
+- **Fault cleanups.** `fault-register`, `fault-before-arm`, and
+  `fault-after-arm` inject failures around exit watcher ownership and the
+  arm barrier. The single owner must not emit a success result; the cleanup
+  path may use a *directly owned, still-unreaped child PID* for bounded
+  fallback, never an unchecked process group. It must account for each opened
+  FD and the single known descendant's `NOTE_EXIT` before issuing the
+  strict `EXPECTED_BLOCK` evidence. If registration cannot be established
+  or cleanup cannot be observed, the result stays `BLOCK` /
+  `cleanup_incomplete`, without upgrading unverified cleanup to success.
+  The `fault-waitpid-eintr` and `fault-kevent-eintr` synthetic modes
+  require bounded retry rather than unexpected termination; these are
+  research-only fault hooks.
+- **Boundaries.** `waitpid` cannot reap an arbitrary grandchild; observing
+  one known descendant is not proof all descendants have exited. Event
+  registration, deadline checks and a retained Leader PID do not establish
+  immunity to PGID reuse or atomically protect a later group signal.
+
+The old `c2-native-research.yml` on PR #20 is intentionally branch-scoped
+and may be skipped on PR #21. **Only the new `c2-review-native.yml`**
+provides PR #21's expanded native review evidence.
+
+**Release gates:** research CI results are not an independent safety review;
+G2 remains BLOCK, the Leader/Relay architecture gate remains unresolved,
+and G3 MCP SDK 2.3.0 is a separate protocol gate. No ExecSupervisor,
+REST/MCP Multi exec, deployment or release activation is permitted.

@@ -47,7 +47,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           architecture: arm64
-      - name: C2 synthetic five-case probe, never qualify G2
+      - name: C2 synthetic six-case primary probe (PR #20 baseline only; not G2)
         shell: bash
         run: |
           set -euo pipefail

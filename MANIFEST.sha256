@@ -33,6 +33,7 @@ c60ae6bfd5272614ba62d2232dbd1a1ab26bba70d2795f411cb96bb9cceb7e95  ./docs/legacy-
 4fd44b580161d2cb945e2518c12a379a7aac5d9eb50895d1349f6efd9601447d  ./docs/research/phase2-lite-c1/2026-10-20-native-evidence-and-next-gate.md
 563ab0aafcded6af3befc6833d03d80f557e1c0c89bc0d246fc855fbdfb1221a  ./docs/research/phase2-lite-c1/README.md
 b97c5a9aa89894f1ea4002ec351b3d0bd02c97f47b9dcd21915315947ac254e8  ./docs/research/phase2-lite-c2/README.md
+a6ef8f7b8ef516853d4c15fa73c6e3c81ee1088a251248bc8c069c3a6d5123e6  ./docs/research/phase2-lite-c3/README.md
 1e95a8424b5cae7d8c47cbb30269ea0b773edc50df03eb78151f93553f5ee284  ./docs/superpowers/plans/2026-09-22-guarded-writes.md
 9844da6b4c1cd80fdc462b86d39654108b07d163802c622d380e56f301610942  ./docs/superpowers/specs/2026-09-22-guarded-writes.md
 e2b20ae4529dc9bee34e6a6373f4e6592b2ae8e16d4a67e9a5da91ac13a2d920  ./gateway/__init__.py

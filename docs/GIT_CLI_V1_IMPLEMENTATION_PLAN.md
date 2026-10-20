@@ -1,6 +1,6 @@
 # Mac File Gateway — Git CLI V1 逐文件实施计划
 
-Status: **IMPLEMENTATION PLAN / DRAFT，待独立计划复审；尚未开始编码、部署或合并**  
+Status: **逐文件计划独立复审已通过；A 批次通过；B 批次实现仍为 Draft、待最终跨模块复审；C 批次未放行**  
 Date: 2026-10-20  
 Authoritative design: docs/GIT_CLI_V1_DESIGN.md @ e32de7b896a3231fd9e60ac5798ea94b482c5e07  
 Design review: **Standards PASS / Spec PASS，P0=0、P1=0、P2=0**（用户提供的独立定向复审结果）  
@@ -123,10 +123,11 @@ Implementation base: the approved design commit above. This plan is subordinate 
 4. Discovery 主进程/受控子进程完整 wait/reap/drain 后才删除本次 DISCOVERING 并同步目录；多个正常并发 discovery 记录不相互覆盖/误删。若尚不能归属 Repository 的子进程清理未确认，保留记录并进入 GLOBAL_QUARANTINED。
 5. 在 discovery 彻底清理、记录已同步删除且**没有未回收子进程**之后，可等仓库锁；拿到锁后先检查本仓库隔离状态，持久化仓库级 RUNNING 后才能启动任何后续内部核验或业务 Git。运行期间保持 RUNNING。
 6. 短期服务端级门协调“检查 GLOBAL_QUARANTINED + 持久化意图 + 启动进程”和“宣告全局隔离”；不要在 Git 命令执行期间或等待仓库锁时持有全局门，不与 WorkspaceService 生命周期互斥锁形成反向锁序。
-7. 超时或无法确认清理时，在**同仓库锁内**原子转换 QUARANTINED 并持久化，然后才能释放锁；其他 Workspace/linked worktree 即使排队也不得启动业务 Git。持久隔离标记写入失败，RUNNING 残留和全局 fail-closed 状态必须继续拒绝。
+7. **清理无法确认**时（包括超时且无法确认清理），在**同仓库锁内**转换 QUARANTINED 并尝试持久提交，再释放锁；其他 Workspace/linked worktree 即使排队也不得启动业务 Git。超时但进程及资源完全回收时按第 8 条清理，不能误隔离。隔离写入失败也不得删除原持久 RUNNING，当前实例全局 fail-closed，按设计 §7.2 的可信持久化故障模型处理。
 8. 成功或 Git 业务失败但进程完全清理后，移除对应 RUNNING、持久 fsync、回到 READY；非零 Git exit_code 本身不是隔离条件。
 9. 进程启动时先扫描残留 DISCOVERING/GLOBAL_QUARANTINED/RUNNING/QUARANTINED 状态，保证**启动扫描完成之前不能启动任何 Git 进程**。无法读取、无法归属或状态损坏时 Git 全局失败关闭。
 10. V1 不提供 Web/MCP/REST reset 或自动解封任务；离线恢复只能在 Gateway 停用后由管理员核实进程及 PID 重用风险、按明确本机流程清除记录再重启。记录的 TTL 不构成恢复资格。
+11. **2026-10-21 已批准的存储故障边界：** 不能删除仍可能有未回收受控 Git 进程的持久记录；确认完全回收后，若 unlink 已生效、目录 fsync 失败且全局标记也无法写入，本实例必须失败关闭，但重启后无残留记录不要求凭空维持永久隔离。重启后的下一次 Git 必须先重新持久提交活动意图，写入失败零启动；有残留记录仍须隔离。详见设计 §7.2。
 
 新增 tests/test_git_state.py 和 tests/test_git_recovery.py。
 
@@ -136,7 +137,9 @@ Implementation base: the approved design commit above. This plan is subordinate 
 - 两个 discovery 并行的调用 ID/记录互不覆盖；完整清理后互不阻塞。
 - DISCOVERING 删除后、RUNNING 写入前模拟强杀 → 无未回收进程；RUNNING 写入后、锁内 Git 启动前强杀 → 重启该仓库隔离。
 - 清理不确定先隔离后解锁，其他 Workspace 和 linked worktree 零业务 Git 启动；独立仓库仍可执行（GLOBAL_QUARANTINED 除外）。
-- 状态读取损坏、活动标记清理失败及目录不可用 → fail-closed。
+- 状态读取损坏、活动标记清理失败及目录不可用 → 本实例 fail-closed。
+- 已启动/可能启动且清理未知，即使隔离覆盖和全局标记补写失败，原已同步的 DISCOVERING/RUNNING 仍保留，重启继续隔离。
+- 已确认所有 Git 进程和资源回收：分别注入 unlink 前失败、unlink 后目录 fsync 失败、全局隔离标记无法写入，核对本实例拒绝、重启按真实残留记录处理；若无记录，新的 Popen 前必须先持久提交新意图，故障注入使其失败则启动数为零。测试文件 tests/test_git_storage_failure_boundary.py。
 
 完成门禁：以上隔离、强杀与重启行为须先有本地可重复自动化证据；禁止先对 Web/MCP 开放 apply。
 

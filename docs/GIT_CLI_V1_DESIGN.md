@@ -1,6 +1,6 @@
 # Mac File Gateway — Git CLI V1 设计与独立评审规格
 
-状态：**DRAFT / Standards PASS；Spec FAIL（上一轮问题已关闭，本轮新增 P2 设计修订待定向复审）**  
+状态：**DRAFT / Standards PASS；Spec FAIL（首次 Git 仓库发现进程前持久记录缺口已针对性修订，待定向复审）**  
 日期：2026-10-20  
 代码基线：release/ms1 @ ba8634f24cdc26904d1c80951df7173e429240c7  
 MCP Python SDK：2.3.0  
@@ -177,7 +177,7 @@ gateway_info 和 list_workspaces 可以公开 Git 是否启用、允许的命令
 ### 5.1 预览与实际执行
 
 - Dry-run（默认）只执行纯服务端 JSON/Schema/Workspace 路径校验和内存 argv 编译；任何 git rev-parse、git remote、git check-ref-format、git show-ref 均不得启动。输出注明未执行仓库、Remote 或 Branch 的运行时验证。
-- Apply 在实际同步 Worker 中重新执行授权与路径验证，执行有界仓库发现，获取同仓库锁，在锁内重查仓库身份及 Remote/Branch 前置条件，再启动业务 Git。
+- Apply 在实际同步 Worker 中重新执行授权与路径验证，**在任何内部 Git discovery 子进程启动之前持久化服务端级 DISCOVERING 记录**；受控发现进程完整清理后安全清除该记录，再获取同仓库锁；**在锁内持久化仓库级 RUNNING 记录后**方可启动锁内再次发现、Remote/Branch 校验或业务 Git。任何清理不确定按 §7.1 失败关闭。
 - 预览与执行之间的 Git 状态、Remote、Branch 或文件均可能变化；预览不是已获得一次性执行许可，也不能保证未来 Git 操作成功。
 
 ### 5.2 后续命令
@@ -205,11 +205,11 @@ gateway_info 和 list_workspaces 可以公开 Git 是否启用、允许的命令
 - Git 按所选 Workspace + 已校验 cwd 向上发现父级仓库。父级 Repository 不要求位于 Workspace 内。
 - V1 不允许 clone，因此取消旧方案中目标目录创建期的锁转换；实现 PR 不需提前设计双锁。
 - dry_run=true 时**完全跳过 Git 仓库发现、前置 Ref/Remote 校验及仓库锁**。
-- Apply 在活动同步 Worker 中用固定 Git argv 和与业务命令相同的受控环境执行有界 git rev-parse，获得 worktree root、gitdir 和 common Git dir；无需将用户输入传给原始 Git 参数。
+- Apply 在活动同步 Worker 中，**必须先持久化服务端级 DISCOVERING 活动意图，才能启动首次内部 git rev-parse**。使用固定 Git argv 与业务命令相同的受控环境获取 worktree root、gitdir、common Git dir；确认发现进程和输出完整收尾后才能清除对应服务端级活动记录，随后再按仓库身份取得执行锁。无需将用户输入传给原始 Git 参数。
 - 使用实际 common Git dir 的规范化目录身份（例如 st_dev/st_ino）作为 Gateway 内部统一仓库锁键，保证多个 Workspace 访问同一个父级仓库及 linked worktree 时协调为同一把锁；独立仓库保持并行能力。
 - **V1 同仓库的全部 Git 命令保守串行化。** 等待锁有上限并可能返回 git_busy；不能在等待或执行过程中持有 WorkspaceService 的全局生命周期 mutex。申请 Workspace 同步 Worker 租约在等待锁之前；关闭时拒绝新的租约。
-- 在获得锁后重新识别并校验 Git 仓库身份，发生变化报 git_repository_changed，不能静默换用另一仓库或在两把仓库锁之间执行。**业务 Git 启动前必须在同一锁内检查该仓库是否处于失败关闭状态。**
-- 释放顺序：执行命令及其有界清理/输出 drain → 锁内确认清理完成并清除活动标记，**或先原子隔离该仓库** → 释放仓库锁 → 释放 Workspace 操作租约 → 允许关闭关联 FD。finally 释放锁绝不意味着清除隔离，细节见 §7.1。
+- 在获得锁后，先检查仓库是否隔离；**必须在首次锁内复核 Git 子进程启动之前持久化该仓库的 RUNNING 意图**，再重新识别并校验 Git 仓库身份，发生变化报 git_repository_changed，不能静默换用另一仓库或在两把仓库锁之间执行。锁内任何业务 Git 启动前必须再次确认本仓库及服务端级失败关闭准入条件，状态检查与启动遵守 §7.1 的短期全局准入门。
+- 释放顺序：首次 discovery 进程及其输出完整清理后清除服务端级 DISCOVERING 记录；仓库锁内各 Git 子进程及输出完整清理后，安全清除仓库级 RUNNING 记录，**或先原子隔离仓库** → 释放仓库锁 → 释放 Workspace 操作租约 → 允许关闭关联 FD。若 discovery 自身清理未确认则保持其服务端级活动记录并全局失败关闭；finally 释放锁绝不意味着清除隔离，细节见 §7.1。
 - 只能协调 Gateway 发起的进程，不能阻止终端、IDE、其他 Gateway 实例的 Git 操作；既有本地 OS 信任边界不变。
 - 错误/能力列表不泄漏绝对仓库根路径；Git 本身有界 stdout/stderr 仍可能返回父级仓库内容，这是已接受的特权能力。
 
@@ -217,15 +217,21 @@ gateway_info 和 list_workspaces 可以公开 Git 是否启用、允许的命令
 
 **隔离状态及原子性。** 按实际 common Git dir 身份为每个 Repository 维护由同一执行锁保护的状态：READY（可执行）、RUNNING（受控 Git 正在执行）和 QUARANTINED（清理未确认，禁止后续执行）。不同 Workspace 与真实 linked worktree 共用同一状态对象。请求 B 在取得仓库锁以后、启动任何**业务 Git**前，必须检查状态与持久活动记录：若为 QUARANTINED 或发现未确认活动记录，则返回 git_repository_quarantined，业务 Git 启动计数必须为零。状态检查、RUNNING 准入和业务执行不可拆到两次锁获取之间；独立仓库仍可并行。
 
-**崩溃/重启不自动清除。** 为使重启不绕过隔离，服务端在 Workspace 外的私有状态目录维持每仓库的持久活动记录。仅在启用 Git 时配置和初始化该目录。锁内首次启动可能残留的 Git 子进程前，必须用写临时文件、fsync、原子 rename 和目录 fsync 的方式持久写入 RUNNING 记录；记录包含 common-dir 稳定身份、调用 ID、时间，启动后尽可能追加 PID/PGID 与进程启动身份（只用于受信任管理员离线核验）。记录无法可靠写入时禁止启动 Git。仓库发现前的内部 Git 子进程若清理不确定、尚无可靠仓库身份，必须持久记录**服务端级 Git 失败关闭状态**；后续任何业务 Git 均被拒绝，而不能随意把故障指给某个 Workspace。
+**服务端级首次 discovery 意图（启动前持久化）。** 为使进程在任何阶段崩溃后不会丢失仍可能存活的 Git 子进程，服务端在 Workspace 外的私有状态目录为**每一次调用**维护唯一持久活动记录。只有 Git 启用时才需要配置与初始化该目录。每次 Apply 必须在首次启动**任何 Git 子进程（包括首次 git rev-parse）之前**生成唯一调用 ID，并在服务端级准入门内同步写入独立的 DISCOVERING 活动记录（含调用 ID、Workspace ID、创建时间和“仓库身份未知”状态）。使用临时文件写入、fsync、原子 rename、目录 fsync 完成持久提交；提交无法可靠完成时，Git 子进程启动数必须为零，并令 Git 服务失败关闭。不能等 discovery 失败、超时或清理不确定后才补写记录，因为崩溃可能发生在异常处理之前。Popen 后可补充 PID/PGID、进程启动身份，供离线核验，但不能依赖 Popen 后才能完成的记录写入保证安全。各个并发 discovery 使用不同活动记录，不得覆盖、删除其他调用的记录。
 
-**锁内终态转换：**
+**Discovery 完成与仓库级接管。** 受控 discovery Git 主进程及受控子进程已确认全部退出/reap，stdout/stderr 已完成 drain，且调用方不再持有该 discovery 进程资源后，才允许同步删除**本次** DISCOVERING 活动记录并 fsync 状态目录；首次 discovery 即使返回“没有仓库”或其他业务错误，只要完整清理也可以安全删除。若记录删除或同步失败，按服务端级失败关闭处理。之后才取得已发现 common Git dir 的仓库执行锁，并在锁内、**任何锁内复核或业务 Git 子进程启动之前**同步持久化该仓库的 RUNNING 记录。两记录之间可以有无记录的间隔，**但这段间隔必须无任何已启动且未确认清理的 Git 子进程，也禁止在仓库级 RUNNING 记录持久化前启动新 Git**。因此无需将服务端级记录与仓库级记录合并为一个原子跨文件事务。
+
+**服务端级失败关闭与全局准入门。** 如果 discovery 的受控进程清理未确认、DISCOVERING 记录无法安全删除、服务端级标记写入失败，或重启检查发现遗留的 DISCOVERING 记录，Git 功能进入 GLOBAL_QUARANTINED。已有的 DISCOVERING 记录必须保留，能写入时可追加持久全局隔离标记；写入失败不能让本实例失效地继续执行。所有此后的 discovery 和**业务 Git 启动**必须拒绝，且不能按 Workspace/Repository 切换绕过。使用单独的短期服务端级 Git 准入门串行化“检查全局隔离 → 持久活动意图 → Popen 启动”和“登记全局隔离”这两个临界转换；这把门不在 Git 执行期间持有，也不用于等待仓库执行锁，不得持有 WorkspaceService 生命周期互斥锁。当其他调用正常处于 DISCOVERING 状态而且还未出错时，这只是一个由 Gateway 正在管理的活动记录，**不是全局隔离条件**；同实例的独立仓库正常并发仍允许。仓库级进程启动也需要经过全局准入门检查，但仍先由仓库独占锁保护对应 RUNNING 状态。
+
+**仓库级活动意图。** 锁内每个可能残留的 Git 子进程启动前必须确保有效的 RUNNING 持久记录已经提交，包含 common-dir 稳定身份、调用 ID、时间；启动后尽可能追加 PID/PGID 与进程启动身份供离线恢复。启动前写入失败不得启动 Git。对进程结果未知时依旧遵循锁内先将仓库转为 QUARANTINED 后释放仓库锁的契约。仓库级 RUNNING 记录在受控执行完整收尾之前不得删除。成功、业务失败但已经完全回收后才能同步移除，以避免重启时误认为没有残留执行。
+
+**锁内终态转换：** 以下 1–3 项适用于已取得 common Git dir 身份并持有仓库锁的阶段；首次 discovery 无仓库身份阶段按上述服务端级 DISCOVERING / GLOBAL_QUARANTINED 规则进行失败关闭。
 
 1. **完全收尾（成功或业务失败均适用）：** 已确认受控主进程及其进程组清理、wait/reap、stdout/stderr drain 完成，且该同步 Worker 已不再使用相关执行资源。安全删除并同步活动标记，回到 READY，最后释放仓库锁，后续请求正常准入。Git 非零退出码不构成隔离条件。
 2. **清理未确认：** 超时、断连、关闭或异常路径中，如果无法确认受控执行已清理，必须**在持有仓库锁期间**把内存状态转为 QUARANTINED，原子持久化隔离标记，再释放仓库锁并有界返回 git_cleanup_incomplete。已存在的 RUNNING 记录不得提前删除；若隔离更新失败，RUNNING 残留记录也必须在后续请求及下次启动被解释为 QUARANTINED，同时将本实例 Git 功能整体置为失败关闭。
 3. **状态清理失败：** 即使子进程已完全退出，删除活动记录/同步持久状态失败仍不得标记 READY；保持隔离并返回明确错误。最后的 finally 仅释放仓库锁和已经结束的同步 Worker 租约，不可抹去隔离状态。
 
-**恢复条件。** V1 不提供 Web/MCP/REST reset 操作，不引入后台监控线程，不以 TTL 到期、git status 成功、Gateway 重启、HTTP 连接关闭或一个独立仓库成功执行作为解封证据。启动时所有残存的 RUNNING/QUARANTINED 标记都按隔离解释。只有受信任的**本地管理员在 Gateway 停止并禁止新 Git 调用后**，根据 PID/PGID、进程启动身份及实际受控进程组/子进程状况确认原执行已经结束或彻底回收，才能通过离线私有状态恢复流程清除对应标记并重新启用 Git。PID 可重用，不能只凭 PID 数字；若无法证明清理完成，则保持隔离。标记目录不能安全读取、存在无法归属的活动记录或身份对应关系不可信时，服务端 Git 功能整体失败关闭，不能自动忽略。
+**恢复条件。** V1 不提供 Web/MCP/REST reset 操作，不引入后台监控线程，不以 TTL 到期、git status 成功、Gateway 重启、HTTP 连接关闭或一个独立仓库成功执行作为解封证据。启动时必须**先扫描全部 DISCOVERING、GLOBAL_QUARANTINED、RUNNING、QUARANTINED 持久记录，并完成失败关闭准入判定，然后才允许任何 Git 子进程启动**；遗留的服务端级 DISCOVERING 或 GLOBAL_QUARANTINED 记录造成全局隔离，仓库级 RUNNING/QUARANTINED 记录造成该仓库隔离。不能在启动期间自动清除记录或执行 Git 探针来推定已清理。只有受信任的**本地管理员在 Gateway 停止并禁止新 Git 调用后**，根据 PID/PGID、进程启动身份及实际受控进程组/子进程状况确认原执行已经结束或彻底回收，才能通过离线私有状态恢复流程清除对应标记并重新启用 Git。PID 可重用，不能只凭 PID 数字；若无法证明清理完成，则保持隔离。标记目录不能安全读取、存在无法归属的活动记录或身份对应关系不可信时，服务端 Git 功能整体失败关闭，不能自动忽略。
 
 **边界不扩张。** 上述规则仅控制 Gateway 自己的 Git 后续准入和受控进程，不禁止终端/IDE 的 Git，也不试图捕捉主动脱离进程组的第三方 Hook/Filter/Credential Helper；后者仍属用户已接受的非沙箱风险。该机制不对普通 File API、受控 Exec 或 Local Skill 增加 Git 权限。
 
@@ -243,8 +249,8 @@ gateway_info 和 list_workspaces 可以公开 Git 是否启用、允许的命令
 ### 8.2 精确生命周期
 
 - timeout_seconds 是**从同步 Worker 被准入开始**计算的单个端到端总预算，建议默认 120 秒、有效范围 10..900 秒。预算包括仓库发现、锁等待、锁内检查、Git 执行、stdout/stderr drain、超时终止和 reap，不得为每阶段重新给满 timeout。
-- 仓库发现最多 5 秒；仓库锁等待最多 10 秒，二者均取与（总截止期限减去 5 秒清理预留之后）的剩余时间较小值；无法在限定时间内取得锁返回 git_busy。业务 Git 不得在清理预留时间不足时启动。
-- 预留最后 5 秒用于进程清理：终止时向进程组发 TERM，最多 2 秒；未退出则发 KILL，剩余时间用于并发 drain/reap；若无法确认主进程及受控子进程已清理，**先在仓库执行锁内持久隔离（§7.1），再有界返回 git_cleanup_incomplete**，不能声称成功。对故意脱离进程组或无法杀死的内核态进程不作绝对保证。
+- 仓库发现最多 5 秒；仓库锁等待最多 10 秒，二者均取与（总截止期限减去 5 秒清理预留之后）的剩余时间较小值；无法在限定时间内取得锁返回 git_busy。**首次 discovery 意图同步持久化、其清理与记录移除，以及仓库 RUNNING 记录持久化均计入同一端到端预算**；不能为这些步骤另起超时。业务 Git 不得在清理预留时间不足时启动。
+- 预留最后 5 秒用于进程清理：终止时向进程组发 TERM，最多 2 秒；未退出则发 KILL，剩余时间用于并发 drain/reap；若无法确认主进程及受控子进程已清理，**首次 discovery 阶段保留 DISCOVERING 意图并触发服务端级全局隔离；仓库阶段则先在仓库执行锁内持久隔离**（§7.1），随后有界返回 git_cleanup_incomplete，不能声称成功。对故意脱离进程组或无法杀死的内核态进程不作绝对保证。
 - stdout/stderr 必须持续并发读取，限制原始字节及最终响应字节；超过上限应标明被截断或明确返回失败，不允许对不完整机器输出给出成功/完整语义。
 - 已进入 closing 时拒绝新调用；已准入 Git 请求可在连接断开后继续受总超时限制。Gateway 不得在同步 Worker 尚在使用目录 FD 时释放该 FD。**实际同步 Worker 仍在运行时不得释放租约或关闭 FD；受控 Git 清理未确认时，应先持久隔离仓库，再释放执行锁及已经结束的 Worker 租约。** finally 不得将 QUARANTINED 自动复位为 READY。
 - 在 SDK 2.3.0 的 stateless JSON 传输中，HTTP 断连并不等于取消执行，也不保证 exactly-once。commit、pull、push 响应丢失属于结果未知，禁止自动重试。
@@ -260,7 +266,7 @@ gateway_info 和 list_workspaces 可以公开 Git 是否启用、允许的命令
 建议新增：
 - gateway/git_cli.py — Git 请求编译与运行器（足够小时不必继续拆分）。
 - gateway/git_policy.py — 每个命令的 Schema、授权验证。
-- gateway/git_repository.py — 父级仓库发现、共享仓库协调标识、锁内失败关闭状态及持久执行记录；私有状态目录不属于 File API，且 V1 不新增后台任务。
+- gateway/git_repository.py — 父级仓库发现、共享仓库协调标识、仓库级 RUNNING/QUARANTINED 和**首次 discovery 前的服务端级 DISCOVERING/GLOBAL_QUARANTINED** 持久意图记录、重启恢复扫描与短期准入门；私有状态目录不属于 File API，且 V1 不新增后台任务。
 
 建议修改：
 - gateway/workspaces_config.py、gateway/workspaces.py：私有权限配置、Workspace 路由、实际 Worker 租约。
@@ -285,6 +291,7 @@ gateway_info 和 list_workspaces 可以公开 Git 是否启用、允许的命令
 | Git 原生行为 | .gitignore 原生规则；tracked 文件 pull 更新；Hook/Filter 执行及外部副作用按设计允许 |
 | 共享仓库 | 两个 Workspace 的共享父级仓库同一把锁，linked worktree 共用 common-dir 锁，独立仓库并行；锁等待不持有生命周期互斥锁 |
 | 清理未确认的隔离准入 | A 清理未确认先隔离后解锁，B 同仓库/不同 Workspace 或 linked worktree 不得启动业务 Git；独立仓库不受影响；持久隔离重启后仍有效，管理员核实后才能离线恢复 |
+| 首次 discovery 崩溃窗口 | 首次 rev-parse 之前持久 DISCOVERING 记录，写入失败零 Git 启动；首次 discovery 启动后强制杀 Gateway，重启全局隔离且零业务 Git 启动；离线恢复后才解封 |
 | 网络和延后功能 | Remote 名称限制；clone/checkout 直接拒绝；已配置的外部本地 Git Remote 作为间接行为允许 |
 | 生命周期 | dry_run 连 rev-parse 都不启动；单一端到端预算覆盖锁/发现/drain/reap；超时 TERM/KILL 和同步 Worker 资源回收，断连状态未知不自动重试 |
 | 环境和输出 | 污染 GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE/GIT_COMMON_DIR 不可重定向仓库/Index；保留认证环境，Gateway Token 不继承，stdout/stderr 持续 drain | 
@@ -300,6 +307,14 @@ gateway_info 和 list_workspaces 可以公开 Git 是否启用、允许的命令
 3. 后续重启载入残留 RUNNING/QUARANTINED 标记、超时、断连和 closing 不得自动放行；只有本机管理员已确认受控主进程/进程组及相关子进程均退出，并通过离线私有状态流程清理标记后方可恢复。
 4. 成功和业务 Git 非零失败但**清理确认完成**的路径均清除活动记录、释放锁并允许下一请求；独立仓库在另一仓库隔离期间仍可运行。
 5. 已准入同步 Worker 在断连、截止期限或关闭时不得提前释放仍使用中的根 FD 与执行租约；不可在仍有受控 Worker 活动时关闭目录身份。仓库发现身份未确定却清理失败时触发服务端 Git 全局失败关闭。
+
+第三轮新增 P2 的**启动前持久意图验收**：
+
+1. 对首次 discovery 意图落盘分别注入文件写入、fsync、rename、目录 fsync 失败；没有持久活动意图的情况下首次 rev-parse/Git 子进程启动计数必须为零，受影响的 Git 服务不能 fail-open。
+2. 在 DISCOVERING 记录已成功持久化、首次 rev-parse 子进程已确认启动、尚未来得及进入错误处理/finally 时强制终止整个 Gateway 进程；重启扫描应发现遗留 DISCOVERING，**拒绝任何新的 discovery 和业务 Git**，而不是等待检测到 git_cleanup_incomplete 才阻断。
+3. 两个并发正常 discovery 必须使用不同调用 ID/记录，不能相互覆盖或误删；正常 discovery 进程完全回收并同步删除自身记录后，同实例其他独立仓库仍可并行执行。
+4. 在 discovery 完整回收并清除 DISCOVERING 后、仓库 RUNNING 持久化之前模拟崩溃，须证明没有未确认清理的 Git 子进程；在仓库 RUNNING 持久化之后、首个锁内 Git 子进程启动之前模拟崩溃，重启必须按对应仓库隔离。
+5. 持久标记损坏、无法读取、孤立 discovery 活动意图、异常清理失败均不能导致自动放行；只有停用 Gateway 并由本机管理员确认受控执行已清理，再通过离线恢复移除活动记录后才允许下一次真实 Git。
 
 实现完成后必须运行 bash verify.sh --require-mcp、真实 macOS Git/MCP/Tunnel smoke、完整 pytest 回归、GitHub Actions、Release Manifest 一致性校验和独立代码安全评审。仅设计文档 PR 不能声称实现测试通过.
 
@@ -329,7 +344,9 @@ gateway_info 和 list_workspaces 可以公开 Git 是否启用、允许的命令
 - P2 clone 创建期目标锁/仓库锁衔接缺口：V1 延后 clone。
 - 原 P2 后续约束：冻结逐命令 Schema、Git 环境清理、预览零 Git 运行、锁等待与总超时/输出 drain/reap 顺序。
 - 第二轮复审 Base ba8634f → Head 4660d05：Standards PASS、Spec FAIL，上一轮三个问题已关闭；新增 P2 是 Git 清理未确认后释放锁前未隔离仓库，导致新请求可能与残留执行重叠。
-- 本次定向补充 §7.1、§8.2、§9 和 §10：状态隔离/持久活动标记、锁内原子转换、离线恢复、跨 Workspace/linked worktree 准入和失败关闭验收；**修订仍待独立定向复审，不代表实现测试通过。**
+- 本次定向补充 §7.1、§8.2、§9 和 §10：状态隔离/持久活动标记、锁内原子转换、离线恢复、跨 Workspace/linked worktree 准入和失败关闭验收。
+- 第三轮复审 Base ba8634f → Head 63c89db：Standards PASS、Spec FAIL；原隔离 P2 的仓库级主路径已关闭，剩余 P2 是**首次 Git rev-parse 启动前缺少持久活动意图**，进程可能在记录失败处理前崩溃而导致重启误放行。
+- 本次最小补充 §5.1、§7/7.1、§8.2、§9、§10：每次首次 discovery 预先同步持久化独立服务端级 DISCOVERING，崩溃遗留标记按 GLOBAL_QUARANTINED 阻断，确认完整清理后删除，再转入仓库锁和仓库级 RUNNING；新增强制终止/重启/离线恢复测试。**本轮仍待独立定向复审，不代表实现或产品测试通过。**
 
 ## 13. 依据
 

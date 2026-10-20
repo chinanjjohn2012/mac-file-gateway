@@ -1,0 +1,81 @@
+name: C3 identity barrier research — Darwin only (NOT G2)
+
+on:
+  push:
+    branches:
+      - research/phase2-lite-c3-identity-20261021
+  pull_request:
+    paths:
+      - ".github/workflows/c3-identity-native.yml"
+      - "tools/research/c3_identity_probe.c"
+      - "tools/research/run_c3_identity_probe.py"
+      - "tests/test_c3_identity_barriers.py"
+      - "docs/research/phase2-lite-c3/identity-barriers.md"
+
+permissions:
+  contents: read
+
+jobs:
+  native-barriers:
+    if: >-
+      (github.event_name == 'push' &&
+       github.ref == 'refs/heads/research/phase2-lite-c3-identity-20261021') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'research/phase2-lite-c3-identity-20261021')
+    runs-on: macos-15
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify ARM64 and immutable checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          sw_vers -productVersion
+          uname -v
+          xcrun --find cc
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          architecture: arm64
+      - name: Run research contracts only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install pytest==8.4.2
+          python -m pytest -q tests/test_c3_identity_barriers.py
+      - name: Run disposable identity barriers, never G2
+        shell: bash
+        run: |
+          set -euo pipefail
+          private_dir="$(mktemp -d)"
+          chmod 700 "$private_dir"
+          trap 'rm -rf "$private_dir"' EXIT
+          python tools/research/run_c3_identity_probe.py --evidence-dir "$private_dir"
+          python - "$private_dir/c3_identity_private.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          data = json.loads(Path(sys.argv[1]).read_text())
+          assert data["g2_qualified"] is False
+          assert data["decision"] == "PARTIAL_C3_IDENTITY_NOT_G2"
+          assert [(c["mode"], c["status"]) for c in data["cases"]] == [
+              ("exit-unreaped", "SAFE_REFUSAL"),
+              ("competing-reap", "EXPECTED_BLOCK"),
+              ("group-isolation", "POSITIVE_EXPERIMENT"),
+              ("stale-after-reap", "EXPECTED_BLOCK"),
+          ]
+          assert all(c["after_loss_signals"] == 0 for c in data["cases"])
+          assert all(c["reuse_proven"] == 0 for c in data["cases"])
+          print("C3_ID_NATIVE_RESULT=PARTIAL_C3_IDENTITY_NOT_G2")
+          PY

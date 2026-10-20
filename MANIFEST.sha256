@@ -1,6 +1,7 @@
 a8e317838b00e2905a24b927075490d60aaf993dbee4335385ca3f4001c8709e  ./.github/workflows/c1-native-research.yml
 9260a8a0b3a6660b66f7034b8a63e2b1b849ae12d83a6316694c865fcecc4560  ./.github/workflows/c2-native-research.yml
 b6b5c72a5ce2050fa1bb6a80b9aced547bbdb4a1ef47fe9457764eae9ad0eadc  ./.github/workflows/c2-review-native.yml
+e9d91f6031850cd5a2aaf996f9848ec3e00f44cf57850821a967c5bdf4e87daf  ./.github/workflows/c3-identity-native.yml
 ed869e8fc850a3ba0844084c35aa891780b098bd396d2cfa29501fefde826959  ./.github/workflows/c3-native-research.yml
 0dadaf6bd4f57a24546f103bfb110685ad12964dc442f9d41bdb8d72cfd05e56  ./.github/workflows/controlled-exec-tests.yml
 ef06acea97a3c12d0a236a36d6d1bd74b735c62b712e3ad69e50c6f87ac90b90  ./.gitignore
@@ -36,6 +37,7 @@ c60ae6bfd5272614ba62d2232dbd1a1ab26bba70d2795f411cb96bb9cceb7e95  ./docs/legacy-
 b97c5a9aa89894f1ea4002ec351b3d0bd02c97f47b9dcd21915315947ac254e8  ./docs/research/phase2-lite-c2/README.md
 a6ef8f7b8ef516853d4c15fa73c6e3c81ee1088a251248bc8c069c3a6d5123e6  ./docs/research/phase2-lite-c3/README.md
 5fff76daf634e5ba5f8e6cabcb858a013f4066b6a0a5e8c5da8c79784d83b91d  ./docs/research/phase2-lite-c3/first-native-evidence.md
+5887b41e0fb922610d5b8e69f92d94640065fe3fa4c63ff2811d842ec5ef44b4  ./docs/research/phase2-lite-c3/identity-barriers.md
 ca68eee7354aa506e009939f4ef4e04ae4327d46bd537ed321ebfe5904cedc42  ./docs/research/phase2-lite-c3/xnu-identity-observations.md
 1e95a8424b5cae7d8c47cbb30269ea0b773edc50df03eb78151f93553f5ee284  ./docs/superpowers/plans/2026-09-22-guarded-writes.md
 9844da6b4c1cd80fdc462b86d39654108b07d163802c622d380e56f301610942  ./docs/superpowers/specs/2026-09-22-guarded-writes.md
@@ -92,6 +94,7 @@ fbd3446dd228380c5f37696a7dddc551a8064d62e0677e9f6e994cd5a6f26246  ./tests/test_c
 ba9bf6180bde9aeb18b433e13860949ae5628a3187fe5e27d4e1afa52440fd88  ./tests/test_c2_pgid_probe.py
 51729ca9b2e169df545cd1d6585159a501ed8b8e1c3c72bcb41655549122f354  ./tests/test_c2_round2_review.py
 0b362b21d5394632189ddb4c2f73c117cfd7500feddf3111ddedf5c16abde5d7  ./tests/test_c2_sigchld_review.py
+e86190d6fb8b6aa005e83c3245f161445b588856bc72b279626204aca5a60d07  ./tests/test_c3_identity_barriers.py
 8323158379476521b43f755747853f8a6cff83f7166a23bc59f9f4f9c6f4d2c8  ./tests/test_c3_relay_research.py
 199ec7e6958c1f21aa8ca14ac1af8b9868490621e02f67e9a3926eaf5957cef1  ./tests/test_cli.py
 599bdd040fa4fd89f1baa9a431e5fe230e6f4509938008cda22d86caccc1db37  ./tests/test_command_http.py

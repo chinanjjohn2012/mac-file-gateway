@@ -317,6 +317,27 @@ static int reap_owned(Owned *o, long long deadline) {
     }
     return 0;
 }
+/* Once identity qualification is lost without any competing waiter, the
+ * original parent may still safely perform waitpid to reap its own child.
+ * This routine issues NO SIGNAL and never uses the cached PID as an authority
+ * to target any other process. ECHILD/timeouts remain incomplete cleanup.
+ */
+static int reap_lost_direct_no_signal(Owned *o, long long deadline) {
+    if (o->pid <= 0 || o->reaped || o->ownership_contested) return 0;
+    while (ms_left(deadline) > 0) {
+        int status = 0;
+        pid_t got = waitpid(o->pid, &status, WNOHANG);
+        if (got == o->pid) {
+            o->reaped = 1;
+            o->status = status;
+            return 1;
+        }
+        if (got < 0 && errno == EINTR) continue;
+        if (got < 0) return 0;
+        delay_ms(20);
+    }
+    return 0;
+}
 static int register_exit_note(int *watcher, pid_t pid) {
     int fd = kqueue();
     if (fd < 0) return 0;
@@ -390,6 +411,8 @@ static int owner_run(const char *mode, const char *root, const char *binary) {
     int exit_observed = 0, refused = 0, canary_alive = 0;
     int success = 0, owned_reap_at_barrier = 0;
     int waiter_active = 0, waiter_done = 0;
+    const long long cleanup_deadline = clock_ms() + 5000;
+    long long deadline = cleanup_deadline;
 #ifdef C3_ID_TEST_FAULTS
     int epipe = 0;
     int fault_mode = strncmp(mode, "fault-", 6) == 0;
@@ -398,7 +421,6 @@ static int owner_run(const char *mode, const char *root, const char *binary) {
     if (!private_root(root, binary, &dirfd)) goto done;
     failure = "sigchld_or_sigpipe";
     if (!waitable_sigchld() || !ignore_sigpipe_for_owner()) goto done;
-    long long deadline = clock_ms() + 5000;
     failure = "spawn_A";
     if (!spawn_owned(binary, root, dirfd, &a, deadline, mode) ||
         !live_owned(&a, deadline)) goto done;
@@ -506,7 +528,10 @@ static int owner_run(const char *mode, const char *root, const char *binary) {
         if (!write_byte(a.input, 'E')) goto done;
 #ifdef C3_ID_TEST_FAULTS
         if (strcmp(mode, "fault-waiter-result") == 0) {
-            close_owned(&result[0]);
+            /* Inject a failed primary receive before it consumes the event.
+               The cleanup lane still has the same private reader, and may
+               recover the trusted completion within the original deadline. */
+            errno = EIO;
             failure = "fault_waiter_result";
             goto done;
         }
@@ -573,11 +598,15 @@ done:
        A contested PID is NEVER eligible for direct-PID SIGKILL fallback. */
     if (waiter_active && !waiter_done) {
         close_owned(&a.input);
-        if (result[0] >= 0 && ms_left(deadline) > 0 &&
-            read_waiter_result(result[0], &waiter_event, deadline))
+        if (result[0] >= 0 && ms_left(cleanup_deadline) > 0 &&
+            read_waiter_result(result[0], &waiter_event, cleanup_deadline))
             waiter_done = waiter_event.result == a.pid &&
                           WIFEXITED(waiter_event.status) &&
                           WEXITSTATUS(waiter_event.status) == 0;
+    }
+    if (a.lost && !a.ownership_contested && !a.reaped && a.pid > 0) {
+        close_owned(&a.input); /* EOF releases the cooperative synthetic child. */
+        (void)reap_lost_direct_no_signal(&a, cleanup_deadline);
     }
     close_owned(&watcher);
     close_owned(&sync[0]); close_owned(&sync[1]);

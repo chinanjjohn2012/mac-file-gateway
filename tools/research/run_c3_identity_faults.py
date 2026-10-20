@@ -29,11 +29,11 @@ MODES = (
 # attempts, after_loss_attempts, direct-PID signals, real EPIPE,
 # contested, observed legitimate waiter completion, cleanup verified
 EXPECTED = {
-    "fault-unauthorized-esrch": (1, 1, 0, 0, 0, 0, 0),
+    "fault-unauthorized-esrch": (1, 1, 0, 0, 0, 0, 1),
     "fault-broken-pipe": (0, 0, 0, 1, 0, 0, 1),
     "fault-waiter-ready": (0, 0, 0, 0, 1, 1, 1),
-    "fault-waiter-timeout": (0, 0, 0, 0, 1, 0, 0),
-    "fault-waiter-result": (0, 0, 0, 0, 1, 0, 0),
+    "fault-waiter-timeout": (0, 0, 0, 0, 1, 1, 1),
+    "fault-waiter-result": (0, 0, 0, 0, 1, 1, 1),
 }
 REASONS = {
     "fault-unauthorized-esrch": "unauthorized_signal_attempt",
@@ -164,7 +164,8 @@ def main() -> int:
 
     accepted = (
         all(c["status"] == "EXPECTED_BLOCK" and
-            c["elapsed_ms"] < 6500 and c["pid_signals"] == 0
+            c["elapsed_ms"] < 6500 and c["pid_signals"] == 0 and
+            c["cleanup_complete"] == 1
             for c in cases)
         and mutation_detected
     )

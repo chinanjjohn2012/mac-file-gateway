@@ -1,0 +1,75 @@
+name: C2 review native macOS research (NOT G2)
+
+on:
+  push:
+    branches:
+      - research/phase2-lite-c2-review-fixes-20261020
+  pull_request:
+    paths:
+      - ".github/workflows/c2-review-native.yml"
+      - "tools/research/c2_sigchld_probe.c"
+      - "tools/research/run_c2_sigchld_probe.py"
+      - "tools/research/c2_pgid_anchor.c"
+      - "tests/test_c2_sigchld_review.py"
+
+permissions:
+  contents: read
+
+jobs:
+  native-review:
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/research/phase2-lite-c2-review-fixes-20261020') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'research/phase2-lite-c2-review-fixes-20261020')
+    runs-on: macos-15
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify exact native checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          sw_vers -productVersion
+          xcrun --find cc
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          architecture: arm64
+      - name: Run synthetic SIGCHLD research only
+        shell: bash
+        run: |
+          set -euo pipefail
+          private_dir="$(mktemp -d)"
+          chmod 700 "$private_dir"
+          trap 'rm -rf "$private_dir"' EXIT
+          python -VV
+          python tools/research/run_c2_sigchld_probe.py --evidence-dir "$private_dir"
+          python - "$private_dir/c2_sigchld_private.json" <<'PY'
+          import json, sys
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              data = json.load(stream)
+          assert data["g2_qualified"] is False
+          assert data["decision"] == "PARTIAL_NATIVE_SIGCHLD_ONLY_NOT_G2"
+          assert len(data["cases"]) == 3
+          assert all(case["status"] == "POSITIVE_EXPERIMENT" for case in data["cases"])
+          print("C2_SIGCHLD_NATIVE_RESULT=PARTIAL_NATIVE_SIGCHLD_ONLY_NOT_G2")
+          PY
+      - name: Recheck existing C2 synthetic lifetime contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          private_dir="$(mktemp -d)"
+          chmod 700 "$private_dir"
+          trap 'rm -rf "$private_dir"' EXIT
+          python tools/research/run_c2_pgid_probe.py --evidence-dir "$private_dir"

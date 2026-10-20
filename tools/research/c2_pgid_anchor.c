@@ -38,6 +38,19 @@ static void pause_ms(long millis) {
     while (nanosleep(&ts, &ts) < 0 && errno == EINTR) {}
 }
 
+/* Standalone research helper owns its own SIGCHLD policy; never change Gateway's. */
+static int configure_waitable_sigchld(void) {
+    struct sigaction wanted, actual;
+    memset(&wanted, 0, sizeof wanted);
+    wanted.sa_handler = SIG_DFL;
+    if (sigemptyset(&wanted.sa_mask) != 0) return -1;
+    wanted.sa_flags = 0;
+    if (sigaction(SIGCHLD, &wanted, NULL) != 0) return -1;
+    if (sigaction(SIGCHLD, NULL, &actual) != 0) return -1;
+    return (actual.sa_handler == SIG_DFL &&
+            (actual.sa_flags & SA_NOCLDWAIT) == 0) ? 0 : -1;
+}
+
 /* The only owner of waitpid may reap this direct child. Never cache a PID as proof. */
 static int owner_live(Owner *owner) {
     if (owner->reaped || owner->pid <= 0) return 0;
@@ -162,6 +175,9 @@ int main(int argc, char **argv) {
     int actions_ready = 0, attr_ready = 0, error = 0;
     Owner owner = {.pid = -1, .reaped = 0, .status = 0};
     const char *failure = "setup";
+    failure = "sigchld_policy";
+    if (configure_waitable_sigchld() != 0) goto done;
+    failure = "setup";
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) goto done;
     if (pipe(gate) != 0 || pipe(output) != 0) goto done;
     if ((error = posix_spawn_file_actions_init(&actions)) != 0) goto done;

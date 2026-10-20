@@ -41,3 +41,22 @@ The native workflow `.github/workflows/c2-native-research.yml` tests Python 3.13
 Even if all five cases pass, **G2 is still BLOCK**. The test does not prove real PID/PGID reuse, identity behavior under hostile external signals, a kernel-held stable group capability, a detached descendant, Direct/Pipenv and Pipfile binding, permissions of real Workspace ancestors, process ownership after Gateway cancellation/shutdown, full stdout/stderr drain, FD/permit release or OS sandboxing. A process that leaves a group is outside group-based cancellation. The work also does not prove `waitpid` works on grandchildren (it usually does not) or authorize *production* signals based only on an integer PGID.
 
 Require independent source/security review of the exact tested SHA and real Mac failure/positive cases before G2. MCP 2.3.0 G3 stays independent. **ExecSupervisor, REST Multi /run, MCP Multi run_command, merge/deploy/enable remain BLOCK.**
+
+## Independent review finding status (2026-10-20)
+
+The fixed C2 review returned **CONDITIONAL**, NOT G2. A standalone C Helper must explicitly use
+a waitable `SIGCHLD` policy: `SIG_DFL` and no `SA_NOCLDWAIT`, with one owner of
+`waitpid`; the research process must never change the live Gateway's process signal policy.
+The new isolated signal probe synthetically injects `SIG_IGN` and `SA_NOCLDWAIT` *inside its own
+test process* before resetting them. This is **not** evidence of inheritance across `exec`
+and never proves the group check-to-signal operation atomic.
+
+The existing `stale` case checks an **invalid expected identity** (the caller supplies zero).
+It is **not a PGID reuse test**. Thus, successful refusal proves neither reuse protection nor
+that an unrelated process group can never receive a signal. Actual reuse and atomic ownership
+remain unproved, and C2's intentional fail-closed behavior after the original leader exits
+still cannot satisfy real Gateway cancellation.
+
+A separate independent descendant-exit witness and a false-EOF native negative control
+are required before the C2 research finding can be closed. Neither the `SIGCHLD` follow-up
+nor CI GREEN alone grants G2, G3, ExecSupervisor, merge, deploy or Multi exec activation.

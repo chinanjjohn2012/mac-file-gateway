@@ -238,7 +238,8 @@ int main(int argc, char **argv) {
     }
 
     failure = "pipe_eof";
-    if (!drain_to_eof(output[0], 6000)) goto done;
+    long drain_budget_ms = refused ? 4000 : 2000;
+    if (!drain_to_eof(output[0], drain_budget_ms)) goto done;
     failure = "owned_reap";
     if (bounded_reap(&owner, 2000) != 0 || !owner.reaped) goto done;
     failure = "owned_exit_status";

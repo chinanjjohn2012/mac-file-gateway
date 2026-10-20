@@ -1,0 +1,71 @@
+name: C2 native macOS owned-PGID research (not G2 qualification)
+
+on:
+  push:
+    branches:
+      - research/phase2-lite-c2-pgid-20261020
+  pull_request:
+    paths:
+      - ".github/workflows/c2-native-research.yml"
+      - "tools/research/c2_pgid_anchor.c"
+      - "tools/research/c2_group_child.py"
+      - "tools/research/run_c2_pgid_probe.py"
+      - "tests/test_c2_pgid_probe.py"
+      - "docs/research/phase2-lite-c2/**"
+
+permissions:
+  contents: read
+
+jobs:
+  c2-native:
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/research/phase2-lite-c2-pgid-20261020') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.ref == 'research/phase2-lite-c2-pgid-20261020' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: macos-15
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Check native architecture and exact checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = "Darwin"
+          test "$(uname -m)" = "arm64"
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          sw_vers -productVersion
+          xcrun --find cc
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          architecture: arm64
+      - name: C2 synthetic five-case probe, never qualify G2
+        shell: bash
+        run: |
+          set -euo pipefail
+          private_dir="$(mktemp -d)"
+          chmod 700 "$private_dir"
+          trap 'rm -rf "$private_dir"' EXIT
+          python -VV
+          python tools/research/run_c2_pgid_probe.py --evidence-dir "$private_dir"
+          python - "$private_dir/c2_pgid_private.json" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as file:
+              data = json.load(file)
+          assert data["g2_qualified"] is False
+          assert data["decision"] == "PARTIAL_NATIVE_OBSERVATION_NOT_G2"
+          assert [c["status"] for c in data["cases"]] == [
+              "POSITIVE_EXPERIMENT", "POSITIVE_EXPERIMENT", "POSITIVE_EXPERIMENT",
+              "SAFE_REFUSAL", "SAFE_REFUSAL"
+          ]
+          print("C2_NATIVE_RESULT=PARTIAL_NATIVE_OBSERVATION_NOT_G2")
+          PY

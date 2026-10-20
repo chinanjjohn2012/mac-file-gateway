@@ -12,7 +12,7 @@
 
 https://github.com/chinanjjohn2012/mac-file-gateway/tree/release/ms1
 
-建议直接使用 `release/ms1`。
+建议正式部署仍使用 `release/ms1`。MCP Python SDK 2.3.0 的迁移正在 `feature/mcp-sdk-v2` 分支评审，尚未合并；验证此次升级时，请明确切换到升级分支。
 
 ### 已包含的主要代码
 
@@ -25,7 +25,9 @@ mac-file-gateway/
 │   ├── write_storage.py         # 写锁、备份、原子提交
 │   ├── file_ops.py              # 删除、移动、重命名
 │   ├── executor.py              # 受控 run_command
-│   ├── mcp_adapter.py           # MCP 工具注册
+│   ├── mcp_adapter.py           # 单工作区 MCP 工具注册
+│   ├── mcp_multi.py             # 多工作区 MCP 工具注册
+│   ├── mcp_transport.py         # MCP SDK v2 HTTP 传输配置
 │   ├── http.py                  # 本地 HTTP / MCP 服务
 │   └── local_skills/
 │       ├── bridge.py            # Local Skill Bridge 入口
@@ -174,6 +176,8 @@ bash setup.sh
 
 需要 **Python 3.11 或更新版本**。
 
+Gateway 自身通过 `requirements.txt` / `requirements-dev.txt` 和项目 `.venv` 管理依赖，当前升级分支固定使用 **`mcp==2.3.0`**，并兼容 MCP `2025-11-25` 与 `2026-07-28` 两种协议。Gateway 仓库本身没有 `Pipfile` 或 `Pipfile.lock`；目标项目中的 Pipfile 仅用于判断受控命令是否需要通过 `pipenv run` 执行，无需为 Gateway 的 SDK 升级修改。
+
 如果没有合适版本，可以使用 Homebrew，例如：
 
 ```bash
@@ -188,7 +192,8 @@ brew install python@3.13
 4. 检查官方 MCP SDK
 5. 运行 `compileall`
 6. 运行完整 pytest
-7. 运行本地 HTTP smoke test
+7. 运行 REST-only HTTP、真实 MCP HTTP（双协议）和 MCP stdio（双协议）smoke test
+8. 核验 `MANIFEST.sha256`
 
 安装和验证过程不会修改你准备让 ChatGPT 操作的目标项目。
 
@@ -687,13 +692,15 @@ Gateway 主要面向普通代码和 UTF-8 文本文件。
 
 ## 七、常用检查命令
 
-代码级本地验证（MCP import、compileall、pytest、HTTP smoke 和 `MANIFEST.sha256` 一致性）：
+升级分支的本地验证（MCP SDK import、compileall、pytest、REST HTTP smoke、真实 MCP HTTP / stdio 双协议 smoke 和 `MANIFEST.sha256` 一致性）：
 
 ```bash
 bash verify.sh --require-mcp
 ```
 
-`verify.sh` 会在 Git 工作树中按已跟踪文件重新计算发布清单；文件内容、文件集合或 `MANIFEST.sha256` 任一发生漂移都会失败。`release/ms1` 的 GitHub Actions 使用同一发布清单作为门禁。
+`verify.sh` 会在 Git 工作树中按已跟踪文件重新计算发布清单；文件内容、文件集合或 `MANIFEST.sha256` 任一发生漂移都会失败。GitHub Actions 也会检查同一发布清单。
+
+其中 REST-only 的 `tests/smoke_live.py` 输出 `mcp_verified: false` 是预期行为（它以 `--http-only` 启动）；独立的 `tests/smoke_mcp_live.py` 成功后才输出 `mcp_verified: true`，`tests/smoke_mcp_stdio.py` 则验证官方 SDK 客户端与真实 stdio 子进程交互，成功后输出 `stdio_verified: true`。
 
 只检查启动策略：
 
@@ -730,6 +737,7 @@ Ctrl+C
 
 ## 八、相关文档
 
+- `docs/MCP_SDK_V2_MIGRATION.md`：SDK 2.3.0 迁移范围、保留契约、验证和回滚
 - `docs/CONTROLLED_EXEC.md`：受控项目命令执行规则
 - `docs/2026-10-01-local-skill-bridge.md`：Local Skill Bridge v1 冻结规格
 - `docs/LOCAL_SKILL_BRIDGE_IMPLEMENTATION_PLAN.md`：实现计划

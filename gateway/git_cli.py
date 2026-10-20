@@ -292,6 +292,30 @@ class GitCLIExecutor:
     def _check_prerequisites(self, key: tuple[int, int], call_id: str, cwd: str,
                              command: str, values: dict[str, Any],
                              deadline: float, evidence: _RepoCleanupEvidence) -> None:
+        # Lexical checks used by the Git-free preview are not equivalent to
+        # Git's own branch grammar (for example, HEAD passes our lexical
+        # filter but Git rejects it as a branch name). Every supplied branch
+        # is therefore checked by Git under the repository lock and RUNNING
+        # intent, before any business command. Never pass a bare branch name
+        # as a push refspec: the compiler builds the complete refs/heads pair.
+        branch_name = None
+        if command == "branch" and values["action"] in {"create", "delete"}:
+            branch_name = values["name"]
+        elif command == "switch":
+            branch_name = values["name"]
+        elif command in {"pull", "push"}:
+            branch_name = values["branch"]
+        if branch_name is not None:
+            checked_name = self._checked_git(
+                key, call_id, cwd,
+                ["check-ref-format", "--branch", branch_name],
+                deadline, evidence, allow_failure=True,
+            )
+            if (checked_name.exit_code != 0
+                    or checked_name.stdout.rstrip("\n") != branch_name):
+                raise GatewayError(
+                    "git_option_invalid", "Invalid Git branch ref name."
+                )
         if command in {"fetch", "pull", "push"}:
             remote = values["remote"]
             r = self._checked_git(key, call_id, cwd, ["remote"], deadline, evidence)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 from pathlib import Path
 import socket
 import subprocess
@@ -210,5 +211,148 @@ def main():
                 server.communicate(timeout=5)
 
 
+
+
+def git_disconnect_smoke():
+    """E/T14: native Git commit Hook survives a disconnected modern MCP caller.
+
+    The client sends EXACTLY ONE non-idempotent commit request and drops TCP
+    after real Git has launched a hook. There is no automatic client retry.
+    """
+    package_root = Path(__file__).resolve().parents[1]
+    with tempfile.TemporaryDirectory(prefix="gateway-git-disconnect-") as path:
+        base = Path(path)
+        repo = base / "project"
+        repo.mkdir()
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=repo, capture_output=True,
+                                  text=True, check=True).stdout.strip()
+        git("init", "-q")
+        git("config", "user.name", "E disconnect")
+        git("config", "user.email", "disconnect@example.invalid")
+        tracked = repo / "tracked.txt"
+        tracked.write_text("first\n")
+        git("add", "tracked.txt")
+        git("commit", "-qm", "initial")
+        tracked.write_text("second\n")
+        git("add", "tracked.txt")
+
+        events = base / "hook.events"
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text(
+            "#!/bin/sh\n"
+            f"printf 'started\\n' >> {shlex.quote(str(events))}\n"
+            "sleep 1.5\n"
+            f"printf 'finished\\n' >> {shlex.quote(str(events))}\n"
+        )
+        hook.chmod(0o755)
+        with socket.socket() as reserved:
+            reserved.bind(("127.0.0.1", 0))
+            port = reserved.getsockname()[1]
+        env = smoke_environment()
+        env["HOME"] = str(base)
+        server = subprocess.Popen(
+            [sys.executable, "-m", "gateway", "--root", str(repo),
+             "--port", str(port), "--allow-git", "--git-command", "commit",
+             "--git-command", "status"],
+            cwd=package_root, env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        url = f"http://127.0.0.1:{port}"
+        def probe():
+            if server.poll() is not None:
+                raise RuntimeError("E Git smoke Gateway exited: " + server.communicate()[1])
+            try:
+                with opener.open(url + "/health", timeout=1) as response:
+                    return response.status == 200
+            except (OSError, urllib.error.URLError):
+                return False
+        try:
+            assert wait_until(probe, seconds=10)
+            preview_body = {"command": "commit", "options": {"message": "one Git commit"}}
+            preview_req = urllib.request.Request(
+                url + "/git/run", data=json.dumps(preview_body).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            with opener.open(preview_req, timeout=7) as response:
+                preview = json.load(response)
+            assert preview["dry_run"] is True
+            assert preview["execute_started"] is False
+            assert not events.exists()
+
+            params = {
+                "_meta": {
+                    PROTOCOL_VERSION_META_KEY: VERSION,
+                    CLIENT_INFO_META_KEY: {"name": "e-git-disconnect", "version": "1"},
+                    CLIENT_CAPABILITIES_META_KEY: {},
+                },
+                "name": "run_git",
+                "arguments": {
+                    "command": "commit",
+                    "options": {"message": "one Git commit"},
+                    "timeout_seconds": 20,
+                    "dry_run": False,
+                },
+            }
+            wire_body = json.dumps({
+                "jsonrpc": "2.0", "id": 991,
+                "method": "tools/call", "params": params,
+            }).encode()
+            wire = (
+                f"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+                "Accept: application/json, text/event-stream\r\n"
+                "Content-Type: application/json\r\n"
+                f"MCP-Protocol-Version: {VERSION}\r\n"
+                "Mcp-Method: tools/call\r\nMcp-Name: run_git\r\n"
+                f"Content-Length: {len(wire_body)}\r\nConnection: close\r\n\r\n"
+            ).encode("ascii") + wire_body
+
+            def events_now():
+                return events.read_text().splitlines() if events.exists() else []
+
+            with socket.create_connection(("127.0.0.1", port), timeout=4) as client:
+                client.sendall(wire)
+                assert wait_until(lambda: events_now() == ["started"], seconds=7), \
+                    "Actual pre-commit hook never started"
+                client.shutdown(socket.SHUT_RDWR)
+
+            assert wait_until(lambda: events_now() == ["started", "finished"],
+                              seconds=7), "Disconnected Git hook did not finish"
+            assert wait_until(lambda: git("rev-list", "--count", "HEAD") == "2",
+                              seconds=7), "Started Git commit did not finish"
+            assert events_now() == ["started", "finished"]
+            status_req = urllib.request.Request(
+                url + "/git/run",
+                data=json.dumps({"command": "status", "dry_run": False}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            with opener.open(status_req, timeout=9) as response:
+                status = json.load(response)
+            assert status["exit_code"] == 0
+            assert status["cleanup_status"] == "complete"
+            assert not list((base / ".config" / "mac-file-gateway" /
+                             "git-legacy-state").iterdir())
+            assert probe()
+            print(json.dumps({
+                "real_git_mcp_disconnect": "PASS",
+                "checks": [
+                    "native_hook_started_before_tcp_disconnect",
+                    "single_non_idempotent_git_commit",
+                    "hook_finishes_after_disconnect",
+                    "no_automatic_retry",
+                    "worker_cleanup_and_status_after_disconnect",
+                ],
+            }, indent=2))
+        finally:
+            if server.poll() is None:
+                server.terminate()
+            try:
+                server.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                server.communicate(timeout=5)
+
 if __name__ == "__main__":
     main()
+    git_disconnect_smoke()

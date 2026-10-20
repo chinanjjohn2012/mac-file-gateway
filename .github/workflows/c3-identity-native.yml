@@ -107,6 +107,7 @@ jobs:
           assert [x["mode"] for x in data["cases"]] == expected
           assert all(x["status"] == "EXPECTED_BLOCK" for x in data["cases"])
           assert all(x["pid_signals"] == 0 for x in data["cases"])
+          assert all(x["cleanup_complete"] == 1 for x in data["cases"])
           assert all(x["elapsed_ms"] < 6500 for x in data["cases"])
           assert data["cases"][0]["attempts"] == 1
           assert data["cases"][0]["after_loss_attempts"] == 1

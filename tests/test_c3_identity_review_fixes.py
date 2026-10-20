@@ -28,11 +28,11 @@ MODES = (
 )
 # attempt count, after-loss attempts, direct-PID signals, EPIPE, contested, waiter
 EXPECTED = {
-    "fault-unauthorized-esrch": (1, 1, 0, 0, 0, 0, 0),
+    "fault-unauthorized-esrch": (1, 1, 0, 0, 0, 0, 1),
     "fault-broken-pipe": (0, 0, 0, 1, 0, 0, 1),
     "fault-waiter-ready": (0, 0, 0, 0, 1, 1, 1),
-    "fault-waiter-timeout": (0, 0, 0, 0, 1, 0, 0),
-    "fault-waiter-result": (0, 0, 0, 0, 1, 0, 0),
+    "fault-waiter-timeout": (0, 0, 0, 0, 1, 1, 1),
+    "fault-waiter-result": (0, 0, 0, 0, 1, 1, 1),
 }
 
 
@@ -159,6 +159,7 @@ def test_native_fault_modes_block_and_bound_cleanup(tmp_path):
     assert [c["mode"] for c in data["cases"]] == list(MODES)
     assert all(c["status"] == "EXPECTED_BLOCK" for c in data["cases"])
     assert all(c["pid_signals"] == 0 for c in data["cases"])
+    assert all(c["cleanup_complete"] == 1 for c in data["cases"])
     assert all(c["after_loss_attempts"] == (1 if c["mode"] == "fault-unauthorized-esrch" else 0)
                for c in data["cases"])
     assert all(c["elapsed_ms"] < 6500 for c in data["cases"])

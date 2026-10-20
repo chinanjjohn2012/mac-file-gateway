@@ -12,6 +12,7 @@ from mcp.types import (
     CLIENT_CAPABILITIES_META_KEY,
     CLIENT_INFO_META_KEY,
     HEADER_MISMATCH,
+    METHOD_NOT_FOUND,
     PROTOCOL_VERSION_META_KEY,
 )
 from starlette.testclient import TestClient
@@ -19,6 +20,8 @@ from starlette.testclient import TestClient
 from gateway.core import Gateway
 from gateway.http import create_app
 from gateway.http_multi import create_multi_app
+from gateway.mcp_adapter import build_mcp
+from gateway.mcp_multi import build_multi_mcp
 from gateway.workspaces import ActiveRuntimeInventory, WorkspaceService
 from gateway.workspaces_config import parse_workspace_config
 
@@ -59,11 +62,27 @@ def modern_call(client, method, params=None):
     return payload["result"]
 
 
+def assert_subscriptions_disabled(client):
+    """An SDK v2 listener must reject unused subscription streams immediately."""
+    response = client.post(
+        "/mcp",
+        headers=modern_headers("subscriptions/listen"),
+        json=modern_body("subscriptions/listen", {
+            "notifications": {"toolsListChanged": True},
+        }),
+    )
+    assert response.status_code == 404, response.text
+    assert response.json()["error"]["code"] == METHOD_NOT_FOUND
+
+
 def test_modern_read_only_tools_and_discovery(tmp_path):
     (tmp_path / "demo.py").write_text("x = 1\n")
     gateway = Gateway(tmp_path)
     try:
+        # Fail quickly before an accidental long-lived SSE stream could be opened.
+        assert "subscriptions/listen" not in build_mcp(gateway)._lowlevel_server._request_handlers
         with TestClient(create_app(gateway), base_url="http://127.0.0.1:8765") as client:
+            assert_subscriptions_disabled(client)
             discovered = modern_call(client, "server/discover")
             assert "supportedVersions" in discovered
             tools = modern_call(client, "tools/list")["tools"]
@@ -153,7 +172,9 @@ def test_modern_multi_workspace_isolation_and_large_wire_body(tmp_path):
         inventory=ActiveRuntimeInventory(paths=(runtime,)),
     )
     try:
+        assert "subscriptions/listen" not in build_multi_mcp(service)._lowlevel_server._request_handlers
         with TestClient(create_multi_app(service), base_url="http://127.0.0.1:8765") as client:
+            assert_subscriptions_disabled(client)
             for workspace, value in (("a", "'a'"), ("b", "'b'")):
                 read = modern_call(client, "tools/call", {
                     "name": "read_file",

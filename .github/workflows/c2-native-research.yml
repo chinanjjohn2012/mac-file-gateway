@@ -47,7 +47,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           architecture: arm64
-      - name: C2 synthetic five-case probe, never qualify G2
+      - name: C2 synthetic six-case primary probe (PR #20 baseline only; not G2)
         shell: bash
         run: |
           set -euo pipefail
@@ -65,7 +65,7 @@ jobs:
           assert data["decision"] == "PARTIAL_NATIVE_OBSERVATION_NOT_G2"
           assert [c["status"] for c in data["cases"]] == [
               "POSITIVE_EXPERIMENT", "POSITIVE_EXPERIMENT", "POSITIVE_EXPERIMENT",
-              "SAFE_REFUSAL", "SAFE_REFUSAL"
+              "SAFE_REFUSAL", "SAFE_REFUSAL", "EXPECTED_BLOCK"
           ]
           print("C2_NATIVE_RESULT=PARTIAL_NATIVE_OBSERVATION_NOT_G2")
           PY

@@ -11,6 +11,7 @@ pytest.importorskip("mcp", reason="Official MCP SDK v2 is required")
 from mcp.types import (
     CLIENT_CAPABILITIES_META_KEY,
     CLIENT_INFO_META_KEY,
+    HEADER_MISMATCH,
     PROTOCOL_VERSION_META_KEY,
 )
 from starlette.testclient import TestClient
@@ -42,8 +43,16 @@ def modern_body(method, params=None):
     }
 
 
+def modern_headers(method, params=None):
+    """Build the routing headers required by MCP 2026-07-28 for a JSON-RPC request."""
+    headers = {**MODERN_HEADERS, "Mcp-Method": method}
+    if method == "tools/call" and params is not None and "name" in params:
+        headers["Mcp-Name"] = params["name"]
+    return headers
+
+
 def modern_call(client, method, params=None):
-    response = client.post("/mcp", headers=MODERN_HEADERS, json=modern_body(method, params))
+    response = client.post("/mcp", headers=modern_headers(method, params), json=modern_body(method, params))
     assert response.status_code == 200, response.text
     payload = response.json()
     assert "result" in payload, payload
@@ -69,6 +78,26 @@ def test_modern_read_only_tools_and_discovery(tmp_path):
                 "name": "read_file", "arguments": {"path": "demo.py", "unexpected": "x"},
             })
             assert invalid["isError"] is True
+    finally:
+        gateway.close()
+
+
+def test_modern_rejects_missing_or_mismatched_routing_headers(tmp_path):
+    """Negative routing checks must exercise the SDK header validator."""
+    gateway = Gateway(tmp_path)
+    try:
+        with TestClient(create_app(gateway), base_url="http://127.0.0.1:8765") as client:
+            params = {"name": "gateway_info", "arguments": {}}
+            body = modern_body("tools/call", params)
+            correct = modern_headers("tools/call", params)
+            for headers in (
+                MODERN_HEADERS,
+                {**correct, "Mcp-Method": "tools/list"},
+                {**correct, "Mcp-Name": "read_file"},
+            ):
+                response = client.post("/mcp", headers=headers, json=body)
+                assert response.status_code == 400, response.text
+                assert response.json()["error"]["code"] == HEADER_MISMATCH
     finally:
         gateway.close()
 
@@ -156,7 +185,9 @@ def test_modern_multi_workspace_isolation_and_large_wire_body(tmp_path):
             })).encode("utf-8")
             payload = payload.replace(b'"MARKER"', b'"' + b'\\u0061' * 800_000 + b'"')
             assert 4 * 1024 * 1024 < len(payload) < 8 * 1024 * 1024
-            response = client.post("/mcp", headers=MODERN_HEADERS, content=payload)
+            response = client.post(
+                "/mcp", headers=modern_headers("tools/call", {"name": "create_file"}), content=payload
+            )
             assert response.status_code == 200, response.text[:500]
             assert response.json()["result"]["structuredContent"]["applied"] is False
             assert not (a / "large.py").exists()
@@ -165,7 +196,9 @@ def test_modern_multi_workspace_isolation_and_large_wire_body(tmp_path):
             raw = (b'{"jsonrpc":"2.0","id":6,"method":"tools/call",'
                    b'"params":{"name":"read_file",'
                    b'"arguments":{"workspace":"a","workspace":"b","path":"demo.py"}}}')
-            duplicate = client.post("/mcp", headers=MODERN_HEADERS, content=raw)
+            duplicate = client.post(
+                "/mcp", headers=modern_headers("tools/call", {"name": "read_file"}), content=raw
+            )
             assert duplicate.status_code == 400
     finally:
         service.close()

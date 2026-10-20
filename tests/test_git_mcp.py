@@ -10,6 +10,10 @@ import pytest
 pytest.importorskip("mcp", reason="Official MCP SDK required")
 
 from starlette.testclient import TestClient
+from mcp.types import (
+    CLIENT_CAPABILITIES_META_KEY, CLIENT_INFO_META_KEY,
+    PROTOCOL_VERSION_META_KEY,
+)
 
 from gateway.core import Gateway
 from gateway.http import create_app
@@ -26,15 +30,37 @@ PROTOCOLS = ("2025-11-25", "2026-07-28")
 
 
 def rpc(client, method, params=None):
+    params = {} if params is None else params
+    headers = dict(HEADERS)
+    if getattr(client, "_git_test_protocol", "2025-11-25") == "2026-07-28":
+        headers.update({
+            "MCP-Protocol-Version": "2026-07-28",
+            "Mcp-Method": method,
+        })
+        if method == "tools/call" and "name" in params:
+            headers["Mcp-Name"] = params["name"]
+        params = {
+            "_meta": {
+                PROTOCOL_VERSION_META_KEY: "2026-07-28",
+                CLIENT_INFO_META_KEY: {"name": "git-d-modern", "version": "1"},
+                CLIENT_CAPABILITIES_META_KEY: {},
+            },
+            **params,
+        }
     resp = client.post(
-        "/mcp", headers=HEADERS,
-        json={"jsonrpc": "2.0", "id": 11, "method": method, "params": params or {}},
+        "/mcp", headers=headers,
+        json={"jsonrpc": "2.0", "id": 11, "method": method, "params": params},
     )
     assert resp.status_code == 200, resp.text
     return resp.json()["result"]
 
 
 def initialized(client, protocol):
+    client._git_test_protocol = protocol
+    if protocol == "2026-07-28":
+        discovery = rpc(client, "server/discover")
+        assert "2026-07-28" in discovery["supportedVersions"]
+        return
     first = rpc(client, "initialize", {
         "protocolVersion": protocol, "capabilities": {},
         "clientInfo": {"name": "git-d-tests", "version": "1.0"},

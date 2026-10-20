@@ -27,6 +27,7 @@ fb9d49a226902f2d1d077dfefdfb118a040c0adff4f4526311d5cab23afce9e3  ./docs/legacy-
 c60ae6bfd5272614ba62d2232dbd1a1ab26bba70d2795f411cb96bb9cceb7e95  ./docs/legacy-v2/README.md
 385c209c06c762cab998f5f572fb5d861ba290ad1d425858326209a6bdcff616  ./docs/legacy-v2/TEST_REPORT.md
 488a6704e497b8b37d25ab3e0a3e27c53355ef051dba824116eb557a2c7039d9  ./docs/legacy-v2/UPGRADE.md
+563ab0aafcded6af3befc6833d03d80f557e1c0c89bc0d246fc855fbdfb1221a  ./docs/research/phase2-lite-c1/README.md
 1e95a8424b5cae7d8c47cbb30269ea0b773edc50df03eb78151f93553f5ee284  ./docs/superpowers/plans/2026-09-22-guarded-writes.md
 9844da6b4c1cd80fdc462b86d39654108b07d163802c622d380e56f301610942  ./docs/superpowers/specs/2026-09-22-guarded-writes.md
 e2b20ae4529dc9bee34e6a6373f4e6592b2ae8e16d4a67e9a5da91ac13a2d920  ./gateway/__init__.py
@@ -77,6 +78,7 @@ db7109d51ee4e242b4776cedf563003ef4d5180e7aef7e8c8c9cd9b0f110b7c9  ./tests/smoke_
 ed7fc3b27a1be8f091fe48ff0819a51e0873e8881b6aff2536d015acbf63d188  ./tests/smoke_mcp_live.py
 877aef784e64645eebfd6ca2d6ccae51ea82d79a457a9614717f453936eaffaa  ./tests/smoke_mcp_stdio.py
 22e551af6367fc5a4ac9c0688231cfba0696ccd84f672fe7f8133718bdb112a3  ./tests/test_backup_retention.py
+fbd3446dd228380c5f37696a7dddc551a8064d62e0677e9f6e994cd5a6f26246  ./tests/test_c1_fd_probe.py
 199ec7e6958c1f21aa8ca14ac1af8b9868490621e02f67e9a3926eaf5957cef1  ./tests/test_cli.py
 599bdd040fa4fd89f1baa9a431e5fe230e6f4509938008cda22d86caccc1db37  ./tests/test_command_http.py
 d1a2fc1207cd40038c8d9ad85ac7813f3907371aa5e6df67c2932196a2564dea  ./tests/test_command_runner.py
@@ -128,5 +130,7 @@ fca5633db78f72f7b7e340ede063418b59682aa8f12b58e6001fe5649dc28862  ./tests/test_w
 d4c009b8db994234522713addff672089869728d0ac81788dc27effba3168fdb  ./tools/check_local_skill_bridge.py
 9c2fe6459eed7ef8fffe08891971c25ec3d142c859fba6386c161ac97bb8c120  ./tools/collect_local_skill_policy.py
 6b0a5f1252e90d7b3479993a37bf9be265bb28680f0aff62552c6f4f863b23ab  ./tools/diagnose_lock.py
+9586f88f06988ebaae11d4a18f06653aa604abf7c99f6b8d1ddc8e4435a1b986  ./tools/research/c1_fd_spawn.c
+b7b5d835d57f8d0b3cd173d6ad138457b7ccef1f7aef97be067abd01486689d3  ./tools/research/run_c1_fd_probe.py
 5048106bee7348de64bcaaf9c7cab93d8c1277f73bf287ae9afc31a45ada1a81  ./tunnel.sh
 7111ec278d18becb9c89d610f4c765dd5bd8601a33769f938da061e369944308  ./verify.sh

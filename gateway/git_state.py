@@ -28,6 +28,10 @@ _ID = re.compile(r"[a-f0-9]{32}\Z")
 _MAX_RECORD = 4096
 
 
+class GitLaunchNotAttempted(Exception):
+    """Only the trusted runner may signal a deadline before calling Popen."""
+
+
 class GitStateStore:
     """All mutable state is protected by a SHORT global admission mutex."""
 
@@ -183,6 +187,16 @@ class GitStateStore:
             self._discoveries.add(call_id)
             try:
                 return spawn()
+            except GitLaunchNotAttempted:
+                # No Popen occurred: fully sync-remove this harmless intent.
+                try:
+                    self._delete(self._name_discover(call_id))
+                except OSError:
+                    self._quarantine_global()
+                    raise GatewayError("git_state_unavailable",
+                                       "Git discovery intent could not be cleared.") from None
+                self._discoveries.discard(call_id)
+                raise GatewayError("git_timeout", "Git deadline expired before subprocess startup.") from None
             except BaseException:
                 # Treat ambiguous Popen failures conservatively; marker stays.
                 self._quarantine_global()
@@ -225,6 +239,10 @@ class GitStateStore:
                 raise GatewayError("git_repository_quarantined", "Git execution is not admitted.")
             try:
                 return spawn()
+            except GitLaunchNotAttempted:
+                # RUNNING persists until the caller's locked finally clears it.
+                raise GatewayError("git_timeout",
+                                   "Git deadline expired before subprocess startup.") from None
             except BaseException:
                 self._bad_repos.add(key)
                 try:

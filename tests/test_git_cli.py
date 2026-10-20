@@ -427,3 +427,94 @@ def test_clean_preflight_failure_does_not_quarantine_repository(tmp_path):
         assert outcome["exit_code"] == 0
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("command,options", [
+    ("branch", {"action": "create", "name": "HEAD"}),
+    ("branch", {"action": "delete", "name": "HEAD"}),
+    ("switch", {"name": "HEAD"}),
+    ("pull", {"remote": "origin", "branch": "HEAD"}),
+    ("push", {"remote": "origin", "branch": "HEAD"}),
+])
+def test_runtime_ref_format_rejects_lexically_valid_reserved_head(
+    tmp_path, monkeypatch, command, options,
+):
+    """Freeze the distinction between in-memory lexical and native ref validation."""
+    _, workspace, _ = repo_workspace(tmp_path)
+    state_dir = tmp_path / "state"
+    state = GitStateStore(state_dir)
+    executor = GitCLIExecutor(state)
+    actual_run = executor.runner.run
+    observed = []
+
+    def observe(cwd, argv, *, spawn_admitted, execute_until, deadline):
+        observed.append(tuple(argv))
+        if argv[0] == "check-ref-format":
+            assert list(state_dir.glob("r-*.json")), "RUNNING must precede ref checks"
+        return actual_run(
+            cwd, argv, spawn_admitted=spawn_admitted,
+            execute_until=execute_until, deadline=deadline,
+        )
+
+    monkeypatch.setattr(executor.runner, "run", observe)
+    try:
+        # HEAD is lexically accepted in the preview, but Git's native
+        # check-ref-format --branch HEAD fails. No branch-changing Git starts.
+        preview = execute(executor, workspace, command,
+                          options=options, dry_run=True)
+        assert preview["execute_started"] is False
+        assert not observed
+        with pytest.raises(GatewayError) as exc:
+            execute(executor, workspace, command, options=options)
+        assert exc.value.code == "git_option_invalid"
+        assert ("check-ref-format", "--branch", "HEAD") in observed
+        assert not any(argv[0] == command for argv in observed)
+        assert not list(state_dir.iterdir())
+        # A rejected ref name with complete cleanup does not quarantine Git.
+        assert execute(executor, workspace, "status")["exit_code"] == 0
+    finally:
+        state.close()
+
+
+def test_native_ref_check_allows_plus_named_branch_and_exact_push(
+    tmp_path, monkeypatch,
+):
+    """A valid +name must remain a literal branch, not a force flag."""
+    repo, workspace, _ = repo_workspace(tmp_path)
+    remote = tmp_path / "bare-remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)],
+                   cwd=tmp_path, check=True)
+    git(repo, "remote", "add", "origin", str(remote))
+    store = GitStateStore(tmp_path / "state", workspace_roots=(str(workspace),))
+    executor = GitCLIExecutor(store)
+    observed = []
+    real_run = executor.runner.run
+
+    def observe(cwd, argv, *, spawn_admitted, execute_until, deadline):
+        observed.append(tuple(argv))
+        return real_run(
+            cwd, argv, spawn_admitted=spawn_admitted,
+            execute_until=execute_until, deadline=deadline,
+        )
+
+    monkeypatch.setattr(executor.runner, "run", observe)
+    try:
+        create = execute(executor, workspace, "branch",
+                         options={"action": "create", "name": "+main"})
+        assert create["exit_code"] == 0
+        pushed = execute(executor, workspace, "push",
+                         options={"remote": "origin", "branch": "+main"})
+        assert pushed["exit_code"] == 0, pushed["stderr"]
+        assert ("check-ref-format", "--branch", "+main") in observed
+        assert ("push", "origin",
+                "refs/heads/+main:refs/heads/+main") in observed
+        assert not any(arg == "+main" for argv in observed if argv[0] == "push"
+                       for arg in argv)
+        heads = subprocess.run(
+            ["git", "for-each-ref", "--format=%(refname)", "refs/heads/"],
+            cwd=remote, capture_output=True, text=True, check=True,
+        ).stdout.splitlines()
+        assert heads == ["refs/heads/+main"]
+        assert not list((tmp_path / "state").iterdir())
+    finally:
+        store.close()

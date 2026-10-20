@@ -234,4 +234,6 @@ def build_multi_mcp(service: WorkspaceService, *, port: int = 8765) -> MCPServer
             """Alias for same-Workspace guarded rename."""
             return await invoke(workspace, 'move', source, destination, expected_sha256, dry_run)
 
+    if service.any_git:
+        service._git_adapter_exposed = True
     return mcp

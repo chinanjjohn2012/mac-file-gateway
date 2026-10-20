@@ -34,7 +34,9 @@ def run_multi(args) -> int:
                                    port=settings.port, token=os.environ.get('GATEWAY_TOKEN'))
             print(f'Mac File Gateway: multi mode, {len(settings.workspaces)} workspaces, '
                   f'listening on 127.0.0.1:{settings.port}', file=sys.stderr)
-            print('Execution and Local Skills disabled in Phase 1.', file=sys.stderr)
+            git_state = ('internally enabled (public adapters pending)' if service.any_git
+                         else 'disabled by policy or unavailable')
+            print('General Exec and Local Skills disabled; Git CLI ' + git_state + '.', file=sys.stderr)
             uvicorn.run(app, host='127.0.0.1', port=settings.port,
                         access_log=False, proxy_headers=False, limit_concurrency=16,
                         timeout_keep_alive=5, timeout_graceful_shutdown=10, log_level='warning')

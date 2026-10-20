@@ -24,6 +24,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-exec", action="store_true", default=argparse.SUPPRESS, help="Enable controlled project command execution (default: disabled)")
     parser.add_argument("--exec-path", action="append", default=argparse.SUPPRESS, help="Executable relative subtree; repeatable; required with --allow-exec")
     parser.add_argument("--exec-runner", action="append", default=argparse.SUPPRESS, help="Project runner mapping PATH=direct or PATH=pipenv; repeatable; requires --allow-exec")
+    parser.add_argument("--allow-git", action="store_true", default=argparse.SUPPRESS, help="Explicit Legacy Git CLI opt-in (default: disabled)")
+    parser.add_argument("--git-command", action="append", default=argparse.SUPPRESS, help="One explicitly permitted Git V1 command; repeatable and requires --allow-git")
     parser.add_argument("--local-skill-root", default=argparse.SUPPRESS, help="Optional project-relative agent-runtime root for Local Skill Bridge")
     parser.add_argument("--local-skill-policy-dir", default=argparse.SUPPRESS, help="Private local audit policy directory (default: ~/.config/mac-file-gateway/local-skill-policy)")
     parser.add_argument("--transport", choices=("http", "stdio"), default="http")
@@ -36,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
         'root': None, 'port': 8765, 'exclude': [], 'allow_hidden_path': [],
         'allow_write': False, 'write_path': [], 'backup_retention_days': 15,
         'allow_exec': False, 'exec_path': [], 'exec_runner': [],
+        'allow_git': False, 'git_command': [],
         'local_skill_root': None, 'local_skill_policy_dir': None,
     }
     args = parser.parse_args(argv)
@@ -67,9 +70,13 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--exec-path/--exec-runner require --allow-exec")
     if args.allow_exec and not args.exec_path:
         parser.error("--allow-exec requires at least one --exec-path")
+    if args.git_command and not args.allow_git:
+        parser.error("--git-command requires --allow-git")
+    if args.allow_git and not args.git_command:
+        parser.error("--allow-git requires at least one --git-command")
     gateway = None
     try:
-        gateway = Gateway(args.root, excludes=tuple(args.exclude), allow_hidden_paths=tuple(args.allow_hidden_path), allow_write=args.allow_write, write_paths=tuple(args.write_path), backup_retention_days=args.backup_retention_days, allow_exec=args.allow_exec, exec_paths=tuple(args.exec_path), exec_runners=tuple(args.exec_runner))
+        gateway = Gateway(args.root, excludes=tuple(args.exclude), allow_hidden_paths=tuple(args.allow_hidden_path), allow_write=args.allow_write, write_paths=tuple(args.write_path), backup_retention_days=args.backup_retention_days, allow_exec=args.allow_exec, exec_paths=tuple(args.exec_path), exec_runners=tuple(args.exec_runner), allow_git=args.allow_git, git_allowed_commands=tuple(args.git_command))
         local_skill_bridge = None
         if args.local_skill_root:
             from .local_skills import LocalSkillBridge
@@ -97,9 +104,10 @@ def main(argv: list[str] | None = None) -> int:
             mode = "REST only; MCP disabled" if args.http_only else "MCP + REST"
             write_policy = "WRITES ENABLED (preview by default)" if args.allow_write else "file writes disabled"
             exec_policy = "EXEC ENABLED (preview by default)" if args.allow_exec else "exec disabled"
+            git_policy = "Git internally enabled (external tools not yet registered)" if args.allow_git else "Git disabled"
             if local_skill_bridge is not None:
                 print(f"Local Skill Bridge: {local_skill_bridge.status_info()['status']}", file=sys.stderr)
-            print(f"Mac File Gateway: {mode}, {write_policy}, {exec_policy}, listening on 127.0.0.1:{args.port}", file=sys.stderr)
+            print(f"Mac File Gateway: {mode}, {write_policy}, {exec_policy}, {git_policy}, listening on 127.0.0.1:{args.port}", file=sys.stderr)
             if args.allow_write:
                 print("Write scope: " + ", ".join(gateway.info()["write_policy"]["paths"]), file=sys.stderr)
             if args.allow_exec:

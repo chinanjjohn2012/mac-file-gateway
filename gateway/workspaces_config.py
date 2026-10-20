@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from .private_fs import PrivateFileError, read_private_json
+from .exec_policy import WorkspaceExecSettings, parse_exec_policy, assert_exec_runtime_unavailable
 
 _ID = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _DENIED_ROOT_PARTS = frozenset({
@@ -26,6 +27,7 @@ class WorkspaceSettings:
     allow_write: bool
     write_paths: tuple[str, ...]
     backup_retention_days: int
+    execution: WorkspaceExecSettings = WorkspaceExecSettings()
 
 
 @dataclass(frozen=True)
@@ -123,13 +125,16 @@ def parse_workspace_config(config: dict[str, Any]) -> GatewaySettings:
         retention = write.get("backup_retention_days", 15)
         if type(retention) is not int or not 1 <= retention <= 3650:
             raise PrivateFileError("Invalid backup retention days.")
-        for option in ("exec", "local_skills"):
+        execution = parse_exec_policy(item.get("exec", {}))
+        for option in ("local_skills",):
             access = _keys(item.get(option, {}), {"enabled"}, option)
             if _bool_field(access, "enabled", False):
                 raise PrivateFileError("Phase 1 rejects unreviewed execution capabilities.")
-        result.append(WorkspaceSettings(name, root, excludes, hidden, allow_write, write_paths, retention))
+        result.append(WorkspaceSettings(name, root, excludes, hidden, allow_write, write_paths, retention, execution))
     return GatewaySettings(port, tuple(result))
 
 
 def read_workspace_config(path: str) -> GatewaySettings:
-    return parse_workspace_config(read_private_json(path))
+    settings = parse_workspace_config(read_private_json(path))
+    assert_exec_runtime_unavailable(settings)
+    return settings

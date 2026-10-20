@@ -15,7 +15,11 @@ from typing import Any, Callable, Iterator
 
 from .private_fs import PinnedDirectory, PrivateFileError, open_pinned_directory
 from .workspaces_config import GatewaySettings, WorkspaceSettings
-from .core import Gateway, GatewayError
+from .core import Gateway, GatewayError, _parts
+from .exec_contracts import ExecutionIntent, parse_execution_request
+from .exec_policy import path_parts, contains_path
+from .executor import _validate_command
+from .exec_registry import ExecRegistry, ExecutionLease
 
 _READ = frozenset({"list_files", "read_file", "search_files"})
 _WRITE = frozenset({"create_directory", "delete_directory", "create_file", "write_file",
@@ -112,6 +116,7 @@ class WorkspaceService:
         self._workspaces: dict[str, WorkspaceContext] = {}
         self._lifecycle = threading.Condition()
         self._active_operations = 0
+        self._exec_registry = ExecRegistry()
         self._closing = self._closed = False
         self._inventory = inventory or ActiveRuntimeInventory()
         config_root: PinnedDirectory | None = None
@@ -170,8 +175,13 @@ class WorkspaceService:
         """
         with self._lifecycle:
             self._closing = True
+            self._exec_registry.begin_close()
             while self._active_operations:
                 self._lifecycle.wait()
+        # A lease owner never needs the Service lock to finish. Do not hold
+        # it while waiting for registry owners; lock order is Service -> Registry.
+        self._exec_registry.wait_idle()
+        with self._lifecycle:
             if self._closed:
                 return
             try:
@@ -199,6 +209,10 @@ class WorkspaceService:
 
     def require(self, name: str, operation: str) -> WorkspaceContext:
         ctx = self.get(name)
+        if operation == "prepare_execution":
+            if not ctx.settings.execution.enabled:
+                raise GatewayError("exec_disabled", "Execution is not declared for this Workspace.")
+            return ctx
         if operation in _WRITE and not ctx.settings.allow_write:
             raise GatewayError("write_disabled", "File writes are disabled for this Workspace.")
         if operation not in _READ | _WRITE:
@@ -220,9 +234,43 @@ class WorkspaceService:
                 self._lifecycle.notify_all()
 
     def invoke(self, name: str, operation: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        if type(operation) is not str or operation not in _READ | _WRITE:
+            raise GatewayError("invalid_argument", "Unsupported file operation.")
         with self._operation(name, operation) as ctx:
             result = getattr(ctx.gateway, operation)(*args, **kwargs)
             return {**result, "workspace": name}
+
+    def prepare_execution(self, payload: object) -> ExecutionIntent:
+        """Plan against a leased root; no filesystem discovery or spawn proof."""
+        request = parse_execution_request(payload)
+        with self._operation(request.workspace, "prepare_execution") as ctx:
+            parts = path_parts(request.cwd)
+            matches = [path_parts(scope) for scope in ctx.settings.execution.paths
+                       if contains_path(path_parts(scope), parts)]
+            if not matches:
+                raise GatewayError("exec_scope", "Execution directory is outside its declared scope.")
+            if not ctx.gateway._allowed(parts, is_file=False):
+                raise GatewayError("blocked_path", "Execution directory is blocked by project policy.")
+            script = _validate_command(list(request.argv))
+            if script is not None and not ctx.gateway._allowed(parts + _parts(script), is_file=True):
+                raise GatewayError("blocked_path", "Execution script is blocked by project policy.")
+            scope = max(matches, key=len)
+            runners = [(path_parts(path), path, mode) for path, mode in ctx.settings.execution.runners
+                       if contains_path(path_parts(path), parts)]
+            if runners:
+                _, project, runner = max(runners, key=lambda item: len(item[0]))
+            else:
+                project, runner = None, "auto"
+            return ExecutionIntent(request, "/".join(scope) or ".", runner, project)
+
+    def _reserve_execution(self, payload: object) -> ExecutionLease:
+        """Internal model seam: re-authorize, reserve only; never dispatch."""
+        intent = self.prepare_execution(payload)
+        with self._lifecycle:
+            # Close may have started after the planning lease was released.
+            # Do not accept a caller-provided intent as an authorization token.
+            self.require(intent.request.workspace, "prepare_execution")
+            return self._exec_registry.reserve(intent)
 
     @property
     def any_write(self) -> bool:

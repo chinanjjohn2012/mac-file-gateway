@@ -1,6 +1,8 @@
 """Explicit Multi-Workspace CLI path; never auto-selects local roots."""
 from __future__ import annotations
 
+from .exec_policy import assert_exec_runtime_unavailable
+
 import importlib.util
 import json
 import os
@@ -18,6 +20,7 @@ def run_multi(args) -> int:
     config = Path(args.config).expanduser()
     try:
         settings = read_workspace_config(str(config))
+        assert_exec_runtime_unavailable(settings)
         service = WorkspaceService(settings, config_dir=config.parent)
         try:
             if args.check:

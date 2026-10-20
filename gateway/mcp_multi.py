@@ -1,6 +1,8 @@
 """Multi-Workspace MCP tools. File-only Phase 1; no command or Skill tools."""
 from __future__ import annotations
 
+from .exec_policy import assert_exec_runtime_unavailable
+
 import json
 from typing import Annotated, Any, Callable
 
@@ -25,6 +27,7 @@ class StrictWorkspaceMCP(MCPServer):
 
 
 def build_multi_mcp(service: WorkspaceService, *, port: int = 8765) -> MCPServer:
+    assert_exec_runtime_unavailable(service.settings)
     # Keep the historical port keyword for callers; HTTP policy now lives at app construction.
     mcp = StrictWorkspaceMCP(
         'Mac File Gateway',

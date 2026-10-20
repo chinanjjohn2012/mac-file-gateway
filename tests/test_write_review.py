@@ -63,7 +63,11 @@ def test_backup_limit_fails_closed(root, g, monkeypatch):
 
 
 def test_world_readable_backup_directory_fails_closed(root, g):
-    (root / ".gateway-backups").mkdir(mode=0o755)
+    backup_dir = root / ".gateway-backups"
+    backup_dir.mkdir(mode=0o755)
+    # mkdir's requested mode is masked by the process umask (077 in native QA).
+    backup_dir.chmod(0o755)
+    assert stat.S_IMODE(backup_dir.stat().st_mode) == 0o755
     with pytest.raises(GatewayError) as exc:
         g.write_file("app.py", "after", sha(b"before"), dry_run=False)
     assert exc.value.code == "backup_unavailable"

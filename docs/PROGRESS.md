@@ -1,3 +1,29 @@
+# Phase 2 Lite core foundation candidate - 2026-10-19
+
+Plan: PR #12, e5d551f7bcf177b956a36c6810de5506b87a3e66.
+Spec: PR #11, ca1a17cc943b2f5b7f5cf43d9d77211fe090de40.
+Runtime code base: PR #10, cd345b0cb46f48b70c6e4478ae4d7d97269c5894.
+The project owner confirmed independent design review and approved the plan.
+
+A1/A2/A3 implementation candidate:
+- Immutable exec declarations and strict activation guards at public factories.
+- Shared signed-off argv validation, immutable requests and Service-only planning.
+- Memory-only owner leases, 1-per-workspace / 4-global immediate admission.
+- Coordinated file-worker and simulated-owner drain before root closure.
+
+No Multi /run route or run_command tool is added. All workspace Gateways
+remain allow_exec=False. No SDK modification, native launcher, OS signalling,
+remote job API, fake backend configuration, deployment or enablement.
+Runtime cwd/PGID (G2), restricted MCP profile (G3), integration (G4) and
+release (G5) remain separate outstanding gates. Task 2's signed-off argv
+fixes are inherited unchanged; Q0 is not repeated as a core-development gate.
+
+Verification must distinguish the local offline snapshot from the complete
+remote code-base CI and native macOS acceptance. Author self-review is not
+independent review; this candidate requires external code review before merge.
+
+---
+
 # Progress
 
 ## 2.2.0 file lifecycle

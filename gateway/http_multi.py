@@ -5,6 +5,8 @@ Legacy create_app remains an independent, unchanged entrypoint.
 """
 from __future__ import annotations
 
+from .exec_policy import assert_exec_runtime_unavailable
+
 from typing import Any
 
 from starlette.applications import Starlette
@@ -56,6 +58,8 @@ def _get_arguments(route: str, p: dict[str, str]) -> dict[str, Any]:
 
 def create_multi_app(service: WorkspaceService, *, enable_mcp: bool = True,
                      port: int = 8765, token: str | None = None) -> ASGIApp:
+    assert_exec_runtime_unavailable(service.settings)
+
     async def read_endpoint(request: Request) -> JSONResponse:
         route = request.url.path
         try:

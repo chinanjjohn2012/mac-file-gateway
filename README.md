@@ -12,7 +12,7 @@
 
 https://github.com/chinanjjohn2012/mac-file-gateway/tree/release/ms1
 
-建议正式部署仍使用 `release/ms1`。MCP Python SDK 2.3.0 的迁移正在 `feature/mcp-sdk-v2` 分支评审，尚未合并；验证此次升级时，请明确切换到升级分支。
+正式部署仍以已经批准发布的 `release/ms1` 为准。**Git CLI V1 目前是独立开发候选能力**（PR #19 / #23 / #25 / #27 及后续 F 批次），不代表 `release/ms1` 或 2.4.0 已发布 Git 执行权限。其代码与测试基于官方 MCP Python SDK 2.3.0；正式合并、发布以及真实 Tunnel 接入仍需通过独立门禁。
 
 ### 已包含的主要代码
 
@@ -123,7 +123,17 @@ Mac File Gateway 按启动参数决定暴露哪些工具，不会默认打开全
 
 Local Skill Bridge 与 `--allow-exec` 是两套独立能力。启用 Local Skill Bridge **不需要**启用 `run_command`。
 
-如果同时启用读取、写入、受控命令和 Local Skill Bridge，最多会暴露 **19 个 MCP 工具**。
+如果同时启用读取、写入、受控命令和 Local Skill Bridge，最多会暴露 **19 个 MCP 工具**；开发候选版额外获得独立 Git 授权后，Legacy 最多 **20 个**。Multi 仍不提供普通 `run_command` 和 Local Skill Bridge。
+
+#### Git CLI V1：额外 1 个（候选、默认关闭）
+
+只有服务端和命令名单**分别显式授权**且 Git 服务可用时，才会注册：
+
+- `run_git`（REST：`POST /git/run`）。
+
+Legacy 必须同时使用 `--allow-git` 和至少一个 `--git-command NAME`；Multi 需要私有配置中的 `server.git.enabled=true` 及对应 Workspace 的 `git.allowed_commands` 非空。Multi 请求必须明确给出 `workspace`，无默认 Workspace。这个工具不继承文件写权限、普通 `run_command` 或 Local Skill Bridge 的权限；Multi stdio 仍不支持。
+
+支持的十个命令为：`status`、`diff`、`log`、`branch`、`switch`、`add`、`commit`、`fetch`、`pull`、`push`。不支持 `checkout`、`clone`、任意 argv、Git 全局 flags 或 shell。所有调用默认 `dry_run=true`，预览**完全不启动 Git，包括 `rev-parse`**。详细授权、API 形状和不可撤销的 Git 副作用见下方“Git CLI V1”章节。
 
 ### 预览、安全保护和限制
 
@@ -339,7 +349,7 @@ curl --noproxy '*' -fsS http://127.0.0.1:8765/health
 }
 ```
 
-这里的 `read_only` 只表示文件写入是否启用。
+这里的 `read_only` **只表示 File API 文件写入是否启用**，不表示 Git 必定只读。候选版中启用 `run_git` 后，即使 `read_only=true`，获授权的 `add`、`commit`、`pull` 等仍可按原生 Git 语义修改文件或仓库。
 
 也可以直接检查当前 Gateway 配置：
 
@@ -380,6 +390,77 @@ curl --noproxy '*' -fsS http://127.0.0.1:8765/health
 这个检查 **不会执行真实 MySQL、ClickHouse、Prometheus、DigitalOcean、Linode 或 trace service 查询脚本**。
 
 ---
+
+### Git CLI V1（独立候选分支，未纳入发布版）
+
+**默认不授权 Git**。先在可丢弃的本地测试仓库验证，确认独立复审和原生 macOS 验收结论；不要因为本节存在，就在生产 Gateway 或 Tunnel 上提前开启高权限 Git。开发版本功能与 `2.4.0` 已发布功能必须区分。
+
+#### Legacy：单 Workspace 显式授权
+
+```bash
+bash run.sh "/path/to/project" \
+  --allow-git \
+  --git-command status \
+  --git-command diff
+```
+
+`--allow-git` 没有 `--git-command`，或只有 `--git-command` 而缺少 `--allow-git`，启动都会拒绝。重复或非法命令名也被拒绝。示例仅授权读取 Git 状态和 diff；若单独授权 `add`、`commit`、`pull` 或 `push`，需要明确接受其写入、Hook/Filter、Remote 副作用。该权限与 `--allow-write`、`--allow-exec` 相互独立，`--check` 不进行 Git discovery 或启动 Git 子进程。
+
+#### Multi：全局开关与 Workspace 双重授权
+
+复制 [`samples/gateway.example.json`](./samples/gateway.example.json) 至项目范围**之外**受保护的私有配置目录后，按需修改：
+
+```json
+{
+  "schema_version": 1,
+  "server": {"port": 8765, "transport": "http", "git": {"enabled": true}},
+  "workspaces": {
+    "project-a": {
+      "root": "/absolute/path/to/project-a",
+      "git": {"allowed_commands": ["status", "diff"]}
+    },
+    "project-b": {
+      "root": "/absolute/path/to/project-b",
+      "git": {"allowed_commands": []}
+    }
+  }
+}
+```
+
+此为 Git 最小授权片段；完整私有配置可保留示例中的受控读取/写入字段。`server.git.enabled` 默认为 `false`；各 Workspace 的 `allowed_commands` 默认为空。**project-b 无 Git 权限**。授权名单只接受已实现的十个命令且不得重复。仅通过 `--config /private/path/gateway.json` 启动 Multi HTTP 模式；不得与 Legacy `--root`、`--allow-git`、`--git-command` 混用，也不提供 Multi stdio。
+
+#### 结构化 API 与字段
+
+Legacy MCP `run_git(command, cwd=".", options={}, paths=[], timeout_seconds=120, dry_run=true)`；Multi 在前面额外要求 `workspace`。两种模式的 REST 地址相同：`POST /git/run`，Multi JSON Body 必须有 `workspace`，Legacy JSON 不接受该字段。
+
+```json
+{"workspace":"project-a","command":"status","cwd":".","options":{"short":true},"paths":[],"timeout_seconds":120,"dry_run":true}
+```
+
+上例是 **Multi** 的纯预览。真正执行需要显式 `"dry_run": false`。Legacy 应删除 `workspace` 字段。两者均使用受控 JSON 参数，不是任意 Git argv；`options` 必须是对象、`paths` 必须是数组，可省略但**不能为 null**。显式本地 `cwd` 和 `paths` 限定在选中的 Workspace 中且拒绝 `..`、绝对路径和 symlink；无 paths 的 `git add -A`、`pull` 以及 Git Hook 等**仍可影响整个父仓库**。Git 仓库根目录可以位于 Workspace 根的父级，这不是 OS sandbox。
+
+| 命令 | 可用的 `options` | 语义限制 |
+|---|---|---|
+| `status` | `short`、`branch` | 原生状态，可选显式 paths |
+| `diff` | `cached`、`stat` | 原生 diff，可选显式 paths |
+| `log` | `limit`（1–50）、`oneline` | 默认最多 20 条 |
+| `branch` | `action`（list/create/delete）、`name` | 创建或删除需要 name |
+| `switch` | `name`、`create` | 固定 `--no-guess`，不会隐式创建远端同名分支 |
+| `add` | `all`、`update` | 互斥；两者都未启用时须提供 paths |
+| `commit` | `message`、`amend` | message 必填；可能运行 Hook |
+| `fetch` | `remote`、`prune` | remote 必须是已配置的名字，不接受 URL |
+| `pull` | `remote`、`branch`、`ff_only` | 固定 fast-forward-only，默认 `ff_only=true` |
+| `push` | `remote`、`branch`、`force_with_lease`、`expected_remote_oid` | 不允许隐式强推，lease 需明确的旧 OID |
+
+`timeout_seconds` 为 **10–900 秒**（默认 120），覆盖发现仓库、等待同仓库锁、检查、执行以及清理。Git REST 请求独立受 65,536 字节 Body 上限限制。执行结果包含 `execute_started`、`repository_checked`、`remote_checked`、`branch_checked`、`exit_code`、`timed_out`、`output_truncated`、`cleanup_status` 等字段；不把退出码非零直接当成进程清理失败，也不会将截断结果声称为完整输出。
+
+#### 高权限边界、断连与离线恢复
+
+- **Git 不使用 File API 的 hidden/exclude/redaction/backup 规则**。Git 的原生输出可能包含其他 Workspace 内的路径或秘密；Hook、Filter、Credential Helper、Remote 能以当前 macOS 用户权限访问工作区外的内容并启动程序。File API 的 `read_only=true` **不禁止 Git 写入**；Git 修改不生成 `.gateway-backups`。
+- `dry_run=true` 是唯一不启动 Git 的预览路径；`dry_run=false` 经服务端及 Workspace 双重授权进入同步 Worker，先持久化 `DISCOVERING` / `RUNNING` 再 Popen。业务 Git 在同一 common-dir 串行；其他本机终端或 IDE 不受这把锁协调。
+- **客户端断连或超时不证明业务取消**。尤其 `commit`、`pull`、`push` 的响应丢失表示结果未知，不要自动重试；应在安全恢复或人工确认后再决定下一步。
+- Git 清理不确定、遗留活动记录或持久状态异常会隔离相关仓库或整个 Git 服务，可能返回 `git_repository_quarantined`、`git_global_quarantined`、`git_cleanup_incomplete`、`git_state_unavailable`。**没有 MCP/REST 重置隔离的接口**；不可通过反复重启、TTL 或另外一个 Workspace 的 `status` 自动解封。
+- 管理员必须先停止 Gateway、禁止新 Git 调用，并独立确认相关主进程、受控子进程及进程组都结束，再根据本地私有状态离线处理遗留标记。PID 可能重用，不应仅凭 PID 数字作清理证明。若无法确认则保持隔离。Git 进程已完整收尾后的状态删除同步失败仍按已批准的 §7.2 故障模型处理，不承诺任意硬件故障下永久持久标记。
 
 ## 三、让网页版 ChatGPT 连接到 Mac
 
@@ -692,7 +773,7 @@ Gateway 主要面向普通代码和 UTF-8 文本文件。
 
 ## 七、常用检查命令
 
-升级分支的本地验证（MCP SDK import、compileall、pytest、REST HTTP smoke、真实 MCP HTTP / stdio 双协议 smoke 和 `MANIFEST.sha256` 一致性）：
+开发候选版本的本地验证（MCP SDK import、compileall、pytest、REST HTTP、真实 MCP HTTP / stdio 双协议、Git Legacy/Multi、Git Hook 断连 Smoke 和 `MANIFEST.sha256` 一致性）：
 
 ```bash
 bash verify.sh --require-mcp
@@ -700,7 +781,7 @@ bash verify.sh --require-mcp
 
 `verify.sh` 会在 Git 工作树中按已跟踪文件重新计算发布清单；文件内容、文件集合或 `MANIFEST.sha256` 任一发生漂移都会失败。GitHub Actions 也会检查同一发布清单。
 
-其中 REST-only 的 `tests/smoke_live.py` 输出 `mcp_verified: false` 是预期行为（它以 `--http-only` 启动）；独立的 `tests/smoke_mcp_live.py` 成功后才输出 `mcp_verified: true`，`tests/smoke_mcp_stdio.py` 验证真实 stdio 子进程交互并输出 `stdio_verified: true`。新增的 `tests/smoke_mcp_disconnect.py` 使用临时项目和无害脚本验证现代 MCP 的执行中断连、正常完成及服务端超时。Gateway 已禁用未使用的 `subscriptions/listen` 长连接接口。断连后的执行与重试契约详见 `docs/MCP_SDK_V2_MIGRATION.md`；断连不表示已启动的操作被撤销。
+其中 REST-only 的 `tests/smoke_live.py` 输出 `mcp_verified: false` 是预期行为（它以 `--http-only` 启动）；独立的 `tests/smoke_mcp_live.py` 成功后才输出 `mcp_verified: true`，`tests/smoke_mcp_stdio.py` 验证真实 stdio 子进程交互并输出 `stdio_verified: true`。新增的 `tests/smoke_mcp_disconnect.py` 使用临时项目验证现代 MCP 的受控执行中断连、超时及**一次真实 Git commit Hook 在断连后继续完成**；`tests/smoke_git_cli.py` 单独覆盖 Legacy/Multi Git MCP 双协议及授权后的预览/应用。Gateway 已禁用未使用的 `subscriptions/listen` 长连接接口。断连后的执行与重试契约详见 `docs/MCP_SDK_V2_MIGRATION.md`；断连不表示已启动的操作被撤销。
 
 只检查启动策略：
 
@@ -749,7 +830,7 @@ Ctrl+C
 
 ---
 
-## Multi-Workspace Phase 1 (development branch; not yet released)
+## Multi-Workspace Phase 1 + Git CLI V1 (development candidate; not yet released)
 
 The optional `--config` mode selects **multiple explicitly named local project roots** using one Gateway HTTP process and one MCP tunnel. This mode is under implementation and is not included in the published `release/ms1` deployment until tests and security review pass. Do not use the draft branch for production access.
 
@@ -769,10 +850,19 @@ bash run.sh --config "$HOME/.config/mac-file-gateway/gateway.json"
 
 In Multi mode, `list_workspaces` enumerates **IDs only**, and every file tool requires an explicit `workspace` argument. REST `GET /workspaces` lists the same IDs; REST GET file methods use `workspace` in the query, and POST mutations require it in the JSON body. There is no implicit default or cross-workspace move/rename. Per-root permissions, backups and locks are independent. A writable Workspace cannot modify a read-only Workspace through file tools.
 
-**Phase-1 restriction:** Multi mode supports file APIs only. It does **not** expose `run_command` or Local Skill Bridge. Those require later independent security reviews. Existing single-root CLI, HTTP and stdio modes remain available and use their original arguments. Do not combine `--config` with legacy root/write/exec flags or stdio.
+**Multi restriction:** Multi mode retains the original file APIs and does **not** expose general `run_command` or Local Skill Bridge. Separately authorized Git CLI V1 is a distinct reviewed capability: `server.git.enabled=true` AND a nonempty per-Workspace `git.allowed_commands` list are required before `run_git` / `POST /git/run` can execute. The default sample grants neither. Multi stdio remains unsupported. Existing Legacy root/HTTP/stdio remain available; never mix `--config` with Legacy root/write/exec/Git flags. See the Chinese Git CLI V1 section above for the exact API contract.
 
 The Multi HTTP listener validates every POST before invoking REST or the MCP SDK. Only one JSON media type (optionally `charset=UTF-8`) is accepted; duplicate JSON keys, unknown tool arguments, excessive decoded data and unsupported multi-mode methods fail closed. This mode assumes a trusted local OS environment: Workspace boundaries are remote API capability routing, not OS-level multi-tenant sandboxing. Other local accounts with write access to configuration, runtime code, or source files can change Gateway behavior; that risk is outside the Phase 1 threat model.
 
 Recognized credentials and configured protected paths are hidden consistently from file reads, search results and diff previews. This is **best-effort content protection**, not general DLP. Whole-file overwrite of sources containing hidden lines is refused; exact replacement can target only visible source spans and never reconstruct a redacted display as source content. Backup retention remains 15 UTC days / 10,000 backups / 5,120 MiB **per root**, with opportunistic pruning during actual writes.
 
 To revert, stop the Multi listener and start the previous positional-root command. Existing files and backups need no conversion.
+
+### Git CLI V1 — English summary (draft feature, not a published release)
+
+- **Default denial:** Legacy requires both `--allow-git` and repeatable `--git-command NAME`. Multi requires `server.git.enabled: true` and a nonempty per-Workspace `git.allowed_commands`. A Multi `run_git` call must specify `workspace`; Legacy does not accept that field. General Exec/Local Skills grants do not enable Git.
+- **Interface:** MCP `run_git` or `POST /git/run` uses `command`, `cwd` (default "."), `options` (object), `paths` (array), `timeout_seconds` (10–900, default 120) and `dry_run` (default true). These options/paths can be omitted, but explicit JSON null is invalid. The REST endpoint has a separate 65,536-byte body cap.
+- **Allowed Git commands:** `status`, `diff`, `log`, `branch`, `switch`, `add`, `commit`, `fetch`, `pull`, `push`. No raw argv, `checkout`, `clone`, or arbitrary shell. Apply requires `dry_run=false`; preview launches **zero** Git subprocesses, including repository discovery.
+- **Repository privilege is broader than File API:** The actual repository can be an ancestor of the Workspace. Explicit local cwd/paths stay Workspace-contained, but native Git `pull`, `add -A`, hooks, filters, remote/credential helpers can change files outside the chosen Workspace. File `read_only`, hidden/exclude/redaction rules and backup guarantees **do not apply** to Git effects/output. Git is **not an OS sandbox**.
+- **Crash/disconnect:** A disconnected or timed-out MCP client may not know whether a non-idempotent Git operation finished. Never automatically retry `commit`, `pull` or `push`. Durable `DISCOVERING`/`RUNNING` intent is required before Git Popen; uncertain cleanup triggers persistent quarantine. There is **no** Web/MCP/REST quarantine reset. Only a trusted local administrator, after Gateway shutdown and independent evidence that the affected main process/group/children have exited, may perform offline recovery. Repeated restart is not a recovery method.
+- **Status:** This is a reviewed development candidate from separate Git CLI draft PRs. Published `release/ms1` and the existing `2.4.0` release are **not** declared Git-enabled by this documentation. Native macOS test success does not replace real Secure MCP Tunnel end-to-end validation or release approval.

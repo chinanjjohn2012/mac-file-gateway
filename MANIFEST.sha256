@@ -1,6 +1,7 @@
 a8e317838b00e2905a24b927075490d60aaf993dbee4335385ca3f4001c8709e  ./.github/workflows/c1-native-research.yml
 9260a8a0b3a6660b66f7034b8a63e2b1b849ae12d83a6316694c865fcecc4560  ./.github/workflows/c2-native-research.yml
 b6b5c72a5ce2050fa1bb6a80b9aced547bbdb4a1ef47fe9457764eae9ad0eadc  ./.github/workflows/c2-review-native.yml
+3870880704941f5e72544372b754b5ce14b91c18e569a839988b5622bb6b819b  ./.github/workflows/c3-candidate-b-kill-native.yml
 4241744fac2c22a3e078e953b287f6cf4ef06f6abaf116d21d4ccf38a5189d02  ./.github/workflows/c3-candidate-b-native.yml
 dced66ab5b87cee6c0e38244b8581be0de69b0e06534a54dc2b585972359a0ad  ./.github/workflows/c3-candidate-b-term-native.yml
 0dadaf6bd4f57a24546f103bfb110685ad12964dc442f9d41bdb8d72cfd05e56  ./.github/workflows/controlled-exec-tests.yml
@@ -97,6 +98,7 @@ ba9bf6180bde9aeb18b433e13860949ae5628a3187fe5e27d4e1afa52440fd88  ./tests/test_c
 51729ca9b2e169df545cd1d6585159a501ed8b8e1c3c72bcb41655549122f354  ./tests/test_c2_round2_review.py
 0b362b21d5394632189ddb4c2f73c117cfd7500feddf3111ddedf5c16abde5d7  ./tests/test_c2_sigchld_review.py
 e32a970f5f0d2425410a33af580d5fc2aa7697068d517e27251d68140236665b  ./tests/test_c3_candidate_b_join.py
+e8c49e81526ed2e38b5bd0d0eba6a0c5c3cb29c9d82e4b38d3eb2e9ba3c94021  ./tests/test_c3_candidate_b_kill.py
 060d09c5d6a102c9ae9aa5689b066ef1baf59e72dcb0f8fdb8f3b48e58c1ee01  ./tests/test_c3_candidate_b_term.py
 199ec7e6958c1f21aa8ca14ac1af8b9868490621e02f67e9a3926eaf5957cef1  ./tests/test_cli.py
 599bdd040fa4fd89f1baa9a431e5fe230e6f4509938008cda22d86caccc1db37  ./tests/test_command_http.py

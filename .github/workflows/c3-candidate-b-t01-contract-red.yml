@@ -59,7 +59,7 @@ jobs:
           test ! -e tools/research/run_c3_candidate_b_kill.py
           echo "T01_CHECK=missing_pure_gate"
           test ! -e tools/research/c3_candidate_b_kill_t01_gate.py
-          test -f tests/test_c3_candidate_b_kill_t01_contract_red.py
+          test -f tests/test_c3_candidate_b_t01_contract_red.py
           test -f docs/research/phase2-lite-c3/candidate-b-b03-t01-r1-contract.md
           echo "T01_CHECK=manifest_and_static"
           python - <<'PY'

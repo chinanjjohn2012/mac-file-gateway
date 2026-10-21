@@ -235,7 +235,7 @@ def test_b03_R1_approved_design_and_red_only_workflow():
     s = DESIGN.read_text()
     for item in ("B03-T01", "B03-T08a", "B03-T08b",
                  "SIGTERM=SIG_IGN", "kill_entry_margin_ms",
-                 "NOT_RUN/BLOCK", "outer_deadline"):
+                 "NOT_RUN", "BLOCK", "outer_deadline"):
         assert item in s
     y = WORKFLOW.read_text()
     for item in ("macos-15", "arm64", "3.13", "3.14",

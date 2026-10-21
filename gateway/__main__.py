@@ -104,7 +104,13 @@ def main(argv: list[str] | None = None) -> int:
             mode = "REST only; MCP disabled" if args.http_only else "MCP + REST"
             write_policy = "WRITES ENABLED (preview by default)" if args.allow_write else "file writes disabled"
             exec_policy = "EXEC ENABLED (preview by default)" if args.allow_exec else "exec disabled"
-            git_policy = "Git internally enabled (external tools not yet registered)" if args.allow_git else "Git disabled"
+            git_info = gateway.info()["git_policy"]
+            if git_info["adapter_exposed"]:
+                git_policy = ("Git adapter registered (separate opt-in; preview default)"
+                              if git_info["available"]
+                              else "Git adapter registered (state unavailable; apply denied)")
+            else:
+                git_policy = "Git disabled" if not args.allow_git else "Git unavailable"
             if local_skill_bridge is not None:
                 print(f"Local Skill Bridge: {local_skill_bridge.status_info()['status']}", file=sys.stderr)
             print(f"Mac File Gateway: {mode}, {write_policy}, {exec_policy}, {git_policy}, listening on 127.0.0.1:{args.port}", file=sys.stderr)

@@ -53,5 +53,41 @@
     "policy_dir_default": "~/.config/mac-file-gateway/local-skill-policy",
     "sample_policy_loaded_by_default": false
   },
-  "hidden_directories": "exact_allowlist_via_--allow-hidden-path"
+  "hidden_directories": "exact_allowlist_via_--allow-hidden-path",
+  "mcp_tools_when_git_authorized": [
+    "run_git"
+  ],
+  "git_cli_v1": {
+    "release_status": "candidate_not_published_in_release_ms1",
+    "authorization": "Legacy --allow-git plus repeatable --git-command; Multi requires server.git.enabled plus per-workspace git.allowed_commands",
+    "supported_commands": [
+      "status",
+      "diff",
+      "log",
+      "branch",
+      "switch",
+      "add",
+      "commit",
+      "fetch",
+      "pull",
+      "push"
+    ],
+    "mcp_protocols": [
+      "2025-11-25",
+      "2026-07-28"
+    ],
+    "rest_endpoint": "POST /git/run",
+    "default_preview": true,
+    "timeout_seconds": {
+      "default": 120,
+      "min": 10,
+      "max": 900
+    },
+    "max_git_request_bytes": 65536,
+    "legacy_stdio": true,
+    "multi_stdio": false,
+    "read_only_does_not_disable_git": true,
+    "offline_only_quarantine_recovery": true,
+    "git_is_not_a_sandbox": true
+  }
 }

@@ -174,3 +174,202 @@ def test_mode_flag_wrong_types_are_not_truthy_authority():
     assert m.t01_mode_admitted(
         "escalate-positive", orphan_preflight_proven=True
     ) is True
+
+def test_ledger_public_methods_cannot_forge_a_simulated_term_event():
+    """P2-01: public mutating helpers must NOT exist on a returned Ledger."""
+    m = module()
+    ledger = m.begin_ledger()
+    assert ledger["term_attempts"] == 0
+    assert ledger["term_succeeded"] is False
+    for forbidden in ("_set", "_mark_term_event", "_term_event_recorded"):
+        assert not hasattr(ledger, forbidden), forbidden
+    with pytest.raises(AttributeError):
+        ledger._set(
+            term_attempts=1, term_succeeded=True,
+            term_sent_at_ms=SENT, term_target_ref=FIXTURE,
+        )
+    with pytest.raises(AttributeError):
+        ledger._mark_term_event()
+    with pytest.raises((TypeError, AttributeError)):
+        ledger["term_succeeded"] = True
+    with pytest.raises(AttributeError):
+        ledger.signals_closed = False
+    with pytest.raises(AttributeError):
+        ledger._Ledger__snapshot = object()
+    assert ledger["term_attempts"] == 0
+    assert ledger["term_succeeded"] is False
+
+    # Caller-supplied public flags never create private event provenance.
+    forged = {**dict(ledger), "term_attempts": 1,
+              "term_succeeded": True, "term_sent_at_ms": SENT,
+              "term_target_ref": FIXTURE}
+    recorder = Recorder()
+    denied = m.attempt_kill_no_signal(
+        policy(m), KILL_NOW, SENT, KILL_FACTS, forged, recorder, FIXTURE
+    )
+    assert recorder.calls == []
+    assert denied["kill_attempts"] == 0
+    assert denied["signals_closed"] is True
+
+    # The original unspent Ledger has no event either; a KILL attempt
+    # must fail even though the public dict had every expected value.
+    direct = Recorder()
+    denied_original = m.attempt_kill_no_signal(
+        policy(m), KILL_NOW, SENT, KILL_FACTS, ledger, direct, FIXTURE
+    )
+    assert direct.calls == []
+    assert denied_original["kill_attempts"] == 0
+    assert denied_original["signals_closed"] is True
+    retry_term = Recorder()
+    m.attempt_term_no_signal(
+        policy(m), NOW, TERM_FACTS, denied_original, retry_term, FIXTURE
+    )
+    assert retry_term.calls == []
+
+
+def test_ledger_no_public_reopen_after_first_fake_kill():
+    """P2-01: closed authority + an old alias cannot send twice."""
+    m = module()
+    p = policy(m)
+    recorder = Recorder()
+    ledger = m.begin_ledger()
+    alias_before_term = ledger
+    result = m.attempt_term_no_signal(
+        p, NOW, TERM_FACTS, ledger, recorder, FIXTURE
+    )
+    assert result is alias_before_term
+    result = m.attempt_kill_no_signal(
+        p, KILL_NOW, SENT, KILL_FACTS, result, recorder, FIXTURE
+    )
+    assert result["kill_attempts"] == 1
+    assert result["signals_closed"] is True
+    assert recorder.calls == [("TERM", FIXTURE), ("KILL", FIXTURE)]
+    with pytest.raises(AttributeError):
+        result._set(signals_closed=False, kill_attempts=0)
+    with pytest.raises(AttributeError):
+        result.signals_closed = False
+    with pytest.raises((TypeError, AttributeError)):
+        result["kill_attempts"] = 0
+    with pytest.raises(AttributeError):
+        del result._Ledger__snapshot
+
+    # Reusing any prior alias and providing otherwise valid evidence
+    # must not revive TERM or KILL after SIGNALS_CLOSED.
+    more = Recorder()
+    replay = m.attempt_kill_no_signal(
+        p, KILL_NOW, SENT, KILL_FACTS, alias_before_term, more, FIXTURE
+    )
+    m.attempt_term_no_signal(
+        p, NOW, TERM_FACTS, alias_before_term, more, FIXTURE
+    )
+    assert replay["kill_attempts"] == 1
+    assert replay["signals_closed"] is True
+    assert more.calls == []
+    assert recorder.calls == [("TERM", FIXTURE), ("KILL", FIXTURE)]
+
+
+def test_original_deadline_cannot_be_rebased_with_self_consistent_new_policy():
+    """P2-02 exact reviewer counterexample: t=112100 after old outer."""
+    m = module()
+    original = policy(m)  # original outer=112000, kill cutoff=109000
+    recorder_term = Recorder()
+    ledger = m.attempt_term_no_signal(
+        original, NOW, TERM_FACTS,
+        m.begin_ledger(), recorder_term, FIXTURE
+    )
+    assert recorder_term.calls == [("TERM", FIXTURE)]
+    assert ledger["term_sent_at_ms"] == SENT
+    assert ledger["signals_closed"] is False
+
+    # p1 is entirely valid as a *separate* policy. The standalone
+    # predicate must be true, isolating missing event-to-policy binding.
+    rebased = m.derive_cutoffs(107_000, 12_000, 3_000, 200, 300)
+    assert rebased["outer_deadline_ms"] == 119_000
+    assert rebased["kill_cutoff_ms"] == 116_000
+    assert m.kill_admitted(rebased, 112_100, SENT, KILL_FACTS) is True
+    assert 112_100 > original["outer_deadline_ms"]
+    kill_recorder = Recorder()
+    refused = m.attempt_kill_no_signal(
+        rebased, 112_100, SENT, KILL_FACTS, ledger, kill_recorder, FIXTURE
+    )
+    assert kill_recorder.calls == []
+    assert refused["kill_attempts"] == 0
+    assert refused["signals_closed"] is True
+    retry = Recorder()
+    m.attempt_kill_no_signal(
+        original, KILL_NOW, SENT, KILL_FACTS, refused, retry, FIXTURE
+    )
+    assert retry.calls == []
+
+
+@pytest.mark.parametrize("variant", (
+    (107_000, 12_000, 3_000, 200, 300),
+    (100_000, 12_001, 3_000, 200, 300),
+    (100_000, 12_000, 2_000, 200, 300),
+    (100_000, 12_000, 3_000, 201, 300),
+    (100_000, 12_000, 3_000, 200, 301),
+))
+def test_simulated_term_binds_all_original_policy_fields(variant):
+    """Changing any of the seven complete cutoff fields is a hard refusal."""
+    m = module()
+    original = policy(m)
+    first = Recorder()
+    ledger = m.attempt_term_no_signal(
+        original, NOW, TERM_FACTS, m.begin_ledger(), first, FIXTURE
+    )
+    assert first.calls == [("TERM", FIXTURE)]
+    foreign = m.derive_cutoffs(*variant)
+    assert foreign != original
+    assert m.kill_admitted(foreign, KILL_NOW, SENT, KILL_FACTS) is True
+    kill_recorder = Recorder()
+    refused = m.attempt_kill_no_signal(
+        foreign, KILL_NOW, SENT, KILL_FACTS, ledger, kill_recorder, FIXTURE
+    )
+    assert kill_recorder.calls == []
+    assert refused["kill_attempts"] == 0
+    assert refused["signals_closed"] is True
+    later = Recorder()
+    m.attempt_kill_no_signal(
+        original, KILL_NOW, SENT, KILL_FACTS, refused, later, FIXTURE
+    )
+    assert later.calls == []
+
+
+def test_caller_mutation_of_same_policy_dict_cannot_reset_term_deadline():
+    """The stored policy is an immutable VALUE snapshot, not a dict alias."""
+    m = module()
+    mutable = policy(m)
+    term = Recorder()
+    ledger = m.attempt_term_no_signal(
+        mutable, NOW, TERM_FACTS, m.begin_ledger(), term, FIXTURE
+    )
+    assert term.calls == [("TERM", FIXTURE)]
+    mutable.update(m.derive_cutoffs(107_000, 12_000, 3_000, 200, 300))
+    assert m.kill_admitted(mutable, 112_100, SENT, KILL_FACTS) is True
+    recorder = Recorder()
+    refused = m.attempt_kill_no_signal(
+        mutable, 112_100, SENT, KILL_FACTS, ledger, recorder, FIXTURE
+    )
+    assert recorder.calls == []
+    assert refused["kill_attempts"] == 0
+    assert refused["signals_closed"] is True
+
+
+def test_value_identical_policy_copy_still_allows_one_simulated_kill():
+    """Matching policy VALUES, not Python dictionary identity, are required."""
+    m = module()
+    original = policy(m)
+    recorder = Recorder()
+    ledger = m.attempt_term_no_signal(
+        original, NOW, TERM_FACTS, m.begin_ledger(), recorder, FIXTURE
+    )
+    equal_copy = dict(original)
+    assert equal_copy == original and equal_copy is not original
+    after = m.attempt_kill_no_signal(
+        equal_copy, KILL_NOW, SENT, KILL_FACTS, ledger, recorder, FIXTURE
+    )
+    assert after["kill_attempts"] == 1
+    assert after["kill_succeeded"] is True
+    assert after["signals_closed"] is True
+    assert recorder.calls == [("TERM", FIXTURE), ("KILL", FIXTURE)]
+

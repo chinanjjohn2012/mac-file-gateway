@@ -11,6 +11,8 @@ separately authorized stage; these Python facts are *claims*, not proof.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from types import MappingProxyType
+from typing import NamedTuple
 
 # Deliberately not configurable from CLI/env/runtime input.
 _FIXTURE_TARGET = "fixture:synthetic-owned-anchor-group-T01"
@@ -141,22 +143,30 @@ def kill_admitted(
     )
 
 
-class _Ledger(Mapping):
-    """One-use, inspectable but externally non-mutable synthetic authority.
+class _LedgerSnapshot(NamedTuple):
+    """Private immutable snapshot: public ledger observations never authorize a transition."""
 
-    All transition functions update the same private state. An older
-    reference therefore cannot replay a previously consumed TERM or KILL.
-    A public dict with forged successful flags is not a Ledger.
+    values: Mapping
+    term_event: object | None
+    original_policy: tuple[tuple[str, int], ...] | None
+
+
+class _Ledger(Mapping):
+    """Externally read-only one-use synthetic authority, shared by all aliases.
+
+    It intentionally exposes no state mutators or event-creation methods.
+    The gate functions change the private snapshot with object.__setattr__;
+    ordinary setattr, Mapping mutation or callable ledger methods cannot
+    forge a recorder event or reopen an already closed authority.
+    This is unit-test integrity, NOT a sandbox against Python reflection.
     """
 
-    __slots__ = ("__values", "__event", "__issued")
+    __slots__ = ("__snapshot",)
 
     def __init__(self, issuer: object):
         if issuer is not _ISSUER:
             raise ValueError("synthetic ledger may only be issued by this module")
-        self.__issued = issuer
-        self.__event = None
-        self.__values = {
+        values = MappingProxyType({
             "term_attempts": 0,
             "term_succeeded": False,
             "term_sent_at_ms": None,
@@ -166,29 +176,29 @@ class _Ledger(Mapping):
             "kill_errno_class": "NONE",
             "signals_closed": False,
             "group_signals_after_close": 0,
-        }
+        })
+        object.__setattr__(
+            self, "_Ledger__snapshot", _LedgerSnapshot(values, None, None)
+        )
+
+    def __setattr__(self, key, value):
+        raise AttributeError("synthetic ledger is externally read-only")
+
+    def __delattr__(self, key):
+        raise AttributeError("synthetic ledger is externally read-only")
 
     def __getitem__(self, key):
-        return self.__values[key]
+        return self.__snapshot.values[key]
 
     def __iter__(self):
-        return iter(self.__values)
+        return iter(self.__snapshot.values)
 
     def __len__(self):
-        return len(self.__values)
-
-    def _set(self, **values):
-        self.__values.update(values)
-
-    def _mark_term_event(self):
-        self.__event = object()
-
-    def _term_event_recorded(self) -> bool:
-        return self.__event is not None and self.__issued is _ISSUER
+        return len(self.__snapshot.values)
 
 
 def begin_ledger() -> Mapping:
-    """Create one initially closed-to-KILL, unspent test-only authority."""
+    """Issue an unspent, non-forgeable-via-public-methods test-only ledger."""
     return _Ledger(_ISSUER)
 
 
@@ -197,8 +207,22 @@ def _ledger_or_closed(value: object) -> _Ledger:
         return value
     # A forged public dict or arbitrary caller object has no authority.
     denied = _Ledger(_ISSUER)
-    denied._set(signals_closed=True)
+    snap = denied._Ledger__snapshot
+    object.__setattr__(
+        denied,
+        "_Ledger__snapshot",
+        _LedgerSnapshot(
+            MappingProxyType({**snap.values, "signals_closed": True}),
+            None,
+            None,
+        ),
+    )
     return denied
+
+
+def _policy_binding(cutoffs: dict) -> tuple[tuple[str, int], ...]:
+    """Value snapshot of every policy field, never a caller-owned dict alias."""
+    return tuple((key, cutoffs[key]) for key in sorted(_POLICY_KEYS))
 
 
 def _fixture_target(target_ref: object) -> bool:
@@ -211,6 +235,20 @@ def attempt_term_no_signal(
 ) -> Mapping:
     """Exactly one fake TERM recorder call, or irrevocable refusal."""
     state = _ledger_or_closed(ledger)
+
+    # This closure is local to the controlled transition. No ledger methods
+    # or externally callable event/state setters exist.
+    def commit(changes: dict, *, event=None, original_policy=None):
+        snap = state._Ledger__snapshot
+        object.__setattr__(
+            state, "_Ledger__snapshot",
+            _LedgerSnapshot(
+                MappingProxyType({**snap.values, **changes}),
+                snap.term_event if event is None else event,
+                snap.original_policy if original_policy is None else original_policy,
+            ),
+        )
+
     if state["signals_closed"]:
         return state
     if (
@@ -219,25 +257,30 @@ def attempt_term_no_signal(
         or not _fixture_target(owned_ref)
         or not term_admitted(cutoffs, now_ms, facts)
     ):
-        state._set(signals_closed=True)
+        commit({"signals_closed": True})
         return state
 
-    # The count is increased immediately before the in-memory call.
-    state._set(term_attempts=1)
+    # Only after a verified TERM gate: snapshot the ORIGINAL complete
+    # absolute policy by value, before handing off to the fake transport.
+    first_policy = _policy_binding(cutoffs)
+    commit({"term_attempts": 1})
     try:
         response = recorder.send("TERM", owned_ref)
     except Exception:
-        state._set(signals_closed=True, term_succeeded=False)
+        commit({"signals_closed": True, "term_succeeded": False})
         return state
 
     if type(response) is str and response == "OK":
-        state._mark_term_event()
-        state._set(
-            term_succeeded=True, term_sent_at_ms=now_ms,
-            term_target_ref=owned_ref,
+        commit(
+            {
+                "term_succeeded": True,
+                "term_sent_at_ms": now_ms,
+                "term_target_ref": owned_ref,
+            },
+            event=object(), original_policy=first_policy,
         )
     else:
-        state._set(signals_closed=True, term_succeeded=False)
+        commit({"signals_closed": True, "term_succeeded": False})
     return state
 
 
@@ -245,13 +288,33 @@ def attempt_kill_no_signal(
     cutoffs: dict, now_ms: int, term_sent_at_ms: int, facts: dict,
     ledger: Mapping, recorder: object, owned_ref: object,
 ) -> Mapping:
-    """Only a genuine simulated TERM event can authorize one fake KILL."""
+    """Only a recorder-proven TERM under the SAME absolute policy may KILL."""
     state = _ledger_or_closed(ledger)
+
+    def commit(changes: dict):
+        snap = state._Ledger__snapshot
+        object.__setattr__(
+            state, "_Ledger__snapshot",
+            _LedgerSnapshot(
+                MappingProxyType({**snap.values, **changes}),
+                snap.term_event, snap.original_policy,
+            ),
+        )
+
     if state["signals_closed"]:
         return state
+
+    # A self-consistent *different* policy cannot rebase t0 or the old
+    # deadline. Check value equality of all seven original absolute fields
+    # before using the current policy for post-grace admission.
+    policy_valid = _valid_policy(cutoffs)
+    original_policy = state._Ledger__snapshot.original_policy
     if not (
         _fixture_target(owned_ref)
-        and state._term_event_recorded()
+        and state._Ledger__snapshot.term_event is not None
+        and original_policy is not None
+        and policy_valid
+        and _policy_binding(cutoffs) == original_policy
         and state["term_attempts"] == 1
         and state["term_succeeded"] is True
         and state["kill_attempts"] == 0
@@ -260,24 +323,24 @@ def attempt_kill_no_signal(
         and owned_ref == state["term_target_ref"]
         and kill_admitted(cutoffs, now_ms, term_sent_at_ms, facts)
     ):
-        state._set(signals_closed=True)
+        commit({"signals_closed": True})
         return state
 
     # Count and close before fake transport. No retries, even on EINTR.
-    state._set(kill_attempts=1, signals_closed=True)
+    commit({"kill_attempts": 1, "signals_closed": True})
     try:
         response = recorder.send("KILL", owned_ref)
     except Exception:
-        state._set(kill_succeeded=False, kill_errno_class="OTHER")
+        commit({"kill_succeeded": False, "kill_errno_class": "OTHER"})
         return state
 
     if type(response) is str and response == "OK":
-        state._set(kill_succeeded=True, kill_errno_class="NONE")
+        commit({"kill_succeeded": True, "kill_errno_class": "NONE"})
     else:
         error = response if type(response) is str and response in (
             "ESRCH", "EPERM", "EINTR"
         ) else "OTHER"
-        state._set(kill_succeeded=False, kill_errno_class=error)
+        commit({"kill_succeeded": False, "kill_errno_class": error})
     return state
 
 

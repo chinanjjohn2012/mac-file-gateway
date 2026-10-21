@@ -29,6 +29,7 @@ MODES = (
     "controller-result-lost",
 )
 MUTATIONS = ("omit-sigdef", "omit-sigmask", "omit-controller-group")
+SAFETY_FAULTS = ("stale-anchor-gate", "owner-fd-close", "controller-fd-close")
 FIELDS = (
     "anchor_held", "controller_group_leader",
     "controller_inherited_ignore", "controller_inherited_block",
@@ -38,33 +39,35 @@ FIELDS = (
     "admission_cutoff_expired", "outer_live_at_refusal",
     "gate_opened", "cleanup_complete", "canary_survived",
     "worker_result_unknown", "result_lost_after_wait",
-    "owner_children_reaped", "reuse_proven", "g2_qualified",
+    "owner_children_reaped", "anchor_loss_gate_checked",
+    "after_loss_attempts", "owner_fds_closed", "controller_worker_fds_closed",
+    "reuse_proven", "g2_qualified",
 )
 # Each bit is a *native observable* fixed by the design, never inferred from EOF.
 EXPECTED = {
     "term-positive": (
-        (1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,0,0,0,1,0,0), "POSITIVE_EXPERIMENT",
+        (1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,0,0,0,1,0,0,1,1,0,0), "POSITIVE_EXPERIMENT",
     ),
     "missing-sigdef": (
-        (1,1,1,1,1,0,1,1,1,1,1,0,0,0,1,1,0,0,0,1,0,0), "EXPECTED_BLOCK",
+        (1,1,1,1,1,0,1,1,1,1,1,0,0,0,1,1,0,0,0,1,0,0,1,1,0,0), "EXPECTED_BLOCK",
     ),
     "missing-sigmask": (
-        (1,1,1,1,1,1,0,1,1,1,1,0,0,0,1,1,0,0,0,1,0,0), "EXPECTED_BLOCK",
+        (1,1,1,1,1,1,0,1,1,1,1,0,0,0,1,1,0,0,0,1,0,0,1,1,0,0), "EXPECTED_BLOCK",
     ),
     "controller-group-regression": (
-        (1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,0,0), "SAFE_REFUSAL",
+        (1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,0,0,1,0,0,0), "SAFE_REFUSAL",
     ),
     "anchor-lost-before-term": (
-        (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,0,0), "SAFE_REFUSAL",
+        (0,1,1,1,1,1,1,1,0,0,1,0,0,0,1,1,0,0,0,1,1,0,1,1,0,0), "SAFE_REFUSAL",
     ),
     "deadline-before-term": (
-        (1,1,1,1,1,1,1,1,0,0,1,0,1,1,1,1,0,0,0,1,0,0), "EXPECTED_BLOCK",
+        (1,1,1,1,1,1,1,1,0,0,1,0,1,1,1,1,0,0,0,1,0,0,1,1,0,0), "EXPECTED_BLOCK",
     ),
     "canary-isolation": (
-        (1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0,1,0,0), "POSITIVE_EXPERIMENT",
+        (1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0,1,0,0,1,1,0,0), "POSITIVE_EXPERIMENT",
     ),
     "controller-result-lost": (
-        (1,1,1,1,1,1,1,1,1,1,0,0,0,0,1,0,0,1,1,1,0,0), "EXPECTED_BLOCK",
+        (1,1,1,1,1,1,1,1,1,1,0,0,0,0,1,0,0,1,1,1,0,0,1,0,0,0), "EXPECTED_BLOCK",
     ),
 }
 
@@ -200,6 +203,67 @@ def test_b02_restricted_mutations_must_reject_missing_restoration():
     assert "C3B02_MUTATIONS_DETECTED" in runner
 
 
+
+def test_b02_T05_actual_owned_group_admission_after_worker_armed():
+    """T05 must exercise the real admission function AFTER its group Worker ARMS.
+
+    This must fail on the reviewed prior code: T05 exited without Controller
+    spawn, Worker gate, or send_term_to_owned_group() call.
+    """
+    v = fixed("anchor-lost-before-term")
+    assert v["worker_spawned"] == 1
+    assert v["worker_armed"] == 1
+    assert v["controller_group_leader"] == 1
+    assert v["controller_waited"] == 1
+    assert v["anchor_held"] == 0
+    assert v["anchor_loss_gate_checked"] == 1
+    assert v["after_loss_attempts"] == 0
+    assert v["term_attempts"] == 0
+    assert v["term_succeeded"] == 0
+    assert v["cleanup_complete"] == 1
+    m = driver()
+    assert m.classify("anchor-lost-before-term", {
+        **v, "anchor_loss_gate_checked": 0,
+    }) == "BLOCK"
+    assert m.classify("anchor-lost-before-term", {
+        **v, "after_loss_attempts": 1,
+    }) == "BLOCK"
+    source = NATIVE.read_text()
+    assert "C3B02_MUT_SKIP_ANCHOR_CHECK" in source
+    assert "C3B02_TEST_STALE_KILL_STUB" in source
+    assert "anchor_loss_gate_checked" in source
+    assert "after_loss_attempts" in source
+
+
+def test_b02_Owner_Controller_fd_close_errors_cannot_report_verified():
+    """Test-only injected close errors must be detected AFTER actual close.
+
+    The underlying owned FD is still closed; only return evidence is faulted.
+    Neither Controller's Worker cleanup nor Owner's controlled IPC cleanup
+    may set cleanup_complete=1 after a negative close result.
+    """
+    src = NATIVE.read_text()
+    assert "static int close_child(" in src
+    assert "worker_fds_closed" in src
+    assert "owner_fds_closed" in src
+    assert "controller_worker_fds_closed" in src
+    assert "C3B02_FAULT_OWNER_CLOSE" in src
+    assert "C3B02_FAULT_CONTROLLER_CLOSE" in src
+    runner = driver()
+    assert runner.SAFETY_FAULTS == SAFETY_FAULTS
+    assert "fault_detected" in RUNNER.read_text()
+    assert "C3B02_FAULTS_DETECTED" in RUNNER.read_text()
+    normal = fixed("term-positive")
+    assert normal["owner_fds_closed"] == 1
+    assert normal["controller_worker_fds_closed"] == 1
+    assert runner.classify("term-positive", {
+        **normal, "owner_fds_closed": 0,
+    }) == "BLOCK"
+    assert runner.classify("term-positive", {
+        **normal, "controller_worker_fds_closed": 0,
+    }) == "BLOCK"
+
+
 def test_b02_workflow_two_arm64_versions_and_no_production_launch():
     s = WORKFLOW.read_text()
     for marker in (
@@ -238,6 +302,7 @@ def test_b02_actual_Darwin_TERM_and_legitimate_wait(tmp_path):
     assert data["decision"] == "PARTIAL_B02_TERM_NOT_G2"
     assert data["g2_qualified"] is False and data["reuse_proven"] is False
     assert data["mutation_detected"] == {name: True for name in MUTATIONS}
+    assert data["fault_detected"] == {name: True for name in SAFETY_FAULTS}
     assert [item["mode"] for item in data["cases"]] == list(MODES)
     assert [item["status"] for item in data["cases"]] == [EXPECTED[m][1] for m in MODES]
     assert all(item["cleanup_complete"] == 1 for item in data["cases"][:-1])
@@ -251,3 +316,10 @@ def test_b02_actual_Darwin_TERM_and_legitimate_wait(tmp_path):
     assert data["cases"][5]["term_attempts"] == 0
     assert data["cases"][5]["outer_live_at_refusal"] == 1
     assert data["cases"][6]["canary_survived"] == 1
+    assert data["cases"][4]["worker_spawned"] == 1
+    assert data["cases"][4]["worker_armed"] == 1
+    assert data["cases"][4]["anchor_loss_gate_checked"] == 1
+    assert data["cases"][4]["after_loss_attempts"] == 0
+    assert data["cases"][4]["term_attempts"] == 0
+    assert all(c["owner_fds_closed"] == 1 for c in data["cases"])
+    assert data["cases"][4]["controller_worker_fds_closed"] == 1

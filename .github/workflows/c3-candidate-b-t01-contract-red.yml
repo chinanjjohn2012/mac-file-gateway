@@ -53,18 +53,24 @@ jobs:
             test "$(uname -s)" = Darwin
             test "$(uname -m)" = arm64
           fi
+          echo "T01_CHECK=no_native_helper"
           test ! -e tools/research/c3_candidate_b_kill.c
+          echo "T01_CHECK=no_native_runner"
           test ! -e tools/research/run_c3_candidate_b_kill.py
+          echo "T01_CHECK=missing_pure_gate"
           test ! -e tools/research/c3_candidate_b_kill_t01_gate.py
           test -f tests/test_c3_candidate_b_kill_t01_contract_red.py
           test -f docs/research/phase2-lite-c3/candidate-b-b03-t01-r1-contract.md
+          echo "T01_CHECK=manifest_and_static"
           python - <<'PY'
           import ast
           import hashlib
           from pathlib import Path
           for line in Path("MANIFEST.sha256").read_text().splitlines():
               expected, path = line.split("  ", 1)
-              assert hashlib.sha256(Path(path).read_bytes()).hexdigest() == expected, path
+              observed = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+              if observed != expected:
+                  raise AssertionError(f"MANIFEST_DIFF {path} expected={expected} actual={observed}")
           source = Path("tests/test_c3_candidate_b_t01_contract_red.py").read_text()
           tree = ast.parse(source)
           unsafe = {"kill", "killpg", "fork", "system", "Popen", "run", "exec", "spawn", "raise_signal"}

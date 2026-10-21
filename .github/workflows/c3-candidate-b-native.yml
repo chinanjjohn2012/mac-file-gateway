@@ -70,6 +70,7 @@ jobs:
           assert data["decision"] == "PARTIAL_B01_NATIVE_NOT_G2"
           assert data["g2_qualified"] is False
           assert data["reuse_proven"] is False
+          assert data["mutation_detected"] is True
           assert [(c["mode"], c["status"]) for c in data["cases"]] == [
               ("join-positive", "POSITIVE_EXPERIMENT"),
               ("owner-reject-missing", "EXPECTED_BLOCK"),

@@ -129,6 +129,20 @@ def test_b01_real_negative_preconditions_and_gate_contract():
         assert required in c
 
 
+def test_b01_spawn_invocation_and_presync_fault_are_distinct():
+    src = C.read_text()
+    for required in (
+        "spawn_invoked", "spawn_errno",
+        "C3B_FAULT_PRESPAWN", "posix_spawn(",
+    ):
+        assert required in src
+    m = module()
+    assert "mutation_detected" in DRIVER.read_text()
+    # Earlier negative controls must reject attribute/FD setup failures
+    # instead of counting them as a kernel-level posix_spawn refusal.
+    assert m.EXPECTED["join-nonexistent"][-1] == "EXPECTED_BLOCK"
+
+
 def test_b01_native_workflow_has_dual_arm64_and_private_evidence():
     s = WORKFLOW.read_text()
     for marker in (
@@ -165,6 +179,7 @@ def test_b01_hosted_darwin_actual_cross_parent_join(tmp_path):
     assert record["decision"] == "PARTIAL_B01_NATIVE_NOT_G2"
     assert record["g2_qualified"] is False
     assert record["reuse_proven"] is False
+    assert record["mutation_detected"] is True
     assert [x["mode"] for x in record["cases"]] == list(MODES)
     assert [x["status"] for x in record["cases"]] == [EXPECTED[m][-1] for m in MODES]
     assert all(x["cleanup_complete"] == 1 for x in record["cases"])

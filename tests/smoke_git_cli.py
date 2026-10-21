@@ -224,7 +224,8 @@ def assert_http_git_mode(tmp: Path, *, multi: bool) -> None:
 
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="gateway-git-cli-e-") as name:
-        base = Path(name)
+        # macOS TMPDIR may contain symlink ancestors; control paths must not.
+        base = Path(name).resolve(strict=True)
         legacy, multi = base / "legacy", base / "multi"
         legacy.mkdir()
         multi.mkdir()

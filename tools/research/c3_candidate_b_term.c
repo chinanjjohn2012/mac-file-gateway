@@ -725,7 +725,7 @@ static int owner_role(const char *mode,const char *self,
     }
     reason=which==ANCHOR_LOST && o.after_loss_attempts ?
            "anchor_gate_violation" : "typed_result";
-done:
+done: ;
     /* Signal qualification CLOSED before held PGID or PID is released.
        Real close results are part of the VERIFIED cleanup contract. */
     int owner_fd_ok=1;

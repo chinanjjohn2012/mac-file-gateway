@@ -47,6 +47,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           architecture: arm64
+      - name: Native Darwin C strict compile check (synthetic only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -pthread -fsyntax-only tools/research/c3_candidate_b_term.c
       - name: B-02 RED/GREEN contracts for test-owned PGID TERM
         shell: bash
         run: |

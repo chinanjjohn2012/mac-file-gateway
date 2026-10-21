@@ -137,7 +137,47 @@ def main() -> int:
             shutil.copyfile(compile_binary, binary)
             os.chmod(binary, 0o700)
             cases.append(run_case(binary, root, mode))
+        # Mutation: a Worker file-action/attribute preparation failure must
+        # never be accepted as evidence of native posix_spawn group rejection.
+        mutant_compiled = private / "c3b_mutant_compiled"
+        try:
+            mutant_build = subprocess.run(
+                ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-pthread",
+                 "-DC3B_FAULT_PRESPAWN", str(NATIVE), "-o", str(mutant_compiled)],
+                text=True, capture_output=True, timeout=40, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            print("C3B_BLOCK mutation_compile_unavailable")
+            return 4
+        if mutant_build.returncode != 0:
+            print("C3B_BLOCK mutation_compile")
+            return 4
+        mutant_root = private / "mutation"
+        mutant_root.mkdir(mode=0o700)
+        os.chmod(mutant_root, 0o700)
+        marker = mutant_root / "C3B_TEST_MARKER"
+        marker.write_bytes(b"synthetic")
+        os.chmod(marker, 0o600)
+        mutant = mutant_root / "c3_candidate_b_native"
+        shutil.copyfile(mutant_compiled, mutant)
+        os.chmod(mutant, 0o700)
+        try:
+            m = subprocess.run(
+                (str(mutant), "join-nonexistent", str(mutant_root)),
+                capture_output=True, text=True, timeout=9, check=False,
+            )
+            mutation_detected = (
+                m.returncode == 70
+                and m.stdout == (
+                    "C3B_MUTATION mode=join-nonexistent invoked=0 "
+                    "gate=0 worker_started=0\n"
+                )
+                and m.stderr == "C3B_BLOCK phase=typed_outcome\n"
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            mutation_detected = False
     success = (
+        mutation_detected and
         [c["status"] for c in cases] == [EXPECTED[m][-1] for m in MODES]
         and all(0 <= c["elapsed_ms"] < 6000 and
                 c.get("cleanup_complete") == 1 and
@@ -150,6 +190,7 @@ def main() -> int:
         "decision": decision, "g2_qualified": False, "reuse_proven": False,
         "native_os": "Darwin", "native_arch": "arm64",
         "python_version": platform.python_version(), "cases": cases,
+        "mutation_detected": mutation_detected,
     }
     output = evidence_dir / "c3_candidate_b_private.json"
     output.write_text(json.dumps(evidence, sort_keys=True, indent=2) + "\n",
@@ -171,6 +212,7 @@ def main() -> int:
                   work=c.get("workload_started", -1),
                   waited=c.get("controller_waited", -1),
                   cleanup=c.get("cleanup_complete", -1)))
+    print("C3B_MUTATION_DETECTED=" + str(mutation_detected).lower())
     print("C3B_NATIVE_RESULT=" + decision)
     return 0 if success else 2
 

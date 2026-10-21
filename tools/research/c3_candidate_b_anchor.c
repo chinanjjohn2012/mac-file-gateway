@@ -180,7 +180,9 @@ static void child_release(Child *p) {
  */
 static int spawn_role(const char *binary,const char *root,int dir,
                       const char *role,int set_pgroup,pid_t newgroup,
-                      Child *out) {
+                      Child *out,int *spawn_invoked,int *spawn_errno) {
+    if(spawn_invoked)*spawn_invoked=0;
+    if(spawn_errno)*spawn_errno=0;
     int in[2]={-1,-1},outpipe[2]={-1,-1};
     posix_spawn_file_actions_t fa;
     posix_spawnattr_t attr;
@@ -211,7 +213,13 @@ static int spawn_role(const char *binary,const char *root,int dir,
     }
     if(posix_spawnattr_setflags(&attr,flags))goto finish;
     char *const argv[]={(char*)binary,(char*)role,(char*)root,NULL};
+#ifdef C3B_FAULT_PRESPAWN
+    /* Mutation: kernel spawn is NOT called despite all setup succeeding. */
+    if(!strcmp(role,"__worker"))goto finish;
+#endif
+    if(spawn_invoked)*spawn_invoked=1; /* immediately before actual syscall */
     int err=posix_spawn(&out->pid,binary,&fa,&attr,argv,environ);
+    if(spawn_errno)*spawn_errno=err;
     if(err){errno=err;out->pid=-1;goto finish;}
     success=1;
     out->input=in[1];in[1]=-1;
@@ -270,10 +278,14 @@ static int controller_role(const char *root,const char *binary,int dir) {
     Proposal p={.magic=PROPOSAL_MAGIC,.seq=1,.controller=getpid(),
                 .ctrl_pgid=getpgid(0),.ctrl_sid=getsid(0)};
     Child worker={.pid=-1,.input=-1,.output=-1};
-    p.attempted=1;
-    int spawned=spawn_role(binary,root,dir,"__worker",1,set.anchor,&worker);
+    int spawn_invoked=0,spawn_errno=0;
+    int spawned=spawn_role(binary,root,dir,"__worker",1,set.anchor,
+                           &worker,&spawn_invoked,&spawn_errno);
+    p.attempted=spawn_invoked;
     p.started=spawned?1:0;
-    p.failure=spawned?0:1;
+    /* Only a real posix_spawn failure counts as a Darwin rejection;
+       a file-action or attribute setup error is a different observation. */
+    p.failure=spawned?0:(spawn_invoked && spawn_errno!=0 ? 1 : 2);
     if(spawned) {
         WorkerReady w;
         if(!wait_read(worker.output,&w,sizeof w,deadline) ||
@@ -331,7 +343,7 @@ static int owner_role(const char *mode,const char *root,
     const char *reason="spawn_anchor";
     pid_t own_sid=getsid(0);
     if(!choice || own_sid<=0 || !waitable_signals())return fail("startup");
-    if(!spawn_role(binary,root,dir,"__anchor",1,0,&anchor))goto done;
+    if(!spawn_role(binary,root,dir,"__anchor",1,0,&anchor,NULL,NULL))goto done;
     char ready=0;
     reason="anchor_ready";
     if(!receive_gate(anchor.output,&ready,deadline) || ready!='A' ||
@@ -357,7 +369,8 @@ static int owner_role(const char *mode,const char *root,
     /* Cross SID: Controller inherits Owner PGID, then actually calls setsid().
        Normal mode: controller is its own group leader in the SAME session. */
     int create_own_group=choice!=M_CROSS_SESSION;
-    if(!spawn_role(binary,root,dir,"__controller",create_own_group,0,&ctrl))
+    if(!spawn_role(binary,root,dir,"__controller",create_own_group,0,
+                   &ctrl,NULL,NULL))
         goto done;
     Setup setup={.magic=SETUP_MAGIC,.mode=choice,.anchor=anchor.pid,
                  .sid=own_sid};
@@ -416,13 +429,13 @@ static int owner_role(const char *mode,const char *root,
     o.workload_started=started_in_root(dir);
     if(choice==M_POSITIVE) {
         good=anchor_ok && o.controller_outside && !o.sid_distinct &&
-             o.spawn_attempted && o.worker_spawned &&
+             p.failure==0 && o.spawn_attempted && o.worker_spawned &&
              o.join_verified && o.parentage_verified &&
              o.owner_granted && o.gate_opened && o.workload_started &&
              o.controller_waited;
     } else if(choice==M_SPAWN_MISSING || choice==M_CROSS_SESSION) {
-        good=o.controller_outside && o.spawn_attempted &&
-             !o.worker_spawned && !o.join_verified &&
+        good=o.controller_outside && p.failure==1 &&
+             o.spawn_attempted && !o.worker_spawned && !o.join_verified &&
              !o.owner_granted && !o.gate_opened &&
              !o.workload_started && !o.controller_waited &&
              ((choice==M_CROSS_SESSION && o.sid_distinct && anchor_ok) ||
@@ -431,7 +444,8 @@ static int owner_role(const char *mode,const char *root,
         /* Kernel parentage is valid, but Controller's *reported* parent is
            deliberately invalid. Independent Owner MUST NOT release gate. */
         good=anchor_ok && o.controller_outside && !o.sid_distinct &&
-             o.spawn_attempted && o.worker_spawned && o.join_verified &&
+             p.failure==0 && o.spawn_attempted && o.worker_spawned &&
+             o.join_verified &&
              o.parentage_verified && !report_matches && !o.owner_granted &&
              !o.gate_opened && !o.workload_started && o.controller_waited;
     }
@@ -451,6 +465,15 @@ done:
     if(anchor.pid>0 && (!anchor.reaped || !WIFEXITED(anchor.raw) ||
                         WEXITSTATUS(anchor.raw)!=0))o.cleanup_complete=0;
     child_release(&anchor);child_release(&ctrl);
+#ifdef C3B_FAULT_PRESPAWN
+    /* A setup failure that never called posix_spawn cannot impersonate
+       a real Darwin "missing process group" rejection. Synthetic mutant
+       evidence is exact, never promotes the mode to a positive result. */
+    if(choice==M_SPAWN_MISSING && !good && o.cleanup_complete &&
+       !o.spawn_attempted && !o.worker_spawned && !o.owner_granted &&
+       !o.gate_opened)
+        puts("C3B_MUTATION mode=join-nonexistent invoked=0 gate=0 worker_started=0");
+#endif
     if(!good || !o.cleanup_complete)return fail(reason);
     printf("C3B_RESULT mode=%s anchor_held=%d controller_outside=%d "
            "sid_distinct=%d spawn_attempted=%d worker_spawned=%d "

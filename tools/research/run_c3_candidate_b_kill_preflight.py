@@ -38,6 +38,39 @@ RESULT = "PRE_SIGNAL_PREFLIGHT_ONLY_NOT_G2"
 SIMPLE = re.compile(r"^C3B03_R2_PREFLIGHT(?: [a-z0-9_]+=[01])+\n\Z")
 
 
+
+ORPHAN_PREFIX = "C3B03_R2_ORPHAN"
+ORPHAN_RESULT = "ORPHAN_EXIT_OBSERVED_NOT_WORKER_WAIT"
+ORPHAN_EXPECTED = {
+    "watcher_registered_before_loss": 1,
+    "worker_reparented": 1,
+    "worker_note_exit": 1,
+    "worker_self_expiry_witness": 1,
+    "controller_legal_wait": 0,
+    "worker_wait_status_unknown": 1,
+    "cleanup_unresolved": 1,
+    "group_term_attempts": 0,
+    "group_kill_attempts": 0,
+}
+
+def parse_orphan_native(output: str) -> dict[str, int]:
+    fields = tuple(ORPHAN_EXPECTED)
+    pattern = (r"\A" + ORPHAN_PREFIX +
+               "".join(r" " + re.escape(k) + r"=([01])" for k in fields)
+               + r"\n\Z")
+    match = re.fullmatch(pattern, output)
+    if match is None:
+        raise ValueError("invalid or duplicated orphan event record")
+    return dict(zip(fields, map(int, match.groups())))
+
+def classify_orphan(record: dict) -> str:
+    if type(record) is not dict or record.keys() != ORPHAN_EXPECTED.keys():
+        return "BLOCK"
+    return ORPHAN_RESULT if all(
+        type(record[k]) is int and record[k] == v
+        for k, v in ORPHAN_EXPECTED.items()
+    ) else "BLOCK"
+
 def parse_native(output: str) -> dict[str, int]:
     if not SIMPLE.fullmatch(output):
         raise ValueError("missing, duplicate, or forged native record")
@@ -106,7 +139,7 @@ def create_root(private: Path, binary: Path) -> Path:
     return executable
 
 
-def run_preflight(executable: Path):
+def run_preflight(executable: Path, mode: str = "preflight"):
     """Bounded native owner; do not send ANY host signal on timeout.
 
     If this times out, record unresolved; the research process's self-expiry
@@ -114,7 +147,7 @@ def run_preflight(executable: Path):
     """
     try:
         proc = subprocess.Popen(
-            [str(executable), "preflight", str(executable.parent)],
+            [str(executable), mode, str(executable.parent)],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True,
         )
@@ -153,7 +186,9 @@ def main() -> int:
             return 4
         executable = create_root(private, binary)
         observed, reason = run_preflight(executable)
+        orphan_raw, orphan_reason = run_preflight(executable, "orphan-preflight")
     verdict = classify(observed) if observed is not None else "BLOCK"
+    orphan_verdict = classify_orphan(orphan_raw) if orphan_raw is not None else "BLOCK"
     # No preflight observation can prove orphan handling or KILL permission.
     data = {
         "decision": RESULT if verdict == RESULT else "BLOCK_RESEARCH",
@@ -162,6 +197,10 @@ def main() -> int:
         "python_version": platform.python_version(),
         "preflight": observed if verdict == RESULT else None,
         "reason": reason,
+        "orphan_lifecycle": orphan_raw if orphan_verdict == ORPHAN_RESULT else None,
+        "orphan_lifecycle_result": orphan_verdict,
+        "orphan_lifecycle_reason": orphan_reason,
+        "orphan_worker_exit_observed": orphan_verdict == ORPHAN_RESULT,
         "orphan_modes": {mode: "NOT_RUN/BLOCK" for mode in ORPHAN_MODES},
         "orphan_preflight_proven": False,
         "group_kill_authorized": False,
@@ -177,9 +216,10 @@ def main() -> int:
         json.dump(data, stream, sort_keys=True, indent=2)
         stream.write("\n")
     print("C3B03_R2_PREFLIGHT_RESULT=" + data["decision"])
+    print("C3B03_R2_ORPHAN_LIFECYCLE=" + orphan_verdict)
     print("C3B03_R2_GROUP_KILL_AUTHORIZED=false")
     print("C3B03_R2_ORPHAN_MODES=NOT_RUN/BLOCK")
-    return 0 if verdict == RESULT else 2
+    return 0 if verdict == RESULT and orphan_verdict == ORPHAN_RESULT else 2
 
 
 if __name__ == "__main__":

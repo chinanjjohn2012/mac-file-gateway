@@ -2,27 +2,56 @@
   "schema_version": 1,
   "server": {
     "port": 8765,
-    "transport": "http"
+    "transport": "http",
+    "git": {
+      "enabled": false
+    }
   },
   "workspaces": {
     "project-a": {
       "root": "/absolute/path/to/project-a",
-      "read": { "enabled": true, "excludes": [] },
-      "hidden_paths": [".scratch"],
+      "read": {
+        "enabled": true,
+        "excludes": []
+      },
+      "hidden_paths": [
+        ".scratch"
+      ],
       "write": {
         "enabled": true,
-        "paths": ["src", ".scratch"],
+        "paths": [
+          "src",
+          ".scratch"
+        ],
         "backup_retention_days": 15
       },
-      "exec": { "enabled": false },
-      "local_skills": { "enabled": false }
+      "exec": {
+        "enabled": false
+      },
+      "local_skills": {
+        "enabled": false
+      },
+      "git": {
+        "allowed_commands": []
+      }
     },
     "project-b": {
       "root": "/absolute/path/to/project-b",
-      "read": { "enabled": true },
-      "write": { "enabled": false },
-      "exec": { "enabled": false },
-      "local_skills": { "enabled": false }
+      "read": {
+        "enabled": true
+      },
+      "write": {
+        "enabled": false
+      },
+      "exec": {
+        "enabled": false
+      },
+      "local_skills": {
+        "enabled": false
+      },
+      "git": {
+        "allowed_commands": []
+      }
     }
   }
 }

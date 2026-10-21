@@ -525,7 +525,7 @@ orphan_done:;
     if(!fd_close(rootfd))fd_ok=0;
     if(!(registered&&worker_known&&controller_waited&&note_exit&&
          reparented&&self_expiry&&fd_ok&&close_ok&&clock_ms()<deadline)){
-        fprintf(stderr,"C3B03_R2_BLOCK phase=orphan_observation cleanup=UNRESOLVED\n");
+        fprintf(stderr,"C3B03_R2_BLOCK phase=orphan_observation registered=%d controller_waited=%d note_exit=%d reparented=%d self_expiry=%d fd_ok=%d cleanup=UNRESOLVED\n",registered,controller_waited,note_exit,reparented,self_expiry,fd_ok);
         return 70;
     }
     puts("C3B03_R2_ORPHAN watcher_registered_before_loss=1 "

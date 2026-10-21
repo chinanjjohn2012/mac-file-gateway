@@ -34,7 +34,7 @@ int main(void) { puts("C3B03_R2_NOT_RUN_NON_DARWIN"); return 77; }
 extern char **environ;
 enum { MAGIC_READY=0x43334271, MAGIC_SETUP=0x43334272,
        MAGIC_PROPOSAL=0x43334273, MAGIC_ARMED=0x43334274,
-       MAGIC_FINAL=0x43334275 };
+       MAGIC_FINAL=0x43334275, MAGIC_ORPHAN_CANCEL=0x43334276 };
 enum { ANCHOR=1, CONTROLLER=2, WORKER=3 };
 typedef struct { pid_t pid; int input,output,reaped,status; } Child;
 typedef struct {
@@ -52,6 +52,9 @@ typedef struct { int magic,seq,armed; pid_t worker; } Armed;
 typedef struct {
     int magic,seq,waited,status,worker_fds_closed; pid_t worker;
 } Final;
+typedef struct {
+    int magic,seq,waited,status,fds_closed; pid_t worker;
+} OrphanCancelFinal;
 static int close_ok=1;
 
 static long long clock_ms(void) {
@@ -328,6 +331,7 @@ static int controller_role(const char *self,const char *root,int dir) {
            WEXITSTATUS(f.status)==24&&f.worker_fds_closed ? 0 : 66;
 }
 static int owner_role(const char *self,const char *root,int *rootfd) {
+    alarm(11); /* self-expiry backstop; NEVER group signal */
     int dir=*rootfd;
     if(!sig_setup())return 70;
     Child anchor={.pid=-1,.input=-1,.output=-1};
@@ -442,17 +446,28 @@ static int orphan_worker_role(int dir) {
     if(!sig_setup())return 81;
     const pid_t parent=getppid();
     if(parent<=1)return 81;
-    long long deadline=clock_ms()+3800;
-    char armed='W';
-    if(!send_byte(STDOUT_FILENO,armed,deadline))return 82;
+    const long long deadline=clock_ms()+3800;
+    if(!send_byte(STDOUT_FILENO,'W',deadline))return 82;
     for(;;) {
         if(getppid()!=parent)break;
         if(remaining(deadline)<=0)return 83;
-        pause_short();
+        /* Only the living Controller can cooperatively cancel the Worker.
+           EOF is NOT a parent-loss witness; independently check getppid(). */
+        struct pollfd ctl={.fd=STDIN_FILENO,.events=POLLIN|POLLHUP};
+        int n=poll(&ctl,1,20);
+        if(n<0&&errno==EINTR)continue;
+        if(n<0)return 86;
+        if(n>0&&(ctl.revents&POLLIN)) {
+            char q=0;
+            ssize_t got=read(STDIN_FILENO,&q,1);
+            if(got==1&&q=='C')return 24;
+            if(got<0&&errno!=EINTR)return 87;
+        }
+        if(n>0&&(ctl.revents&POLLHUP))pause_short();
     }
     if(!orphan_marker(dir,"C3B03_ORPHAN_REPARENTED"))return 84;
-    /* The worker, not Owner/Controller/runner, chooses its own exit deadline. */
-    long long self_expiry=clock_ms()+150;
+    /* Actual parent loss -> Worker uses its own monotonic self-expiry. */
+    const long long self_expiry=clock_ms()+150;
     while(clock_ms()<self_expiry)pause_short();
     if(!orphan_marker(dir,"C3B03_ORPHAN_SELF_EXIT"))return 85;
     return 0;
@@ -463,38 +478,78 @@ static int orphan_controller_role(const char *self,const char *root,int dir){
     const long long deadline=clock_ms()+5000;
     Child worker={.pid=-1,.input=-1,.output=-1};
     if(!spawn_role(self,root,dir,"__orphan_worker",1,0,&worker))return 87;
-    char ready=0;
-    if(!read_byte(worker.output,&ready,deadline)||ready!='W')return 88;
-    /* Worker PID is sent only over Owner's controlled private pipe. */
+    char ready=0,release=0;
+    if(!read_byte(worker.output,&ready,deadline)||ready!='W')
+        goto cancel_worker;
+    /* No Worker loss before Owner has installed independent NOTE_EXIT. */
     if(!write_exact(STDOUT_FILENO,&worker.pid,sizeof worker.pid,deadline))
-        return 89;
-    char release=0;
-    if(!read_byte(STDIN_FILENO,&release,deadline)||release!='L')return 90;
-    /* A real Controller exit, intentionally WITHOUT waitpid(worker). */
-    return 0;
+        goto cancel_worker;
+    if(!read_byte(STDIN_FILENO,&release,deadline))release='C';
+    if(release=='L') {
+        /* Only the explicitly released positive case relinquishes waitpid.
+           Worker then independently observes reparenting and self-expires. */
+        return 0;
+    }
+cancel_worker:;
+    /* Observer registration failure, EOF or malformed release:
+       still the lawful Worker parent; cancel, waitpid, close checked FDs. */
+    int request=send_byte(worker.input,'C',deadline);
+    int input_closed=fd_close(&worker.input);
+    OrphanCancelFinal f={.magic=MAGIC_ORPHAN_CANCEL,.seq=2,
+                         .worker=worker.pid};
+    if(child_wait(&worker,deadline)) {
+        f.waited=1;f.status=worker.status;
+    }
+    f.fds_closed=input_closed&&child_close(&worker)&&close_ok;
+    int valid=request&&f.waited&&WIFEXITED(f.status)&&
+              WEXITSTATUS(f.status)==24&&f.fds_closed;
+    if(valid) (void)write_exact(STDOUT_FILENO,&f,sizeof f,deadline);
+    return valid?0:90;
 }
 static int orphan_owner_role(const char *self,const char *root,int *rootfd){
+    alarm(11); /* own-process watchdog, not a group signal */
     int dir=*rootfd;
     if(!sig_setup())return 70;
     Child ctrl={.pid=-1,.input=-1,.output=-1};
     const long long deadline=clock_ms()+7000;
     int kq=-1,registered=0,reparented=0,note_exit=0,self_expiry=0;
-    int controller_waited=0,fd_ok=1,worker_known=0;
+    int controller_waited=0,fd_ok=1,worker_known=0,identity=0;
+    int released=0,cancel_verified=0;
     pid_t worker=-1;
     if(!spawn_role(self,root,dir,"__orphan_controller",1,0,&ctrl))
         goto orphan_done;
     if(!read_exact(ctrl.output,&worker,sizeof worker,deadline)||worker<=1)
         goto orphan_done;
     worker_known=1;
-    /* Kernel-backed NOTE_EXIT registration precedes the release of parent. */
+    /* Bind numeric PID to real Controller child, session and self-led PGID
+       before installing the kernel watcher. No user-provided PID exists. */
+    const pid_t owner_sid=getsid(0);
+    identity=owner_sid>0&&worker!=ctrl.pid&&
+             getpgid(worker)==worker&&getsid(worker)==owner_sid&&
+             bsd_parent(worker,ctrl.pid,worker);
+    if(!identity)goto orphan_done;
+#ifdef C3B03_R2_FAULT_KQUEUE_OPEN
+    errno=EMFILE; /* fault BEFORE any Controller release */
+    goto orphan_done;
+#else
     kq=kqueue();
     if(kq<0)goto orphan_done;
+#endif
     struct kevent change;
     EV_SET(&change,(uintptr_t)worker,EVFILT_PROC,EV_ADD|EV_ENABLE|EV_ONESHOT,
            NOTE_EXIT,0,NULL);
+#ifdef C3B03_R2_FAULT_KEVENT_ADD
+    errno=EPERM; /* simulate failed event registration, no release */
+    goto orphan_done;
+#else
     if(kevent(kq,&change,1,NULL,0,NULL)<0)goto orphan_done;
+#endif
     registered=1;
+    /* Recheck live parent/group/session once registration is installed. */
+    if(getpgid(worker)!=worker||getsid(worker)!=owner_sid||
+       !bsd_parent(worker,ctrl.pid,worker))goto orphan_done;
     if(!send_byte(ctrl.input,'L',deadline))goto orphan_done;
+    released=1; /* gate: NOT set by a mere positive kqueue descriptor */
     if(!child_wait(&ctrl,deadline)||!WIFEXITED(ctrl.status)||
        WEXITSTATUS(ctrl.status)!=0)goto orphan_done;
     controller_waited=1;
@@ -502,37 +557,62 @@ static int orphan_owner_role(const char *self,const char *root,int *rootfd){
         struct kevent event;
         struct timespec tick={.tv_sec=0,.tv_nsec=100000000L};
         int n=kevent(kq,NULL,0,&event,1,&tick);
-        if(n<0 && errno==EINTR)continue;
+        if(n<0&&errno==EINTR)continue;
         if(n<0)break;
-        if(n==1 && event.filter==EVFILT_PROC &&
-           event.ident==(uintptr_t)worker && (event.fflags&NOTE_EXIT)){
-            note_exit=1;
-            break;
+        if(n==1&&event.filter==EVFILT_PROC&&
+           event.ident==(uintptr_t)worker&&(event.fflags&NOTE_EXIT)){
+            note_exit=1;break;
         }
     }
     struct stat st;
     reparented=fstatat(dir,"C3B03_ORPHAN_REPARENTED",&st,
-                      AT_SYMLINK_NOFOLLOW)==0 && S_ISREG(st.st_mode) &&
-             st.st_uid==geteuid() && st.st_nlink==1;
+                       AT_SYMLINK_NOFOLLOW)==0&&S_ISREG(st.st_mode)&&
+               st.st_uid==geteuid()&&st.st_nlink==1;
     self_expiry=fstatat(dir,"C3B03_ORPHAN_SELF_EXIT",&st,
-                      AT_SYMLINK_NOFOLLOW)==0 && S_ISREG(st.st_mode) &&
-                st.st_uid==geteuid() && st.st_nlink==1;
+                       AT_SYMLINK_NOFOLLOW)==0&&S_ISREG(st.st_mode)&&
+                st.st_uid==geteuid()&&st.st_nlink==1;
 orphan_done:;
+    if(!released&&ctrl.pid>0&&!ctrl.reaped) {
+        /* Registration failed: Controller MUST wait its own Worker.
+           Cancellation is a protocol byte, not a host PID/PGID signal. */
+        int sent=send_byte(ctrl.input,'C',deadline);
+        OrphanCancelFinal f={0};
+        if(sent&&read_exact(ctrl.output,&f,sizeof f,deadline)&&
+           f.magic==MAGIC_ORPHAN_CANCEL&&f.seq==2&&f.worker==worker&&
+           f.waited&&WIFEXITED(f.status)&&WEXITSTATUS(f.status)==24&&
+           f.fds_closed)
+            cancel_verified=1;
+    }
     if(!fd_close(&ctrl.input))fd_ok=0;
     if(!child_wait(&ctrl,deadline))controller_waited=0;
     if(!child_close(&ctrl))fd_ok=0;
     if(kq>=0&&!fd_close(&kq))fd_ok=0;
     if(!fd_close(rootfd))fd_ok=0;
-    if(!(registered&&worker_known&&controller_waited&&note_exit&&
-         reparented&&self_expiry&&fd_ok&&close_ok&&clock_ms()<deadline)){
-        fprintf(stderr,"C3B03_R2_BLOCK phase=orphan_observation registered=%d controller_waited=%d note_exit=%d reparented=%d self_expiry=%d fd_ok=%d cleanup=UNRESOLVED\n",registered,controller_waited,note_exit,reparented,self_expiry,fd_ok);
+    if(!released&&cancel_verified&&controller_waited&&ctrl.reaped&&
+       WIFEXITED(ctrl.status)&&WEXITSTATUS(ctrl.status)==0&&
+       fd_ok&&close_ok&&clock_ms()<deadline) {
+        puts("C3B03_R2_REFUSED reason=observer_not_ready "
+             "controller_waited_worker=1 worker_exit_24=1 "
+             "fds_closed=1 term_attempts=0 kill_attempts=0");
+        return 75; /* expected refusal, NEVER a positive orphan pass */
+    }
+    if(!(registered&&worker_known&&identity&&released&&
+         controller_waited&&note_exit&&reparented&&self_expiry&&
+         fd_ok&&close_ok&&clock_ms()<deadline)){
+        fprintf(stderr,"C3B03_R2_BLOCK phase=orphan_observation "
+                "registered=%d released=%d identity=%d "
+                "cancel_verified=%d controller_waited=%d "
+                "note_exit=%d reparented=%d self_expiry=%d fd_ok=%d "
+                "cleanup=UNRESOLVED\n",registered,released,identity,
+                cancel_verified,controller_waited,note_exit,reparented,
+                self_expiry,fd_ok);
         return 70;
     }
     puts("C3B03_R2_ORPHAN watcher_registered_before_loss=1 "
-         "worker_reparented=1 worker_note_exit=1 "
-         "worker_self_expiry_witness=1 controller_legal_wait=0 "
-         "worker_wait_status_unknown=1 cleanup_unresolved=1 "
-         "group_term_attempts=0 group_kill_attempts=0");
+         "worker_identity_verified=1 worker_reparented=1 "
+         "worker_note_exit=1 worker_self_expiry_witness=1 "
+         "controller_legal_wait=0 worker_wait_status_unknown=1 "
+         "cleanup_unresolved=1 group_term_attempts=0 group_kill_attempts=0");
     return 0;
 }
 

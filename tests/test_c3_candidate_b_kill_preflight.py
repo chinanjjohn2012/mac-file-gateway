@@ -168,6 +168,7 @@ def test_r2_controller_loss_orphan_kernel_observer_contract():
     assert m.ORPHAN_PREFIX == "C3B03_R2_ORPHAN"
     assert m.ORPHAN_RESULT == "ORPHAN_EXIT_OBSERVED_NOT_WORKER_WAIT"
     assert m.ORPHAN_EXPECTED["watcher_registered_before_loss"] == 1
+    assert m.ORPHAN_EXPECTED["worker_identity_verified"] == 1
     assert m.ORPHAN_EXPECTED["controller_legal_wait"] == 0
     assert m.ORPHAN_EXPECTED["worker_wait_status_unknown"] == 1
     assert m.ORPHAN_EXPECTED["cleanup_unresolved"] == 1
@@ -191,7 +192,9 @@ def test_r2_controller_loss_orphan_kernel_observer_contract():
     source = NATIVE.read_text(encoding="utf-8")
     for symbol in ("kqueue(", "kevent(", "EVFILT_PROC", "NOTE_EXIT",
                    "watcher_registered_before_loss", "orphan_owner_role",
-                   "worker_self_expiry_witness"):
+                   "worker_self_expiry_witness", "bsd_parent(worker,ctrl.pid,worker)",
+                   "MAGIC_ORPHAN_CANCEL", "C3B03_R2_FAULT_KQUEUE_OPEN",
+                   "C3B03_R2_FAULT_KEVENT_ADD", "C3B03_R2_REFUSED"):
         assert symbol in source
     assert "kill(" not in source and "killpg(" not in source
 
@@ -218,3 +221,122 @@ def test_r2_actual_controller_loss_orphan_lifecycle(tmp_path):
     assert record["orphan_modes"] == {
         mode: "NOT_RUN/BLOCK" for mode in module().ORPHAN_MODES
     }
+
+
+@pytest.mark.parametrize("fault", ("kqueue-open", "kevent-add"))
+@pytest.mark.skipif(sys.platform != "darwin",
+                    reason="Darwin-only actual watcher failure injection")
+def test_r2_watcher_failure_keeps_controller_legal_wait_and_no_orphan(
+    tmp_path, fault
+):
+    """Cause registration failure BEFORE releasing Controller, never KILL."""
+    m = module()
+    tmp_path.chmod(0o700)
+    binary = tmp_path / ("fault-" + fault)
+    assert m.compile_preflight(binary, fault=fault)
+    private = tmp_path / ("root-" + fault)
+    private.mkdir(mode=0o700)
+    executable = m.create_root(private, binary)
+    p = subprocess.run(
+        [str(executable), "orphan-preflight", str(executable.parent)],
+        text=True, capture_output=True, check=False, timeout=14,
+    )
+    assert p.returncode == 75, p.stdout + p.stderr
+    assert p.stdout == (
+        "C3B03_R2_REFUSED reason=observer_not_ready "
+        "controller_waited_worker=1 worker_exit_24=1 "
+        "fds_closed=1 term_attempts=0 kill_attempts=0\n"
+    )
+    assert p.stderr == ""
+    assert not (executable.parent / "C3B03_ORPHAN_REPARENTED").exists()
+    assert not (executable.parent / "C3B03_ORPHAN_SELF_EXIT").exists()
+
+
+def test_r2_fault_compiler_rejects_arbitrary_mutation_flags(tmp_path):
+    m = module()
+    assert not m.compile_preflight(tmp_path / "out", fault="skip-gate")
+    assert not (tmp_path / "out").exists()
+
+
+def test_r2_owner_timeout_reaps_only_owned_child_without_signaling(monkeypatch):
+    m = module()
+
+    class FakeProcess:
+        returncode = 0
+        def __init__(self):
+            self.calls = []
+        def communicate(self, timeout):
+            self.calls.append(timeout)
+            if len(self.calls) == 1:
+                raise subprocess.TimeoutExpired("synthetic-owner", timeout)
+            return "", ""
+        def poll(self):
+            return self.returncode
+
+    p = FakeProcess()
+    monkeypatch.setattr(m.subprocess, "Popen", lambda *a, **kw: p)
+    value, reason = m.run_preflight(Path("/synthetic/preflight"))
+    assert value is None and reason == "owner_timeout_reaped"
+    assert p.calls == [12, 3]
+
+
+def test_r2_owner_timeout_unresolved_is_not_a_cleanup_claim(monkeypatch):
+    m = module()
+
+    class FakeProcess:
+        def __init__(self):
+            self.calls = []
+        def communicate(self, timeout):
+            self.calls.append(timeout)
+            raise subprocess.TimeoutExpired("synthetic-owner", timeout)
+
+    p = FakeProcess()
+    monkeypatch.setattr(m.subprocess, "Popen", lambda *a, **kw: p)
+    value, reason = m.run_preflight(Path("/synthetic/preflight"))
+    assert value is None and reason == "owner_timeout_unresolved"
+    assert p.calls == [12, 3]
+
+
+@pytest.mark.parametrize("owner_reason, expected_cleanup", (
+    ("owner_timeout_unresolved", "UNRESOLVED"),
+    ("owner_timeout_reaped", "OWNER_REAPED_AFTER_TIMEOUT"),
+))
+def test_r2_runner_failure_never_launches_second_mode_and_tracks_owner(
+    tmp_path, monkeypatch, owner_reason, expected_cleanup
+):
+    """Stub only Runner logic; no native process, no PID operation."""
+    m = module()
+    private = tmp_path / "private"
+    calls = []
+
+    def stub_run(executable, mode="preflight"):
+        calls.append(mode)
+        return None, owner_reason
+
+    def stub_mkdtemp(*a, **kw):
+        private.mkdir(mode=0o700)
+        return str(private)
+
+    monkeypatch.setattr(m.sys, "platform", "darwin")
+    monkeypatch.setattr(m.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(m, "private_evidence_root", lambda path: True)
+    monkeypatch.setattr(m, "compile_preflight", lambda target: True)
+    monkeypatch.setattr(m, "create_root", lambda root, binary: root / "dummy")
+    monkeypatch.setattr(m, "run_preflight", stub_run)
+    monkeypatch.setattr(m.tempfile, "mkdtemp", stub_mkdtemp)
+    monkeypatch.setattr(m.sys, "argv", [
+        "runner", "--evidence-dir", str(tmp_path),
+    ])
+    rc = m.main()
+    assert rc == 2
+    assert calls == ["preflight"]  # NEVER enroll orphan after bad Owner
+    document = json.loads(
+        (tmp_path / "c3_b03_r2_preflight_private.json").read_text()
+    )
+    assert document["decision"] == "BLOCK_RESEARCH"
+    assert document["orphan_lifecycle"] is None
+    assert document["orphan_lifecycle_result"] == "BLOCK"
+    assert document["orphan_lifecycle_reason"] == "NOT_RUN_PRIOR_OWNER_UNVERIFIED"
+    assert document["native_owner_cleanup"] == expected_cleanup
+    assert document["group_kill_authorized"] is False
+    assert private.exists() is (owner_reason == "owner_timeout_unresolved")

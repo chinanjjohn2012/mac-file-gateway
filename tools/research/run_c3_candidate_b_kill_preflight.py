@@ -43,6 +43,7 @@ ORPHAN_PREFIX = "C3B03_R2_ORPHAN"
 ORPHAN_RESULT = "ORPHAN_EXIT_OBSERVED_NOT_WORKER_WAIT"
 ORPHAN_EXPECTED = {
     "watcher_registered_before_loss": 1,
+    "worker_identity_verified": 1,
     "worker_reparented": 1,
     "worker_note_exit": 1,
     "worker_self_expiry_witness": 1,
@@ -109,9 +110,18 @@ def private_evidence_root(path: Path) -> bool:
         return False
 
 
-def compile_preflight(target: Path) -> bool:
-    cmd = ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-pthread",
-           str(SOURCE), "-o", str(target)]
+def compile_preflight(target: Path, fault: str | None = None) -> bool:
+    """Compile only known in-source test faults; NEVER run a PID signal."""
+    macros = {
+        None: (),
+        "kqueue-open": ("C3B03_R2_FAULT_KQUEUE_OPEN",),
+        "kevent-add": ("C3B03_R2_FAULT_KEVENT_ADD",),
+    }
+    if fault not in macros:
+        return False
+    cmd = ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-pthread"]
+    cmd.extend("-D" + flag for flag in macros[fault])
+    cmd.extend([str(SOURCE), "-o", str(target)])
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               check=False, timeout=45)
@@ -140,10 +150,10 @@ def create_root(private: Path, binary: Path) -> Path:
 
 
 def run_preflight(executable: Path, mode: str = "preflight"):
-    """Bounded native owner; do not send ANY host signal on timeout.
+    """Two bounded waits, no host signals and no false success after timeout.
 
-    If this times out, record unresolved; the research process's self-expiry
-    is not proof of cleanup and no Actions runner cleanup may be counted.
+    All C roles have independent alarm/self-expiry. A timeout remains a BLOCK
+    even when the Owner is subsequently observed terminated/reaped.
     """
     try:
         proc = subprocess.Popen(
@@ -156,15 +166,26 @@ def run_preflight(executable: Path, mode: str = "preflight"):
     try:
         stdout, stderr = proc.communicate(timeout=12)
     except subprocess.TimeoutExpired:
-        # Never forcibly terminate a timed-out native owner to disguise failure.
-        # Runner must not claim VERIFIED if its native owner is unresolved.
-        return None, "owner_timeout_unresolved"
+        # Owned child ONLY. Never signal a numeric PID, PGID, or task.
+        # Give the native Owner's independent alarm a bounded wait window.
+        try:
+            proc.communicate(timeout=3)
+        except (subprocess.TimeoutExpired, OSError):
+            return None, "owner_timeout_unresolved"
+        if proc.poll() is None:
+            return None, "owner_timeout_unresolved"
+        return None, "owner_timeout_reaped"
+    except OSError:
+        return None, "owner_wait_failed_unresolved"
     if proc.returncode != 0 or stderr:
-        if mode == "orphan-preflight" and stderr.startswith("C3B03_R2_BLOCK phase=orphan_observation "):
+        if mode == "orphan-preflight" and stderr.startswith(
+            "C3B03_R2_BLOCK phase=orphan_observation "
+        ):
             return None, stderr.strip()
         return None, "native_rejected"
     try:
-        return (parse_orphan_native(stdout) if mode == "orphan-preflight" else parse_native(stdout)), None
+        return (parse_orphan_native(stdout)
+                if mode == "orphan-preflight" else parse_native(stdout)), None
     except ValueError:
         return None, "invalid_native_record"
 
@@ -179,18 +200,42 @@ def main() -> int:
     if not private_evidence_root(args.evidence_dir):
         print("C3B03_R2_BLOCK untrusted_evidence_directory")
         return 4
-    with tempfile.TemporaryDirectory(prefix="c3b03-r2-private-") as folder:
-        private = Path(folder)
-        private.chmod(0o700)
+    # Never delete a live Owner's private root. A failed wait is expressly
+    # UNRESOLVED and stops all further modes. The 0700 tree is retained for
+    # forensic inspection if the Owner's exit cannot be observed.
+    private = Path(tempfile.mkdtemp(prefix="c3b03-r2-private-"))
+    private.chmod(0o700)
+    preserve_private = False
+    observed = None
+    reason = "not_started"
+    orphan_raw = None
+    orphan_reason = "NOT_RUN_PRECONDITION"
+    try:
         binary = private / "preflight_compiled"
         if not compile_preflight(binary):
             print("C3B03_R2_BLOCK compilation")
             return 4
         executable = create_root(private, binary)
         observed, reason = run_preflight(executable)
-        orphan_raw, orphan_reason = run_preflight(executable, "orphan-preflight")
+        if reason in ("owner_timeout_unresolved", "owner_wait_failed_unresolved"):
+            preserve_private = True
+        if observed is not None and classify(observed) == RESULT:
+            orphan_raw, orphan_reason = run_preflight(
+                executable, "orphan-preflight"
+            )
+            if orphan_reason in (
+                "owner_timeout_unresolved", "owner_wait_failed_unresolved"
+            ):
+                preserve_private = True
+        else:
+            orphan_reason = "NOT_RUN_PRIOR_OWNER_UNVERIFIED"
+    finally:
+        if not preserve_private:
+            shutil.rmtree(private)
     verdict = classify(observed) if observed is not None else "BLOCK"
-    orphan_verdict = classify_orphan(orphan_raw) if orphan_raw is not None else "BLOCK"
+    orphan_verdict = (
+        classify_orphan(orphan_raw) if orphan_raw is not None else "BLOCK"
+    )
     # No preflight observation can prove orphan handling or KILL permission.
     data = {
         "decision": RESULT if verdict == RESULT else "BLOCK_RESEARCH",
@@ -202,6 +247,13 @@ def main() -> int:
         "orphan_lifecycle": orphan_raw if orphan_verdict == ORPHAN_RESULT else None,
         "orphan_lifecycle_result": orphan_verdict,
         "orphan_lifecycle_reason": orphan_reason,
+        "native_owner_cleanup": (
+            "UNRESOLVED" if preserve_private else
+            "OWNER_REAPED_AFTER_TIMEOUT" if (
+                reason == "owner_timeout_reaped" or
+                orphan_reason == "owner_timeout_reaped"
+            ) else "NO_OWNER_TIMEOUT"
+        ),
         "orphan_worker_exit_observed": orphan_verdict == ORPHAN_RESULT,
         "orphan_modes": {mode: "NOT_RUN/BLOCK" for mode in ORPHAN_MODES},
         "orphan_preflight_proven": False,

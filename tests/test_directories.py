@@ -263,7 +263,7 @@ def test_sync_failure_is_success_with_warning_not_false_failure(root, monkeypatc
 def test_info_declares_directory_policy(root):
     with gateway(root) as g:
         info = g.info()
-    assert info["version"] == "2.4.0"
+    assert info["version"] == "2.5.0"
     policy = info["write_policy"]["directory_creation"]
     assert policy["enabled"] is True
     assert policy["parents_default"] is False

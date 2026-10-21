@@ -117,14 +117,21 @@ class NoSignalRecorder:
         return self.response
 
 
-def test_t01_r1_no_native_execution_surface():
+def test_t01_contract_is_reusable_after_R2_implementation():
+    """Shared behavior contract must allow a later correct GREEN implementation.
+
+    R1-only absence checks live in the *R1 workflow*, not in shared pytest.
+    """
     assert DESIGN.is_file()
     assert FROZEN_R1.is_file()
     assert WORKFLOW.is_file()
-    assert not NATIVE.exists(), "T01-R1 must not add a live B03 group helper"
-    assert not RUNNER.exists(), "T01-R1 must not add a native-run driver"
-    assert not GATE.exists(), "T01-R1 pure gate is intentionally not implemented"
     assert "POSITIVE_EXPERIMENT" in DESIGN.read_text(encoding="utf-8")
+    stub = NoSignalRecorder()
+    stub.send("TERM", OWNED_REF)
+    assert stub.calls == [("TERM", OWNED_REF)]
+    with pytest.raises(AssertionError):
+        stub.send("KILL", 123)  # not an authorized opaque fixture target
+    assert stub.calls == [("TERM", OWNED_REF)]
 
 
 def test_t01_r1_frozen_b03_schemas_stay_untouched():
@@ -206,11 +213,43 @@ def test_t01_term_cutoff_equality_and_late_entry_are_denied(now):
     (KILL_CUTOFF_MS, TERM_SENT_AT_MS),
     (KILL_CUTOFF_MS + 1, TERM_SENT_AT_MS),
     (OUTER_DEADLINE_MS, TERM_SENT_AT_MS),
-    (KILL_NOW_MS, KILL_CUTOFF_MS),  # fraudulent late TERM
+    (108_702, 108_501),  # late TERM, but grace complete and KILL still timely
+    (108_701, 108_500),  # equal TERM cutoff, grace complete
 ))
 def test_t01_kill_grace_and_cutoff_boundaries_are_denied(now, sent):
     m = t01_module()
     assert not m.kill_admitted(cutoffs(m), now, sent, KILL_FACTS)
+
+
+def test_t01_second_absolute_time_vector_and_rebased_t0():
+    """Independent numbers block a hard-coded single-vector implementation."""
+    m = t01_module()
+    p = m.derive_cutoffs(30_000, 21_000, 6_000, 900, 600)
+    assert p == {
+        "t0_ms": 30_000,
+        "outer_deadline_ms": 51_000,
+        "kill_cutoff_ms": 45_000,
+        "term_cutoff_ms": 43_500,
+        "cleanup_reserve_ms": 6_000,
+        "term_grace_ms": 900,
+        "kill_entry_margin_ms": 600,
+    }
+    assert m.term_admitted(p, 42_900, TERM_FACTS)
+    assert m.kill_admitted(p, 44_000, 42_900, KILL_FACTS)
+    assert not m.term_admitted(p, 43_500, TERM_FACTS)
+    # TERM at 43,501 is late; grace ends 44,401, now 44,402 is still
+    # strictly before KILL cutoff 45,000: reject ONLY for late TERM.
+    assert not m.kill_admitted(p, 44_402, 43_501, KILL_FACTS)
+    assert not m.kill_admitted(p, 44_401, 43_500, KILL_FACTS)
+    assert not m.kill_admitted(p, 44_999, 44_101, KILL_FACTS)
+    # Shift the launch epoch without changing any relative budget.
+    shifted = m.derive_cutoffs(230_000, 21_000, 6_000, 900, 600)
+    assert shifted["outer_deadline_ms"] == 251_000
+    assert shifted["kill_cutoff_ms"] == 245_000
+    assert shifted["term_cutoff_ms"] == 243_500
+    assert m.term_admitted(shifted, 242_900, TERM_FACTS)
+    assert m.kill_admitted(shifted, 244_000, 242_900, KILL_FACTS)
+    assert not m.kill_admitted(shifted, 244_402, 243_501, KILL_FACTS)
 
 
 def test_t01_term_eligibility_is_fail_closed_for_every_native_fact():
@@ -265,6 +304,8 @@ def test_t01_term_and_kill_attempts_have_distinct_no_signal_ledger():
     assert recorder.calls == [("TERM", OWNED_REF)]
     assert after_term["term_attempts"] == 1
     assert after_term["term_succeeded"] is True
+    assert after_term["term_sent_at_ms"] == TERM_NOW_MS
+    assert after_term["term_target_ref"] == OWNED_REF
     assert after_term["kill_attempts"] == 0
     assert after_term["signals_closed"] is False
     after_kill = m.attempt_kill_no_signal(
@@ -281,6 +322,94 @@ def test_t01_term_and_kill_attempts_have_distinct_no_signal_ledger():
     )
     assert again["kill_attempts"] == 1
     assert recorder.calls == [("TERM", OWNED_REF), ("KILL", OWNED_REF)]
+    # SIGNALS_CLOSED forbids both actions, not just a second KILL.
+    after_closed_term = m.attempt_term_no_signal(
+        cutoffs(m), TERM_NOW_MS, TERM_FACTS,
+        after_kill, recorder, OWNED_REF
+    )
+    assert after_closed_term["term_attempts"] == 1
+    assert after_closed_term["kill_attempts"] == 1
+    assert after_closed_term["signals_closed"] is True
+    assert recorder.calls == [("TERM", OWNED_REF), ("KILL", OWNED_REF)]
+
+
+def test_t01_successful_term_cannot_be_repeated_or_renumbered():
+    m = t01_module()
+    recorder = NoSignalRecorder()
+    after = m.attempt_term_no_signal(
+        cutoffs(m), TERM_NOW_MS, TERM_FACTS,
+        m.begin_ledger(), recorder, OWNED_REF
+    )
+    again = m.attempt_term_no_signal(
+        cutoffs(m), TERM_NOW_MS + 1, TERM_FACTS,
+        after, recorder, OWNED_REF
+    )
+    assert recorder.calls == [("TERM", OWNED_REF)]
+    assert again["term_attempts"] == 1
+    assert again["term_sent_at_ms"] == TERM_NOW_MS
+    assert again["term_target_ref"] == OWNED_REF
+    assert again["kill_attempts"] == 0
+    assert again["signals_closed"] is True  # duplicate TERM is fail-closed
+
+
+def test_t01_no_kill_without_real_simulated_successful_term():
+    m = t01_module()
+    stub = NoSignalRecorder()
+    start = m.begin_ledger()
+    assert start["term_attempts"] == 0
+    assert start["term_succeeded"] is False
+    denied = m.attempt_kill_no_signal(
+        cutoffs(m), KILL_NOW_MS, TERM_SENT_AT_MS, KILL_FACTS,
+        start, stub, OWNED_REF
+    )
+    assert denied["kill_attempts"] == 0
+    assert denied["signals_closed"] is True
+    assert stub.calls == []
+    # A forged public dict must not impersonate a successful recorder event.
+    forged = {
+        **m.begin_ledger(), "term_attempts": 1, "term_succeeded": True,
+        "term_sent_at_ms": TERM_SENT_AT_MS, "term_target_ref": OWNED_REF,
+    }
+    denied_forgery = m.attempt_kill_no_signal(
+        cutoffs(m), KILL_NOW_MS, TERM_SENT_AT_MS, KILL_FACTS,
+        forged, stub, OWNED_REF
+    )
+    assert denied_forgery["kill_attempts"] == 0
+    assert stub.calls == []
+
+
+def test_t01_term_time_and_target_bound_to_successful_ledger_event():
+    m = t01_module()
+    term_stub = NoSignalRecorder()
+    for wrong in (TERM_NOW_MS - 300, TERM_NOW_MS + 1, TERM_CUTOFF_MS):
+        term_stub = NoSignalRecorder()
+        good = m.attempt_term_no_signal(
+            cutoffs(m), TERM_NOW_MS, TERM_FACTS,
+            m.begin_ledger(), term_stub, OWNED_REF
+        )
+        assert term_stub.calls == [("TERM", OWNED_REF)]
+        assert good["term_sent_at_ms"] == TERM_NOW_MS
+        assert good["term_target_ref"] == OWNED_REF
+        stub = NoSignalRecorder()
+        now = max(KILL_NOW_MS, wrong + TERM_GRACE_MS + 1)
+        denied = m.attempt_kill_no_signal(
+            cutoffs(m), now, wrong, KILL_FACTS, good, stub, OWNED_REF
+        )
+        assert denied["kill_attempts"] == 0
+        assert stub.calls == [], f"mismatched or late sent_at={wrong}!"
+    # A separate genuine TERM is needed: a prior rejection must not mask
+    # the wrong-target path by closing the shared ledger.
+    good = m.attempt_term_no_signal(
+        cutoffs(m), TERM_NOW_MS, TERM_FACTS,
+        m.begin_ledger(), NoSignalRecorder(), OWNED_REF
+    )
+    wrong_target_stub = NoSignalRecorder()
+    rejected = m.attempt_kill_no_signal(
+        cutoffs(m), KILL_NOW_MS, TERM_SENT_AT_MS, KILL_FACTS,
+        good, wrong_target_stub, OWNED_REF + "-other"
+    )
+    assert rejected["kill_attempts"] == 0
+    assert wrong_target_stub.calls == []
 
 
 @pytest.mark.parametrize("errno", ERRORS)
@@ -320,9 +449,16 @@ def test_t01_term_failure_never_proceeds_to_kill_or_retries():
     assert after["term_succeeded"] is False
     assert after["kill_attempts"] == 0
     assert after["signals_closed"] is True
+    # A failed TERM is single-use: neither repeated TERM nor KILL is allowed.
+    retried = m.attempt_term_no_signal(
+        cutoffs(m), TERM_NOW_MS + 1, TERM_FACTS,
+        after, recorder, OWNED_REF
+    )
+    assert retried["term_attempts"] == 1
+    assert retried["signals_closed"] is True
     after = m.attempt_kill_no_signal(
         cutoffs(m), KILL_NOW_MS, TERM_SENT_AT_MS, KILL_FACTS,
-        after, recorder, OWNED_REF
+        retried, recorder, OWNED_REF
     )
     assert after["kill_attempts"] == 0
     assert recorder.calls == [("TERM", OWNED_REF)]
@@ -356,11 +492,22 @@ def test_t01_mutant_cannot_reach_even_a_no_signal_stub(mutant):
         proof["trusted_ipc_writer_isolated"] = False
     elif mutant == "omit-private-root-ownership":
         proof["private_root_owned_0700"] = False
-    ledger = m.begin_ledger()
-    ledger = {**ledger, "term_attempts": 1, "term_succeeded": True}
+    # Prepare baseline with an ACTUAL simulated successful TERM event.
+    term_stub = NoSignalRecorder()
+    ledger = m.attempt_term_no_signal(
+        policy, TERM_NOW_MS, TERM_FACTS,
+        m.begin_ledger(), term_stub, OWNED_REF
+    )
+    assert term_stub.calls == [("TERM", OWNED_REF)]
+    assert ledger["term_sent_at_ms"] == TERM_SENT_AT_MS
     if mutant == "allow-second-kill":
-        ledger.update(kill_attempts=1, kill_succeeded=True,
-                      signals_closed=True)
+        positive_stub = NoSignalRecorder()
+        ledger = m.attempt_kill_no_signal(
+            policy, KILL_NOW_MS, TERM_SENT_AT_MS, KILL_FACTS,
+            ledger, positive_stub, OWNED_REF
+        )
+        assert positive_stub.calls == [("KILL", OWNED_REF)]
+        assert ledger["signals_closed"] is True
     stub = NoSignalRecorder()
     out = m.attempt_kill_no_signal(
         policy, now, TERM_SENT_AT_MS, proof, ledger, stub, OWNED_REF
@@ -397,6 +544,24 @@ def test_t01_kill_success_without_lawful_wait_is_never_verified():
     assert m.classify_t01({**record, "worker_result": "KILL_SENT"}) == "BLOCK"
     assert m.classify_t01({**record, "anchor_result": "NOTE_EXIT"}) == "BLOCK"
     assert m.classify_t01({**record, "unknown_field": 1}) == "BLOCK"
+    assert m.classify_t01({k: v for k, v in record.items()
+                           if k != "mode"}) == "BLOCK"
+    for wrong_mode in (
+        "controller-lost-after-term", "kill-canary-isolation",
+        "worker-exits-before-kill", "", None, 1, True,
+    ):
+        assert m.classify_t01({**record, "mode": wrong_mode}) == "BLOCK"
+    for key in frozen.BOOL_FIELDS:
+        flag = record[key]
+        assert type(flag) is int, key  # Python bool is an int subclass!
+        assert m.classify_t01(
+            {**record, key: bool(flag)}
+        ) == "BLOCK", key
+        assert m.classify_t01({**record, key: str(flag)}) == "BLOCK", key
+    for key in frozen.ENUM_FIELDS:
+        assert type(record[key]) is str
+        for wrong in (None, 1, True):
+            assert m.classify_t01({**record, key: wrong}) == "BLOCK", key
 
 
 def test_t01_orphan_modes_never_gain_admission_from_t01_positive():

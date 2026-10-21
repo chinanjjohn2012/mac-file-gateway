@@ -106,7 +106,7 @@ def test_r2_orphan_modes_remain_hard_blocked_after_preflight():
     assert "group_kill_authorized" in src
     assert '"g2_qualified": False' in src
     assert '"reuse_proven": False' in src
-    assert "proc.kill(" not in src and "proc.terminate(" not in src
+    assert ".kill(" not in src and ".terminate(" not in src
 
 
 def test_r2_ci_separately_qualifies_preflight_without_removing_R1_RED():

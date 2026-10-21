@@ -2,6 +2,7 @@ a8e317838b00e2905a24b927075490d60aaf993dbee4335385ca3f4001c8709e  ./.github/work
 9260a8a0b3a6660b66f7034b8a63e2b1b849ae12d83a6316694c865fcecc4560  ./.github/workflows/c2-native-research.yml
 b6b5c72a5ce2050fa1bb6a80b9aced547bbdb4a1ef47fe9457764eae9ad0eadc  ./.github/workflows/c2-review-native.yml
 4241744fac2c22a3e078e953b287f6cf4ef06f6abaf116d21d4ccf38a5189d02  ./.github/workflows/c3-candidate-b-native.yml
+dced66ab5b87cee6c0e38244b8581be0de69b0e06534a54dc2b585972359a0ad  ./.github/workflows/c3-candidate-b-term-native.yml
 0dadaf6bd4f57a24546f103bfb110685ad12964dc442f9d41bdb8d72cfd05e56  ./.github/workflows/controlled-exec-tests.yml
 ef06acea97a3c12d0a236a36d6d1bd74b735c62b712e3ad69e50c6f87ac90b90  ./.gitignore
 82f36c9f3945a204b821c1d5314c9a62c8886d9c28d45f44268643dff1b5210d  ./BUILD_INFO.json
@@ -36,6 +37,7 @@ c60ae6bfd5272614ba62d2232dbd1a1ab26bba70d2795f411cb96bb9cceb7e95  ./docs/legacy-
 b97c5a9aa89894f1ea4002ec351b3d0bd02c97f47b9dcd21915315947ac254e8  ./docs/research/phase2-lite-c2/README.md
 a6ef8f7b8ef516853d4c15fa73c6e3c81ee1088a251248bc8c069c3a6d5123e6  ./docs/research/phase2-lite-c3/README.md
 506a724c70a64df95c3a37883809217e946f4dc4b069d00376559557ebb85499  ./docs/research/phase2-lite-c3/candidate-b-b01-native-evidence.md
+90cc8c3b46f3bb5c2ce294c09f06b52e8ad2934c5993e531b4f0454fe8c91326  ./docs/research/phase2-lite-c3/candidate-b-b02-native-evidence.md
 61a2851c9b4ae1af13021d9d670848c123b44ca8fd4202f5a36e475cdd8808e9  ./docs/research/phase2-lite-c3/candidate-b-b02-term-design.md
 1fa8e0b8fa1fc3ccdbea276ec782c050f6dc60af46f156887f000eade32a68e5  ./docs/research/phase2-lite-c3/candidate-b-isolated-plan.md
 1e95a8424b5cae7d8c47cbb30269ea0b773edc50df03eb78151f93553f5ee284  ./docs/superpowers/plans/2026-09-22-guarded-writes.md
@@ -94,6 +96,7 @@ ba9bf6180bde9aeb18b433e13860949ae5628a3187fe5e27d4e1afa52440fd88  ./tests/test_c
 51729ca9b2e169df545cd1d6585159a501ed8b8e1c3c72bcb41655549122f354  ./tests/test_c2_round2_review.py
 0b362b21d5394632189ddb4c2f73c117cfd7500feddf3111ddedf5c16abde5d7  ./tests/test_c2_sigchld_review.py
 e32a970f5f0d2425410a33af580d5fc2aa7697068d517e27251d68140236665b  ./tests/test_c3_candidate_b_join.py
+060d09c5d6a102c9ae9aa5689b066ef1baf59e72dcb0f8fdb8f3b48e58c1ee01  ./tests/test_c3_candidate_b_term.py
 199ec7e6958c1f21aa8ca14ac1af8b9868490621e02f67e9a3926eaf5957cef1  ./tests/test_cli.py
 599bdd040fa4fd89f1baa9a431e5fe230e6f4509938008cda22d86caccc1db37  ./tests/test_command_http.py
 d1a2fc1207cd40038c8d9ad85ac7813f3907371aa5e6df67c2932196a2564dea  ./tests/test_command_runner.py
@@ -150,9 +153,11 @@ d4c009b8db994234522713addff672089869728d0ac81788dc27effba3168fdb  ./tools/check_
 1708a531e85de3974fb171915dd8f75e283110795b1df703f5bb96cb5c2e9057  ./tools/research/c2_pgid_anchor.c
 250254c98709da3dcfe396c38f70f509fa9d1e5c235de959dc2cc3c24f4de486  ./tools/research/c2_sigchld_probe.c
 df9e860e07dbac8ee27694695b8dc8602ddcd4ddc7fa9bcfe2e96472f6fe1019  ./tools/research/c3_candidate_b_anchor.c
+1a4dd92a92eca37b96933d076abcc1f1bd47b343d6081e6e22e5f567c7172ab6  ./tools/research/c3_candidate_b_term.c
 b7b5d835d57f8d0b3cd173d6ad138457b7ccef1f7aef97be067abd01486689d3  ./tools/research/run_c1_fd_probe.py
 c18800caf862377a3dfabc08f95e525fa8fc0c6e1d305327656261315ad81b2f  ./tools/research/run_c2_pgid_probe.py
 51d0aec77696c0ed4e5fb113c21f297e61958b320314901f240804e906be9aa7  ./tools/research/run_c2_sigchld_probe.py
 da893e0ee7b6fc4a2bea7ee9c40e3e1a182517eec3c5fb873bf74068db8a7a67  ./tools/research/run_c3_candidate_b.py
+27bc51dd0f73c9e027d5d1c852ee38886680f1ea693a0464d459e2c46fafc133  ./tools/research/run_c3_candidate_b_term.py
 5048106bee7348de64bcaaf9c7cab93d8c1277f73bf287ae9afc31a45ada1a81  ./tunnel.sh
 7111ec278d18becb9c89d610f4c765dd5bd8601a33769f938da061e369944308  ./verify.sh

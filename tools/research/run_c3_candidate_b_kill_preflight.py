@@ -160,6 +160,8 @@ def run_preflight(executable: Path, mode: str = "preflight"):
         # Runner must not claim VERIFIED if its native owner is unresolved.
         return None, "owner_timeout_unresolved"
     if proc.returncode != 0 or stderr:
+        if mode == "orphan-preflight" and stderr.startswith("C3B03_R2_BLOCK phase=orphan_observation "):
+            return None, stderr.strip()
         return None, "native_rejected"
     try:
         return parse_native(stdout), None
@@ -217,6 +219,8 @@ def main() -> int:
         stream.write("\n")
     print("C3B03_R2_PREFLIGHT_RESULT=" + data["decision"])
     print("C3B03_R2_ORPHAN_LIFECYCLE=" + orphan_verdict)
+    if orphan_verdict == "BLOCK":
+        print("C3B03_R2_ORPHAN_DIAGNOSTIC=" + str(orphan_reason))
     print("C3B03_R2_GROUP_KILL_AUTHORIZED=false")
     print("C3B03_R2_ORPHAN_MODES=NOT_RUN/BLOCK")
     return 0 if verdict == RESULT and orphan_verdict == ORPHAN_RESULT else 2

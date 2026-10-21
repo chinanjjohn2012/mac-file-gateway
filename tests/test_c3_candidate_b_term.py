@@ -25,6 +25,8 @@ MODES = (
     "controller-group-regression",
     "anchor-lost-before-term",
     "deadline-before-term",
+    "canary-isolation",
+    "controller-result-lost",
 )
 MUTATIONS = ("omit-sigdef", "omit-sigmask", "omit-controller-group")
 FIELDS = (
@@ -34,27 +36,35 @@ FIELDS = (
     "worker_armed", "term_attempts", "term_succeeded",
     "controller_waited", "worker_observed_term",
     "admission_cutoff_expired", "outer_live_at_refusal",
-    "gate_opened", "cleanup_complete", "reuse_proven", "g2_qualified",
+    "gate_opened", "cleanup_complete", "canary_survived",
+    "worker_result_unknown", "result_lost_after_wait",
+    "owner_children_reaped", "reuse_proven", "g2_qualified",
 )
 # Each bit is a *native observable* fixed by the design, never inferred from EOF.
 EXPECTED = {
     "term-positive": (
-        (1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,0,0), "POSITIVE_EXPERIMENT",
+        (1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,0,0,0,1,0,0), "POSITIVE_EXPERIMENT",
     ),
     "missing-sigdef": (
-        (1,1,1,1,1,0,1,1,1,1,1,0,0,0,1,1,0,0), "EXPECTED_BLOCK",
+        (1,1,1,1,1,0,1,1,1,1,1,0,0,0,1,1,0,0,0,1,0,0), "EXPECTED_BLOCK",
     ),
     "missing-sigmask": (
-        (1,1,1,1,1,1,0,1,1,1,1,0,0,0,1,1,0,0), "EXPECTED_BLOCK",
+        (1,1,1,1,1,1,0,1,1,1,1,0,0,0,1,1,0,0,0,1,0,0), "EXPECTED_BLOCK",
     ),
     "controller-group-regression": (
-        (1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0), "SAFE_REFUSAL",
+        (1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,0,0), "SAFE_REFUSAL",
     ),
     "anchor-lost-before-term": (
-        (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0), "SAFE_REFUSAL",
+        (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,0,0), "SAFE_REFUSAL",
     ),
     "deadline-before-term": (
-        (1,1,1,1,1,1,1,1,0,0,1,0,1,1,1,1,0,0), "EXPECTED_BLOCK",
+        (1,1,1,1,1,1,1,1,0,0,1,0,1,1,1,1,0,0,0,1,0,0), "EXPECTED_BLOCK",
+    ),
+    "canary-isolation": (
+        (1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0,1,0,0), "POSITIVE_EXPERIMENT",
+    ),
+    "controller-result-lost": (
+        (1,1,1,1,1,1,1,1,1,1,0,0,0,0,1,0,0,1,1,1,0,0), "EXPECTED_BLOCK",
     ),
 }
 
@@ -85,6 +95,8 @@ def test_b02_synthetic_native_companion_declares_safe_signal_boundary():
         "outer_deadline", "term_admission_cutoff", "cleanup_reserve_ms",
         "CLOCK_MONOTONIC", "term_attempts", "worker_armed",
         "send_term_to_owned_group", "O_EXCL",
+        "__canary", "C3B02_AFTER_WAIT_BEFORE_FINAL",
+        "worker_result_unknown", "owner_children_reaped",
     ):
         assert required in src, f"native code lacks {required}"
     # No forced group KILL escalation in the B-02 experiment.
@@ -128,7 +140,7 @@ def test_b02_parse_rejects_forged_EOF_and_TERM_sent_without_wait():
 
 def test_b02_one_outer_deadline_and_reserved_cleanup_gate():
     m = driver()
-    assert m.MODES[-1] == "deadline-before-term"
+    assert m.MODES[5] == "deadline-before-term"
     outer, reserve = 15000, 4000
     cutoff = outer - reserve
     assert m.term_admitted(9000, cutoff, outer)
@@ -154,6 +166,26 @@ def test_b02_T01_and_T02_T03_adverse_controller_signal_inheritance():
         assert fixed(mode)["controller_inherited_block"] == 1
 
 
+def test_b02_T07_canary_survives_and_T08_missing_result_is_unknown():
+    canary = fixed("canary-isolation")
+    assert canary["canary_survived"] == 1
+    assert canary["worker_observed_term"] == 1
+    assert canary["term_attempts"] == 1
+    lost = fixed("controller-result-lost")
+    assert lost["term_attempts"] == 1
+    assert lost["worker_result_unknown"] == 1
+    assert lost["result_lost_after_wait"] == 1
+    assert lost["controller_waited"] == 0
+    assert lost["worker_observed_term"] == 0
+    assert lost["cleanup_complete"] == 0
+    assert lost["owner_children_reaped"] == 1
+    m = driver()
+    assert m.classify("controller-result-lost",
+                      {**lost, "worker_observed_term": 1}) == "BLOCK"
+    assert m.classify("controller-result-lost",
+                      {**lost, "cleanup_complete": 1}) == "BLOCK"
+
+
 def test_b02_restricted_mutations_must_reject_missing_restoration():
     m = driver()
     assert m.MUTATIONS == MUTATIONS
@@ -176,7 +208,8 @@ def test_b02_workflow_two_arm64_versions_and_no_production_launch():
         "run_c3_candidate_b_term.py", "C3B02_NATIVE_RESULT",
         "term-positive", "missing-sigdef", "missing-sigmask",
         "controller-group-regression", "anchor-lost-before-term",
-        "deadline-before-term",
+        "deadline-before-term", "canary-isolation",
+        "controller-result-lost",
     ):
         assert marker in s
 
@@ -207,9 +240,14 @@ def test_b02_actual_Darwin_TERM_and_legitimate_wait(tmp_path):
     assert data["mutation_detected"] == {name: True for name in MUTATIONS}
     assert [item["mode"] for item in data["cases"]] == list(MODES)
     assert [item["status"] for item in data["cases"]] == [EXPECTED[m][1] for m in MODES]
-    assert all(item["cleanup_complete"] == 1 for item in data["cases"])
+    assert all(item["cleanup_complete"] == 1 for item in data["cases"][:-1])
+    assert data["cases"][-1]["cleanup_complete"] == 0
+    assert data["cases"][-1]["worker_result_unknown"] == 1
+    assert data["cases"][-1]["result_lost_after_wait"] == 1
+    assert data["cases"][-1]["owner_children_reaped"] == 1
     assert data["cases"][0]["worker_observed_term"] == 1
     assert data["cases"][0]["controller_waited"] == 1
     assert data["cases"][0]["term_attempts"] == 1
-    assert data["cases"][-1]["term_attempts"] == 0
-    assert data["cases"][-1]["outer_live_at_refusal"] == 1
+    assert data["cases"][5]["term_attempts"] == 0
+    assert data["cases"][5]["outer_live_at_refusal"] == 1
+    assert data["cases"][6]["canary_survived"] == 1

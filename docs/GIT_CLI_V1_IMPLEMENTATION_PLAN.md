@@ -1,7 +1,7 @@
 # Mac File Gateway — Git CLI V1 逐文件实施计划
 
-Status: **逐文件计划独立复审已通过；A 批次通过；B 批次实现仍为 Draft、待最终跨模块复审；C 批次未放行**  
-Date: 2026-10-20  
+Status: **A–D 批次 Standards / Spec 复审通过；E 独立复审和原生 macOS 验证已由用户确认完成；F（T15–T16）进行中，真实 Tunnel 和最终合并/发布仍未批准**  
+Date: 2026-10-21  
 Authoritative design: docs/GIT_CLI_V1_DESIGN.md @ e32de7b896a3231fd9e60ac5798ea94b482c5e07  
 Design review: **Standards PASS / Spec PASS，P0=0、P1=0、P2=0**（用户提供的独立定向复审结果）  
 Runtime baseline: release/ms1 @ ba8634f24cdc26904d1c80951df7173e429240c7, MCP Python SDK 2.3.0  

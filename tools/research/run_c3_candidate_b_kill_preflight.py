@@ -164,7 +164,7 @@ def run_preflight(executable: Path, mode: str = "preflight"):
             return None, stderr.strip()
         return None, "native_rejected"
     try:
-        return parse_native(stdout), None
+        return (parse_orphan_native(stdout) if mode == "orphan-preflight" else parse_native(stdout)), None
     except ValueError:
         return None, "invalid_native_record"
 

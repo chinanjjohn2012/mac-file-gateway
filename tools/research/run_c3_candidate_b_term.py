@@ -28,6 +28,7 @@ MODES = (
     "controller-result-lost",
 )
 MUTATIONS = ("omit-sigdef", "omit-sigmask", "omit-controller-group")
+SAFETY_FAULTS = ("stale-anchor-gate", "owner-fd-close", "controller-fd-close")
 FIELDS = (
     "anchor_held", "controller_group_leader",
     "controller_inherited_ignore", "controller_inherited_block",
@@ -37,32 +38,35 @@ FIELDS = (
     "admission_cutoff_expired", "outer_live_at_refusal",
     "gate_opened", "cleanup_complete", "canary_survived",
     "worker_result_unknown", "result_lost_after_wait",
-    "owner_children_reaped", "reuse_proven", "g2_qualified",
+    "owner_children_reaped", "anchor_loss_gate_checked",
+    "after_loss_attempts", "owner_fds_closed", "controller_worker_fds_closed",
+    "reuse_proven", "g2_qualified",
 )
+# Each bit is a *native observable* fixed by the design, never inferred from EOF.
 EXPECTED = {
     "term-positive": (
-        (1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,0,0,0,1,0,0), "POSITIVE_EXPERIMENT",
+        (1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,0,0,0,1,0,0,1,1,0,0), "POSITIVE_EXPERIMENT",
     ),
     "missing-sigdef": (
-        (1,1,1,1,1,0,1,1,1,1,1,0,0,0,1,1,0,0,0,1,0,0), "EXPECTED_BLOCK",
+        (1,1,1,1,1,0,1,1,1,1,1,0,0,0,1,1,0,0,0,1,0,0,1,1,0,0), "EXPECTED_BLOCK",
     ),
     "missing-sigmask": (
-        (1,1,1,1,1,1,0,1,1,1,1,0,0,0,1,1,0,0,0,1,0,0), "EXPECTED_BLOCK",
+        (1,1,1,1,1,1,0,1,1,1,1,0,0,0,1,1,0,0,0,1,0,0,1,1,0,0), "EXPECTED_BLOCK",
     ),
     "controller-group-regression": (
-        (1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,0,0), "SAFE_REFUSAL",
+        (1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,0,0,1,0,0,0), "SAFE_REFUSAL",
     ),
     "anchor-lost-before-term": (
-        (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,0,0), "SAFE_REFUSAL",
+        (0,1,1,1,1,1,1,1,0,0,1,0,0,0,1,1,0,0,0,1,1,0,1,1,0,0), "SAFE_REFUSAL",
     ),
     "deadline-before-term": (
-        (1,1,1,1,1,1,1,1,0,0,1,0,1,1,1,1,0,0,0,1,0,0), "EXPECTED_BLOCK",
+        (1,1,1,1,1,1,1,1,0,0,1,0,1,1,1,1,0,0,0,1,0,0,1,1,0,0), "EXPECTED_BLOCK",
     ),
     "canary-isolation": (
-        (1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0,1,0,0), "POSITIVE_EXPERIMENT",
+        (1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0,1,0,0,1,1,0,0), "POSITIVE_EXPERIMENT",
     ),
     "controller-result-lost": (
-        (1,1,1,1,1,1,1,1,1,1,0,0,0,0,1,0,0,1,1,1,0,0), "EXPECTED_BLOCK",
+        (1,1,1,1,1,1,1,1,1,1,0,0,0,0,1,0,0,1,1,1,0,0,1,0,0,0), "EXPECTED_BLOCK",
     ),
 }
 _RESULT = re.compile(
@@ -90,6 +94,32 @@ _MUTANT = {
         "C3B02_MUTANT name=omit-controller-group controller_group_leader=0 "
         "worker_spawned=0 term_attempts=0 cleanup_complete=1\n",
         "C3B02_BLOCK phase=controller_group\n",
+    ),
+}
+
+
+_SAFETY_FAULT = {
+    "stale-anchor-gate": (
+        ("C3B02_MUT_SKIP_ANCHOR_CHECK", "C3B02_TEST_STALE_KILL_STUB"),
+        "anchor-lost-before-term",
+        "C3B02_FAULT name=stale-anchor-gate gate_checked=1 "
+        "worker_armed=1 after_loss_attempts=1 term_attempts=1 "
+        "native_signals=0 cleanup_complete=1\n",
+        "C3B02_BLOCK phase=anchor_gate_violation\n",
+    ),
+    "owner-fd-close": (
+        ("C3B02_FAULT_OWNER_CLOSE",),
+        "term-positive",
+        "C3B02_FAULT name=owner-fd-close owner_fds_closed=0 "
+        "controller_worker_fds_closed=1 cleanup_complete=0\n",
+        "C3B02_BLOCK phase=fd_close\n",
+    ),
+    "controller-fd-close": (
+        ("C3B02_FAULT_CONTROLLER_CLOSE",),
+        "term-positive",
+        "C3B02_FAULT name=controller-fd-close owner_fds_closed=1 "
+        "controller_worker_fds_closed=0 cleanup_complete=0\n",
+        "C3B02_BLOCK phase=fd_close\n",
     ),
 }
 
@@ -122,10 +152,17 @@ def classify(mode: str, record: dict) -> str:
     return EXPECTED[mode][1]
 
 
-def compile_binary(out: Path, mutation: str | None = None) -> bool:
+def compile_binary(
+    out: Path, mutation: str | None = None, fault: str | None = None,
+) -> bool:
+    if mutation is not None and fault is not None:
+        return False
     args = ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-pthread"]
     if mutation is not None:
         args.append("-D" + _MUTANT[mutation][0])
+    if fault is not None:
+        for flag in _SAFETY_FAULT[fault][0]:
+            args.append("-D" + flag)
     args.extend([str(NATIVE), "-o", str(out)])
     try:
         result = subprocess.run(
@@ -189,6 +226,18 @@ def mutation_case(binary: Path, root: Path, name: str) -> bool:
     )
 
 
+def fault_case(binary: Path, root: Path, name: str) -> bool:
+    flags, mode, expected_stdout, expected_stderr = _SAFETY_FAULT[name]
+    assert flags  # only compiled research-test macros, never runtime PID args
+    proc, elapsed = execute(binary, root, mode)
+    return (
+        proc is not None and 0 <= elapsed < 10000
+        and proc.returncode == 70
+        and proc.stdout == expected_stdout
+        and proc.stderr == expected_stderr
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence-dir", type=Path, required=True)
@@ -230,6 +279,15 @@ def main() -> int:
             root = private / ("mutation-" + name)
             binary = prepare(root, compiled_variant)
             mutants[name] = mutation_case(binary, root, name)
+        faults = {}
+        for name in SAFETY_FAULTS:
+            compiled_variant = private / ("compiled-fault-" + name)
+            if not compile_binary(compiled_variant, fault=name):
+                faults[name] = False
+                continue
+            root = private / ("fault-" + name)
+            binary = prepare(root, compiled_variant)
+            faults[name] = fault_case(binary, root, name)
 
     passed = (
         [c["status"] for c in cases] == [EXPECTED[m][1] for m in MODES]
@@ -241,6 +299,7 @@ def main() -> int:
                 and c.get("g2_qualified") == 0
                 for c in cases)
         and mutants == {m: True for m in MUTATIONS}
+        and faults == {f: True for f in SAFETY_FAULTS}
     )
     decision = "PARTIAL_B02_TERM_NOT_G2" if passed else "BLOCK_RESEARCH"
     evidence = {
@@ -248,6 +307,7 @@ def main() -> int:
         "python_version": platform.python_version(),
         "g2_qualified": False, "reuse_proven": False,
         "cases": cases, "mutation_detected": mutants,
+        "fault_detected": faults,
     }
     target = evidence_dir / "c3_b02_term_private.json"
     target.write_text(json.dumps(evidence, sort_keys=True, indent=2) + "\n",
@@ -286,6 +346,7 @@ def main() -> int:
             )
         )
     print("C3B02_MUTATIONS_DETECTED=" + str(all(mutants.values())).lower())
+    print("C3B02_FAULTS_DETECTED=" + str(all(faults.values())).lower())
     print("C3B02_NATIVE_RESULT=" + decision)
     return 0 if passed else 2
 

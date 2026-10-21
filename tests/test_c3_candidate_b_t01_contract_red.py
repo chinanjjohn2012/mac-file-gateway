@@ -294,6 +294,178 @@ def test_t01_native_witness_must_be_post_term_not_old_ready_or_note_exit():
         ), key
 
 
+def _bad_fact_variants(facts, field):
+    """One complete fault per variant; callers allocate fresh authority."""
+    assert facts[field] is True
+    return (
+        ("missing", {k: v for k, v in facts.items() if k != field}),
+        ("false", {**facts, field: False}),
+        ("wrong-type-int", {**facts, field: 1}),
+    )
+
+
+@pytest.mark.parametrize("field", tuple(TERM_FACTS))
+def test_t01_attempt_term_enforces_every_native_fact_before_transport(field):
+    """Pure term_admitted PASS alone does not protect the TERM entrypoint."""
+    m = t01_module()
+    p = cutoffs(m)
+    assert m.term_admitted(p, TERM_NOW_MS, TERM_FACTS)
+    for variant, bad in _bad_fact_variants(TERM_FACTS, field):
+        # Every fault starts with a fresh, unused ledger.
+        first_transport = NoSignalRecorder()
+        result = m.attempt_term_no_signal(
+            p, TERM_NOW_MS, bad, m.begin_ledger(), first_transport, OWNED_REF
+        )
+        context = f"{field}: {variant}"
+        assert first_transport.calls == [], context
+        assert result["term_attempts"] == 0, context
+        assert result["kill_attempts"] == 0, context
+        assert result["signals_closed"] is True, context
+        assert result["group_signals_after_close"] == 0, context
+        # A failure to enroll closes authority permanently, even with good
+        # facts on a second call; no hidden/rearmed TERM signal is permitted.
+        retry_transport = NoSignalRecorder()
+        again = m.attempt_term_no_signal(
+            p, TERM_NOW_MS, TERM_FACTS,
+            result, retry_transport, OWNED_REF
+        )
+        assert retry_transport.calls == [], context
+        assert again["term_attempts"] == 0, context
+        assert again["kill_attempts"] == 0, context
+        assert again["signals_closed"] is True, context
+
+
+@pytest.mark.parametrize("field", tuple(KILL_FACTS))
+def test_t01_attempt_kill_enforces_every_native_fact_before_transport(field):
+    """Fresh, recorder-proven TERM for EVERY faulty KILL attempt."""
+    m = t01_module()
+    p = cutoffs(m)
+    assert m.kill_admitted(p, KILL_NOW_MS, TERM_SENT_AT_MS, KILL_FACTS)
+    for variant, bad in _bad_fact_variants(KILL_FACTS, field):
+        # Genuine *simulated* TERM event; no forged ledger flags.
+        term_transport = NoSignalRecorder()
+        ledger = m.attempt_term_no_signal(
+            p, TERM_NOW_MS, TERM_FACTS,
+            m.begin_ledger(), term_transport, OWNED_REF
+        )
+        context = f"{field}: {variant}"
+        assert term_transport.calls == [("TERM", OWNED_REF)], context
+        assert ledger["term_attempts"] == 1, context
+        assert ledger["term_succeeded"] is True, context
+        assert ledger["term_sent_at_ms"] == TERM_SENT_AT_MS, context
+        assert ledger["term_target_ref"] == OWNED_REF, context
+        assert ledger["signals_closed"] is False, context
+
+        kill_transport = NoSignalRecorder()
+        refused = m.attempt_kill_no_signal(
+            p, KILL_NOW_MS, TERM_SENT_AT_MS, bad,
+            ledger, kill_transport, OWNED_REF
+        )
+        assert kill_transport.calls == [], context
+        assert refused["term_attempts"] == 1, context
+        assert refused["kill_attempts"] == 0, context
+        assert refused["signals_closed"] is True, context
+        assert refused["group_signals_after_close"] == 0, context
+        # A later valid KILL and a later TERM must both remain denied.
+        retry_kill = NoSignalRecorder()
+        after_retry = m.attempt_kill_no_signal(
+            p, KILL_NOW_MS, TERM_SENT_AT_MS, KILL_FACTS,
+            refused, retry_kill, OWNED_REF
+        )
+        assert retry_kill.calls == [], context
+        assert after_retry["kill_attempts"] == 0, context
+        assert after_retry["signals_closed"] is True, context
+        retry_term = NoSignalRecorder()
+        after_term = m.attempt_term_no_signal(
+            p, TERM_NOW_MS, TERM_FACTS,
+            after_retry, retry_term, OWNED_REF
+        )
+        assert retry_term.calls == [], context
+        assert after_term["term_attempts"] == 1, context
+        assert after_term["kill_attempts"] == 0, context
+        assert after_term["signals_closed"] is True, context
+
+
+@pytest.mark.parametrize("now", (
+    TERM_CUTOFF_MS, TERM_CUTOFF_MS + 1, KILL_CUTOFF_MS,
+    OUTER_DEADLINE_MS, OUTER_DEADLINE_MS + 1,
+))
+def test_t01_attempt_term_cutoff_rejects_before_transport(now):
+    m = t01_module()
+    stub = NoSignalRecorder()
+    result = m.attempt_term_no_signal(
+        cutoffs(m), now, TERM_FACTS,
+        m.begin_ledger(), stub, OWNED_REF
+    )
+    assert stub.calls == []
+    assert result["term_attempts"] == 0
+    assert result["signals_closed"] is True
+    retry = NoSignalRecorder()
+    again = m.attempt_term_no_signal(
+        cutoffs(m), TERM_NOW_MS, TERM_FACTS, result, retry, OWNED_REF
+    )
+    assert retry.calls == []
+    assert again["term_attempts"] == 0
+    assert again["signals_closed"] is True
+
+
+@pytest.mark.parametrize("now,claimed_sent", (
+    (GRACE_END_MS - 1, TERM_SENT_AT_MS),  # Grace not elapsed
+    (KILL_CUTOFF_MS, TERM_SENT_AT_MS),    # exact KILL cutoff
+    (KILL_CUTOFF_MS + 1, TERM_SENT_AT_MS),
+    (OUTER_DEADLINE_MS, TERM_SENT_AT_MS),
+    (108_702, 108_501),  # late TERM but grace complete & before KILL cutoff
+    (108_701, 108_500),  # TERM at cutoff, grace complete
+))
+def test_t01_attempt_kill_time_gate_rejects_before_transport(now, claimed_sent):
+    m = t01_module()
+    p = cutoffs(m)
+    term_stub = NoSignalRecorder()
+    good = m.attempt_term_no_signal(
+        p, TERM_NOW_MS, TERM_FACTS,
+        m.begin_ledger(), term_stub, OWNED_REF
+    )
+    assert term_stub.calls == [("TERM", OWNED_REF)]
+    assert good["term_sent_at_ms"] == TERM_SENT_AT_MS
+    kill_stub = NoSignalRecorder()
+    refused = m.attempt_kill_no_signal(
+        p, now, claimed_sent, KILL_FACTS, good, kill_stub, OWNED_REF
+    )
+    assert kill_stub.calls == []
+    assert refused["term_attempts"] == 1
+    assert refused["kill_attempts"] == 0
+    assert refused["signals_closed"] is True
+    retry_stub = NoSignalRecorder()
+    after = m.attempt_kill_no_signal(
+        p, KILL_NOW_MS, TERM_SENT_AT_MS, KILL_FACTS,
+        refused, retry_stub, OWNED_REF
+    )
+    assert retry_stub.calls == []
+    assert after["kill_attempts"] == 0
+    assert after["signals_closed"] is True
+
+
+def test_t01_late_term_entry_never_bootstraps_kill_authority():
+    m = t01_module()
+    p = cutoffs(m)
+    late_term_stub = NoSignalRecorder()
+    refused = m.attempt_term_no_signal(
+        p, TERM_CUTOFF_MS + 1, TERM_FACTS,
+        m.begin_ledger(), late_term_stub, OWNED_REF
+    )
+    assert late_term_stub.calls == []
+    assert refused["term_attempts"] == 0
+    assert refused["signals_closed"] is True
+    after_grace_stub = NoSignalRecorder()
+    rejected = m.attempt_kill_no_signal(
+        p, 108_702, 108_501, KILL_FACTS,
+        refused, after_grace_stub, OWNED_REF
+    )
+    assert after_grace_stub.calls == []
+    assert rejected["kill_attempts"] == 0
+    assert rejected["signals_closed"] is True
+
+
 def test_t01_term_and_kill_attempts_have_distinct_no_signal_ledger():
     m = t01_module()
     recorder = NoSignalRecorder()
@@ -564,12 +736,29 @@ def test_t01_kill_success_without_lawful_wait_is_never_verified():
             assert m.classify_t01({**record, key: wrong}) == "BLOCK", key
 
 
-def test_t01_orphan_modes_never_gain_admission_from_t01_positive():
+@pytest.mark.parametrize("orphan_preflight_proven", (False, True))
+def test_t01_only_positive_mode_admitted_over_frozen_all_eleven(
+    orphan_preflight_proven
+):
     m, frozen = t01_module(), freeze_r1()
-    for mode in frozen.PENDING_CONTAINMENT:
-        assert m.t01_mode_admitted(mode, orphan_preflight_proven=False) is False
-        assert m.t01_mode_admitted(mode, orphan_preflight_proven=True) is False
-    assert m.t01_mode_admitted("escalate-positive",
-                              orphan_preflight_proven=False) is True
-    assert m.t01_mode_admitted("kill-canary-isolation",
-                              orphan_preflight_proven=True) is False
+    assert len(frozen.MODES) == 11 and len(set(frozen.MODES)) == 11
+    # Includes T02/T03/T05/T06/T07/T08a, not just orphan modes and T09.
+    for mode in frozen.MODES:
+        permitted = mode == "escalate-positive"
+        assert m.t01_mode_admitted(
+            mode, orphan_preflight_proven=orphan_preflight_proven
+        ) is permitted, mode
+
+
+@pytest.mark.parametrize("orphan_preflight_proven", (False, True))
+def test_t01_mode_admission_rejects_unknown_empty_and_wrong_types(
+    orphan_preflight_proven
+):
+    m = t01_module()
+    for invalid in (
+        "unknown-T11", "worker-exits-before-kill", "Escalate-positive",
+        "", " ", None, True, False, 0, 1, 1.0, (), [], {},
+    ):
+        assert m.t01_mode_admitted(
+            invalid, orphan_preflight_proven=orphan_preflight_proven
+        ) is False, f"invalid mode: {invalid!r}"

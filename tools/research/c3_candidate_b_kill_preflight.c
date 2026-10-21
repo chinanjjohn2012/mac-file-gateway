@@ -585,6 +585,9 @@ orphan_done:;
     }
     if(!fd_close(&ctrl.input))fd_ok=0;
     if(!child_wait(&ctrl,deadline))controller_waited=0;
+    else if(!released&&ctrl.reaped&&WIFEXITED(ctrl.status)&&
+            WEXITSTATUS(ctrl.status)==0)
+        controller_waited=1; /* actual Owner waitpid on abort path */
     if(!child_close(&ctrl))fd_ok=0;
     if(kq>=0&&!fd_close(&kq))fd_ok=0;
     if(!fd_close(rootfd))fd_ok=0;

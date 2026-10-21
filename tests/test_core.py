@@ -284,4 +284,4 @@ def test_equals_dotted_code_reference_is_not_redacted(root, gateway):
 
 
 def test_gateway_info_reports_current_version(root, gateway):
-    assert gateway.info()["version"] == "2.4.0"
+    assert gateway.info()["version"] == "2.5.0"

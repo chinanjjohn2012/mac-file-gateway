@@ -1,8 +1,8 @@
 {
   "name": "Mac File Gateway",
-  "bundle_release": "2.4.0",
-  "runtime_version": "2.4.0",
-  "built_on": "2026-10-06",
+  "bundle_release": "2.5.0",
+  "runtime_version": "2.5.0",
+  "built_on": "2026-10-21",
   "source_baseline": "release/ms1",
   "mcp_tools_always": [
     "gateway_info",
@@ -58,7 +58,7 @@
     "run_git"
   ],
   "git_cli_v1": {
-    "release_status": "candidate_not_published_in_release_ms1",
+    "release_status": "included_in_2.5.0_source",
     "authorization": "Legacy --allow-git plus repeatable --git-command; Multi requires server.git.enabled plus per-workspace git.allowed_commands",
     "supported_commands": [
       "status",

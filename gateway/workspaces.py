@@ -311,7 +311,7 @@ class WorkspaceService:
 
     def info(self) -> dict[str, Any]:
         with self._lifecycle:
-            return {"name": "Mac File Gateway", "version": "2.4.0", "mode": "multi",
+            return {"name": "Mac File Gateway", "version": "2.5.0", "mode": "multi",
                     "workspace_count": len(self._workspaces),
                     "read_only": not self.any_write, "path_base": ".",
                     "workspaces": self.list_workspaces()["workspaces"],

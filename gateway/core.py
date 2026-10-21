@@ -351,7 +351,7 @@ class Gateway:
     def info(self) -> dict[str, Any]:
         return {
             "name": "Mac File Gateway", "project": self.project_name,
-            "version": "2.4.0", "read_only": not self.allow_write, "path_base": ".", "encoding": "UTF-8",
+            "version": "2.5.0", "read_only": not self.allow_write, "path_base": ".", "encoding": "UTF-8",
             "write_policy": self._writer.policy(),
             "hidden_paths": ["/".join(parts) for parts in self.hidden_paths],
             "exec_policy": self._executor.policy(),

@@ -1,11 +1,19 @@
 # Mac File Gateway — Git CLI V1 逐文件实施计划
 
-Status: **A–D 批次 Standards / Spec 复审通过；E 独立复审和原生 macOS 验证已由用户确认完成；F（T15–T16）进行中，真实 Tunnel 和最终合并/发布仍未批准**  
+Status: **A–F 分批独立 Standards / Spec 复审 PASS（无未关闭 P0/P1/P2）；F Linux CI、用户提供的 macOS 原生验证、真实 ChatGPT Web → Secure MCP Tunnel Git E2E 均 PASS；2.5.0 单次集成发布仍待独立定向复审与运营审批，最终合并、Tag、部署及生产 Git 启用未批准**  
 Date: 2026-10-21  
 Authoritative design: docs/GIT_CLI_V1_DESIGN.md @ e32de7b896a3231fd9e60ac5798ea94b482c5e07  
 Design review: **Standards PASS / Spec PASS，P0=0、P1=0、P2=0**（用户提供的独立定向复审结果）  
-Runtime baseline: release/ms1 @ ba8634f24cdc26904d1c80951df7173e429240c7, MCP Python SDK 2.3.0  
+Pre-Git runtime baseline: release/ms1 @ ba8634f24cdc26904d1c80951df7173e429240c7, MCP Python SDK 2.3.0  
 Implementation base: the approved design commit above. This plan is subordinate to the design and is **not implementation evidence**.
+
+### 2026-10-21 实施与测试验收记录（不等于发布授权）
+
+- F 固定测试基线：`b0bfe1f6b9e2ebfc79db01b716bd2074bd19fb56`（Git CLI V1 T15/T16 原 P2 已由独立定向复审关闭；Standards / Spec PASS）。
+- F Linux [Actions #39543099172](https://github.com/chinanjjohn2012/mac-file-gateway/actions/runs/39543099172)：`1109 passed, 8 skipped`，真实 Git/MCP Smoke 与 Manifest 157 项 PASS。
+- 用户在隔离的 macOS 临时仓库报告：`1117 passed, 1 warning`，MCP/stdio/Git Hook 断连 Smoke PASS、`Release manifest: OK`、退出码 0。这是用户提交的本机日志，不冒充本助手远程 macOS 执行。
+- 真实 ChatGPT Web → Secure MCP Tunnel → 测试 Gateway 实测：工具发现、A/B 独立授权、Git Preview/Apply、非幂等 Commit、断连后的 Hook 完成（用户观察提交数 2 → 3）及重连后的 `run_git(status)` PASS；见 [PR #31 E2E 记录](https://github.com/chinanjjohn2012/mac-file-gateway/pull/31#issuecomment-6311418279)。
+- **2.5.0 集成发布收尾**仅调整版本/文档/断言/Manifest；真实生产发布与 Git 高权限启用仍须运营者在新增集成 PR 的独立复审、完整 CI 后明确批准。源码所含 Git 执行权限默认关闭。
 
 ## 0. 目标与不可改变的契约
 
@@ -329,4 +337,4 @@ Smoke：
 - V1 的回归矩阵是否覆盖强杀首次 discovery、重启残留记录、正常并发发现、移交空档、离线恢复这五项关键验收？
 - 是否错把 Multi stdio 当作现有支持模式，或错把 Linux CI / 设计 Spec PASS 视为 macOS 产品验收？
 
-**计划为文档，不构成代码通过、发布、部署或合并授权。下一步是独立计划复审；没有通过不得擅自扩大 Git 能力。**
+**本计划保留历史设计和审查问题；实际 A–F 分批代码证据参见相应 PR。2.5.0 独立发布集成 PR 尚须新 Head 的 CI、版本/Manifest 定向独立复审及运营者明确授权，才能合并、打 Tag 或部署；不得因计划状态而自动开放 Git。**

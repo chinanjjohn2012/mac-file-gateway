@@ -1,4 +1,4 @@
-# Mac File Gateway 2.4.0
+# Mac File Gateway 2.5.0
 
 让网页版 ChatGPT 通过 **本地网关 + OpenAI Secure MCP Tunnel** 安全访问 macOS 上的项目文件，并按需启用文件修改、受控命令执行和 Local Skill Bridge。
 
@@ -12,7 +12,7 @@
 
 https://github.com/chinanjjohn2012/mac-file-gateway/tree/release/ms1
 
-正式部署仍以已经批准发布的 `release/ms1` 为准。**Git CLI V1 目前是独立开发候选能力**（PR #19 / #23 / #25 / #27 及后续 F 批次），不代表 `release/ms1` 或 2.4.0 已发布 Git 执行权限。其代码与测试基于官方 MCP Python SDK 2.3.0；正式合并、发布以及真实 Tunnel 接入仍需通过独立门禁。
+**2.5.0 源码包含 Git CLI V1，执行权限默认关闭。** Git CLI V1 已经过分批独立复审、macOS 原生测试与真实 Secure MCP Tunnel 测试；这些证据并不代表已创建正式 Tag/Release、部署到生产或授权生产 Git。正式合并、发布和启用仍须独立运营审批。运行基于官方 MCP Python SDK 2.3.0。
 
 ### 已包含的主要代码
 
@@ -123,13 +123,13 @@ Mac File Gateway 按启动参数决定暴露哪些工具，不会默认打开全
 
 Local Skill Bridge 与 `--allow-exec` 是两套独立能力。启用 Local Skill Bridge **不需要**启用 `run_command`。
 
-如果同时启用读取、写入、受控命令和 Local Skill Bridge，最多会暴露 **19 个 MCP 工具**；开发候选版额外获得独立 Git 授权后，Legacy 最多 **20 个**。Multi 仍不提供普通 `run_command` 和 Local Skill Bridge。
+如果同时启用读取、写入、受控命令和 Local Skill Bridge，最多会暴露 **19 个 MCP 工具**；2.5.0 源码获得独立 Git 授权后，Legacy 最多 **20 个**。Multi 仍不提供普通 `run_command` 和 Local Skill Bridge。
 
-#### Git CLI V1：额外 1 个（候选、默认关闭）
+#### Git CLI V1：额外 1 个（2.5.0、默认关闭）
 
-只有服务端和命令名单**分别显式授权**且 Git 服务可用时，才会注册：
+服务端和命令名单**分别显式授权**、适配器初始化成功时，才会注册：
 
-- `run_git`（REST：`POST /git/run`）。
+- `run_git`（REST：`POST /git/run`）。工具注册状态由 `git_policy.adapter_exposed` 反映；注册后如进入隔离状态，工具可以继续可见，但执行会被拒绝，`git_policy.available` 反映当前可用性。
 
 Legacy 必须同时使用 `--allow-git` 和至少一个 `--git-command NAME`；Multi 需要私有配置中的 `server.git.enabled=true` 及对应 Workspace 的 `git.allowed_commands` 非空。Multi 请求必须明确给出 `workspace`，无默认 Workspace。这个工具不继承文件写权限、普通 `run_command` 或 Local Skill Bridge 的权限；Multi stdio 仍不支持。
 
@@ -349,7 +349,7 @@ curl --noproxy '*' -fsS http://127.0.0.1:8765/health
 }
 ```
 
-这里的 `read_only` **只表示 File API 文件写入是否启用**，不表示 Git 必定只读。候选版中启用 `run_git` 后，即使 `read_only=true`，获授权的 `add`、`commit`、`pull` 等仍可按原生 Git 语义修改文件或仓库。
+这里的 `read_only` **只表示 File API 文件写入是否启用**，不表示 Git 必定只读。2.5.0 源码中启用 `run_git` 后，即使 `read_only=true`，获授权的 `add`、`commit`、`pull` 等仍可按原生 Git 语义修改文件或仓库。
 
 也可以直接检查当前 Gateway 配置：
 
@@ -361,10 +361,10 @@ curl --noproxy '*' -fsS http://127.0.0.1:8765/health
   --check
 ```
 
-`gateway_info` 当前版本应为：
+`gateway_info` 在 2.5.0 源码中的版本应为：
 
 ```text
-2.4.0
+2.5.0
 ```
 
 ### 10. Local Skill Bridge 真实树检查
@@ -391,9 +391,9 @@ curl --noproxy '*' -fsS http://127.0.0.1:8765/health
 
 ---
 
-### Git CLI V1（独立候选分支，未纳入发布版）
+### Git CLI V1（2.5.0 源码包含，默认关闭）
 
-**默认不授权 Git**。先在可丢弃的本地测试仓库验证，确认独立复审和原生 macOS 验收结论；不要因为本节存在，就在生产 Gateway 或 Tunnel 上提前开启高权限 Git。开发版本功能与 `2.4.0` 已发布功能必须区分。
+**默认不授权 Git**。2.5.0 源码包含 Git CLI V1，但升级代码不会自动开启 `run_git`；启用前必须有明确的运营者授权、独立风险评估和最小命令名单。先在可丢弃的本地测试仓库验证，不要因源码包含 Git 功能就提前在生产 Gateway 或 Tunnel 中开放 Git；代码版本号也不等于发布或生产授权。
 
 #### Legacy：单 Workspace 显式授权
 
@@ -773,7 +773,7 @@ Gateway 主要面向普通代码和 UTF-8 文本文件。
 
 ## 七、常用检查命令
 
-开发候选版本的本地验证（MCP SDK import、compileall、pytest、REST HTTP、真实 MCP HTTP / stdio 双协议、Git Legacy/Multi、Git Hook 断连 Smoke 和 `MANIFEST.sha256` 一致性）：
+2.5.0 源码的本地验证（MCP SDK import、compileall、pytest、REST HTTP、真实 MCP HTTP / stdio 双协议、Git Legacy/Multi、Git Hook 断连 Smoke 和 `MANIFEST.sha256` 一致性）：
 
 ```bash
 bash verify.sh --require-mcp
@@ -830,9 +830,9 @@ Ctrl+C
 
 ---
 
-## Multi-Workspace Phase 1 + Git CLI V1 (development candidate; not yet released)
+## Multi-Workspace Phase 1 + Git CLI V1 (2.5.0 source; Git disabled by default)
 
-The optional `--config` mode selects **multiple explicitly named local project roots** using one Gateway HTTP process and one MCP tunnel. This mode is under implementation and is not included in the published `release/ms1` deployment until tests and security review pass. Do not use the draft branch for production access.
+The optional `--config` mode selects **multiple explicitly named local project roots** using one Gateway HTTP process and one MCP tunnel. Version 2.5.0 source contains Git CLI V1, but its Git execution grants remain disabled by default. Source inclusion is not proof of a published tag, an actual deployment, or permission to enable Git in production; each requires separate operator approval.
 
 Configuration stays **private and local**, never in the public Git repository. Start from [samples/gateway.example.json](./samples/gateway.example.json), substitute your own absolute project directories, then place the final file at `~/.config/mac-file-gateway/gateway.json`. On a personal Mac, a `0700` config directory and `0600` JSON file are **recommended but not enforced**. Phase 1 trusts local OS accounts and does not use ownership, POSIX mode or extended ACLs as startup admission gates. Symlinks, multiply-linked config files, unexpected file types, ambiguous JSON, control-plane/Workspace overlaps and API authorization errors are still rejected. See [Phase 1 local trust boundary amendment](./docs/PHASE1_LOCAL_TRUST_BOUNDARY.md) for the accepted local-user risk.
 
@@ -858,11 +858,11 @@ Recognized credentials and configured protected paths are hidden consistently fr
 
 To revert, stop the Multi listener and start the previous positional-root command. Existing files and backups need no conversion.
 
-### Git CLI V1 — English summary (draft feature, not a published release)
+### Git CLI V1 — English summary (2.5.0; explicit opt-in only)
 
 - **Default denial:** Legacy requires both `--allow-git` and repeatable `--git-command NAME`. Multi requires `server.git.enabled: true` and a nonempty per-Workspace `git.allowed_commands`. A Multi `run_git` call must specify `workspace`; Legacy does not accept that field. General Exec/Local Skills grants do not enable Git.
 - **Interface:** MCP `run_git` or `POST /git/run` uses `command`, `cwd` (default "."), `options` (object), `paths` (array), `timeout_seconds` (10–900, default 120) and `dry_run` (default true). These options/paths can be omitted, but explicit JSON null is invalid. The REST endpoint has a separate 65,536-byte body cap.
 - **Allowed Git commands:** `status`, `diff`, `log`, `branch`, `switch`, `add`, `commit`, `fetch`, `pull`, `push`. No raw argv, `checkout`, `clone`, or arbitrary shell. Apply requires `dry_run=false`; preview launches **zero** Git subprocesses, including repository discovery.
 - **Repository privilege is broader than File API:** The actual repository can be an ancestor of the Workspace. Explicit local cwd/paths stay Workspace-contained, but native Git `pull`, `add -A`, hooks, filters, remote/credential helpers can change files outside the chosen Workspace. File `read_only`, hidden/exclude/redaction rules and backup guarantees **do not apply** to Git effects/output. Git is **not an OS sandbox**.
 - **Crash/disconnect:** A disconnected or timed-out MCP client may not know whether a non-idempotent Git operation finished. Never automatically retry `commit`, `pull` or `push`. Durable `DISCOVERING`/`RUNNING` intent is required before Git Popen; uncertain cleanup triggers persistent quarantine. There is **no** Web/MCP/REST quarantine reset. Only a trusted local administrator, after Gateway shutdown and independent evidence that the affected main process/group/children have exited, may perform offline recovery. Repeated restart is not a recovery method.
-- **Status:** This is a reviewed development candidate from separate Git CLI draft PRs. Published `release/ms1` and the existing `2.4.0` release are **not** declared Git-enabled by this documentation. Native macOS test success does not replace real Secure MCP Tunnel end-to-end validation or release approval.
+- **Status:** Git CLI V1 is included in the 2.5.0 source tree and is disabled by default. Independent code review, native macOS verification and live Secure MCP Tunnel E2E were completed for the reviewed pre-release Git code. A source version number is **not** a GitHub Release or deployment attestation, and those verifications do **not** authorize enabling production Git. Final merge, release and production grants require separate operator approval.

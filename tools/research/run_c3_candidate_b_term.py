@@ -80,13 +80,13 @@ _MUTANT = {
     "omit-sigdef": (
         "C3B02_MUT_OMIT_SIGDEF",
         "C3B02_MUTANT name=omit-sigdef worker_default_term=0 "
-        "worker_unblocked_term=1 term_attempts=0 cleanup_complete=1\n",
+        "worker_unblocked_term=1 term_attempts=0 cleanup_complete=0\n",
         "C3B02_BLOCK phase=worker_signal_ineligible\n",
     ),
     "omit-sigmask": (
         "C3B02_MUT_OMIT_SIGMASK",
         "C3B02_MUTANT name=omit-sigmask worker_default_term=1 "
-        "worker_unblocked_term=0 term_attempts=0 cleanup_complete=1\n",
+        "worker_unblocked_term=0 term_attempts=0 cleanup_complete=0\n",
         "C3B02_BLOCK phase=worker_signal_ineligible\n",
     ),
     "omit-controller-group": (
@@ -345,6 +345,12 @@ def main() -> int:
                 reaped=c.get("owner_children_reaped", -1),
             )
         )
+    for name in MUTATIONS:
+        print("C3B02_MUTATION name=" + name + " detected=" +
+              str(mutants[name]).lower())
+    for name in SAFETY_FAULTS:
+        print("C3B02_FAULT_CHECK name=" + name + " detected=" +
+              str(faults[name]).lower())
     print("C3B02_MUTATIONS_DETECTED=" + str(all(mutants.values())).lower())
     print("C3B02_FAULTS_DETECTED=" + str(all(faults.values())).lower())
     print("C3B02_NATIVE_RESULT=" + decision)

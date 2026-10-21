@@ -766,19 +766,23 @@ done: ;
         (!o.worker_spawned || o.controller_worker_fds_closed) &&
         which!=RESULT_LOST;
 #ifdef C3B02_MUT_OMIT_SIGDEF
-    if(which==POSITIVE&&!accepted&&o.cleanup_complete&&o.term_attempts==0 &&
+    if(which==POSITIVE&&!accepted && o.owner_children_reaped &&
+       o.owner_fds_closed && !o.controller_worker_fds_closed &&
+       !o.cleanup_complete && o.term_attempts==0 &&
        !strcmp(reason,"worker_signal_ineligible") &&
        !o.worker_default_term && o.worker_unblocked_term) {
         puts("C3B02_MUTANT name=omit-sigdef worker_default_term=0 "
-             "worker_unblocked_term=1 term_attempts=0 cleanup_complete=1");
+             "worker_unblocked_term=1 term_attempts=0 cleanup_complete=0");
     }
 #endif
 #ifdef C3B02_MUT_OMIT_SIGMASK
-    if(which==POSITIVE&&!accepted&&o.cleanup_complete&&o.term_attempts==0 &&
+    if(which==POSITIVE&&!accepted && o.owner_children_reaped &&
+       o.owner_fds_closed && !o.controller_worker_fds_closed &&
+       !o.cleanup_complete && o.term_attempts==0 &&
        !strcmp(reason,"worker_signal_ineligible") &&
        o.worker_default_term && !o.worker_unblocked_term) {
         puts("C3B02_MUTANT name=omit-sigmask worker_default_term=1 "
-             "worker_unblocked_term=0 term_attempts=0 cleanup_complete=1");
+             "worker_unblocked_term=0 term_attempts=0 cleanup_complete=0");
     }
 #endif
 #ifdef C3B02_MUT_CTRL_GROUP
@@ -813,9 +817,10 @@ done: ;
              "controller_worker_fds_closed=0 cleanup_complete=0");
     }
 #endif
+    /* Missing a Controller FINAL does not prove a close() error. */
     if(!o.owner_fds_closed ||
-       (o.worker_spawned && !o.controller_worker_fds_closed &&
-        which!=RESULT_LOST))reason="fd_close";
+       (o.controller_waited && !o.controller_worker_fds_closed))
+        reason="fd_close";
     if(which==ANCHOR_LOST && o.after_loss_attempts)
         reason="anchor_gate_violation";
     if(!accepted || !o.owner_children_reaped ||

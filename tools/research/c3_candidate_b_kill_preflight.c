@@ -16,6 +16,7 @@ int main(void) { puts("C3B03_R2_NOT_RUN_NON_DARWIN"); return 77; }
 #define _DARWIN_C_SOURCE 1
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/event.h>
 #include <libproc.h>
 #include <poll.h>
 #include <signal.h>
@@ -427,6 +428,114 @@ done: ;
          "orphan_preflight_proven=0 reuse_proven=0 g2_qualified=0");
     return 0;
 }
+
+/* Deliberately no group signal. NOTE_EXIT observes a non-child but cannot
+   furnish a legal worker wait status. The worker self-exits on its own clock. */
+static int orphan_marker(int dir,const char *name) {
+    int fd=openat(dir,name,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);
+    if(fd<0)return 0;
+    int ok=write(fd,"observed",8)==8;
+    return fd_close(&fd)&&ok;
+}
+static int orphan_worker_role(int dir) {
+    alarm(5);
+    if(!sig_setup())return 81;
+    const pid_t parent=getppid();
+    if(parent<=1)return 81;
+    long long deadline=clock_ms()+3800;
+    char armed='W';
+    if(!send_byte(STDOUT_FILENO,armed,deadline))return 82;
+    for(;;) {
+        if(getppid()!=parent)break;
+        if(remaining(deadline)<=0)return 83;
+        pause_short();
+    }
+    if(!orphan_marker(dir,"C3B03_ORPHAN_REPARENTED"))return 84;
+    /* The worker, not Owner/Controller/runner, chooses its own exit deadline. */
+    long long self_expiry=clock_ms()+150;
+    while(clock_ms()<self_expiry)pause_short();
+    if(!orphan_marker(dir,"C3B03_ORPHAN_SELF_EXIT"))return 85;
+    return 0;
+}
+static int orphan_controller_role(const char *self,const char *root,int dir){
+    alarm(6);
+    if(!sig_setup())return 86;
+    const long long deadline=clock_ms()+5000;
+    Child worker={.pid=-1,.input=-1,.output=-1};
+    if(!spawn_role(self,root,dir,"__orphan_worker",1,0,&worker))return 87;
+    char ready=0;
+    if(!read_byte(worker.output,&ready,deadline)||ready!='W')return 88;
+    /* Worker PID is sent only over Owner's controlled private pipe. */
+    if(!write_exact(STDOUT_FILENO,&worker.pid,sizeof worker.pid,deadline))
+        return 89;
+    char release=0;
+    if(!read_byte(STDIN_FILENO,&release,deadline)||release!='L')return 90;
+    /* A real Controller exit, intentionally WITHOUT waitpid(worker). */
+    return 0;
+}
+static int orphan_owner_role(const char *self,const char *root,int *rootfd){
+    int dir=*rootfd;
+    if(!sig_setup())return 70;
+    Child ctrl={.pid=-1,.input=-1,.output=-1};
+    const long long deadline=clock_ms()+7000;
+    int kq=-1,registered=0,reparented=0,note_exit=0,self_expiry=0;
+    int controller_waited=0,fd_ok=1,worker_known=0;
+    pid_t worker=-1;
+    if(!spawn_role(self,root,dir,"__orphan_controller",1,0,&ctrl))
+        goto orphan_done;
+    if(!read_exact(ctrl.output,&worker,sizeof worker,deadline)||worker<=1)
+        goto orphan_done;
+    worker_known=1;
+    /* Kernel-backed NOTE_EXIT registration precedes the release of parent. */
+    kq=kqueue();
+    if(kq<0)goto orphan_done;
+    struct kevent change;
+    EV_SET(&change,(uintptr_t)worker,EVFILT_PROC,EV_ADD|EV_ENABLE|EV_ONESHOT,
+           NOTE_EXIT,0,NULL);
+    if(kevent(kq,&change,1,NULL,0,NULL)<0)goto orphan_done;
+    registered=1;
+    if(!send_byte(ctrl.input,'L',deadline))goto orphan_done;
+    if(!child_wait(&ctrl,deadline)||!WIFEXITED(ctrl.status)||
+       WEXITSTATUS(ctrl.status)!=0)goto orphan_done;
+    controller_waited=1;
+    while(remaining(deadline)>0) {
+        struct kevent event;
+        struct timespec tick={.tv_sec=0,.tv_nsec=100000000L};
+        int n=kevent(kq,NULL,0,&event,1,&tick);
+        if(n<0 && errno==EINTR)continue;
+        if(n<0)break;
+        if(n==1 && event.filter==EVFILT_PROC &&
+           event.ident==(uintptr_t)worker && (event.fflags&NOTE_EXIT)){
+            note_exit=1;
+            break;
+        }
+    }
+    struct stat st;
+    reparented=fstatat(dir,"C3B03_ORPHAN_REPARENTED",&st,
+                      AT_SYMLINK_NOFOLLOW)==0 && S_ISREG(st.st_mode) &&
+             st.st_uid==geteuid() && st.st_nlink==1;
+    self_expiry=fstatat(dir,"C3B03_ORPHAN_SELF_EXIT",&st,
+                      AT_SYMLINK_NOFOLLOW)==0 && S_ISREG(st.st_mode) &&
+                st.st_uid==geteuid() && st.st_nlink==1;
+orphan_done:;
+    if(!fd_close(&ctrl.input))fd_ok=0;
+    if(!child_wait(&ctrl,deadline))controller_waited=0;
+    if(!child_close(&ctrl))fd_ok=0;
+    if(kq>=0&&!fd_close(&kq))fd_ok=0;
+    if(!fd_close(rootfd))fd_ok=0;
+    if(!(registered&&worker_known&&controller_waited&&note_exit&&
+         reparented&&self_expiry&&fd_ok&&close_ok&&clock_ms()<deadline)){
+        fprintf(stderr,"C3B03_R2_BLOCK phase=orphan_observation cleanup=UNRESOLVED\n");
+        return 70;
+    }
+    puts("C3B03_R2_ORPHAN watcher_registered_before_loss=1 "
+         "worker_reparented=1 worker_note_exit=1 "
+         "worker_self_expiry_witness=1 controller_legal_wait=0 "
+         "worker_wait_status_unknown=1 cleanup_unresolved=1 "
+         "group_term_attempts=0 group_kill_attempts=0");
+    return 0;
+}
+
 int main(int argc,char **argv) {
     if(argc!=3)return 70; /* fixed role and private root only */
     int dir=-1;
@@ -440,6 +549,12 @@ int main(int argc,char **argv) {
         rc=controller_role(argv[0],argv[2],dir);
     else if(!strcmp(argv[1],"__worker"))
         rc=worker_role();
+    else if(!strcmp(argv[1],"orphan-preflight"))
+        rc=orphan_owner_role(argv[0],argv[2],&dir);
+    else if(!strcmp(argv[1],"__orphan_controller"))
+        rc=orphan_controller_role(argv[0],argv[2],dir);
+    else if(!strcmp(argv[1],"__orphan_worker"))
+        rc=orphan_worker_role(dir);
     if(!fd_close(&dir)&&rc==0)return 70;
     return rc;
 }

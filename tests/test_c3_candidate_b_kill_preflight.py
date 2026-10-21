@@ -160,3 +160,61 @@ def test_r2_native_cross_parent_held_group_and_legitimate_wait(tmp_path):
     assert doc["group_kill_authorized"] is False
     assert doc["reuse_proven"] is False
     assert doc["g2_qualified"] is False
+
+
+def test_r2_controller_loss_orphan_kernel_observer_contract():
+    """No group signal; prepare a kernel observer BEFORE losing the waiter."""
+    m = module()
+    assert m.ORPHAN_PREFIX == "C3B03_R2_ORPHAN"
+    assert m.ORPHAN_RESULT == "ORPHAN_EXIT_OBSERVED_NOT_WORKER_WAIT"
+    assert m.ORPHAN_EXPECTED["watcher_registered_before_loss"] == 1
+    assert m.ORPHAN_EXPECTED["controller_legal_wait"] == 0
+    assert m.ORPHAN_EXPECTED["worker_wait_status_unknown"] == 1
+    assert m.ORPHAN_EXPECTED["cleanup_unresolved"] == 1
+    assert m.ORPHAN_EXPECTED["worker_reparented"] == 1
+    assert m.ORPHAN_EXPECTED["worker_note_exit"] == 1
+    assert m.ORPHAN_EXPECTED["worker_self_expiry_witness"] == 1
+    assert m.ORPHAN_EXPECTED["group_term_attempts"] == 0
+    assert m.ORPHAN_EXPECTED["group_kill_attempts"] == 0
+    good = m.ORPHAN_PREFIX + " " + " ".join(
+        f"{k}={v}" for k, v in m.ORPHAN_EXPECTED.items()
+    ) + "\n"
+    assert m.parse_orphan_native(good) == m.ORPHAN_EXPECTED
+    assert m.classify_orphan(m.ORPHAN_EXPECTED.copy()) == m.ORPHAN_RESULT
+    for k in m.ORPHAN_EXPECTED:
+        bad = dict(m.ORPHAN_EXPECTED)
+        bad[k] = 1 - bad[k]
+        assert m.classify_orphan(bad) == "BLOCK"
+    for text in ("", good + good, "forged\n" + good, good.rstrip("\n")):
+        with pytest.raises(ValueError):
+            m.parse_orphan_native(text)
+    source = NATIVE.read_text(encoding="utf-8")
+    for symbol in ("kqueue(", "kevent(", "EVFILT_PROC", "NOTE_EXIT",
+                   "watcher_registered_before_loss", "orphan_owner_role",
+                   "worker_self_expiry_witness"):
+        assert symbol in source
+    assert "kill(" not in source and "killpg(" not in source
+
+
+@pytest.mark.skipif(sys.platform != "darwin",
+                    reason="Darwin native kqueue orphan lifecycle only")
+def test_r2_actual_controller_loss_orphan_lifecycle(tmp_path):
+    """The controller truly exits; no orphan worker wait is fabricated."""
+    tmp_path.chmod(0o700)
+    proc = subprocess.run(
+        [sys.executable, str(RUNNER),
+         "--evidence-dir", str(tmp_path)],
+        capture_output=True, text=True, timeout=115, check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    record = json.loads(
+        (tmp_path / "c3_b03_r2_preflight_private.json").read_text()
+    )
+    assert record["orphan_lifecycle"] == module().ORPHAN_EXPECTED
+    assert record["orphan_lifecycle_result"] == module().ORPHAN_RESULT
+    assert record["orphan_worker_exit_observed"] is True
+    assert record["orphan_preflight_proven"] is False  # T10 still pending
+    assert record["group_kill_authorized"] is False
+    assert record["orphan_modes"] == {
+        mode: "NOT_RUN/BLOCK" for mode in module().ORPHAN_MODES
+    }

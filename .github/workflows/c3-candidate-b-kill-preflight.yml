@@ -1,0 +1,76 @@
+name: C3 Candidate B B03-R2 pre-signal containment (NO GROUP SIGNAL)
+
+on:
+  push:
+    branches:
+      - research/phase2-lite-c3-candidate-b-kill-preflight-20261021
+  pull_request:
+    paths:
+      - ".github/workflows/c3-candidate-b-kill-preflight.yml"
+      - "tools/research/c3_candidate_b_kill_preflight.c"
+      - "tools/research/run_c3_candidate_b_kill_preflight.py"
+      - "tests/test_c3_candidate_b_kill_preflight.py"
+      - "MANIFEST.sha256"
+permissions:
+  contents: read
+jobs:
+  b03-r2-native-preflight:
+    runs-on: macos-15
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify exact Darwin ARM64 Head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          sw_vers -productVersion
+          uname -v
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          architecture: arm64
+      - name: B03-R2 safety and MANIFEST.sha256
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -f tools/research/c3_candidate_b_kill.c
+          test ! -f tools/research/run_c3_candidate_b_kill.py
+          python -m compileall -q tools/research/run_c3_candidate_b_kill_preflight.py tests/test_c3_candidate_b_kill_preflight.py
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          for line in Path("MANIFEST.sha256").read_text().splitlines():
+              expected, path = line.split("  ", 1)
+              assert hashlib.sha256(Path(path).read_bytes()).hexdigest() == expected, path
+          print("C3B03_R2_MANIFEST_OK=true")
+          PY
+      - name: Build synthetic preflight only
+        run: cc -std=c11 -Wall -Wextra -Werror -pthread -fsyntax-only tools/research/c3_candidate_b_kill_preflight.c
+      - name: B03-R2 contract and Darwin synthetic preflight
+        run: |
+          python -m pip install pytest==8.4.2
+          python -m pytest -q tests/test_c3_candidate_b_kill_preflight.py
+  b03-r2-linux-nonnative:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: |
+          python -m pip install pytest==8.4.2
+          python -m pytest -q tests/test_c3_candidate_b_kill_preflight.py

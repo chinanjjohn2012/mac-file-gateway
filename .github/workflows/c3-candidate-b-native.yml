@@ -1,0 +1,93 @@
+name: C3 Candidate B B-01 cross-parent PGID join — synthetic Darwin research (NOT G2)
+
+on:
+  push:
+    branches:
+      - research/phase2-lite-c3-candidate-b-join-20261021
+  pull_request:
+    paths:
+      - ".github/workflows/c3-candidate-b-native.yml"
+      - "tools/research/c3_candidate_b_anchor.c"
+      - "tools/research/run_c3_candidate_b.py"
+      - "tests/test_c3_candidate_b_join.py"
+      - "docs/research/phase2-lite-c3/candidate-b-isolated-plan.md"
+
+permissions:
+  contents: read
+
+jobs:
+  b01-native:
+    if: >-
+      (github.event_name == 'push' &&
+       github.ref == 'refs/heads/research/phase2-lite-c3-candidate-b-join-20261021') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'research/phase2-lite-c3-candidate-b-join-20261021')
+    runs-on: macos-15
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Native ARM64 and fixed checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          sw_vers -productVersion
+          uname -v
+          xcrun --find cc
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          architecture: arm64
+      - name: Native B-01 contract tests — private synthetic children
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install pytest==8.4.2
+          python -m pytest -q tests/test_c3_candidate_b_join.py
+      - name: Validate five actual B-01 cases, no group signals
+        shell: bash
+        run: |
+          set -euo pipefail
+          private_dir="$(mktemp -d)"
+          chmod 700 "$private_dir"
+          trap 'rm -rf "$private_dir"' EXIT
+          python tools/research/run_c3_candidate_b.py --evidence-dir "$private_dir"
+          python - "$private_dir/c3_candidate_b_private.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          data = json.loads(Path(sys.argv[1]).read_text())
+          assert data["decision"] == "PARTIAL_B01_NATIVE_NOT_G2"
+          assert data["g2_qualified"] is False
+          assert data["reuse_proven"] is False
+          assert data["mutation_detected"] is True
+          assert [(c["mode"], c["status"]) for c in data["cases"]] == [
+              ("join-positive", "POSITIVE_EXPERIMENT"),
+              ("owner-reject-missing", "EXPECTED_BLOCK"),
+              ("join-nonexistent", "EXPECTED_BLOCK"),
+              ("join-cross-session", "EXPECTED_BLOCK"),
+              ("gate-denied", "EXPECTED_BLOCK"),
+          ]
+          assert all(c["cleanup_complete"] == 1 for c in data["cases"])
+          assert data["cases"][0]["controller_waited"] == 1
+          assert data["cases"][0]["gate_opened"] == 1
+          assert data["cases"][1]["spawn_attempted"] == 0
+          assert data["cases"][2]["spawn_attempted"] == 1
+          assert data["cases"][2]["worker_spawned"] == 0
+          assert data["cases"][3]["sid_distinct"] == 1
+          assert data["cases"][3]["worker_spawned"] == 0
+          assert data["cases"][4]["worker_spawned"] == 1
+          assert data["cases"][4]["gate_opened"] == 0
+          assert data["cases"][4]["workload_started"] == 0
+          print("C3B_NATIVE_RESULT=PARTIAL_B01_NATIVE_NOT_G2")
+          PY

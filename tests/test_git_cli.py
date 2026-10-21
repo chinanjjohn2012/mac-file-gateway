@@ -1,0 +1,531 @@
+"""T06 direct internal Git execution tests. All repositories are temporary."""
+from __future__ import annotations
+
+import errno
+import os
+from pathlib import Path
+import stat
+import signal
+import subprocess
+import sys
+import time
+
+import pytest
+
+from gateway.core import GatewayError
+from gateway.git_cli import GitCLIExecutor, GitProcessRunner, git_environment
+from gateway.git_repository import RepositoryIdentity
+from gateway.git_repository import GitRepositoryCoordinator
+from gateway.git_state import GitStateStore
+
+
+def git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
+                            text=True, check=True)
+    return result.stdout.strip()
+
+
+def repo_workspace(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    git(repo, "config", "user.name", "Fixture")
+    git(repo, "config", "user.email", "fixture@example.invalid")
+    ws = repo / "project-b"
+    sibling = repo / "project-a"
+    ws.mkdir()
+    sibling.mkdir()
+    (sibling / "tracked.txt").write_text("first")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "initial")
+    return repo, ws, sibling
+
+
+def execute(executor, workspace: Path, command: str, *,
+            options=None, paths=None, dry_run=False):
+    fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        return executor.run(workspace="b", root_fd=fd, root_path=str(workspace),
+                            command=command, options={} if options is None else options,
+                            paths=[] if paths is None else paths, dry_run=dry_run)
+    finally:
+        os.close(fd)
+
+
+def test_git_runner_is_not_a_transport_and_preserves_workspace_parent_repo(tmp_path):
+    repo, workspace, sibling = repo_workspace(tmp_path)
+    state = GitStateStore(tmp_path / "git-state", workspace_roots=(str(workspace),))
+    runner = GitCLIExecutor(state)
+    try:
+        status = execute(runner, workspace, "status")
+        assert status["exit_code"] == 0
+        assert status["execute_started"] and status["repository_checked"]
+        assert status["cleanup_status"] == "complete"
+        assert not list((tmp_path / "git-state").iterdir())
+        (sibling / "tracked.txt").write_text("changed outside Workspace")
+        # The user-approved Git semantics allow no-paths -A to stage
+        # changes in the parent repository, including sibling directories.
+        added = execute(runner, workspace, "add", options={"all": True})
+        assert added["exit_code"] == 0
+        staged = git(repo, "diff", "--cached", "--name-only")
+        assert "project-a/tracked.txt" in staged
+        committed = execute(runner, workspace, "commit",
+                            options={"message": "from gateway sibling"})
+        assert committed["exit_code"] == 0
+        assert git(repo, "log", "-1", "--format=%s") == "from gateway sibling"
+    finally:
+        state.close()
+
+
+def test_non_repository_failure_clears_discovery_record(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    state = GitStateStore(tmp_path / "state")
+    executor = GitCLIExecutor(state)
+    try:
+        with pytest.raises(GatewayError) as exc:
+            execute(executor, root, "status")
+        assert exc.value.code == "git_not_repository"
+        assert not state.globally_quarantined
+        assert not list((tmp_path / "state").iterdir())
+    finally:
+        state.close()
+
+
+def test_preview_startup_requires_no_git_process(tmp_path, monkeypatch):
+    repo, workspace, _ = repo_workspace(tmp_path)
+    state = GitStateStore(tmp_path / "state")
+    executor = GitCLIExecutor(state)
+    fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_k:
+                            (_ for _ in ()).throw(AssertionError("Preview spawned Git")))
+        preview = executor.run(workspace="b", root_fd=fd, root_path=str(workspace),
+                               command="status", dry_run=True)
+        assert not preview["repository_checked"] and not preview["execute_started"]
+        assert not list((tmp_path / "state").iterdir())
+    finally:
+        os.close(fd)
+        state.close()
+
+
+def test_git_environment_removes_git_and_gateway_secrets():
+    env = git_environment({
+        "HOME": "/tmp/fakehome", "USER": "fixture", "SSH_AUTH_SOCK": "/tmp/agent",
+        "GIT_DIR": "/tmp/evil", "GIT_WORK_TREE": "/tmp/evil2",
+        "GIT_INDEX_FILE": "/tmp/evil/index", "GIT_COMMON_DIR": "/tmp/bad",
+        "GIT_SSH_COMMAND": "bad", "GIT_CONFIG_GLOBAL": "/tmp/other",
+        "GATEWAY_TOKEN": "secret", "TUNNEL_API_KEY": "private",
+    })
+    assert env["HOME"] == "/tmp/fakehome"
+    assert env["SSH_AUTH_SOCK"] == "/tmp/agent"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert all(not name.startswith("GIT_") or name == "GIT_TERMINAL_PROMPT"
+               for name in env)
+    assert "GATEWAY_TOKEN" not in env and "TUNNEL_API_KEY" not in env
+
+
+def test_run_does_not_inherit_poisoned_git_environment(tmp_path, monkeypatch):
+    repo, workspace, _ = repo_workspace(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    git(elsewhere, "init", "-q")
+    monkeypatch.setenv("GIT_DIR", str(elsewhere / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(elsewhere))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(elsewhere / "badindex"))
+    state = GitStateStore(tmp_path / "state")
+    try:
+        executor = GitCLIExecutor(state)
+        result = execute(executor, workspace, "status")
+        assert result["exit_code"] == 0
+        assert not (elsewhere / "badindex").exists()
+    finally:
+        state.close()
+
+
+def test_runtime_branch_check_disallows_remote_guess(tmp_path):
+    repo, workspace, _ = repo_workspace(tmp_path)
+    state = GitStateStore(tmp_path / "state")
+    executor = GitCLIExecutor(state)
+    try:
+        with pytest.raises(GatewayError) as exc:
+            execute(executor, workspace, "switch", options={"name": "unavailable"})
+        assert exc.value.code == "git_branch_unknown"
+        assert not state.globally_quarantined
+        new = execute(executor, workspace, "switch",
+                      options={"name": "newlocal", "create": True})
+        assert new["exit_code"] == 0
+        assert git(repo, "branch", "--show-current") == "newlocal"
+        assert not list((tmp_path / "state").iterdir())
+    finally:
+        state.close()
+
+
+def _fake_git(tmp_path: Path, text: str) -> Path:
+    # Fixed absolute interpreter: CI Python may not be on the narrow Git PATH.
+    script = tmp_path / "fake-git"
+    script.write_text("#!" + sys.executable + "\n" + text, encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    return script
+
+
+def test_runner_streams_large_output_without_memory_growth(tmp_path):
+    fake = _fake_git(tmp_path, "import sys\nsys.stdout.write('X'*350000)\nsys.stdout.flush()\n")
+    runner = GitProcessRunner(binary=str(fake))
+    result = runner.run(str(tmp_path), ["status"],
+                        spawn_admitted=lambda spawn: spawn(),
+                        execute_until=time.monotonic()+5, deadline=time.monotonic()+12)
+    assert result.exit_code == 0
+    assert result.cleanup_complete
+    assert result.output_truncated
+    assert len(result.stdout) <= 131072
+
+
+def test_timeout_with_confirmed_cleanup_does_not_quarantine(tmp_path):
+    fake = _fake_git(tmp_path, "import time\ntime.sleep(20)\n")
+    runner = GitProcessRunner(binary=str(fake))
+    result = runner.run(str(tmp_path), ["status"],
+                        spawn_admitted=lambda spawn: spawn(),
+                        execute_until=time.monotonic()+0.3, deadline=time.monotonic()+12)
+    assert result.timed_out
+    assert result.cleanup_complete
+    assert result.exit_code is not None
+
+
+def test_closed_pipes_do_not_hide_a_live_git_process_group(tmp_path):
+    """A hook's non-detached child may close inherited pipes but remain alive."""
+    import signal
+    pidfile = tmp_path / "group-child-pid"
+    child_script = "import time; time.sleep(45)"
+
+    fake_source = (
+    "import subprocess, sys\n"
+    "from pathlib import Path\n"
+    "child = subprocess.Popen("
+    f"[sys.executable, '-c', {child_script!r}], "
+    "stdin=subprocess.DEVNULL, "
+    "stdout=subprocess.DEVNULL, "
+    "stderr=subprocess.DEVNULL, "
+    "start_new_session=False)\n"
+    f"Path({str(pidfile)!r}).write_text(str(child.pid))\n"
+)
+    fake_git = _fake_git(tmp_path, fake_source)
+    runner = GitProcessRunner(binary=str(fake_git))
+    try:
+        result = runner.run(
+    str(tmp_path),
+    ["status"],
+    spawn_admitted=lambda spawn: spawn(),
+    execute_until=time.monotonic() + 2.5,
+    deadline=time.monotonic() + 10,
+)
+        # Main Git process exits and its two pipes reach EOF almost
+        # immediately; the group's child must still prevent a clean success.
+        assert pidfile.exists(), (
+    f"Fake Git did not record child PID: "
+    f"exit_code={result.exit_code}, "
+    f"timed_out={result.timed_out}, "
+    f"cleanup_complete={result.cleanup_complete}, "
+    f"stderr={result.stderr!r}"
+)
+        assert result.timed_out
+        assert result.exit_code is not None
+    finally:
+        if pidfile.exists():
+            pid = int(pidfile.read_text())
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_deadline_expiring_during_intent_fsync_starts_no_git(tmp_path, monkeypatch):
+    """Intent is persisted BEFORE Popen, so the budget must be rechecked after it."""
+    state = GitStateStore(tmp_path / "state")
+    runner = GitProcessRunner()
+    launched = []
+    original_write = state._atomic_write
+
+    def slow_write(name, record):
+        if name.startswith("d-"):
+            time.sleep(0.5)
+        return original_write(name, record)
+
+    def spy(*args, **kwargs):
+        launched.append(1)
+        raise AssertionError("Git must not start after its deadline.")
+
+    monkeypatch.setattr(state, "_atomic_write", slow_write)
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    call = state.new_call_id()
+    try:
+        with pytest.raises(GatewayError) as exc:
+            runner.run(str(tmp_path), ["status"],
+                       spawn_admitted=lambda spawn: state.start_discovery(call, "a", spawn),
+                       execute_until=time.monotonic() + 0.3,
+                       deadline=time.monotonic() + 9)
+        assert exc.value.code == "git_timeout"
+        assert not launched
+        assert not state.globally_quarantined
+        assert not list((tmp_path / "state").iterdir())
+    finally:
+        state.close()
+
+
+def test_deadline_expiring_inside_repo_admission_clears_running(tmp_path, monkeypatch):
+    state = GitStateStore(tmp_path / "state")
+    runner = GitProcessRunner()
+    key = (212, 313)
+    call = state.new_call_id()
+    state.begin_repo(key, call)
+    launched = []
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_k: launched.append(1))
+    try:
+        def delayed(spawn):
+            time.sleep(0.5)
+            return state.start_repo_process(key, call, spawn)
+        with pytest.raises(GatewayError) as exc:
+            runner.run(str(tmp_path), ["status"], spawn_admitted=delayed,
+                       execute_until=time.monotonic() + 0.3,
+                       deadline=time.monotonic() + 9)
+        assert exc.value.code == "git_timeout"
+        assert not launched
+        state.finish_repo(key, call, clean=True)
+        assert not state.is_repo_quarantined(key)
+        assert not list((tmp_path / "state").iterdir())
+    finally:
+        state.close()
+
+
+@pytest.mark.parametrize("fault_stage", ["locked_recheck", "business"])
+def test_launched_then_exception_preserves_quarantine_and_blocks_next_workspace(
+    tmp_path, monkeypatch, fault_stage,
+):
+    """T05 P1 regression: exception after a real Popen never clears RUNNING.
+
+    The fault simulates reader allocation failure after a protected child
+    exists, while that child is deliberately still alive. No production Git
+    repository or external remote is accessed.
+    """
+    repo, workspace, _ = repo_workspace(tmp_path)
+    state_path = tmp_path / "state"
+    state = GitStateStore(state_path)
+    executor = GitCLIExecutor(state)
+    actual_run = executor.runner.run
+    started_children = []
+    calls = []
+    target_call = 2 if fault_stage == "locked_recheck" else 3
+    identity_args = (
+        "rev-parse", "--path-format=absolute", "--show-toplevel",
+        "--absolute-git-dir", "--git-common-dir",
+    )
+    physical = RepositoryIdentity.from_rev_parse(
+        git(workspace, *identity_args) + "\n"
+    )
+    try:
+        def fault_after_spawn(cwd, argv, *, spawn_admitted, execute_until, deadline):
+            calls.append(tuple(argv))
+            if len(calls) != target_call:
+                return actual_run(
+                    cwd, argv, spawn_admitted=spawn_admitted,
+                    execute_until=execute_until, deadline=deadline,
+                )
+            child = spawn_admitted(lambda: subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, start_new_session=True,
+                close_fds=True,
+            ))
+            started_children.append(child)
+            assert child.poll() is None
+            raise OSError(errno.EMFILE, "injected post-Popen reader allocation failure")
+
+        monkeypatch.setattr(executor.runner, "run", fault_after_spawn)
+        with pytest.raises(GatewayError) as exc:
+            execute(executor, workspace, "status")
+        assert exc.value.code == "git_cleanup_incomplete"
+        assert len(started_children) == 1
+        assert started_children[0].poll() is None
+        assert state.is_repo_quarantined(physical.common_key)
+        persisted = state_path / (
+            "r-" + str(physical.common_key[0]) + "-" +
+            str(physical.common_key[1]) + ".json"
+        )
+        assert persisted.exists()
+        assert "QUARANTINED" in persisted.read_text()
+
+        # Later requests can run discovery, but may NOT start a second
+        # business Git child in this same physical repository.
+        monkeypatch.setattr(executor.runner, "run", actual_run)
+        with pytest.raises(GatewayError) as followup:
+            execute(executor, workspace, "status")
+        assert followup.value.code == "git_repository_quarantined"
+        assert len(started_children) == 1
+        assert started_children[0].poll() is None
+    finally:
+        state.close()
+        for child in started_children:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.wait(timeout=5)
+            for pipe in (child.stdout, child.stderr):
+                if pipe is not None:
+                    pipe.close()
+
+    # A reboot must not forget a launched-but-unreaped prior operation.
+    reopened = GitStateStore(state_path)
+    try:
+        assert reopened.is_repo_quarantined(physical.common_key)
+        assert not reopened.globally_quarantined
+    finally:
+        reopened.close()
+
+
+def test_selector_setup_failure_after_popen_is_handled_as_uncertain_cleanup(
+    tmp_path, monkeypatch,
+):
+    """Actual runner must enter cleanup even when selector creation raises."""
+    import gateway.git_cli as git_module
+
+    fake = _fake_git(tmp_path, "import time\ntime.sleep(60)\n")
+    runner = GitProcessRunner(binary=str(fake))
+    children = []
+
+    def admitted(spawn):
+        process = spawn()
+        children.append(process)
+        return process
+
+    def no_selector():
+        raise OSError(errno.EMFILE, "injected selector initialization failure")
+
+    monkeypatch.setattr(git_module.selectors, "DefaultSelector", no_selector)
+    try:
+        result = runner.run(
+            str(tmp_path), ["status"], spawn_admitted=admitted,
+            execute_until=time.monotonic() + 1,
+            deadline=time.monotonic() + 9,
+        )
+        assert children
+        assert result.cleanup_complete is False
+        assert children[0].poll() is not None
+    finally:
+        for child in children:
+            if child.poll() is None:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                child.wait(timeout=5)
+
+
+def test_clean_preflight_failure_does_not_quarantine_repository(tmp_path):
+    """Nonexistent branch is an error, not evidence of unclean Git children."""
+    _, workspace, _ = repo_workspace(tmp_path)
+    state_dir = tmp_path / "state"
+    store = GitStateStore(state_dir)
+    runner = GitCLIExecutor(store)
+    try:
+        with pytest.raises(GatewayError) as err:
+            execute(runner, workspace, "switch",
+                    options={"name": "branch-that-does-not-exist"})
+        assert err.value.code == "git_branch_unknown"
+        assert not store.globally_quarantined
+        assert list(state_dir.iterdir()) == []
+        outcome = execute(runner, workspace, "status")
+        assert outcome["exit_code"] == 0
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("command,options", [
+    ("branch", {"action": "create", "name": "HEAD"}),
+    ("branch", {"action": "delete", "name": "HEAD"}),
+    ("switch", {"name": "HEAD"}),
+    ("pull", {"remote": "origin", "branch": "HEAD"}),
+    ("push", {"remote": "origin", "branch": "HEAD"}),
+])
+def test_runtime_ref_format_rejects_lexically_valid_reserved_head(
+    tmp_path, monkeypatch, command, options,
+):
+    """Freeze the distinction between in-memory lexical and native ref validation."""
+    _, workspace, _ = repo_workspace(tmp_path)
+    state_dir = tmp_path / "state"
+    state = GitStateStore(state_dir)
+    executor = GitCLIExecutor(state)
+    actual_run = executor.runner.run
+    observed = []
+
+    def observe(cwd, argv, *, spawn_admitted, execute_until, deadline):
+        observed.append(tuple(argv))
+        if argv[0] == "check-ref-format":
+            assert list(state_dir.glob("r-*.json")), "RUNNING must precede ref checks"
+        return actual_run(
+            cwd, argv, spawn_admitted=spawn_admitted,
+            execute_until=execute_until, deadline=deadline,
+        )
+
+    monkeypatch.setattr(executor.runner, "run", observe)
+    try:
+        # HEAD is lexically accepted in the preview, but Git's native
+        # check-ref-format --branch HEAD fails. No branch-changing Git starts.
+        preview = execute(executor, workspace, command,
+                          options=options, dry_run=True)
+        assert preview["execute_started"] is False
+        assert not observed
+        with pytest.raises(GatewayError) as exc:
+            execute(executor, workspace, command, options=options)
+        assert exc.value.code == "git_option_invalid"
+        assert ("check-ref-format", "--branch", "HEAD") in observed
+        assert not any(argv[0] == command for argv in observed)
+        assert not list(state_dir.iterdir())
+        # A rejected ref name with complete cleanup does not quarantine Git.
+        assert execute(executor, workspace, "status")["exit_code"] == 0
+    finally:
+        state.close()
+
+
+def test_native_ref_check_allows_plus_named_branch_and_exact_push(
+    tmp_path, monkeypatch,
+):
+    """A valid +name must remain a literal branch, not a force flag."""
+    repo, workspace, _ = repo_workspace(tmp_path)
+    remote = tmp_path / "bare-remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)],
+                   cwd=tmp_path, check=True)
+    git(repo, "remote", "add", "origin", str(remote))
+    store = GitStateStore(tmp_path / "state", workspace_roots=(str(workspace),))
+    executor = GitCLIExecutor(store)
+    observed = []
+    real_run = executor.runner.run
+
+    def observe(cwd, argv, *, spawn_admitted, execute_until, deadline):
+        observed.append(tuple(argv))
+        return real_run(
+            cwd, argv, spawn_admitted=spawn_admitted,
+            execute_until=execute_until, deadline=deadline,
+        )
+
+    monkeypatch.setattr(executor.runner, "run", observe)
+    try:
+        create = execute(executor, workspace, "branch",
+                         options={"action": "create", "name": "+main"})
+        assert create["exit_code"] == 0
+        pushed = execute(executor, workspace, "push",
+                         options={"remote": "origin", "branch": "+main"})
+        assert pushed["exit_code"] == 0, pushed["stderr"]
+        assert ("check-ref-format", "--branch", "+main") in observed
+        assert ("push", "origin",
+                "refs/heads/+main:refs/heads/+main") in observed
+        assert not any(arg == "+main" for argv in observed if argv[0] == "push"
+                       for arg in argv)
+        heads = subprocess.run(
+            ["git", "for-each-ref", "--format=%(refname)", "refs/heads/"],
+            cwd=remote, capture_output=True, text=True, check=True,
+        ).stdout.splitlines()
+        assert heads == ["refs/heads/+main"]
+        assert not list((tmp_path / "state").iterdir())
+    finally:
+        store.close()

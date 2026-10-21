@@ -68,5 +68,8 @@ if [ "${1:-}" = '--require-mcp' ]; then
     .venv/bin/python tests/smoke_mcp_live.py
     .venv/bin/python tests/smoke_mcp_stdio.py
     .venv/bin/python tests/smoke_mcp_disconnect.py
+    # Dedicated disposable Git smoke, independent of the existing MCP smoke.
+    # It tests both Legacy/Multi listeners against temporary local repositories.
+    .venv/bin/python tests/smoke_git_cli.py
 fi
 verify_manifest

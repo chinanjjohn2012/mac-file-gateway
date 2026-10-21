@@ -39,6 +39,8 @@ jobs:
       - run: python tests/smoke_mcp_live.py
       - run: python tests/smoke_mcp_stdio.py
       - run: python tests/smoke_mcp_disconnect.py
+      - name: Disposable Git CLI Legacy/Multi MCP smoke
+        run: python tests/smoke_git_cli.py
       - run: python -m compileall -q gateway tests tools
       - run: bash -n setup.sh run.sh verify.sh tunnel.sh
       - name: Verify release manifest

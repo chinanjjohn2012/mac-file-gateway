@@ -19,6 +19,8 @@ OPTIONS = [
     ('--allow-exec', '--allow-e', None),
     ('--exec-path', '--exec-p', '.'),
     ('--exec-runner', '--exec-r', '.=direct'),
+    ('--allow-git', '--allow-g', None),
+    ('--git-command', '--git-c', 'status'),
     ('--local-skill-root', '--local-skill-r', 'agent'),
     ('--local-skill-policy-dir', '--local-skill-p', '/tmp/unused-policy'),
 ]

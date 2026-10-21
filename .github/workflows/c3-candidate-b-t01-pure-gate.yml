@@ -1,0 +1,108 @@
+name: C3 Candidate B T01-R2a pure Gate GREEN (NO GROUP SIGNAL)
+
+on:
+  push:
+    branches:
+      - research/phase2-lite-c3-candidate-b-kill-t01-pure-gate-r2-20261022
+  pull_request:
+    paths:
+      - ".github/workflows/c3-candidate-b-t01-pure-gate.yml"
+      - "tools/research/c3_candidate_b_kill_t01_gate.py"
+      - "tests/test_c3_candidate_b_t01_pure_gate_r2.py"
+      - "docs/research/phase2-lite-c3/candidate-b-b03-t01-r2-pure-gate.md"
+      - "MANIFEST.sha256"
+
+permissions:
+  contents: read
+
+jobs:
+  t01-r2a-pure-gate-no-signal:
+    if: >-
+      (github.event_name == 'push' &&
+       github.ref == 'refs/heads/research/phase2-lite-c3-candidate-b-kill-t01-pure-gate-r2-20261022') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'research/phase2-lite-c3-candidate-b-kill-t01-pure-gate-r2-20261022')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            python-version: "3.13"
+          - os: macos-15
+            python-version: "3.14"
+          - os: ubuntu-latest
+            python-version: "3.13"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 8
+    env:
+      C3_T01_NO_GROUP_SIGNAL: "true"
+      C3_T01_NATIVE_RUN_AUTHORIZED: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Verify exact SHA, Manifest, and pure no-signal boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          if [ "${{ matrix.os }}" = "macos-15" ]; then
+            test "$(uname -s)" = Darwin
+            test "$(uname -m)" = arm64
+          fi
+          test -f tools/research/c3_candidate_b_kill_t01_gate.py
+          test -f tests/test_c3_candidate_b_t01_contract_red.py
+          test -f tests/test_c3_candidate_b_t01_pure_gate_r2.py
+          test ! -e tools/research/c3_candidate_b_kill.c
+          test ! -e tools/research/run_c3_candidate_b_kill.py
+          python - <<'PY'
+          import ast
+          import hashlib
+          from pathlib import Path
+
+          for line in Path("MANIFEST.sha256").read_text().splitlines():
+              expected, path = line.split("  ", 1)
+              observed = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+              if observed != expected:
+                  raise AssertionError(f"MANIFEST_DIFF {path} expected={expected} actual={observed}")
+
+          source = Path("tools/research/c3_candidate_b_kill_t01_gate.py").read_text()
+          tree = ast.parse(source)
+          disallowed = {
+              "os", "signal", "subprocess", "ctypes", "multiprocessing",
+              "threading", "socket", "pty", "resource", "fcntl",
+          }
+          dangerous_calls = {
+              "kill", "killpg", "fork", "system", "Popen", "run",
+              "spawn", "posix_spawn", "exec", "eval", "open",
+              "__import__", "raise_signal",
+          }
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Import):
+                  for entry in node.names:
+                      assert entry.name.split(".", 1)[0] not in disallowed, entry.name
+              elif isinstance(node, ast.ImportFrom):
+                  assert (node.module or "").split(".", 1)[0] not in disallowed, node.module
+              elif isinstance(node, ast.Call):
+                  name = node.func.attr if isinstance(node.func, ast.Attribute) else (
+                      node.func.id if isinstance(node.func, ast.Name) else ""
+                  )
+                  assert name not in dangerous_calls, name
+          print("C3B03_T01_R2A_MANIFEST_OK=true")
+          print("C3B03_T01_R2A_PURE_GATE_NO_SIGNAL=true")
+          print("C3B03_T01_R2A_NATIVE_RUN_AUTHORIZED=false")
+          PY
+          python -m py_compile tools/research/c3_candidate_b_kill_t01_gate.py
+          python -m py_compile tests/test_c3_candidate_b_t01_contract_red.py
+          python -m py_compile tests/test_c3_candidate_b_t01_pure_gate_r2.py
+      - name: Frozen T01-R1 contract + R2a guards MUST be GREEN
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install pytest==8.4.2
+          python -m pytest -q tests/test_c3_candidate_b_t01_contract_red.py tests/test_c3_candidate_b_t01_pure_gate_r2.py

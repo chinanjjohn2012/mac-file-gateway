@@ -1,6 +1,7 @@
 a8e317838b00e2905a24b927075490d60aaf993dbee4335385ca3f4001c8709e  ./.github/workflows/c1-native-research.yml
 9260a8a0b3a6660b66f7034b8a63e2b1b849ae12d83a6316694c865fcecc4560  ./.github/workflows/c2-native-research.yml
 b6b5c72a5ce2050fa1bb6a80b9aced547bbdb4a1ef47fe9457764eae9ad0eadc  ./.github/workflows/c2-review-native.yml
+e17f8314bc3268192e596a95826ab02d6941c5df829001ba7871f78ee0a23d52  ./.github/workflows/c3-candidate-b-native.yml
 0dadaf6bd4f57a24546f103bfb110685ad12964dc442f9d41bdb8d72cfd05e56  ./.github/workflows/controlled-exec-tests.yml
 ef06acea97a3c12d0a236a36d6d1bd74b735c62b712e3ad69e50c6f87ac90b90  ./.gitignore
 82f36c9f3945a204b821c1d5314c9a62c8886d9c28d45f44268643dff1b5210d  ./BUILD_INFO.json
@@ -90,6 +91,7 @@ fbd3446dd228380c5f37696a7dddc551a8064d62e0677e9f6e994cd5a6f26246  ./tests/test_c
 ba9bf6180bde9aeb18b433e13860949ae5628a3187fe5e27d4e1afa52440fd88  ./tests/test_c2_pgid_probe.py
 51729ca9b2e169df545cd1d6585159a501ed8b8e1c3c72bcb41655549122f354  ./tests/test_c2_round2_review.py
 0b362b21d5394632189ddb4c2f73c117cfd7500feddf3111ddedf5c16abde5d7  ./tests/test_c2_sigchld_review.py
+3ef3549659f064a268fd5d5f571bb65b5db525162b26284aff59c24df988659d  ./tests/test_c3_candidate_b_join.py
 199ec7e6958c1f21aa8ca14ac1af8b9868490621e02f67e9a3926eaf5957cef1  ./tests/test_cli.py
 599bdd040fa4fd89f1baa9a431e5fe230e6f4509938008cda22d86caccc1db37  ./tests/test_command_http.py
 d1a2fc1207cd40038c8d9ad85ac7813f3907371aa5e6df67c2932196a2564dea  ./tests/test_command_runner.py

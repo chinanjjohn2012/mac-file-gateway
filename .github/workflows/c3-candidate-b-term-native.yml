@@ -1,0 +1,92 @@
+name: C3 Candidate B B-02 synthetic TERM native (NOT G2)
+
+on:
+  push:
+    branches:
+      - research/phase2-lite-c3-candidate-b-term-20261021
+  pull_request:
+    paths:
+      - ".github/workflows/c3-candidate-b-term-native.yml"
+      - "tools/research/c3_candidate_b_term.c"
+      - "tools/research/run_c3_candidate_b_term.py"
+      - "tests/test_c3_candidate_b_term.py"
+
+permissions:
+  contents: read
+
+jobs:
+  b02-darwin-synthetic:
+    if: >-
+      (github.event_name == 'push' &&
+       github.ref == 'refs/heads/research/phase2-lite-c3-candidate-b-term-20261021') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'research/phase2-lite-c3-candidate-b-term-20261021')
+    runs-on: macos-15
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Confirm hosted ARM64 and immutable code Head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          sw_vers -productVersion
+          uname -v
+          xcrun --find cc
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          architecture: arm64
+      - name: B-02 RED/GREEN contracts for test-owned PGID TERM
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install pytest==8.4.2
+          python -m pytest -q tests/test_c3_candidate_b_term.py
+      - name: Validate B02 six native modes and three mutations (not G2)
+        shell: bash
+        run: |
+          set -euo pipefail
+          private_dir="$(mktemp -d)"
+          chmod 700 "$private_dir"
+          trap 'rm -rf "$private_dir"' EXIT
+          python tools/research/run_c3_candidate_b_term.py --evidence-dir "$private_dir"
+          python - "$private_dir/c3_b02_term_private.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          d = json.loads(Path(sys.argv[1]).read_text())
+          assert d["decision"] == "PARTIAL_B02_TERM_NOT_G2"
+          assert d["reuse_proven"] is False and d["g2_qualified"] is False
+          assert d["mutation_detected"] == {
+              "omit-sigdef": True,
+              "omit-sigmask": True,
+              "omit-controller-group": True,
+          }
+          assert [(c["mode"], c["status"]) for c in d["cases"]] == [
+              ("term-positive", "POSITIVE_EXPERIMENT"),
+              ("missing-sigdef", "EXPECTED_BLOCK"),
+              ("missing-sigmask", "EXPECTED_BLOCK"),
+              ("controller-group-regression", "SAFE_REFUSAL"),
+              ("anchor-lost-before-term", "SAFE_REFUSAL"),
+              ("deadline-before-term", "EXPECTED_BLOCK"),
+          ]
+          assert all(c["cleanup_complete"] == 1 for c in d["cases"])
+          assert d["cases"][0]["term_attempts"] == 1
+          assert d["cases"][0]["worker_observed_term"] == 1
+          assert d["cases"][0]["controller_waited"] == 1
+          assert d["cases"][-1]["admission_cutoff_expired"] == 1
+          assert d["cases"][-1]["outer_live_at_refusal"] == 1
+          assert d["cases"][-1]["term_attempts"] == 0
+          print("C3B02_NATIVE_RESULT=PARTIAL_B02_TERM_NOT_G2")
+          PY

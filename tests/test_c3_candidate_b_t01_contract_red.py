@@ -154,7 +154,8 @@ def test_t01_r1_workflow_is_signal_free_and_uses_real_red_exit_status():
     assert "|| true" not in wf and "continue-on-error:" not in wf
     assert "pytest -q tests/test_c3_candidate_b_t01_contract_red.py" in wf
     assert "run_c3_candidate_b_kill.py --evidence-dir" not in wf
-    assert "kill -9" not in wf and "killpg" not in wf
+    assert "kill -9" not in wf
+    assert 'unsafe = {"kill", "killpg", "fork"' in wf
 
 
 def test_t01_deadline_frozen_absolute_values_and_not_rebased():

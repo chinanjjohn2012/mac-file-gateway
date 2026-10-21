@@ -24,6 +24,8 @@ MODES = (
     "term-positive", "missing-sigdef", "missing-sigmask",
     "controller-group-regression", "anchor-lost-before-term",
     "deadline-before-term",
+    "canary-isolation",
+    "controller-result-lost",
 )
 MUTATIONS = ("omit-sigdef", "omit-sigmask", "omit-controller-group")
 FIELDS = (
@@ -33,26 +35,34 @@ FIELDS = (
     "worker_armed", "term_attempts", "term_succeeded",
     "controller_waited", "worker_observed_term",
     "admission_cutoff_expired", "outer_live_at_refusal",
-    "gate_opened", "cleanup_complete", "reuse_proven", "g2_qualified",
+    "gate_opened", "cleanup_complete", "canary_survived",
+    "worker_result_unknown", "result_lost_after_wait",
+    "owner_children_reaped", "reuse_proven", "g2_qualified",
 )
 EXPECTED = {
     "term-positive": (
-        (1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,0,0), "POSITIVE_EXPERIMENT",
+        (1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,0,0,0,1,0,0), "POSITIVE_EXPERIMENT",
     ),
     "missing-sigdef": (
-        (1,1,1,1,1,0,1,1,1,1,1,0,0,0,1,1,0,0), "EXPECTED_BLOCK",
+        (1,1,1,1,1,0,1,1,1,1,1,0,0,0,1,1,0,0,0,1,0,0), "EXPECTED_BLOCK",
     ),
     "missing-sigmask": (
-        (1,1,1,1,1,1,0,1,1,1,1,0,0,0,1,1,0,0), "EXPECTED_BLOCK",
+        (1,1,1,1,1,1,0,1,1,1,1,0,0,0,1,1,0,0,0,1,0,0), "EXPECTED_BLOCK",
     ),
     "controller-group-regression": (
-        (1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0), "SAFE_REFUSAL",
+        (1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,0,0), "SAFE_REFUSAL",
     ),
     "anchor-lost-before-term": (
-        (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0), "SAFE_REFUSAL",
+        (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,0,0), "SAFE_REFUSAL",
     ),
     "deadline-before-term": (
-        (1,1,1,1,1,1,1,1,0,0,1,0,1,1,1,1,0,0), "EXPECTED_BLOCK",
+        (1,1,1,1,1,1,1,1,0,0,1,0,1,1,1,1,0,0,0,1,0,0), "EXPECTED_BLOCK",
+    ),
+    "canary-isolation": (
+        (1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0,1,0,0), "POSITIVE_EXPERIMENT",
+    ),
+    "controller-result-lost": (
+        (1,1,1,1,1,1,1,1,1,1,0,0,0,0,1,0,0,1,1,1,0,0), "EXPECTED_BLOCK",
     ),
 }
 _RESULT = re.compile(
@@ -224,7 +234,9 @@ def main() -> int:
     passed = (
         [c["status"] for c in cases] == [EXPECTED[m][1] for m in MODES]
         and all(0 <= c["elapsed_ms"] < 9500
-                and c.get("cleanup_complete") == 1
+                and c.get("cleanup_complete") ==
+                    (0 if c["mode"] == "controller-result-lost" else 1)
+                and c.get("owner_children_reaped") == 1
                 and c.get("reuse_proven") == 0
                 and c.get("g2_qualified") == 0
                 for c in cases)
@@ -249,7 +261,9 @@ def main() -> int:
             "worker_default={default} worker_unblocked={unblocked} "
             "armed={armed} term_attempts={attempts} "
             "term_sent={sent} waited={waited} observed_term={term} "
-            "cutoff_elapsed={cutoff} outer_live={outer} cleanup={cleanup}".format(
+            "cutoff_elapsed={cutoff} outer_live={outer} cleanup={cleanup} "
+            "canary_survived={canary} unknown={unknown} "
+            "postwait_lost={postwait} owner_children_reaped={reaped}".format(
                 mode=c["mode"], status=c["status"],
                 anchor=c.get("anchor_held", -1),
                 group=c.get("controller_group_leader", -1),
@@ -265,6 +279,10 @@ def main() -> int:
                 cutoff=c.get("admission_cutoff_expired", -1),
                 outer=c.get("outer_live_at_refusal", -1),
                 cleanup=c.get("cleanup_complete", -1),
+                canary=c.get("canary_survived", -1),
+                unknown=c.get("worker_result_unknown", -1),
+                postwait=c.get("result_lost_after_wait", -1),
+                reaped=c.get("owner_children_reaped", -1),
             )
         )
     print("C3B02_MUTATIONS_DETECTED=" + str(all(mutants.values())).lower())

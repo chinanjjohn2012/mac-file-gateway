@@ -34,7 +34,7 @@ int main(void) { puts("C3B02_NOT_RUN_NON_DARWIN"); return 77; }
 
 extern char **environ;
 enum { POSITIVE=1, NO_SIGDEF=2, NO_SIGMASK=3, CTRL_REGRESSION=4,
-       ANCHOR_LOST=5, DEADLINE=6 };
+       ANCHOR_LOST=5, DEADLINE=6, CANARY=7, RESULT_LOST=8 };
 enum { MAGIC_CTRL=0x43334261, MAGIC_SETUP=0x43334262,
        MAGIC_WORKER=0x43334263, MAGIC_PROPOSAL=0x43334264,
        MAGIC_ARMED=0x43334265, MAGIC_FINAL=0x43334266 };
@@ -43,7 +43,9 @@ typedef struct {
         controller_inherited_block, worker_spawned, worker_default_term,
         worker_unblocked_term, worker_armed, term_attempts, term_succeeded,
         controller_waited, worker_observed_term, admission_cutoff_expired,
-        outer_live_at_refusal, gate_opened, cleanup_complete;
+        outer_live_at_refusal, gate_opened, cleanup_complete,
+        canary_survived, worker_result_unknown, result_lost_after_wait,
+        owner_children_reaped;
 } Observation;
 typedef struct { pid_t pid; int input,output,reaped,status; } Child;
 typedef struct { int magic,seq; pid_t pid,pgid,sid; } ControllerReady;
@@ -285,10 +287,22 @@ static int anchor_role(void) {
     if(!recv_char(STDIN_FILENO,&c,until))return 0; /* cooperative EOF */
     return c=='Q'?0:43;
 }
-static int armed_marker(int dir) {
+static int marker_present(int dir,const char *name) {
     struct stat st;
-    return fstatat(dir,"C3B02_WORK_ARMED",&st,AT_SYMLINK_NOFOLLOW)==0 &&
+    return fstatat(dir,name,&st,AT_SYMLINK_NOFOLLOW)==0 &&
            S_ISREG(st.st_mode)&&st.st_nlink==1&&st.st_uid==geteuid();
+}
+static int canary_role(void) {
+    alarm(7);
+    if(!signal_setup() || getpgid(0)!=getpid())return 61;
+    int term_default=0,unblocked=0;
+    if(!signals_term_state(&term_default,&unblocked) ||
+       !term_default || !unblocked)return 61;
+    const long long until=clock_ms()+6800;
+    if(!send_char(STDOUT_FILENO,'C',until))return 62;
+    char q=0;
+    if(!recv_char(STDIN_FILENO,&q,until))return 0; /* cooperative EOF */
+    return q=='Q'?0:63;
 }
 static int worker_role(int dir) {
     alarm(7);
@@ -325,7 +339,8 @@ static int controller_role(const char *self,const char *root,int dir) {
     if(setup.magic!=MAGIC_SETUP || setup.anchor<=0 ||
        setup.owner_sid<=0 || setup.outer_deadline<=clock_ms() ||
        (setup.mode!=POSITIVE && setup.mode!=NO_SIGDEF &&
-        setup.mode!=NO_SIGMASK && setup.mode!=DEADLINE))return 52;
+        setup.mode!=NO_SIGMASK && setup.mode!=DEADLINE &&
+        setup.mode!=CANARY && setup.mode!=RESULT_LOST))return 52;
     Proposal p={.magic=MAGIC_PROPOSAL,.seq=2};
     if(!ctrl_adverse_term(&p.controller_inherited_ignore,
                           &p.controller_inherited_block))return 53;
@@ -372,13 +387,14 @@ static int controller_role(const char *self,const char *root,int dir) {
         char arm=0;
         if(recv_char(w.output,&arm,setup.outer_deadline) &&
            arm=='A' && getpgid(w.pid)==setup.anchor &&
-           armed_marker(dir))armed.worker_armed=1;
+           marker_present(dir,"C3B02_WORK_ARMED"))armed.worker_armed=1;
     }
     if(!write_exact(STDOUT_FILENO,&armed,sizeof armed,setup.outer_deadline))
         goto bad;
     char action='N';
     if(!recv_char(STDIN_FILENO,&action,setup.outer_deadline))action='N';
-    if(action!='T' || setup.mode!=POSITIVE) {
+    if(action!='T' || (setup.mode!=POSITIVE &&
+                       setup.mode!=CANARY && setup.mode!=RESULT_LOST)) {
         /* T02/T03: TERM may have been sent but must NOT count as signal exit.
            T06: no TERM attempted; cooperative closure within cleanup reserve. */
         if(action=='T' && (setup.mode==NO_SIGDEF ||
@@ -396,6 +412,19 @@ static int controller_role(const char *self,const char *root,int dir) {
         f.waited=1;f.raw_status=w.status;
     }
     close_child(&w);
+    if(setup.mode==RESULT_LOST) {
+        /* Controlled P3 fault: AFTER legitimate direct Worker waitpid,
+           BEFORE transmitting the status. This marker is research-only
+           fault timing, NEVER a substitute for a trusted FINAL/result. */
+        if(!f.waited || !WIFSIGNALED(f.raw_status) ||
+           WTERMSIG(f.raw_status)!=SIGTERM)return 55;
+        int audit=openat(dir,"C3B02_AFTER_WAIT_BEFORE_FINAL",
+                         O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);
+        if(audit<0)return 55;
+        int okay=write_exact(audit,"waited",6,setup.outer_deadline);
+        close(audit);
+        return okay?0:55; /* no FINAL frame; Owner must report UNKNOWN */
+    }
     if(!write_exact(STDOUT_FILENO,&f,sizeof f,setup.outer_deadline))
         return 54;
     return f.waited?0:55;
@@ -412,6 +441,8 @@ static int mode_number(const char *v) {
     if(!strcmp(v,"controller-group-regression"))return CTRL_REGRESSION;
     if(!strcmp(v,"anchor-lost-before-term"))return ANCHOR_LOST;
     if(!strcmp(v,"deadline-before-term"))return DEADLINE;
+    if(!strcmp(v,"canary-isolation"))return CANARY;
+    if(!strcmp(v,"controller-result-lost"))return RESULT_LOST;
     return 0;
 }
 static int live_anchor(Child *a,pid_t owner_pid,pid_t sid) {
@@ -454,6 +485,7 @@ static int owner_role(const char *mode,const char *self,
     Observation o={0};
     Child anchor={.pid=-1,.input=-1,.output=-1};
     Child controller={.pid=-1,.input=-1,.output=-1};
+    Child canary={.pid=-1,.input=-1,.output=-1};
     const long long outer_deadline=clock_ms()+8000;
     const long long cleanup_reserve_ms=2600;
     const long long term_admission_cutoff=outer_deadline-cleanup_reserve_ms;
@@ -478,6 +510,19 @@ static int owner_role(const char *mode,const char *self,
         errno=0;
         if(getpgid(anchor.pid)!=-1 || errno!=ESRCH)goto done;
         o.anchor_held=0;accepted=1;goto done;
+    }
+    if(which==CANARY) {
+        reason="spawn_canary";
+        if(!spawn_role(self,root,dir,"__canary",1,0,1,1,&canary))
+            goto done;
+        char response=0;
+        reason="canary_ready";
+        if(!recv_char(canary.output,&response,outer_deadline) ||
+           response!='C' || canary.pid<=0 ||
+           getpgid(canary.pid)!=canary.pid ||
+           getsid(canary.pid)!=sid ||
+           !bsd_owned(canary.pid,owner,canary.pid) ||
+           canary.pid==anchor.pid)goto done;
     }
     reason="spawn_controller";
     int group=which!=CTRL_REGRESSION;
@@ -530,7 +575,8 @@ static int owner_role(const char *mode,const char *self,
     int eligible=worker_identity && adverse && o.controller_group_leader;
     /* Fixed-mode negative controls are not a generic production bypass:
        they explicitly require proven abnormal inherited Worker SIGTERM. */
-    if(which==POSITIVE || which==DEADLINE)
+    if(which==POSITIVE || which==DEADLINE ||
+       which==CANARY || which==RESULT_LOST)
         eligible=eligible&&o.worker_default_term&&o.worker_unblocked_term;
     else if(which==NO_SIGDEF)
         eligible=eligible&&!o.worker_default_term&&o.worker_unblocked_term;
@@ -545,7 +591,7 @@ static int owner_role(const char *mode,const char *self,
     if(!read_exact(controller.output,&arm,sizeof arm,outer_deadline) ||
        arm.magic!=MAGIC_ARMED || arm.seq!=3 ||
        arm.worker!=p.worker || !arm.worker_armed ||
-       !armed_marker(dir))goto done;
+       !marker_present(dir,"C3B02_WORK_ARMED"))goto done;
     o.worker_armed=1;
     reason="term_admission";
     if(!live_anchor(&anchor,owner,sid) ||
@@ -577,19 +623,41 @@ static int owner_role(const char *mode,const char *self,
     }
     Final f;
     reason="controller_wait";
-    if(!action_success ||
-       !read_exact(controller.output,&f,sizeof f,outer_deadline) ||
-       f.magic!=MAGIC_FINAL || f.seq!=4 ||
+    if(!action_success)goto done;
+    int final_received=read_exact(controller.output,&f,sizeof f,
+                                  outer_deadline);
+    if(which==RESULT_LOST) {
+        /* This fault occurs after Controller's real Worker wait.
+           An audit marker helps validate the synthetic fault's TIMING,
+           but cannot supply a Worker exit status to Owner. */
+        if(final_received)goto done;
+        o.worker_result_unknown=1;
+        o.result_lost_after_wait=marker_present(
+            dir,"C3B02_AFTER_WAIT_BEFORE_FINAL");
+        accepted=o.result_lost_after_wait && o.term_attempts==1 &&
+                 o.term_succeeded && o.worker_armed &&
+                 o.gate_opened && o.worker_spawned;
+        reason="controller_result_lost";
+        goto done;
+    }
+    if(!final_received || f.magic!=MAGIC_FINAL || f.seq!=4 ||
        f.worker!=p.worker || !f.gate_opened || !f.worker_armed ||
        !f.waited)goto done;
     o.controller_waited=f.waited;
     if(WIFSIGNALED(f.raw_status) &&
        WTERMSIG(f.raw_status)==SIGTERM)
         o.worker_observed_term=1;
-    if(which==POSITIVE) {
+    if(which==CANARY) {
+        o.canary_survived=canary.pid>0 && !canary.reaped &&
+            getpgid(canary.pid)==canary.pid &&
+            getsid(canary.pid)==sid &&
+            bsd_owned(canary.pid,owner,canary.pid);
+    }
+    if(which==POSITIVE || which==CANARY) {
         accepted=o.worker_observed_term && o.term_attempts==1 &&
                  o.term_succeeded && o.worker_armed &&
-                 o.worker_default_term && o.worker_unblocked_term;
+                 o.worker_default_term && o.worker_unblocked_term &&
+                 (which!=CANARY || o.canary_survived);
     } else if(which==NO_SIGDEF || which==NO_SIGMASK) {
         accepted=!o.worker_observed_term && WIFEXITED(f.raw_status) &&
                  WEXITSTATUS(f.raw_status)==24 &&
@@ -608,18 +676,29 @@ done:
     close_fd(&controller.input);
     if(anchor.pid>0 && !anchor.reaped)
         (void)send_char(anchor.input,'Q',outer_deadline);
+    if(canary.pid>0 && !canary.reaped)
+        (void)send_char(canary.input,'Q',outer_deadline);
     close_fd(&anchor.input);
+    close_fd(&canary.input);
     int c_ok=controller.pid<=0 || wait_child(&controller,outer_deadline);
     int a_ok=anchor.pid<=0 || wait_child(&anchor,outer_deadline);
-    o.cleanup_complete=c_ok&&a_ok;
+    int y_ok=canary.pid<=0 || wait_child(&canary,outer_deadline);
+    o.owner_children_reaped=c_ok&&a_ok&&y_ok;
     if(controller.pid>0 &&
        (!controller.reaped||!WIFEXITED(controller.status)||
-        WEXITSTATUS(controller.status)!=0))o.cleanup_complete=0;
+        WEXITSTATUS(controller.status)!=0))o.owner_children_reaped=0;
     if(anchor.pid>0 &&
        (!anchor.reaped||!WIFEXITED(anchor.status)||
-        WEXITSTATUS(anchor.status)!=0))o.cleanup_complete=0;
-    if(clock_ms()>=outer_deadline)o.cleanup_complete=0;
-    close_child(&controller);close_child(&anchor);
+        WEXITSTATUS(anchor.status)!=0))o.owner_children_reaped=0;
+    if(canary.pid>0 &&
+       (!canary.reaped||!WIFEXITED(canary.status)||
+        WEXITSTATUS(canary.status)!=0))o.owner_children_reaped=0;
+    if(clock_ms()>=outer_deadline)o.owner_children_reaped=0;
+    /* A timed-out or missing Controller FINAL cannot upgrade Worker status
+       or the independent cleanup evidence axis. In T08, all test-owned
+       processes are actually reaped, but Owner lacks trusted Worker wait. */
+    o.cleanup_complete=o.owner_children_reaped && which!=RESULT_LOST;
+    close_child(&controller);close_child(&anchor);close_child(&canary);
 #ifdef C3B02_MUT_OMIT_SIGDEF
     if(which==POSITIVE&&!accepted&&o.cleanup_complete&&o.term_attempts==0 &&
        !strcmp(reason,"worker_signal_ineligible") &&
@@ -644,7 +723,9 @@ done:
              "worker_spawned=0 term_attempts=0 cleanup_complete=1");
     }
 #endif
-    if(!accepted || !o.cleanup_complete)return block_fail(reason);
+    if(!accepted || !o.owner_children_reaped ||
+       (which==RESULT_LOST ? o.cleanup_complete : !o.cleanup_complete))
+        return block_fail(reason);
     printf("C3B02_RESULT mode=%s "
            "anchor_held=%d controller_group_leader=%d "
            "controller_inherited_ignore=%d controller_inherited_block=%d "
@@ -653,6 +734,8 @@ done:
            "term_attempts=%d term_succeeded=%d controller_waited=%d "
            "worker_observed_term=%d admission_cutoff_expired=%d "
            "outer_live_at_refusal=%d gate_opened=%d cleanup_complete=%d "
+           "canary_survived=%d worker_result_unknown=%d "
+           "result_lost_after_wait=%d owner_children_reaped=%d "
            "reuse_proven=0 g2_qualified=0\n",
            mode,o.anchor_held,o.controller_group_leader,
            o.controller_inherited_ignore,o.controller_inherited_block,
@@ -660,7 +743,9 @@ done:
            o.worker_armed,o.term_attempts,o.term_succeeded,
            o.controller_waited,o.worker_observed_term,
            o.admission_cutoff_expired,o.outer_live_at_refusal,
-           o.gate_opened,o.cleanup_complete);
+           o.gate_opened,o.cleanup_complete,o.canary_survived,
+           o.worker_result_unknown,o.result_lost_after_wait,
+           o.owner_children_reaped);
     return 0;
 }
 int main(int argc,char **argv) {
@@ -671,6 +756,8 @@ int main(int argc,char **argv) {
     int value=0;
     if(!strcmp(role,"__anchor")) {
         value=anchor_role();
+    } else if(!strcmp(role,"__canary")) {
+        value=canary_role();
     } else if(!strcmp(role,"__controller")) {
         value=controller_role(argv[0],argv[2],dir);
     } else if(!strcmp(role,"__worker")) {

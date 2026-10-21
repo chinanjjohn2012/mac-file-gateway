@@ -35,7 +35,7 @@ ORPHAN_MODES = (
     "known-descendant-observation",
 )
 RESULT = "PRE_SIGNAL_PREFLIGHT_ONLY_NOT_G2"
-SIMPLE = re.compile(r"^C3B03_R2_PREFLIGHT(?: [a-z_]+=[01])+\n\Z")
+SIMPLE = re.compile(r"^C3B03_R2_PREFLIGHT(?: [a-z0-9_]+=[01])+\n\Z")
 
 
 def parse_native(output: str) -> dict[str, int]:
@@ -123,7 +123,7 @@ def run_preflight(executable: Path):
     try:
         stdout, stderr = proc.communicate(timeout=12)
     except subprocess.TimeoutExpired:
-        # Never use proc.kill() or terminate() to disguise a failed preflight.
+        # Never forcibly terminate a timed-out native owner to disguise failure.
         # Runner must not claim VERIFIED if its native owner is unresolved.
         return None, "owner_timeout_unresolved"
     if proc.returncode != 0 or stderr:

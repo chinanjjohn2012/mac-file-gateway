@@ -195,3 +195,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    # E/T14: independently start authorized Legacy and Multi Git listeners.
+    # These are additional temporary processes, never a real Gateway/Tunnel.
+    from smoke_git_cli import main as git_mcp_live_smoke
+    git_mcp_live_smoke()

@@ -281,3 +281,274 @@ finally:
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=5)
+
+
+# E/T13: Service boundary fault tests extend B's runner-only crash fixtures.
+# No test below attempts any network transport or user-selected repo.
+
+
+@pytest.mark.parametrize("failure", ["write", "file_fsync", "rename", "dir_fsync"])
+def test_executor_first_discovery_intent_fault_never_attempts_popen(
+    tmp_path, monkeypatch, failure,
+):
+    import stat
+    import gateway.git_cli as git_module
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    workspace = repo / "ws"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    state = GitStateStore(tmp_path / "state")
+    executor = GitCLIExecutor(state)
+    root_fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    original_popen = subprocess.Popen
+    launched = []
+    faults = []
+
+    try:
+        with monkeypatch.context() as m:
+            if failure == "write":
+                original = os.write
+
+                def broken_write(fd, data):
+                    faults.append("write")
+                    raise OSError("durable intent write failed")
+
+                m.setattr(os, "write", broken_write)
+            elif failure in ("file_fsync", "dir_fsync"):
+                original = os.fsync
+                directory = failure == "dir_fsync"
+
+                def broken_fsync(fd):
+                    if stat.S_ISDIR(os.fstat(fd).st_mode) == directory:
+                        faults.append(failure)
+                        raise OSError("durable intent fsync failed")
+                    return original(fd)
+
+                m.setattr(os, "fsync", broken_fsync)
+            else:
+                def broken_rename(*args, **kwargs):
+                    faults.append("rename")
+                    raise OSError("durable intent rename failed")
+
+                m.setattr(os, "rename", broken_rename)
+
+            def forbidden_git(*args, **kwargs):
+                launched.append(args)
+                raise AssertionError("Popen before a durable DISCOVERING record")
+
+            m.setattr(git_module.subprocess, "Popen", forbidden_git)
+            with pytest.raises(GatewayError) as exc:
+                executor.run(
+                    workspace="ws", root_fd=root_fd, root_path=str(workspace),
+                    command="status", timeout_seconds=15, dry_run=False,
+                )
+        assert exc.value.code == "git_state_unavailable"
+        assert faults, failure
+        assert not launched
+        assert state.globally_quarantined
+    finally:
+        os.close(root_fd)
+        state.close()
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGKILL"), reason="POSIX signals required")
+def test_real_child_uncertain_cleanup_blocks_siblings_linked_and_restart(
+    tmp_path, monkeypatch,
+):
+    from gateway.workspaces import WorkspaceService, ActiveRuntimeInventory
+    from gateway.workspaces_config import parse_workspace_config
+
+    repo = tmp_path / "project"
+    repo.mkdir()
+    a, b = repo / "a", repo / "b"
+    a.mkdir()
+    b.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "E Test"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "e@example.invalid"], check=True)
+    (a / "tracked.txt").write_text("initial\n")
+    subprocess.run(["git", "-C", str(repo), "add", "a/tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "first"], check=True)
+    linked = tmp_path / "linked"
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q",
+                    "-b", "linked", str(linked)], check=True)
+    other = tmp_path / "other"
+    other.mkdir()
+    subprocess.run(["git", "-C", str(other), "init", "-q"], check=True)
+    state_home = tmp_path / "control"
+    state_home.mkdir(mode=0o700)
+    raw = {"schema_version": 1, "server": {"git": {"enabled": True}},
+           "workspaces": {
+               name: {"root": str(root), "git": {"allowed_commands": ["status"]}}
+               for name, root in (("a", a), ("b", b), ("linked", linked), ("other", other))
+           }}
+    settings = parse_workspace_config(raw)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+
+    def make_service():
+        return WorkspaceService(
+            settings, config_dir=state_home,
+            inventory=ActiveRuntimeInventory(paths=(runtime,)),
+        )
+
+    service = make_service()
+    runner = service._git_executor.runner
+    actual = runner.run
+    children = []
+    triggered = []
+
+    def interrupted(cwd, argv, *, spawn_admitted, execute_until, deadline):
+        if argv[0] == "status" and not triggered:
+            triggered.append(True)
+            child = spawn_admitted(lambda: subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, start_new_session=True, close_fds=True,
+            ))
+            children.append(child)
+            assert child.poll() is None
+            raise OSError("injected post-Popen transport/reader fault")
+        return actual(cwd, argv, spawn_admitted=spawn_admitted,
+                      execute_until=execute_until, deadline=deadline)
+
+    monkeypatch.setattr(runner, "run", interrupted)
+    try:
+        with pytest.raises(GatewayError) as exc:
+            service.invoke_git("a", "status", dry_run=False, timeout_seconds=20)
+        assert exc.value.code == "git_cleanup_incomplete"
+        assert children and children[0].poll() is None
+        assert list((state_home / "git-state").glob("r-*.json"))
+
+        monkeypatch.setattr(runner, "run", actual)
+        for workspace in ("b", "linked"):
+            with pytest.raises(GatewayError) as blocked:
+                service.invoke_git(workspace, "status", dry_run=False,
+                                   timeout_seconds=20)
+            assert blocked.value.code == "git_repository_quarantined"
+        assert service.invoke_git("other", "status", dry_run=False,
+                                  timeout_seconds=20)["exit_code"] == 0
+    finally:
+        service.close()
+        for child in children:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.wait(timeout=5)
+            for pipe in (child.stdout, child.stderr):
+                if pipe is not None:
+                    pipe.close()
+
+    assert children and _wait_not_executing(children[0].pid)
+    restarted = make_service()
+    try:
+        with pytest.raises(GatewayError) as exc:
+            restarted.invoke_git("linked", "status", dry_run=False)
+        assert exc.value.code == "git_repository_quarantined"
+    finally:
+        restarted.close()
+
+    # Controlled test administrator: only after real child group is no
+    # longer executing, offline and with all services stopped.
+    state_path = state_home / "git-state"
+    assert list(state_path.glob("r-*.json"))
+    for marker in state_path.iterdir():
+        marker.unlink()
+    recovered = make_service()
+    try:
+        assert recovered.invoke_git("a", "status", dry_run=False)["exit_code"] == 0
+        assert not list(state_path.iterdir())
+    finally:
+        recovered.close()
+
+
+def test_real_hook_running_blocks_gateway_close_until_worker_reaps(
+    tmp_path,
+):
+    import threading
+    from gateway.workspaces import WorkspaceService, ActiveRuntimeInventory
+    from gateway.workspaces_config import parse_workspace_config
+
+    repo = tmp_path / "project"
+    repo.mkdir()
+    b = repo / "b"
+    b.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "E Test"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "e@example.invalid"], check=True)
+    (b / "file.txt").write_text("initial\n")
+    subprocess.run(["git", "-C", str(repo), "add", "b/file.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "initial"], check=True)
+    (b / "file.txt").write_text("changed\n")
+    subprocess.run(["git", "-C", str(repo), "add", "b/file.txt"], check=True)
+    started, allow_finish = tmp_path / "hook-started", tmp_path / "hook-finish"
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text(
+        "#!/bin/sh\n"
+        f"printf 'started' > '{started}'\n"
+        "i=0\n"
+        f"while [ ! -f '{allow_finish}' ] && [ \"$i\" -lt 80 ]; do\n"
+        "  sleep 0.1\n"
+        "  i=$((i + 1))\n"
+        "done\n"
+        f"test -f '{allow_finish}'\n"
+    )
+    hook.chmod(0o755)
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    svc = WorkspaceService(parse_workspace_config({
+        "schema_version": 1, "server": {"git": {"enabled": True}},
+        "workspaces": {"b": {"root": str(b),
+                             "git": {"allowed_commands": ["commit", "status"]}}},
+    }), config_dir=control, inventory=ActiveRuntimeInventory(paths=(runtime,)))
+    fd = svc.get("b").gateway._root_fd
+    done = threading.Event()
+    failures = []
+    results = []
+
+    def perform():
+        try:
+            results.append(svc.invoke_git(
+                "b", "commit", options={"message": "hook release"},
+                timeout_seconds=25, dry_run=False,
+            ))
+        except BaseException as exc:
+            failures.append(exc)
+
+    git_worker = threading.Thread(target=perform, name="actual-git-hook-worker")
+    closer = threading.Thread(target=lambda: (svc.close(), done.set()),
+                              name="actual-git-hook-close")
+    try:
+        git_worker.start()
+        deadline = time.monotonic() + 8
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(0.03)
+        assert started.exists(), "actual Git pre-commit hook not observed"
+        assert os.fstat(fd).st_ino == b.stat().st_ino
+        closer.start()
+        deadline = time.monotonic() + 5
+        while not svc._closing and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert svc._closing
+        assert not done.is_set()
+        assert os.fstat(fd).st_ino == b.stat().st_ino
+        with pytest.raises(GatewayError) as refused:
+            svc.invoke_git("b", "status", dry_run=False)
+        assert refused.value.code == "service_closing"
+    finally:
+        allow_finish.write_text("go\n")
+        git_worker.join(timeout=15)
+        closer.join(timeout=15)
+        svc.close()
+    assert not git_worker.is_alive() and not closer.is_alive()
+    assert not failures, failures
+    assert done.is_set()
+    assert results[0]["exit_code"] == 0
+    assert results[0]["cleanup_status"] == "complete"
+    with pytest.raises(OSError):
+        os.fstat(fd)

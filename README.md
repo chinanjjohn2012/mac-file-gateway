@@ -460,7 +460,7 @@ Legacy MCP `run_git(command, cwd=".", options={}, paths=[], timeout_seconds=120,
 - `dry_run=true` 是唯一不启动 Git 的预览路径；`dry_run=false` 经服务端及 Workspace 双重授权进入同步 Worker，先持久化 `DISCOVERING` / `RUNNING` 再 Popen。业务 Git 在同一 common-dir 串行；其他本机终端或 IDE 不受这把锁协调。
 - **客户端断连或超时不证明业务取消**。尤其 `commit`、`pull`、`push` 的响应丢失表示结果未知，不要自动重试；应在安全恢复或人工确认后再决定下一步。
 - Git 清理不确定、遗留活动记录或持久状态异常会隔离相关仓库或整个 Git 服务，可能返回 `git_repository_quarantined`、`git_global_quarantined`、`git_cleanup_incomplete`、`git_state_unavailable`。**没有 MCP/REST 重置隔离的接口**；不可通过反复重启、TTL 或另外一个 Workspace 的 `status` 自动解封。
-- 管理员必须先停止 Gateway、禁止新 Git 调用，并独立确认相关主进程、受控子进程及进程组都结束，再根据本地私有状态离线处理遗留标记。PID 可能重用，不应仅凭 PID 数字作清理证明。若无法确认则保持隔离。Git 进程已完整收尾后的状态删除同步失败仍按已批准的 §7.2 故障模型处理，不承诺任意硬件故障下永久持久标记。
+- 本地管理员必须先停止 Gateway、禁止新 Git 调用，并独立确认相关主进程、受控子进程及进程组都结束，再根据本地私有状态离线处理遗留标记。PID 可能重用，不应仅凭 PID 数字作清理证明。若无法确认则保持隔离。Git 进程已完整收尾后的状态删除同步失败仍按已批准的 §7.2 故障模型处理，不承诺任意硬件故障下永久持久标记。
 
 ## 三、让网页版 ChatGPT 连接到 Mac
 

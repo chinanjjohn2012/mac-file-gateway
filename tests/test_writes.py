@@ -474,7 +474,7 @@ def test_redacted_source_replaces_only_visible_duplicate_matches(root):
     [
         "[REDACTED] possible credential",
         "password = 'new-secret'",
-        'Password: "new-secret"',
+        'Password: str = "new-secret"',
     ],
 )
 def test_replace_rejects_placeholder_or_new_credential_literal(root, new_text):

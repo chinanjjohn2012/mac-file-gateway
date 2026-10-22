@@ -1,0 +1,108 @@
+name: C3 B03-T01 R2b-R2b-R2 Adapter SOURCE ONLY (NO C LOAD)
+
+on:
+  push:
+    branches:
+      - research/phase2-lite-c3-candidate-b-kill-t01-r2b-r2b-r2-adapter-source-preload-20261022
+  pull_request:
+    paths:
+      - ".github/workflows/c3-candidate-b-t01-r2b-r2b-r2-adapter-source.yml"
+      - "docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2b-r2-source-only-adapter.md"
+      - "tools/research/c3_candidate_b_t01_r2_source_only_adapter.py"
+      - "tests/test_c3_candidate_b_t01_r2b_r2b_r2_source_only_adapter.py"
+      - "tests/test_c3_candidate_b_t01_r2b_r2b_r1_linked_inspection.py"
+      - "MANIFEST.sha256"
+
+permissions:
+  contents: read
+
+jobs:
+  source-adapter-and-nsects-no-load:
+    if: >-
+      (github.event_name == 'push' &&
+       github.ref == 'refs/heads/research/phase2-lite-c3-candidate-b-kill-t01-r2b-r2b-r2-adapter-source-preload-20261022') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'research/phase2-lite-c3-candidate-b-kill-t01-r2b-r2b-r2-adapter-source-preload-20261022')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            python-version: "3.13"
+          - os: macos-15
+            python-version: "3.14"
+          - os: ubuntu-latest
+            python-version: "3.13"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    env:
+      C3B03_T01_R2B_R2B_R2_NO_LOAD: "true"
+      C3B03_T01_R2B_R2B_R2_GROUP_SIGNAL_AUTHORIZED: "false"
+      C3B03_TEST_NO_SIGNAL_STUB: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Exact SHA, frozen originals, no Native Helper/Probe, MANIFEST
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          if [ "${{ matrix.os }}" = "macos-15" ]; then
+            test "$(uname -s)" = Darwin
+            test "$(uname -m)" = arm64
+          fi
+          test ! -e tools/research/c3_candidate_b_kill.c
+          test ! -e tools/research/c3_candidate_b_kill_t01_no_signal_probe.py
+          test ! -e tools/research/run_c3_candidate_b_kill.py
+          test ! -e tools/research/c3_candidate_b_t01_no_signal_candidate.dylib
+          test ! -e tools/research/c3_candidate_b_t01_no_signal_candidate.so
+          python - <<'PY'
+          import ast
+          import hashlib
+          from pathlib import Path
+          for line in Path("MANIFEST.sha256").read_text().splitlines():
+              expected, path = line.split("  ", 1)
+              observed = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+              if observed != expected:
+                  raise AssertionError(f"MANIFEST_DIFF {path}")
+          frozen = {
+              "tools/research/c3_candidate_b_t01_no_signal_candidate.c":
+                  "5a1292787584632fac20c86bbe62e50153e82b0ecb36ad190446bf4b7b714195",
+              "tests/native/c3_b03_t01_no_signal_contract.h":
+                  "7c9bd037ecf65da8de91605846c4ac4fc7ceaebbd0ca2fe983ecfef630c9958e",
+          }
+          for path, digest in frozen.items():
+              if hashlib.sha256(Path(path).read_bytes()).hexdigest() != digest:
+                  raise AssertionError(f"REVIEWED_PARENT_CHANGED {path}")
+          source = Path("tools/research/c3_candidate_b_t01_r2_source_only_adapter.py").read_text()
+          tree = ast.parse(source)
+          for node in ast.walk(tree):
+              if isinstance(node, (ast.Import, ast.ImportFrom)):
+                  names = (
+                      [a.name.split(".")[0] for a in node.names]
+                      if isinstance(node, ast.Import)
+                      else [(node.module or "").split(".")[0]]
+                  )
+                  if any(n not in {"__future__", "dataclasses"} for n in names):
+                      raise AssertionError(f"ADAPTER_IMPORT_BLOCK {names}")
+          print("C3B03_T01_R2B_R2B_R2_MANIFEST_OK=true")
+          print("C3B03_T01_R2B_R2B_R2_PARENT_C_SOURCE_FROZEN=true")
+          print("C3B03_T01_R2B_R2B_R2_NO_LOAD=true")
+          print("C3B03_T01_R2B_R2B_R2_NATIVE_DISPATCHES=0")
+          print("C3B03_T01_R2B_R2B_R2_GROUP_SIGNAL_AUTHORIZED=false")
+          PY
+          python -m py_compile tools/research/c3_candidate_b_t01_r2_source_only_adapter.py tests/test_c3_candidate_b_t01_r2b_r2b_r1_linked_inspection.py tests/test_c3_candidate_b_t01_r2b_r2b_r2_source_only_adapter.py
+      - name: Source-only binding/schema negative cases + reviewed no-load C inspections
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install pytest==8.4.2
+          # C is only COMPILED/LINKED into ephemeral test files then INSPECTED
+          # by inherited R1 tests. No shared library is loaded or invoked.
+          python -m pytest -q -s tests/test_c3_candidate_b_t01_contract_red.py tests/test_c3_candidate_b_t01_pure_gate_r2.py tests/test_c3_candidate_b_t01_r2b_admission_design.py tests/test_c3_candidate_b_t01_r2b_r2a_source_admission.py tests/test_c3_candidate_b_t01_r2b_r2b_d0_provenance_design.py tests/test_c3_candidate_b_t01_r2b_r2b_r1_linked_inspection.py tests/test_c3_candidate_b_t01_r2b_r2b_r2_source_only_adapter.py

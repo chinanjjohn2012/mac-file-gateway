@@ -259,17 +259,27 @@ def _validate_darwin_macho_commands(
         if name == "LC_SEGMENT_64":
             seg = raw[pos + 8:pos + 24].split(b"\0", 1)[0].decode("ascii")
             nsects = struct.unpack_from("<I", raw, pos + 64)[0]
+            expected = (("__TEXT", ("__text",)), ("__LINKEDIT", ()))
+            expected_count = len(expected[i][1])
+            # Check count and bytes BEFORE allocating/iterating an untrusted
+            # nsects. A malformed 0xffffffff MUST be O(1) BLOCK, not a
+            # 4.29-billion-iteration tuple construction (P3-03).
+            assert nsects == expected_count, (
+                "UNAPPROVED_MACHO_NSECTS", i, nsects, expected_count
+            )
+            assert cmdsize == 72 + 80 * expected_count, (
+                "UNAPPROVED_MACHO_SECTION_SIZE", i
+            )
+            assert pos + cmdsize <= len(raw), (
+                "UNAPPROVED_MACHO_SECTION_BOUNDS", i
+            )
             sections = tuple(
                 raw[pos + 72 + j * 80:pos + 88 + j * 80]
                 .split(b"\0", 1)[0].decode("ascii")
-                for j in range(nsects)
+                for j in range(expected_count)
             )
-            expected = (("__TEXT", ("__text",)), ("__LINKEDIT", ()))
             assert (seg, sections) == expected[i], (
                 "UNAPPROVED_MACHO_SECTION", i, seg, sections
-            )
-            assert cmdsize == 72 + 80 * nsects, (
-                "UNAPPROVED_MACHO_SECTION_SIZE", i
             )
         if name == "LC_ID_DYLIB":
             assert _macho_lc_name(raw, pos, cmdsize) == image.name, (
@@ -665,4 +675,38 @@ def test_stage_contract_has_one_darwin_libsystem_policy():
     assert "no libSystem or other dylib" not in s
     assert "-lSystem" in s and "-lSystem" in _compile_link.__code__.co_consts
     assert _DARWIN_SYSTEM_DEPENDENCY == "/usr/lib/libSystem.B.dylib"
+
+@pytest.mark.parametrize("segment_index,nsects", (
+    (0, 0xFFFFFFFF), (0, 2), (0, 0),
+    (1, 0xFFFFFFFF), (1, 1),
+))
+def test_macho_nsects_is_bounded_before_section_iteration(segment_index, nsects):
+    """Synthetic Mach-O HEADER DATA only; no compiler, load, or C execution."""
+    head = struct.pack(
+        "<IiiIIIII", 0xFEEDFACF, 0x0100000C, 0, 6,
+        len(_DARWIN_EXACT_LC), sum(x[2] for x in _DARWIN_EXACT_LC), 0, 0,
+    )
+    parts = []
+    for i, (_name, cmd, size) in enumerate(_DARWIN_EXACT_LC):
+        part = bytearray(struct.pack("<II", cmd, size) + bytes(size - 8))
+        if cmd == 0x19:
+            part[8:8 + len(("__TEXT" if i == 0 else "__LINKEDIT").encode())] = (
+                "__TEXT" if i == 0 else "__LINKEDIT"
+            ).encode()
+            if i == 0:
+                # Keep an otherwise valid first segment for the second
+                # segment's malformed-count negative, so the negative fails
+                # on NSECTS rather than an earlier invalid __text name.
+                part[72:72 + len(b"__text")] = b"__text"
+                part[88:88 + len(b"__TEXT")] = b"__TEXT"
+            if i == segment_index:
+                struct.pack_into("<I", part, 64, nsects)
+            else:
+                struct.pack_into("<I", part, 64, 1 if i == 0 else 0)
+        parts.append(part)
+    with tempfile.TemporaryDirectory(prefix="c3b03-malformed-nsects-no-load-") as tmp:
+        image = Path(tmp) / (LIBRARY + ".dylib")
+        image.write_bytes(head + b"".join(parts))
+        with pytest.raises(AssertionError, match="UNAPPROVED_MACHO_NSECTS"):
+            _validate_darwin_macho_commands(image)
 

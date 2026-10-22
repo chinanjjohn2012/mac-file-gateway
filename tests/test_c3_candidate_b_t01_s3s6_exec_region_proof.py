@@ -194,6 +194,65 @@ def test_binary_mutant_fails_closed(actual, mutation):
         scan.static_executable_ranges(bytes(data), platform)
 
 
+
+def _elf_writable_load_ph(raw: bytearray) -> int:
+    phoff = struct.unpack_from("<Q", raw, 32)[0]
+    count = struct.unpack_from("<H", raw, 56)[0]
+    matches = [
+        phoff + i * 56 for i in range(count)
+        if struct.unpack_from("<II", raw, phoff + i * 56) == (1, 6)
+    ]
+    assert len(matches) == 1, "expected one real writable PT_LOAD"
+    return matches[0]
+
+
+@pytest.mark.parametrize("mutation", (
+    "overlap-rw-with-rx-vm",
+    "rw-rx-alias-on-single-page-without-byte-overlap",
+    "dynamic-vaddr-unmapped",
+    "dynamic-vaddr-mapped-to-wrong-load",
+    "writable-load-virtual-address-wraparound",
+))
+def test_actual_elf_virtual_load_and_dynamic_mapping_denies_mutants(
+        actual, mutation):
+    """P2-01 RED first, then GREEN. Mutate observed inert ELF bytes only.
+
+    Under the OLD parser every one of these variations is accepted. The
+    first two expose PT_LOAD VM/page aliases, the next two show PT_DYNAMIC
+    file bytes not mapping at the declared virtual address, and the last
+    lacks virtual end-overflow validation. No candidate ELF is loaded.
+    """
+    observed, _summary = actual
+    if observed["platform"] != "Linux":
+        pytest.skip("ELF-specific binary negatives; macOS positive unchanged")
+    raw = bytearray(observed["linked_image_bytes"])
+    rx = _elf_exec_ph(raw)
+    rw = _elf_writable_load_ph(raw)
+    dy = _elf_dynamic_ph(raw)
+    rx_vaddr = struct.unpack_from("<Q", raw, rx + 16)[0]
+    assert rx_vaddr == 0x1000
+    assert struct.unpack_from("<Q", raw, rw + 16)[0] == 0x2f20
+    if mutation == "overlap-rw-with-rx-vm":
+        struct.pack_into("<Q", raw, rw + 16, rx_vaddr)
+        struct.pack_into("<Q", raw, rw + 48, 1)
+    elif mutation == "rw-rx-alias-on-single-page-without-byte-overlap":
+        assert struct.unpack_from("<Q", raw, rx + 40)[0] < 0x900
+        struct.pack_into("<Q", raw, rw + 16, rx_vaddr + 0x900)
+        struct.pack_into("<Q", raw, rw + 48, 1)
+    elif mutation == "dynamic-vaddr-unmapped":
+        before = struct.unpack_from("<Q", raw, dy + 16)[0]
+        struct.pack_into("<Q", raw, dy + 16, before + 0x8000)
+    elif mutation == "dynamic-vaddr-mapped-to-wrong-load":
+        struct.pack_into("<Q", raw, dy + 16, rx_vaddr)
+    elif mutation == "writable-load-virtual-address-wraparound":
+        struct.pack_into("<Q", raw, rw + 16, 0xFFFFFFFFFFFFFFD0)
+        struct.pack_into("<Q", raw, rw + 48, 1)
+    else:
+        raise AssertionError("unhandled P2-01 mutation")
+    with pytest.raises(ValueError):
+        scan.static_executable_ranges(bytes(raw), "Linux")
+
+
 @pytest.mark.parametrize("source", (None, [], "not bytes", b"", b"x" * 1048577))
 def test_non_binary_or_unbounded_input_is_rejected(source):
     with pytest.raises(ValueError):

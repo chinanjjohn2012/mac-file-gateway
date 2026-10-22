@@ -62,6 +62,28 @@ def _sha_regular(path: Path) -> tuple[str, os.stat_result]:
         os.close(fd)
 
 
+def _manifest_checked_path(root: Path, rel: str) -> Path:
+    """Reject symlinks on EVERY manifest component before resolve/check.
+
+    This is a source-stage best-effort path gate, not an atomic S5 loader
+    custody mechanism: a hostile concurrent writer still requires proof.
+    """
+    if not rel.startswith("./") or not rel[2:] or "\0" in rel:
+        raise ValueError("UNSAFE_MANIFEST_PATH")
+    parts = rel[2:].split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError("UNSAFE_MANIFEST_PATH")
+    node = root
+    for part in parts:
+        node = node / part
+        if node.is_symlink():
+            raise ValueError("MANIFEST_SYMLINK_COMPONENT")
+    resolved = node.resolve(strict=True)
+    if not resolved.is_relative_to(root.resolve(strict=True)):
+        raise ValueError("MANIFEST_PATH_ESCAPED")
+    return resolved
+
+
 def checked_manifest() -> dict[str, str]:
     digest, _ = _sha_regular(MANIFEST)
     assert _SHA256.fullmatch(digest)
@@ -75,9 +97,7 @@ def checked_manifest() -> dict[str, str]:
                 "/../" in rel or rel.endswith("/..")):
             raise ValueError("UNSORTED_OR_UNSAFE_MANIFEST_PATH")
         previous = rel
-        path = (ROOT / rel).resolve(strict=True)
-        if not path.is_relative_to(ROOT) or path.is_symlink():
-            raise ValueError("MANIFEST_PATH_ESCAPED")
+        path = _manifest_checked_path(ROOT, rel)
         observed, _ = _sha_regular(path)
         if observed != sha:
             raise ValueError("MANIFEST_BYTES_MISMATCH:" + rel)

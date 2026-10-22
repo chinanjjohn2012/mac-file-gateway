@@ -200,3 +200,31 @@ def test_no_source_or_ci_can_produce_a_native_runtime_authorization():
     assert not (ROOT / "tools/research/c3_candidate_b_kill.c").exists()
     assert not (ROOT / "tools/research/c3_candidate_b_kill_t01_no_signal_probe.py").exists()
     assert not (ROOT / "tools/research/run_c3_candidate_b_kill.py").exists()
+
+def test_manifest_rejects_symlink_file_and_symlink_directory_before_realpath(tmp_path):
+    actual = tmp_path / "actual"
+    actual.mkdir()
+    file = actual / "source.txt"
+    file.write_text("not a candidate", encoding="utf-8")
+    alias = tmp_path / "alias"
+    alias.symlink_to(actual, target_is_directory=True)
+    file_alias = tmp_path / "source-alias.txt"
+    file_alias.symlink_to(file)
+    for link in ("./alias/source.txt", "./source-alias.txt"):
+        with pytest.raises(ValueError, match="MANIFEST_SYMLINK_COMPONENT"):
+            proof._manifest_checked_path(tmp_path, link)
+    assert proof._manifest_checked_path(tmp_path, "./actual/source.txt") == file
+
+
+@pytest.mark.parametrize("unsafe", (
+    "", "actual/source.txt", "./", "./../outside",
+    "./actual/../actual/source.txt", "./actual//source.txt",
+    "./actual/./source.txt", "./actual/source.txt/",
+))
+def test_manifest_rejects_unsafe_relative_components_before_resolving(tmp_path, unsafe):
+    actual = tmp_path / "actual"
+    actual.mkdir()
+    (actual / "source.txt").write_text("inert", encoding="utf-8")
+    with pytest.raises(ValueError, match="UNSAFE_MANIFEST_PATH"):
+        proof._manifest_checked_path(tmp_path, unsafe)
+

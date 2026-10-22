@@ -6,7 +6,6 @@ imports or executes source code from the selected workspace.
 from __future__ import annotations
 
 import ast
-from collections import Counter
 
 
 def proven_contextvar_lines(source: str) -> list[int]:
@@ -14,13 +13,25 @@ def proven_contextvar_lines(source: str) -> list[int]:
     tree = ast.parse(source)
     if sum(1 for _ in ast.walk(tree)) > 8192:
         return []
-    # Reject dynamic namespace and reflection operations that defeat local
-    # proof of stable module-level object identity.
-    unsafe_calls = {"exec", "eval", "globals", "locals", "setattr", "delattr", "__import__"}
-    if any(isinstance(n, ast.Call) and (
-        isinstance(n.func, ast.Name) and n.func.id in unsafe_calls
-        or isinstance(n.func, ast.Attribute) and n.func.attr in {"__setattr__", "__delattr__"}
-    ) for n in ast.walk(tree)):
+    # Reject reflective namespace access even when a builtin is passed as a
+    # first-class value (e.g. alias = globals), not only when called directly.
+    # Module dictionaries and frame-global mappings can rebind the trusted
+    # ContextVar object without creating another ast.Name(Store) node.
+    # Unprovable binding stability must preserve heuristic redaction.
+    reflective_names = frozenset({
+        "exec", "eval", "compile", "globals", "locals", "vars",
+        "getattr", "setattr", "delattr", "__import__", "__builtins__",
+    })
+    reflective_attributes = frozenset({
+        "exec", "eval", "globals", "locals", "vars", "getattr",
+        "setattr", "delattr", "__setattr__", "__delattr__",
+        "__dict__", "f_globals", "f_locals",
+    })
+    if any(
+        (isinstance(node, ast.Name) and node.id in reflective_names)
+        or (isinstance(node, ast.Attribute) and node.attr in reflective_attributes)
+        for node in ast.walk(tree)
+    ):
         return []
     module_aliases: set[str] = set()
     constructor_aliases: set[str] = set()

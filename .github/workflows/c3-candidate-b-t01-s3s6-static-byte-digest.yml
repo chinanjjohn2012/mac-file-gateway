@@ -1,0 +1,107 @@
+name: C3 B03-T01 S3/S6 static byte-to-SHA consistency (NO LOAD NO C EXEC)
+
+on:
+  push:
+    branches:
+      - research/phase2-lite-c3-b03-t01-s3s6-byte-digest-20261022
+  pull_request:
+    paths:
+      - ".github/workflows/c3-candidate-b-t01-s3s6-static-byte-digest.yml"
+      - "docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2b-r2-s3s6-static-byte-digest.md"
+      - "tools/research/c3_candidate_b_t01_s3_linked_proof.py"
+      - "tools/research/c3_candidate_b_t01_s6_offline_deny_proof.py"
+      - "tests/test_c3_candidate_b_t01_s3_linked_proof.py"
+      - "tests/test_c3_candidate_b_t01_s6_offline_deny.py"
+      - "MANIFEST.sha256"
+
+permissions:
+  contents: read
+
+jobs:
+  bounded-real-static-object-linked-byte-consistency:
+    if: >-
+      (github.event_name == 'push' &&
+       github.ref == 'refs/heads/research/phase2-lite-c3-b03-t01-s3s6-byte-digest-20261022') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'research/phase2-lite-c3-b03-t01-s3s6-byte-digest-20261022')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            python-version: "3.13"
+          - os: macos-15
+            python-version: "3.14"
+          - os: ubuntu-latest
+            python-version: "3.13"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 16
+    env:
+      C3B03_STATIC_BYTE_SHA_ONLY: "true"
+      C3B03_S3S6_NO_LOAD: "true"
+      C3B03_S3S6_GROUP_SIGNAL_AUTHORIZED: "false"
+      C3B03_S3S6_FIRST_C_LOAD_AUTHORIZED: "false"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Verify actual Head and complete Manifest, frozen C/header, and Native absence
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          test ! -e tools/research/c3_candidate_b_kill.c
+          test ! -e tools/research/c3_candidate_b_kill_t01_no_signal_probe.py
+          test ! -e tools/research/run_c3_candidate_b_kill.py
+          if [ "${{ matrix.os }}" = "macos-15" ]; then
+            test "$(uname -s)" = Darwin
+            test "$(uname -m)" = arm64
+          else
+            test "$(uname -s)" = Linux
+            test "$(uname -m)" = x86_64
+          fi
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          lines = Path("MANIFEST.sha256").read_text(encoding="ascii").splitlines()
+          names = [row.split("  ", 1)[1] for row in lines]
+          assert names == sorted(names) and len(names) == len(set(names))
+          for row in lines:
+              digest, path = row.split("  ", 1)
+              assert path.startswith("./")
+              assert hashlib.sha256(Path(path).read_bytes()).hexdigest() == digest, path
+          frozen = {
+              "tools/research/c3_candidate_b_t01_no_signal_candidate.c":
+                  "5a1292787584632fac20c86bbe62e50153e82b0ecb36ad190446bf4b7b714195",
+              "tests/native/c3_b03_t01_no_signal_contract.h":
+                  "7c9bd037ecf65da8de91605846c4ac4fc7ceaebbd0ca2fe983ecfef630c9958e",
+          }
+          for name, digest in frozen.items():
+              assert hashlib.sha256(Path(name).read_bytes()).hexdigest() == digest, name
+          print("C3B03_S3S6_HEAD=" + __import__("subprocess").check_output(
+              ["/usr/bin/git", "rev-parse", "HEAD"], text=True).strip())
+          print("C3B03_S3S6_TREE=" + __import__("subprocess").check_output(
+              ["/usr/bin/git", "rev-parse", "HEAD^{tree}"], text=True).strip())
+          print("C3B03_S3S6_MANIFEST_OK=true")
+          print("C3B03_S3S6_CANDIDATE_LOADED=false")
+          print("C3B03_S3S6_GROUP_SIGNAL_AUTHORIZED=false")
+          PY
+      - name: Rehash actual static object and linked bytes, offline denial mutations
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install pytest==8.4.2
+          python -m pytest -q -s \
+            tests/test_c3_candidate_b_t01_s3_linked_proof.py \
+            tests/test_c3_candidate_b_t01_s6_offline_deny.py \
+            tests/test_c3_candidate_b_t01_s4_abi_source_proof.py \
+            tests/test_c3_candidate_b_t01_s5_inert_path_custody.py \
+            tests/test_c3_candidate_b_t01_s0_abi_proof.py \
+            tests/test_c3_candidate_b_t01_r2b_r2b_r2_source_only_adapter.py \
+            tests/test_c3_candidate_b_t01_r2b_r2b_r2_preload_d1_design.py

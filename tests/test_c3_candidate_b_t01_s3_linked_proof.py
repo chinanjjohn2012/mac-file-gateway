@@ -19,8 +19,16 @@ WORKFLOW = ROOT / ".github/workflows/c3-candidate-b-t01-r2b-r2b-r2-s3-linked-pro
 @pytest.fixture(scope="module")
 def evidence():
     x = s3._compile_link_observe()
-    out = {k: v for k, v in x.items() if k not in ("inspection", "image_header_bytes")}
-    print("C3B03_S3_ACTUAL_LINKED_PROOF=" + json.dumps(out, sort_keys=True, default=str))
+    # Raw binaries remain in-memory evidence; do NOT dump their bytes into CI.
+    out = {k: v for k, v in x.items() if k not in (
+        "inspection", "image_header_bytes", "object_bytes",
+        "linked_image_bytes",
+    )}
+    out["static_object_byte_count"] = len(x["object_bytes"])
+    out["static_linked_byte_count"] = len(x["linked_image_bytes"])
+    print("C3B03_S3_ACTUAL_LINKED_PROOF=" + json.dumps(
+        out, sort_keys=True, default=str
+    ))
     for key, body in x["inspection"].items():
         print("C3B03_S3_" + key.upper() + "_SHA256=" + hashlib.sha256(body.encode()).hexdigest())
         print("C3B03_S3_" + key.upper() + "_BEGIN")
@@ -41,6 +49,14 @@ def test_real_linked_bytes_are_bound_to_same_session_object(evidence):
     assert x["image_device"] > 0 and x["image_inode"] > 0
     assert all(re.fullmatch(r"[a-f0-9]{64}", v) for v in x["stage_digests"].values())
     assert x["linked_image_bytes_observed"] is True
+    for raw_key, sha_key in (
+        ("object_bytes", "object_sha256"),
+        ("linked_image_bytes", "linked_image_sha256"),
+    ):
+        assert type(x[raw_key]) is bytes
+        assert 0 < len(x[raw_key]) <= s3._STATIC_ARTIFACT_LIMIT
+        assert hashlib.sha256(x[raw_key]).hexdigest() == x[sha_key]
+    assert x["image_header_bytes"] == x["linked_image_bytes"][:4096]
     assert x["linked_header"].endswith("_PARTIAL")
     assert s3._metadata_gate(x["platform"], x["inspection"]) == "LINKED_METADATA_PARTIAL_NO_LOAD"
 
@@ -109,6 +125,43 @@ def test_byte_header_negatives_rejected_offline(evidence, kind):
     with pytest.raises(ValueError):
         s3._linked_header_gate(bytes(raw), platform,
                                s3.NAME + (".dylib" if platform == "Darwin" else ".so"))
+
+
+
+def test_bounded_nofollow_snapshot_negative_fixtures(tmp_path):
+    """Exercise the real file-FD snapshot against safe data-only fixtures."""
+    path = tmp_path / "inert-test-bytes.data"
+    path.write_bytes(b"STATIC DATA NOT AN EXECUTABLE")
+    original = path.read_bytes()
+    digest = hashlib.sha256(original).hexdigest()
+    before = path.stat()
+    assert s3._static_artifact_bytes(path, digest, before) == original
+    with pytest.raises(ValueError, match="STATIC_ARTIFACT_BYTE_SHA_MISMATCH"):
+        s3._static_artifact_bytes(path, "0" * 64, before)
+    path.chmod(0o400)
+    with pytest.raises(ValueError, match="STATIC_ARTIFACT_IDENTITY_CHANGED"):
+        s3._static_artifact_bytes(path, digest, before)
+    path.chmod(0o600)
+    before = path.stat()
+    link = tmp_path / "hardlink"
+    link.hardlink_to(path)
+    with pytest.raises(ValueError, match="STATIC_ARTIFACT_IDENTITY_CHANGED"):
+        s3._static_artifact_bytes(path, digest, before)
+    link.unlink()
+    path.unlink()
+    path.symlink_to(tmp_path / "absent")
+    with pytest.raises((OSError, ValueError)):
+        s3._static_artifact_bytes(path, digest, before)
+
+
+def test_bounded_static_snapshot_rejects_empty_and_oversized(tmp_path):
+    path = tmp_path / "inert.data"
+    path.touch()
+    with pytest.raises(ValueError, match="STATIC_ARTIFACT_SIZE_OUT_OF_BOUNDS"):
+        s3._static_artifact_bytes(path, hashlib.sha256(b"").hexdigest(), path.stat())
+    path.write_bytes(b"x" * (s3._STATIC_ARTIFACT_LIMIT + 1))
+    with pytest.raises(ValueError, match="STATIC_ARTIFACT_SIZE_OUT_OF_BOUNDS"):
+        s3._static_artifact_bytes(path, hashlib.sha256(path.read_bytes()).hexdigest(), path.stat())
 
 def test_scope_is_strict_no_load():
     text = DOC.read_text()

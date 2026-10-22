@@ -36,7 +36,8 @@ S3_FIELDS = frozenset((
     "platform source_sha256 header_sha256 compiler_entry_sha256_precompile "
     "compiler_entry_sha256_postlink manifest_sha256 manifest_entry_count "
     "compile_environment object_inspection compile_argv link_argv "
-    "object_sha256 linked_image_sha256 linked_header image_owner_uid "
+    "object_sha256 linked_image_sha256 object_bytes linked_image_bytes "
+    "linked_header image_owner_uid "
     "image_device image_inode stage_digests inspection image_header_bytes "
     "linked_image_bytes_observed toolchain_sdk_closure_proven "
     "complete_final_binary_cfg_proven final_linked_image_lock_proven "
@@ -257,6 +258,20 @@ def _check_bundle(bundle: object, *, head: str, tree: str,
             type(a["inspection"]) is dict and
             _hex(a["linked_image_sha256"], _SHA)):
         return False
+    # The original S3 build session retains bounded byte snapshots of its
+    # actual relocatable object and final linked library, without loading.
+    # Reject a forged digest chain when its submitted bytes contradict it.
+    # Not independent authentication or atomic custody for a future loader.
+    obj_bytes = a["object_bytes"]
+    linked_bytes = a["linked_image_bytes"]
+    if not (type(obj_bytes) is bytes and type(linked_bytes) is bytes
+            and 0 < len(obj_bytes) <= s3._STATIC_ARTIFACT_LIMIT
+            and 0 < len(linked_bytes) <= s3._STATIC_ARTIFACT_LIMIT
+            and hashlib.sha256(obj_bytes).hexdigest() == a["object_sha256"]
+            and hashlib.sha256(linked_bytes).hexdigest() ==
+            a["linked_image_sha256"]
+            and a["image_header_bytes"] == linked_bytes[:4096]):
+        return False
     # An honest 64-hex but semantically spliced object/link SHA or any
     # S0/S1/S2/S3 stage digest MUST fail here before a partial verdict.
     # The source of object_format/exports/undefined is the fresh S3
@@ -389,6 +404,11 @@ def collect_real_partial_evidence() -> tuple[dict[str, dict], dict[str, object]]
         "missing_full_gates": MISSING_FULL_GATES,
         "s0_s3_stage_digest_consistency_recomputed": True,
         "object_inspection_preimage_recorded": True,
+        "actual_static_object_bytes_sha_recomputed": True,
+        "actual_static_linked_bytes_sha_recomputed": True,
+        "actual_static_linked_header_prefix_checked": True,
+        "static_object_byte_count": len(s3_data["object_bytes"]),
+        "static_linked_byte_count": len(s3_data["linked_image_bytes"]),
         "collector_sessions_are_atomic": False,
         "author_or_synthetic_self_approval_accepted": False,
         "full_s6_independent_decision_made": False,

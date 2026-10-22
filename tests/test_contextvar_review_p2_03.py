@@ -453,3 +453,63 @@ def test_p2_03_positive_static_module_subset(tmp_path, extra):
         assert "token = active.set(value)" in read["content"]
     finally:
         gateway.close()
+
+
+@pytest.mark.parametrize("unproven_argument", [
+    "value + 1",
+    "value[0]",
+    "value.render()",
+    "value or 17",
+    "next(value)",
+])
+def test_p2_03_dynamic_argument_evaluation_does_not_receive_proof(
+    tmp_path, unproven_argument,
+):
+    """Untrusted operators/calls may execute arbitrary user code during eval."""
+    source = (
+        "from contextvars import ContextVar\n"
+        "active = ContextVar('active')\n"
+        "def scope(value):\n"
+        "    token = active.set(" + unproven_argument + ")\n"
+        "    try:\n"
+        "        yield\n"
+        "    finally:\n"
+        "        active.reset(token)\n"
+    )
+    root = tmp_path / "project"
+    root.mkdir()
+    gateway = Gateway(root, allow_write=True)
+    try:
+        with pytest.raises(GatewayError) as exc:
+            gateway.create_file("blocked.py", source, dry_run=False)
+        assert exc.value.code == "sensitive_content"
+        assert proven_lines(source.encode("utf-8")) == ()
+    finally:
+        gateway.close()
+
+
+def test_p2_03_known_contextmanager_decorator_is_still_proven(tmp_path):
+    source = (
+        "from contextlib import contextmanager\n"
+        "from contextvars import ContextVar\n"
+        "active = ContextVar('active', default=None)\n"
+        "@contextmanager\n"
+        "def scope(value):\n"
+        "    token = active.set(value)\n"
+        "    try:\n"
+        "        yield value\n"
+        "    finally:\n"
+        "        active.reset(token)\n"
+    )
+    root = tmp_path / "project"
+    root.mkdir()
+    gateway = Gateway(root, allow_write=True)
+    try:
+        assert len(proven_lines(source.encode("utf-8"))) == 1
+        written = gateway.create_file("decorated.py", source, dry_run=False)
+        assert written["applied"]
+        read = gateway.read_file("decorated.py")
+        assert read["redacted_lines"] == 0
+        assert "token = active.set(value)" in read["content"]
+    finally:
+        gateway.close()

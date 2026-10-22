@@ -133,27 +133,32 @@ Implementation after independent **design** PASS:
 | Test input / context | Python V3 result | Severity |
 |---|---|---|
 | `token = active.set(value)`, genuine/fake/unknown `.set()` | Visible, searchable, writable | none |
-| `token = get_token()`, `password = config.password`, `api_key = os.getenv("API_KEY")` | Visible, searchable, writable | none |
+| `token = get_token()`, `password = config.password`, `api_key = os.getenv("API_KEY")`, `os.environ.get("API_KEY")`, `os.environ["API_KEY"]` | Visible, searchable, writable | none |
 | `token = None`, `token = f"{runtime}"` | Visible, searchable, writable | none |
 | `password = "literal"`, `api_key = b"literal"` | Redact; reject new write | hard |
 | `{"password": "literal"}`, `request(token="literal")` | Redact; reject new write | hard |
+| `def connect(api_key="abc")`, `async def f(*, password="secret")`, `lambda token="abc": token` | Redact; reject new write | hard |
+| `def connect(api_key=os.environ["API_KEY"])`, `lambda token=get_token(): token` | Visible, searchable, writable | none |
+| `# password = "abc"` and actual docstring field `api_key = "actual-key"` | Redact; reject new write | hard |
+| `# token = get_token()` and ordinary prose mentioning `password` | Visible, searchable, writable | none |
 | `token = "ab" + "cd"`, adjacent literals, multiline literals | Redact; reject new write | hard |
+| `marker = ("ghp_" "ABCDEFGHIJKLMNOPQRSTUVWX")`, `marker = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWX"` | Redact even without credential field | hard |
 | `token = f"prefix-{runtime}"`, `os.getenv("API_KEY", "fallback")` | Redact; reject new write | hard |
 | Known key signature, authenticated URI, PEM or protected absolute path anywhere | Redact; reject new write | hard |
 | Mixed `token = active.set(value); password = "literal"` | Entire evidence line protected | hard |
 | Ambiguous but evident nonempty literal cue | Redact; `audit` may allow eligible write | heuristic |
-| Unscannable/over-budget source | Do not return raw content or admit changed write, even in Audit | scan_unavailable |
+| Unscannable/over-budget source | Redact full file, skip search, suppress raw diff; reject preview/apply even in Audit (`rule_id=SCAN_UNAVAILABLE`) | scan_unavailable |
 | JSON/YAML hard-coded credential and heuristic cases | Precisely **unchanged** from pre-V3 | existing |
 
 Required test breadth:
-- Source parsing: assignment, annotated/walrus, dict/keyword, nested calls, env-key vs fallback, escaped/bytes/raw/triple/f-string, implicit/explicit concatenation, multi-line, comments/docstrings, malformed source, 32KiB+ and Gateway max-sized files, BOM, CRLF/LF, mixed Hard+ordinary code.
-- Flow: create preview/apply, read/redaction, search, diff, exact replacement preview/apply, whole write, hidden-line origin and multiplicity, backup/sha/conflict, Audit active/expired/lock/install deadline, Multi-Workspace isolation, REST/MCP parity.
+- Source parsing: assignment, annotated/walrus, dict/keyword, `FunctionDef`/`AsyncFunctionDef`/`Lambda` defaults with right-aligned positional and keyword-only association, nested calls, `os.getenv`/`os.environ.get`/`os.environ[...]` lookup keys vs fallback, escaped/bytes/raw/triple/f-string, adjacent and explicit literal-only concatenation (including split known-format keys in noncredential fields), multiline, mandatory Hard for explicit comment/docstring literal vs ordinary prose None, malformed source, 32 KiB+ and Gateway max-sized files, BOM, CRLF/LF, mixed Hard+ordinary code.
+- Flow: create preview/apply, read/redaction, search, diff, exact replacement preview/apply, whole write, hidden-line origin and multiplicity, backup/sha/conflict, Audit active/expired/lock/install deadline, Multi-Workspace isolation, REST/MCP parity. For `scan_unavailable`, verify whole-file placeholder and bounded redacted-line count, zero search matches with skipped reason, no raw diff, `SCAN_UNAVAILABLE` on both preview/apply, and unconditional rejection under active Audit.
 - Compare JSON/YAML/non-Python output on fixed baseline fixtures **byte-for-byte**, and preserve error semantics and counters. Run RED first, then implementation GREEN, full Linux and GitHub-hosted macOS `verify.sh --require-mcp`, real HTTP/MCP/Git smoke, manifest validation and exact-Head independent Standards/Spec **code** review.
 - Existing sporadic macOS CRLF false denial remains separately tracked as P3; hosted macOS tests cannot substitute for user-machine Gateway/Tunnel E2E.
 
 ## 7. Independent design-review decision points
 
-**Standards reviewer:** evaluate incomplete/invalid Python lexical fallback, scanner budget and DoS, distinguishing env lookup key vs value literals, UTF-8/BOM/CRLF line provenance, hard secrets in comments/multiline, no unscanned content leaks, no API/permission regression, Audit/Hard isolation and removal of unnecessary Worker.
+**Standards reviewer:** evaluate incomplete/invalid Python lexical fallback, scanner budget and DoS, default-value mapping for functions/lambdas, explicit comments/docstrings Hard versus ordinary prose None, `os.environ[...]` lookup key vs literal fallback, statically joined known key formats, UTF-8/BOM/CRLF line provenance, no unscanned content leaks (including Audit/scan-unavailable and read/search/diff), no API/permission regression and removal of unnecessary Worker.
 
 **Spec reviewer:** run each acceptance row against this precise contract, including source-value vs runtime-reference classification, name-only false-positive elimination, single-line mixed evidence, JSON/YAML unchanged, observed false-positive tradeoff for static `f"Bearer {value}"`, and proper staged gate order.
 

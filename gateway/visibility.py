@@ -28,6 +28,9 @@ class SensitiveContentPolicy:
 
     def classify(self, canonical_path: str, raw: bytes) -> tuple[list[bool], tuple[tuple[int, str], ...]]:
         """Path-aware, full-document classification with conservative fallback."""
+        if canonical_path.endswith((".py", ".pyi")):
+            from .python_values import classify_python
+            return classify_python(raw, self._expr)
         from .core import CREDENTIAL_ASSIGNMENT, CREDENTIAL_URI, TOKEN_VALUE, PRIVATE_KEY_BEGIN
         text = raw.decode("utf-8-sig")
         flags = self.sensitive_flags(text)

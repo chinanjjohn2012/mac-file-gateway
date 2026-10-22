@@ -34,7 +34,8 @@ _SHA = re.compile(r"[a-f0-9]{64}\Z")
 S3_FIELDS = frozenset((
     "current_head current_tree reviewed_s2_parent_head reviewed_s2_parent_tree "
     "platform source_sha256 header_sha256 compiler_entry_sha256_precompile "
-    "compiler_entry_sha256_postlink manifest_sha256 compile_argv link_argv "
+    "compiler_entry_sha256_postlink manifest_sha256 manifest_entry_count "
+    "compile_environment object_inspection compile_argv link_argv "
     "object_sha256 linked_image_sha256 linked_header image_owner_uid "
     "image_device image_inode stage_digests inspection image_header_bytes "
     "linked_image_bytes_observed toolchain_sdk_closure_proven "
@@ -123,6 +124,57 @@ def _stage_flags(item: dict, fields: tuple[str, ...]) -> bool:
             all(item.get(field) is False for field in fields))
 
 
+def _recomputed_s3_stages(a: dict, *, head: str, tree: str,
+                          manifest_sha: str) -> dict[str, str] | None:
+    """Recalculate EVERY S0->S3 digest using actual reported preimages.
+
+    Only reports whether the submitted static observations are internally
+    consistent. This does not authenticate the preimages or future loader.
+    """
+    count = a["manifest_entry_count"]
+    environment = a["compile_environment"]
+    obj = a["object_inspection"]
+    if (type(count) is not int or count <= 0 or count > 10000 or
+            type(environment) is not dict or environment != s3.ENV or
+            type(obj) is not dict or set(obj) != {
+                "object_format", "exports", "undefined",
+            } or not all(type(value) is str for value in obj.values()) or
+            not obj["object_format"] or not obj["exports"] or
+            obj["undefined"].strip()):
+        return None
+    # Explicitly reconstruct each historical S3 payload. Digest values
+    # must be derived from the prior *recomputed* stage, not copied from
+    # a possibly mutated stage_digests dictionary.
+    stage0 = _digest({
+        "head": head, "tree": tree, "manifest": manifest_sha,
+        "source": a["source_sha256"], "header": a["header_sha256"],
+        "entries": count,
+    })
+    stage1 = _digest({
+        "previous": stage0,
+        "compiler_entry_pre": a["compiler_entry_sha256_precompile"],
+        "compile_argv": a["compile_argv"],
+        "link_argv": a["link_argv"],
+        "environment": environment, "platform": a["platform"],
+    })
+    stage2 = _digest({
+        "previous": stage1, "object_sha256": a["object_sha256"],
+        "object_format": obj["object_format"], "exports": obj["exports"],
+        "undefined": obj["undefined"],
+    })
+    stage3 = _digest({
+        "previous": stage2, "linked_sha256": a["linked_image_sha256"],
+        "linked_header": a["linked_header"],
+        "link_argv": a["link_argv"],
+    })
+    return {
+        "S0_observation": stage0,
+        "S1_partial": stage1,
+        "S2_object": stage2,
+        "S3_linked_partial": stage3,
+    }
+
+
 def _check_bundle(bundle: object, *, head: str, tree: str,
                   manifest_sha: str) -> bool:
     """Validate observation consistency, NEVER decide to load. No I/O.
@@ -204,6 +256,15 @@ def _check_bundle(bundle: object, *, head: str, tree: str,
     if not (type(a["image_header_bytes"]) is bytes and
             type(a["inspection"]) is dict and
             _hex(a["linked_image_sha256"], _SHA)):
+        return False
+    # An honest 64-hex but semantically spliced object/link SHA or any
+    # S0/S1/S2/S3 stage digest MUST fail here before a partial verdict.
+    # The source of object_format/exports/undefined is the fresh S3
+    # object inspection, never the linked-image metadata dictionary.
+    recalculated = _recomputed_s3_stages(
+        a, head=head, tree=tree, manifest_sha=manifest_sha
+    )
+    if recalculated is None or stages != recalculated:
         return False
     image_name = s3.NAME + (".dylib" if a["platform"] == "Darwin" else ".so")
     if (s3._linked_header_gate(
@@ -326,6 +387,8 @@ def collect_real_partial_evidence() -> tuple[dict[str, dict], dict[str, object]]
             "s5_leaf_identity": s5_data["inert_file_snapshot"],
         }),
         "missing_full_gates": MISSING_FULL_GATES,
+        "s0_s3_stage_digest_consistency_recomputed": True,
+        "object_inspection_preimage_recorded": True,
         "collector_sessions_are_atomic": False,
         "author_or_synthetic_self_approval_accepted": False,
         "full_s6_independent_decision_made": False,

@@ -53,6 +53,8 @@ def test_real_same_job_partial_s3_s4_s5_never_grants_load(actual):
     assert len(summary["missing_full_gates"]) == 6
     assert summary["collector_sessions_are_atomic"] is False
     assert summary["full_s6_independent_decision_made"] is False
+    assert summary["s0_s3_stage_digest_consistency_recomputed"] is True
+    assert summary["object_inspection_preimage_recorded"] is True
     assert summary["author_or_synthetic_self_approval_accepted"] is False
     assert summary["first_c_load_authorized"] is False
     assert summary["native_dispatches"] == 0
@@ -76,6 +78,19 @@ def test_fresh_actual_frozen_inputs_and_stage_artifacts(actual):
         "SIZE": 9, "ALIGN": 6, "OFF": 31, "FIELD_SIZE": 31,
     }
     assert a["linked_image_bytes_observed"] is True
+    assert set(a["object_inspection"]) == {
+        "object_format", "exports", "undefined",
+    }
+    assert a["object_inspection"]["object_format"]
+    assert a["object_inspection"]["exports"]
+    assert a["object_inspection"]["undefined"].strip() == ""
+    assert type(a["manifest_entry_count"]) is int
+    assert a["manifest_entry_count"] == len(s6.s0.checked_manifest())
+    assert a["compile_environment"] == s6.s3.ENV
+    assert s6._recomputed_s3_stages(
+        a, head=summary["head"], tree=summary["tree"],
+        manifest_sha=summary["manifest_sha256"],
+    ) == a["stage_digests"]
     assert b["real_c11_abi_assertions_compiled_only"] is True
     assert c["inert_temporary_directory_discarded"] is True
     assert c["same_content_and_inode_observed_twice"] == (
@@ -96,6 +111,16 @@ def test_fresh_actual_frozen_inputs_and_stage_artifacts(actual):
     "s4-ast-drift", "s5-inert-sha", "s5-inode-zero", "s5-hardlink",
     "s5-loader-proof-claim", "parent-tree-drift", "unexpected-field",
     "stage-null", "s3-status-authorized",
+    # P2-01 regression: all hashes below remain VALID 64-character hex.
+    # These used to be accepted as REVIEW_REQUIRED_NO_LOAD despite
+    # contradicting the frozen S0->S1->S2->S3 stage computation.
+    "valid-hex-object-sha", "valid-hex-linked-sha",
+    "valid-hex-s0-digest", "valid-hex-s1-digest",
+    "valid-hex-s2-digest", "valid-hex-s3-digest",
+    "changed-object-file-preimage", "changed-object-exports-preimage",
+    "changed-object-undefined-preimage",
+    "missing-object-inspection", "missing-manifest-count",
+    "changed-manifest-count", "changed-compile-environment",
 ))
 def test_missing_spliced_mutated_or_self_authorized_fails_closed(actual, mutation):
     real, summary = actual
@@ -146,6 +171,32 @@ def test_missing_spliced_mutated_or_self_authorized_fails_closed(actual, mutatio
         bundle[s6.STAGES[0]] = None
     elif mutation == "s3-status-authorized":
         a["admission"] = "AUTHORIZED"
+    elif mutation == "valid-hex-object-sha":
+        a["object_sha256"] = "0" * 64
+    elif mutation == "valid-hex-linked-sha":
+        a["linked_image_sha256"] = "0" * 64
+    elif mutation == "valid-hex-s0-digest":
+        a["stage_digests"]["S0_observation"] = "0" * 64
+    elif mutation == "valid-hex-s1-digest":
+        a["stage_digests"]["S1_partial"] = "0" * 64
+    elif mutation == "valid-hex-s2-digest":
+        a["stage_digests"]["S2_object"] = "0" * 64
+    elif mutation == "valid-hex-s3-digest":
+        a["stage_digests"]["S3_linked_partial"] = "0" * 64
+    elif mutation == "changed-object-file-preimage":
+        a["object_inspection"]["object_format"] += " changed"
+    elif mutation == "changed-object-exports-preimage":
+        a["object_inspection"]["exports"] += "\nextra exported symbol"
+    elif mutation == "changed-object-undefined-preimage":
+        a["object_inspection"]["undefined"] = " U unreviewed"
+    elif mutation == "missing-object-inspection":
+        del a["object_inspection"]
+    elif mutation == "missing-manifest-count":
+        del a["manifest_entry_count"]
+    elif mutation == "changed-manifest-count":
+        a["manifest_entry_count"] += 1
+    elif mutation == "changed-compile-environment":
+        a["compile_environment"]["LC_ALL"] = "C.UTF-8"
     assert _verdict(bundle, summary) == "REJECT"
 
 
@@ -186,6 +237,27 @@ def test_even_well_formed_copied_dictionary_is_not_permission(actual):
     assert "AUTHORIZED" not in _verdict(untrusted_copy, summary)
     assert not any(x in (s6.NO_LOAD, s6.REJECT)
                    for x in ("ALLOW_NATIVE", "FIRST_LOAD_AUTHORIZED"))
+
+
+def test_p2_01_self_consistent_fake_sha_still_never_grants_load(actual):
+    """Recomputed digests catch contradictions, not forged real-world bytes.
+
+    An attacker can synthesize internally consistent digest records. Such a
+    record must still NEVER produce a Native load permission or a PASS.
+    """
+    original, summary = actual
+    fake = copy.deepcopy(original)
+    entry = fake[s6.STAGES[0]]
+    assert entry["object_sha256"] != "0" * 64
+    entry["object_sha256"] = "0" * 64
+    assert _verdict(fake, summary) == "REJECT"
+    entry["stage_digests"] = s6._recomputed_s3_stages(
+        entry, head=summary["head"], tree=summary["tree"],
+        manifest_sha=summary["manifest_sha256"],
+    )
+    assert re.fullmatch(r"[0-9a-f]{64}", entry["stage_digests"]["S2_object"])
+    assert _verdict(fake, summary) == "REVIEW_REQUIRED_NO_LOAD"
+    assert _verdict(fake, summary) != "AUTHORIZED"
 
 
 def test_review_scope_manifest_branch_guard_and_no_loader():

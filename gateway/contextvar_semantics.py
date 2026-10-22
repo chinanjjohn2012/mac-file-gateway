@@ -23,6 +23,53 @@ def _touches_constructor_member(target: ast.AST) -> bool:
     return False
 
 
+_IMPORT_REGISTRY_MEMBERS = frozenset({
+    "modules", "meta_path", "path_hooks", "path_importer_cache",
+})
+_MODULE_PROVENANCE_MUTATIONS = frozenset({
+    "__class__", "__getattribute__", "__getattr__",
+    "__import__", "__spec__", "__loader__", "__path__", "__package__",
+})
+_DYNAMIC_IMPORT_OPERATIONS = frozenset({
+    "import_module", "reload", "invalidate_caches",
+})
+
+
+def _has_unproven_import_identity(tree: ast.AST) -> bool:
+    """Fail closed when source can affect module identity or import resolution.
+
+    A stable import of contextvars does not prove its object remains the
+    stdlib module. Module-type mutation, import-cache edits and import hooks
+    make constructor provenance dynamic. Opaque registry aliases cannot be
+    positively verified without executing source code.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            # Including Load catches cache = sys.modules as well as direct
+            # sys.modules["contextvars"] = FakeModule().
+            if node.attr in _IMPORT_REGISTRY_MEMBERS:
+                return True
+            if (isinstance(node.ctx, (ast.Store, ast.Del))
+                    and node.attr in _MODULE_PROVENANCE_MUTATIONS):
+                return True
+            if node.attr in _DYNAMIC_IMPORT_OPERATIONS:
+                return True
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            if node.module == "sys" and any(
+                    alias.name in _IMPORT_REGISTRY_MEMBERS for alias in node.names):
+                return True
+            if node.module in ("importlib", "importlib.util") and any(
+                    alias.name in _DYNAMIC_IMPORT_OPERATIONS for alias in node.names):
+                return True
+        elif isinstance(node, ast.Subscript):
+            # The target of an opaque mapping may be a sys.modules alias.
+            if (isinstance(node.ctx, (ast.Store, ast.Del))
+                    and isinstance(node.slice, ast.Constant)
+                    and node.slice.value == "contextvars"):
+                return True
+    return False
+
+
 def _bound_names(node: ast.AST) -> tuple[str, ...]:
     """Names bound or deleted by explicit *and implicit* Python syntax.
 
@@ -74,6 +121,10 @@ def proven_contextvar_lines(source: str) -> list[int]:
         or (isinstance(node, ast.Attribute) and node.attr in reflective_attributes)
         for node in ast.walk(tree)
     ):
+        return []
+    # Import names are insufficient proof if the importing module object,
+    # sys.modules cache, or an import hook can be changed in this file.
+    if _has_unproven_import_identity(tree):
         return []
     # A module import can be stable while its ContextVar constructor member
     # is rebound. Attribute(Store/Del), including annotated/augmented

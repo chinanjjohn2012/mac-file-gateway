@@ -196,10 +196,11 @@ def _proven_source_subset(tree: ast.Module) -> bool:
     stable_imports = module_aliases | constructor_aliases | sys_aliases | (
         contextlib_aliases | contextmanager_aliases
     )
-    if any(
-        sum(name in _bound_names(node) for node in ast.walk(tree)) != 1
-        for name in stable_imports
-    ):
+    binding_counts: dict[str, int] = {}
+    for node in ast.walk(tree):
+        for name in _bound_names(node):
+            binding_counts[name] = binding_counts.get(name, 0) + 1
+    if any(binding_counts.get(name) != 1 for name in stable_imports):
         return False
 
     def pure_value(node: ast.AST) -> bool:
@@ -207,11 +208,16 @@ def _proven_source_subset(tree: ast.Module) -> bool:
             return type(node.value) in (type(None), bool, int, float, complex, str, bytes)
         if isinstance(node, ast.Name):
             return isinstance(node.ctx, ast.Load)
-        if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        if isinstance(node, (ast.Tuple, ast.List)):
             return all(pure_value(element) for element in node.elts)
         if isinstance(node, ast.Dict):
-            return all(key is not None and pure_value(key) and pure_value(value)
-                       for key, value in zip(node.keys, node.values))
+            # Unknown keys can call arbitrary __hash__ during construction.
+            return all(
+                isinstance(key, ast.Constant)
+                and type(key.value) in (str, int, float, bool, bytes, type(None))
+                and pure_value(value)
+                for key, value in zip(node.keys, node.values)
+            )
         return False
 
     def contextvar_constructor(node: ast.AST) -> bool:
@@ -281,7 +287,9 @@ def _proven_source_subset(tree: ast.Module) -> bool:
             value = node.value
             if isinstance(value, ast.Constant):
                 return pure_value(value)
-            if isinstance(value, (ast.Yield, ast.YieldFrom)):
+            if isinstance(value, ast.Yield):
+                # yield from invokes an arbitrary iterator protocol; bare
+                # yield evaluates only an already bound name/constant.
                 return value.value is None or pure_value(value.value)
             return cleanup and checked_contextvar_call(value, "reset")
         if isinstance(node, ast.Return):

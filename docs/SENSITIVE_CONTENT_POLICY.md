@@ -26,6 +26,13 @@ targeting `contextvars`. This is deliberately conservative: the analyzer
 cannot safely execute source to decide what an opaque import-cache mapping
 refers to. Ordinary `import sys` plus unrelated inspection such as
 `sys.platform` does not disable an otherwise proven ContextVar handle.
+An imported module namespace is equally unprovable when exposed through an
+`ImportFrom` alias: for example `from contextvars import __dict__ as registry`
+followed by mutation of `registry["ContextVar"]`. The analyzer examines
+the **imported member name**, not merely the local alias or literal key;
+`__dict__` and `__builtins__` namespace exports are conservatively
+disqualified (including opaque reexports). Importing ordinary symbols
+such as `ContextVar` and `Token` continues to support proof.
 
 
 The ContextVar proof also fails closed when source code writes or deletes the

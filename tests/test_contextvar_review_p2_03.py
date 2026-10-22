@@ -78,9 +78,8 @@ def test_p2_03_untrusted_module_identity_never_exempted(tmp_path, source):
     root.mkdir()
     gateway = Gateway(root, allow_write=True)
     try:
-        # The actual isolated, 250-ms-bounded worker must not grant a proof.
-        assert proven_lines(source.encode("utf-8")) == ()
-
+        # First assert the public Gateway security boundary, so RED directly
+        # records a false acceptance rather than stopping at worker output.
         with pytest.raises(GatewayError) as error:
             gateway.create_file("blocked.py", source, dry_run=False)
         assert error.value.code == "sensitive_content"
@@ -93,6 +92,8 @@ def test_p2_03_untrusted_module_identity_never_exempted(tmp_path, source):
         assert "token = active.set(value)" not in visible["content"]
         result = gateway.search_files("token = active.set(value)", file_glob="existing.py")
         assert result["matches"] == []
+        # The actual isolated, bounded AST worker must agree with Gateway.
+        assert proven_lines(source.encode("utf-8")) == ()
     finally:
         gateway.close()
 

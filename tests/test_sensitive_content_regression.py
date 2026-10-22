@@ -97,7 +97,7 @@ def test_audit_heuristic_only_scoped_and_hard_secrets_rejected(tmp_path):
         sensitive_content_audit_until=until,
     )
     try:
-        candidate = 'token = "unterminated\n'
+        candidate = 'token = f"{runtime}" +\n'
         preview = gateway.create_file("src/a.py", candidate)
         assert preview["applied"] is False
         gateway.create_file("src/a.py", candidate, dry_run=False)
@@ -120,7 +120,7 @@ def test_audit_expired_before_apply_rejects(tmp_path):
                       sensitive_content_audit_paths=("src",),
                       sensitive_content_audit_until=until)
     try:
-        payload = 'token = "unterminated\n'
+        payload = 'token = f"{runtime}" +\n'
         assert gateway.create_file("src/a.py", payload)["applied"] is False
         gateway.sensitive_audit.deadline = 0.0
         with pytest.raises(GatewayError) as exc:
@@ -148,7 +148,7 @@ def test_audit_expiry_during_install_prevents_commit(tmp_path, monkeypatch):
     try:
         monkeypatch.setattr(write_storage, "install_file", expire_before_install)
         with pytest.raises(GatewayError) as exc:
-            gateway.create_file("src/a.py", 'token = "unterminated\n', dry_run=False)
+            gateway.create_file("src/a.py", 'token = f"{runtime}" +\n', dry_run=False)
         assert exc.value.code == "sensitive_content"
         assert not (root / "src" / "a.py").exists()
     finally:
@@ -269,7 +269,7 @@ def test_audit_expires_during_temporary_file_fsync(tmp_path, monkeypatch):
     try:
         monkeypatch.setattr(write_storage.os, "fsync", expire_on_fsync)
         with pytest.raises(GatewayError) as exc:
-            gateway.create_file("src/a.py", 'token = "unterminated\n', dry_run=False)
+            gateway.create_file("src/a.py", 'token = f"{runtime}" +\n', dry_run=False)
         assert exc.value.code == "sensitive_content"
         assert calls
         assert not (root / "src" / "a.py").exists()

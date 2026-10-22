@@ -332,3 +332,124 @@ def test_p2_03_normal_contextvar_file_still_accepted(tmp_path, head, newline, bo
         assert (root / "normal.py").read_bytes() == raw.encode("utf-8")
     finally:
         gateway.close()
+
+
+_REVIEW_OPERATOR_FAKE = (
+    "class FakeVar:\n"
+    "    def __init__(self, *args, **kwargs): pass\n"
+    "    def set(self, value): return 71\n"
+    "    def reset(self, token): pass\n"
+)
+_REVIEW_OPERATOR_SCOPE = (
+    "def scope(value):\n"
+    "    token = active.set(value)\n"
+    "    try:\n"
+    "        yield\n"
+    "    finally:\n"
+    "        active.reset(token)\n"
+)
+
+
+@pytest.mark.parametrize("preamble", [
+    # Independent Review #5617418021: no blacklisted spelling on AST
+    # attributes; __dict__ is present only as literal string.
+    "from operator import attrgetter\n"
+    "attrgetter('__dict__')(contextvars)['ContextVar'] = FakeVar\n",
+    "from operator import methodcaller\n"
+    "methodcaller('__setattr__', 'ContextVar', FakeVar)(contextvars)\n",
+    "from operator import attrgetter as resolve\n"
+    "resolve('__dict__')(contextvars)['ContextVar'] = FakeVar\n",
+    "from operator import methodcaller as apply\n"
+    "apply('__setattr__', 'ContextVar', FakeVar)(contextvars)\n",
+    # A newly introduced unknown top-level function or imported helper can
+    # have side effects even if no dangerous name appears in its AST.
+    "def change_module():\n"
+    "    contextvars.ContextVar = FakeVar\n"
+    "change_module()\n",
+    "from opaque_helper import innocuous_name\n",
+    # A generic comprehension evaluates unknown operations at module import.
+    "items = [f(x) for x in (1, 2)]\n",
+])
+def test_p2_03_unknown_module_executable_syntax_denied(tmp_path, preamble):
+    source = (
+        "import contextvars\n" + _REVIEW_OPERATOR_FAKE + preamble
+        + "active = contextvars.ContextVar('active')\n"
+        + _REVIEW_OPERATOR_SCOPE
+    )
+    root = tmp_path / "project"
+    root.mkdir()
+    gateway = Gateway(root, allow_write=True)
+    try:
+        with pytest.raises(GatewayError) as exc:
+            gateway.create_file("blocked.py", source, dry_run=False)
+        assert exc.value.code == "sensitive_content"
+        assert not (root / "blocked.py").exists()
+
+        (root / "existing.py").write_text(source, encoding="utf-8")
+        read = gateway.read_file("existing.py")
+        assert read["redacted_lines"] >= 1
+        assert "token = active.set(value)" not in read["content"]
+        assert gateway.search_files(
+            "token = active.set(value)", file_glob="existing.py",
+        )["matches"] == []
+        assert proven_lines(source.encode("utf-8")) == ()
+    finally:
+        gateway.close()
+
+
+@pytest.mark.parametrize("extra,tail", [
+    ("@unknown_decorator\n", ""),
+    ("", "    unknown_side_effect()\n"),
+    ("", "    other = helper()\n"),
+    ("", "    active.set(helper())\n"),
+])
+def test_p2_03_unknown_function_effects_denied(tmp_path, extra, tail):
+    source = (
+        "from contextvars import ContextVar\n"
+        "active = ContextVar('active')\n"
+        + extra + "def scope(value):\n"
+        + tail
+        + "    token = active.set(value)\n"
+          "    try:\n"
+          "        yield\n"
+          "    finally:\n"
+          "        active.reset(token)\n"
+    )
+    root = tmp_path / "project"
+    root.mkdir()
+    gateway = Gateway(root, allow_write=True)
+    try:
+        with pytest.raises(GatewayError) as exc:
+            gateway.create_file("blocked.py", source, dry_run=False)
+        assert exc.value.code == "sensitive_content"
+        assert not (root / "blocked.py").exists()
+        assert proven_lines(source.encode("utf-8")) == ()
+    finally:
+        gateway.close()
+
+
+@pytest.mark.parametrize("extra", [
+    "from builtins import len as count\n",
+    "from builtins import str as make_text\n",
+    "from types import ModuleType\n",
+    "import sys\nruntime_platform = sys.platform\n",
+])
+def test_p2_03_positive_static_module_subset(tmp_path, extra):
+    source = (
+        extra
+        + "from contextvars import ContextVar\n"
+        + "active = ContextVar('active')\n"
+        + _REVIEW_OPERATOR_SCOPE
+    )
+    root = tmp_path / "project"
+    root.mkdir()
+    gateway = Gateway(root, allow_write=True)
+    try:
+        assert len(proven_lines(source.encode("utf-8"))) == 1
+        written = gateway.create_file("good.py", source, dry_run=False)
+        assert written["applied"]
+        read = gateway.read_file("good.py")
+        assert read["redacted_lines"] == 0
+        assert "token = active.set(value)" in read["content"]
+    finally:
+        gateway.close()

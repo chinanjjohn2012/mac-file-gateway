@@ -61,6 +61,7 @@ class FileWriter:
         return {"enabled": self.gateway.allow_write,
                 "paths": ["/".join(p) or "." for p in self.paths] or ["."],
                 "dry_run_default": True, "source_hash_required_for_updates": True,
+                "sensitive_content": self.gateway.sensitive_audit.status(),
                 "max_file_bytes": self.gateway.limits.max_file_bytes,
                 "backup_directory": storage.BACKUP_DIR,
                 "max_backup_files": storage.BACKUP_COUNT_LIMIT,
@@ -102,6 +103,33 @@ class FileWriter:
         if reject_sensitive and self.gateway._visibility.is_sensitive(text):
             raise GatewayError("sensitive_content", "Credential-like content is not accepted by this gateway's write policy.")
         return raw
+
+    def _reject_candidate(self, canonical: str, raw: bytes, previous: bytes | None = None) -> bool:
+        """Return whether temporary audit was required for an allowed candidate."""
+        from collections import Counter
+        source = () if previous is None else self.gateway._visibility.classify(canonical, previous)[1]
+        candidate = self.gateway._visibility.classify(canonical, raw)[1]
+        source_counts = Counter((line, kind) for (line, kind) in source)
+        # For replacement, preserve existing unchanged hidden lines separately.
+        # New heuristic findings can be accepted only within an active scoped audit.
+        if previous is None:
+            introduced = [kind for _, kind in candidate]
+        else:
+            # Lines may move after an edit; compare exact hidden line text with
+            # classification severity, never compare only a count of findings.
+            source_text = previous.decode('utf-8-sig').splitlines()
+            candidate_text = raw.decode('utf-8-sig').splitlines()
+            old = Counter((source_text[n - 1], kind) for n, kind in source)
+            new = Counter((candidate_text[n - 1], kind) for n, kind in candidate)
+            introduced = list((new - old).elements())
+            introduced = [kind for _, kind in introduced]
+        if not introduced:
+            return False
+        if "hard" in introduced:
+            raise GatewayError("sensitive_content", "Credential-like content is not accepted by this gateway's write policy.")
+        if not self.gateway.sensitive_audit.allows(canonical):
+            raise GatewayError("sensitive_content", "Credential-like content is not accepted by this gateway's write policy.")
+        return True
 
     @staticmethod
     def _visible_match_spans(source_text: str, old_text: str) -> list[tuple[int, int]]:
@@ -199,13 +227,11 @@ class FileWriter:
                     if not self.gateway._visibility.preserves_hidden_lines(
                             source_text, updated_text, visible_matches, new_text, canonical):
                         raise GatewayError("sensitive_content", "Edits may not expose or merge protected source lines.")
-                    if self.gateway._visibility.new_sensitive_content(source_text, updated_text, canonical):
-                        raise GatewayError("sensitive_content", "Edits may not introduce protected content.")
                     raw = self._content(updated_text, reject_sensitive=False)
+                    audit_needed = self._reject_candidate(canonical, raw, previous)
                 else:
                     raw = self._content(content, reject_sensitive=False)
-                    if self.gateway._visibility.is_sensitive(raw.decode('utf-8-sig'), canonical):
-                        raise GatewayError('sensitive_content', 'Credential-like content is not accepted by this gateway\'s write policy.')
+                    audit_needed = self._reject_candidate(canonical, raw)
                 changed = snapshot is None or raw != previous
                 diff, truncated = _preview(previous, raw, canonical, policy=self.gateway._visibility)
                 result = {"operation": operation, "path": canonical, "dry_run": dry_run,
@@ -218,12 +244,16 @@ class FileWriter:
                     result["replacements"] = replacements
                 if dry_run or not changed:
                     return result
+                if audit_needed and not self.gateway.sensitive_audit.allows(canonical):
+                    raise GatewayError('sensitive_content', 'Temporary sensitive audit authorization expired.')
                 if snapshot is not None:
                     assert state is not None
                     result["backup_path"] = storage.save_backup(state, canonical, snapshot.raw, snapshot.sha256,
                                                                  retention_days=self.gateway.backup_retention_days)
 
                 def verify() -> None:
+                    if audit_needed and not self.gateway.sensitive_audit.allows(canonical):
+                        raise GatewayError('sensitive_content', 'Temporary sensitive audit authorization expired before install.')
                     if snapshot is None:
                         self._absent(parent, parts[-1])
                         return

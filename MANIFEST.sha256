@@ -14,6 +14,7 @@ dcb1790877b6084094c651ea8dc66ce0cf31c1fca29b2054d579016b474e9f5f  ./.github/work
 1fbb1820c977b3d91d037633ea8d5948f91afa84b8710679d3175ef4f56e211d  ./.github/workflows/c3-candidate-b-t01-r2b-r2b-r2-adapter-source.yml
 c7fb5892d488a0f826c5732543c64c821d45dcc06d9e84d07eeb6cc7ea8ac99a  ./.github/workflows/c3-candidate-b-t01-r2b-r2b-r2-preload-provenance-d1-design.yml
 b92f4885a5011352c9b6fef40d9562881beee028d79499c16437431e5897623e  ./.github/workflows/c3-candidate-b-t01-r2b-r2b-r2-s0-abi-proof.yml
+b5071efb438cf9f33c3a29a57e2bb0bf885e23bc334689abf3c49dec83e809ec  ./.github/workflows/c3-candidate-b-t01-r2b-r2b-r2-s2-object-proof.yml
 dced66ab5b87cee6c0e38244b8581be0de69b0e06534a54dc2b585972359a0ad  ./.github/workflows/c3-candidate-b-term-native.yml
 0dadaf6bd4f57a24546f103bfb110685ad12964dc442f9d41bdb8d72cfd05e56  ./.github/workflows/controlled-exec-tests.yml
 ef06acea97a3c12d0a236a36d6d1bd74b735c62b712e3ad69e50c6f87ac90b90  ./.gitignore
@@ -62,6 +63,7 @@ adeadae68e33559338f2c5ec5249070ac4b0392e7ec7d4ac91c08b5fa4d4bb3b  ./docs/researc
 120bbe4e2e78d720861a33f29d408284b74dcb3657df180fb9e9aeb147762634  ./docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2b-r1-linked-binary-inspection.md
 b76a9ac2bc4bd087798c8dd04152e165016c77cbf36d299017ae456337a726ee  ./docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2b-r2-preload-provenance-d1-design.md
 9ecbef38e00351ebbc15cd758c4adffa3b421fb7ec20c5c27c1d794d26651200  ./docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2b-r2-s0-abi-proof.md
+bb647646b1fc4b938de5702571682e9d875fd47b990d6d94b3aed09da802cb19  ./docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2b-r2-s2-object-proof.md
 8017f39e9c15351785f04d878a5c3f122fe3614fc9ff1f23d358f1625fd225ed  ./docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2b-r2-source-only-adapter.md
 1fa8e0b8fa1fc3ccdbea276ec782c050f6dc60af46f156887f000eade32a68e5  ./docs/research/phase2-lite-c3/candidate-b-isolated-plan.md
 1e95a8424b5cae7d8c47cbb30269ea0b773edc50df03eb78151f93553f5ee284  ./docs/superpowers/plans/2026-09-22-guarded-writes.md
@@ -134,6 +136,7 @@ ccbd61b4736e8137ba8f68169814f89b77cd9a744134fbd01cbc4f23717ce367  ./tests/test_c
 7bec05c8a57d3c57f7675db092b560feabc9e4d9f41d8b66c5a86e1a48456c6c  ./tests/test_c3_candidate_b_t01_r2b_r2b_r2_preload_d1_design.py
 985d2466a026e2d4fa2f4bacff5656bb9016db62c5443b975dc5d8fdd4bf7092  ./tests/test_c3_candidate_b_t01_r2b_r2b_r2_source_only_adapter.py
 6bfdb11207c829ebf3a293ce21743f3e5d0f629ac7774320447d57ff6274564a  ./tests/test_c3_candidate_b_t01_s0_abi_proof.py
+44bc3208a4c735fb98af8188b9ad354458b073441b9a9bf8b130dc7a9e1379bc  ./tests/test_c3_candidate_b_t01_s2_object_proof.py
 060d09c5d6a102c9ae9aa5689b066ef1baf59e72dcb0f8fdb8f3b48e58c1ee01  ./tests/test_c3_candidate_b_term.py
 199ec7e6958c1f21aa8ca14ac1af8b9868490621e02f67e9a3926eaf5957cef1  ./tests/test_cli.py
 599bdd040fa4fd89f1baa9a431e5fe230e6f4509938008cda22d86caccc1db37  ./tests/test_command_http.py
@@ -196,6 +199,7 @@ df9e860e07dbac8ee27694695b8dc8602ddcd4ddc7fa9bcfe2e96472f6fe1019  ./tools/resear
 5a1292787584632fac20c86bbe62e50153e82b0ecb36ad190446bf4b7b714195  ./tools/research/c3_candidate_b_t01_no_signal_candidate.c
 22cf1f0e9037495f0e75d4004dd48d38f0893180fa8da7aca6d09a1fa2ad8628  ./tools/research/c3_candidate_b_t01_r2_source_only_adapter.py
 32a0f43aef21793c7cc04dfbb0ed39847dbdd002d408b5d4b945134fcd0e0764  ./tools/research/c3_candidate_b_t01_s0_abi_proof.py
+8e3aefe862da92776ec678e164345ad7d86222c945557510b2cc5fd80a59ad28  ./tools/research/c3_candidate_b_t01_s2_object_proof.py
 1a4dd92a92eca37b96933d076abcc1f1bd47b343d6081e6e22e5f567c7172ab6  ./tools/research/c3_candidate_b_term.c
 b7b5d835d57f8d0b3cd173d6ad138457b7ccef1f7aef97be067abd01486689d3  ./tools/research/run_c1_fd_probe.py
 c18800caf862377a3dfabc08f95e525fa8fc0c6e1d305327656261315ad81b2f  ./tools/research/run_c2_pgid_probe.py

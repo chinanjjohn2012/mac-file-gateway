@@ -1,6 +1,16 @@
-# Sensitive content policy (V2)
+# Sensitive content policy (V2 — CURRENT DRAFT IMPLEMENTATION)
 
-Status: implementation in progress. Based on the Standards/Spec approved design against
+**Product-direction change (not yet implemented):** The user approved V3
+Python source classification based on actual credential-value evidence,
+not variable-name heuristics or ContextVar provenance. The proposed
+**authoritative V3 design** is
+[docs/SENSITIVE_CONTENT_CLASSIFICATION_V3_DESIGN.md](SENSITIVE_CONTENT_CLASSIFICATION_V3_DESIGN.md),
+awaiting independent Standards + Spec **design** review. The V2 code and
+ContextVar Worker below are transitional behavior on PR #52 only; they are
+**not** the newly approved product contract. Do not treat V3 as implemented or
+approved for merge, and do not advance code migration before design PASS.
+
+V2 implementation baseline: previously approved Standards/Spec design against
 `d3373649b968f23c85b3ee09d8e984eefecea5c3`.
 
 ## Positive static provenance subset (P2-03)

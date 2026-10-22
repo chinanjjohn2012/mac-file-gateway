@@ -133,6 +133,18 @@ def _literal_from_comment(rhs: str) -> str:
     try:
         expression = ast.parse(rhs, mode="eval").body
     except (SyntaxError, ValueError, RecursionError):
+        # A docstring may end with the surrounding triple-quote delimiter
+        # after an embedded field literal: password = "abc" """. Parse
+        # just the FIRST value token, not the enclosing source delimiter.
+        try:
+            first = next(tokenize.generate_tokens(io.StringIO(rhs).readline))
+            if first.type == tokenize.STRING:
+                first_value = ast.parse(first.string, mode="eval").body
+                if _value_literal(first_value):
+                    return "hard"
+        except (StopIteration, tokenize.TokenError, SyntaxError, ValueError,
+                RecursionError, IndentationError):
+            pass
         return "heuristic" if re.search(r"(?i)^\s*[rubf]*['\"]", rhs) else "none"
     return "hard" if _value_literal(expression) else "none"
 

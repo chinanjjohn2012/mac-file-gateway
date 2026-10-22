@@ -133,10 +133,228 @@ def _bound_names(node: ast.AST) -> tuple[str, ...]:
     return ()
 
 
+# Positive, source-local AST contract. A known name or module spelling is not
+# proof that arbitrary module initialization and function execution are safe.
+# New modules/syntax are not automatically privileged: reject the exemption
+# until their semantics are reviewed and explicitly admitted here.
+_TRUSTED_MODULE_IMPORTS = frozenset({
+    "contextvars", "builtins", "sys", "types", "contextlib", "typing",
+})
+_TRUSTED_EXPORTS = {
+    "__future__": frozenset({"annotations"}),
+    "contextvars": frozenset({"ContextVar", "Token"}),
+    "builtins": frozenset({"len", "str", "print"}),
+    "types": frozenset({"ModuleType"}),
+    "sys": frozenset({"platform"}),
+    "contextlib": frozenset({"contextmanager", "asynccontextmanager"}),
+    "typing": frozenset({"Any", "Optional", "Iterator", "Generator", "AsyncIterator"}),
+}
+
+
+def _proven_source_subset(tree: ast.Module) -> bool:
+    """Permit only inert declarations and checked ContextVar operations.
+
+    Neither an imported helper nor a seemingly harmless module-level call is
+    trusted to leave module identity unchanged. Default/decorator/annotation
+    expressions, overloaded operators and arbitrary function calls likewise
+    cannot establish stable provenance; no user code is executed to decide.
+    """
+    module_aliases: set[str] = set()
+    constructor_aliases: set[str] = set()
+    sys_aliases: set[str] = set()
+    contextlib_aliases: set[str] = set()
+    contextmanager_aliases: set[str] = set()
+
+    for statement in tree.body:
+        if isinstance(statement, ast.Import):
+            if any(entry.name not in _TRUSTED_MODULE_IMPORTS
+                   for entry in statement.names):
+                return False
+            for entry in statement.names:
+                alias = entry.asname or entry.name
+                if entry.name == "contextvars":
+                    module_aliases.add(alias)
+                elif entry.name == "sys":
+                    sys_aliases.add(alias)
+                elif entry.name == "contextlib":
+                    contextlib_aliases.add(alias)
+        elif isinstance(statement, ast.ImportFrom):
+            if (statement.level != 0 or statement.module not in _TRUSTED_EXPORTS
+                    or any(entry.name not in _TRUSTED_EXPORTS[statement.module]
+                           for entry in statement.names)):
+                return False
+            for entry in statement.names:
+                alias = entry.asname or entry.name
+                if statement.module == "contextvars" and entry.name == "ContextVar":
+                    constructor_aliases.add(alias)
+                elif statement.module == "contextlib" and entry.name in (
+                        "contextmanager", "asynccontextmanager"):
+                    contextmanager_aliases.add(alias)
+
+    # Multiple bindings of an imported capability invalidate its identity,
+    # even if the rebinding occurs through a nested scope or pattern.
+    stable_imports = module_aliases | constructor_aliases | sys_aliases | (
+        contextlib_aliases | contextmanager_aliases
+    )
+    if any(
+        sum(name in _bound_names(node) for node in ast.walk(tree)) != 1
+        for name in stable_imports
+    ):
+        return False
+
+    def pure_value(node: ast.AST) -> bool:
+        if isinstance(node, ast.Constant):
+            return type(node.value) in (type(None), bool, int, float, complex, str, bytes)
+        if isinstance(node, ast.Name):
+            return isinstance(node.ctx, ast.Load)
+        if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+            return all(pure_value(element) for element in node.elts)
+        if isinstance(node, ast.Dict):
+            return all(key is not None and pure_value(key) and pure_value(value)
+                       for key, value in zip(node.keys, node.values))
+        return False
+
+    def contextvar_constructor(node: ast.AST) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        fn = node.func
+        direct = isinstance(fn, ast.Name) and fn.id in constructor_aliases
+        dotted = (isinstance(fn, ast.Attribute) and fn.attr == "ContextVar"
+                  and isinstance(fn.value, ast.Name)
+                  and fn.value.id in module_aliases)
+        return (direct or dotted) and all(pure_value(a) for a in node.args) and all(
+            kw.arg is not None and kw.arg == "default" and pure_value(kw.value)
+            for kw in node.keywords
+        )
+
+    contextvars: set[str] = set()
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+            target = statement.targets[0]
+            if isinstance(target, ast.Name) and contextvar_constructor(statement.value):
+                contextvars.add(target.id)
+
+    def proven_contextmanager_decorator(node: ast.AST) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id in contextmanager_aliases
+        return (isinstance(node, ast.Attribute)
+                and node.attr in ("contextmanager", "asynccontextmanager")
+                and isinstance(node.value, ast.Name)
+                and node.value.id in contextlib_aliases)
+
+    def safe_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+        arguments = node.args
+        parameters = (
+            arguments.posonlyargs + arguments.args + arguments.kwonlyargs
+            + ([arguments.vararg] if arguments.vararg else [])
+            + ([arguments.kwarg] if arguments.kwarg else [])
+        )
+        if (arguments.defaults or any(x is not None for x in arguments.kw_defaults)
+                or node.returns is not None or getattr(node, "type_params", ())
+                or any(arg.annotation is not None for arg in parameters)):
+            return False
+        if node.decorator_list and not (
+            len(node.decorator_list) == 1
+            and proven_contextmanager_decorator(node.decorator_list[0])
+        ):
+            return False
+        return True
+
+    def checked_contextvar_call(value: ast.AST, member: str) -> bool:
+        if not isinstance(value, ast.Call):
+            return False
+        fn = value.func
+        if not (isinstance(fn, ast.Attribute) and fn.attr == member
+                and isinstance(fn.value, ast.Name) and fn.value.id in contextvars
+                and len(value.args) == 1 and not value.keywords):
+            return False
+        if member == "reset":
+            return isinstance(value.args[0], ast.Name)
+        # Even a simple overloaded "+" or a user-defined __getitem__ can
+        # mutate globals while evaluating set() arguments.
+        return pure_value(value.args[0])
+
+    def safe_function_statement(node: ast.stmt, *, cleanup: bool = False) -> bool:
+        if isinstance(node, ast.Pass):
+            return True
+        if isinstance(node, ast.Expr):
+            value = node.value
+            if isinstance(value, ast.Constant):
+                return pure_value(value)
+            if isinstance(value, (ast.Yield, ast.YieldFrom)):
+                return value.value is None or pure_value(value.value)
+            return cleanup and checked_contextvar_call(value, "reset")
+        if isinstance(node, ast.Return):
+            return node.value is None or pure_value(node.value)
+        if isinstance(node, ast.Assign):
+            return (len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                    and (pure_value(node.value)
+                         or checked_contextvar_call(node.value, "set")))
+        if isinstance(node, ast.Try):
+            return (
+                not node.handlers and not node.orelse
+                and bool(node.body)
+                and all(safe_function_statement(s) for s in node.body)
+                and len(node.finalbody) == 1
+                and safe_function_statement(node.finalbody[0], cleanup=True)
+            )
+        # Match, with, nested definitions, arbitrary calls and dynamic control
+        # flow cannot be treated as evidence that module identity is stable.
+        return False
+
+    def safe_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+        return safe_signature(node) and all(
+            safe_function_statement(stmt) for stmt in node.body
+        )
+
+    def safe_class(node: ast.ClassDef) -> bool:
+        if (node.bases or node.keywords or node.decorator_list
+                or getattr(node, "type_params", ())):
+            return False
+        return all(
+            safe_function(stmt) if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+            else isinstance(stmt, ast.Pass)
+                 or (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant))
+            for stmt in node.body
+        )
+
+    for statement in tree.body:
+        if isinstance(statement, (ast.Import, ast.ImportFrom)):
+            continue
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not safe_function(statement):
+                return False
+        elif isinstance(statement, ast.ClassDef):
+            if not safe_class(statement):
+                return False
+        elif isinstance(statement, ast.Assign):
+            if len(statement.targets) != 1 or not isinstance(statement.targets[0], ast.Name):
+                return False
+            value = statement.value
+            is_sys_platform = (
+                isinstance(value, ast.Attribute) and value.attr == "platform"
+                and isinstance(value.value, ast.Name)
+                and value.value.id in sys_aliases
+            )
+            if not (pure_value(value) or contextvar_constructor(value) or is_sys_platform):
+                return False
+        elif isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant):
+            continue
+        elif isinstance(statement, ast.Pass):
+            continue
+        else:
+            return False
+    return True
+
+
 def proven_contextvar_lines(source: str) -> list[int]:
     """Return assignment line numbers with a conservative ContextVar proof."""
     tree = ast.parse(source)
     if sum(1 for _ in ast.walk(tree)) > 8192:
+        return []
+    # This positive grammar is the admission gate. Name deny rules below
+    # remain defense-in-depth, never the sole basis for a security exemption.
+    if not _proven_source_subset(tree):
         return []
     # Reject reflective namespace access even when a builtin is passed as a
     # first-class value (e.g. alias = globals), not only when called directly.

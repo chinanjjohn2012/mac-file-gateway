@@ -219,8 +219,8 @@ def test_r2b_r1_contract_has_only_one_owned_fixture_and_frozen_modes():
         "known-descendant-observation",
     )
     for name in ("C3B03_TEST_NO_SIGNAL_STUB", "no kernel signal",
-                 "controller", "anchor", "worker",
-                 "ORIGINAL_POLICY", "no-signal C probe",
+                 "Controller", "anchor", "worker",
+                 "ORIGINAL_POLICY", "probe adapter",
                  "R2b-R1", "R2b-R2", "NOT_RUN/BLOCK"):
         assert name in s, name
 

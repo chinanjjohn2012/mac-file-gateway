@@ -14,6 +14,14 @@ def proven_contextvar_lines(source: str) -> list[int]:
     tree = ast.parse(source)
     if sum(1 for _ in ast.walk(tree)) > 8192:
         return []
+    # Reject dynamic namespace and reflection operations that defeat local
+    # proof of stable module-level object identity.
+    unsafe_calls = {"exec", "eval", "globals", "locals", "setattr", "delattr", "__import__"}
+    if any(isinstance(n, ast.Call) and (
+        isinstance(n.func, ast.Name) and n.func.id in unsafe_calls
+        or isinstance(n.func, ast.Attribute) and n.func.attr in {"__setattr__", "__delattr__"}
+    ) for n in ast.walk(tree)):
+        return []
     module_aliases: set[str] = set()
     constructor_aliases: set[str] = set()
     for node in tree.body:
@@ -115,12 +123,18 @@ def proven_contextvar_lines(source: str) -> list[int]:
                     continue
                 if any(isinstance(n, ast.arg) and n.arg == token_name for n in subnodes):
                     continue
-                resets = [n for n in ast.walk(candidate.finalbody[0])
-                          if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                          and n.func.attr == "reset" and isinstance(n.func.value, ast.Name)
-                          and n.func.value.id == func.value.id and len(n.args) == 1
-                          and isinstance(n.args[0], ast.Name) and n.args[0].id == token_name]
-                if len(resets) != 1:
+                # The cleanup must be a direct, unconditional reset call.
+                if len(candidate.finalbody) != 1:
+                    continue
+                reset_statement = candidate.finalbody[0]
+                if not isinstance(reset_statement, ast.Expr):
+                    continue
+                reset = reset_statement.value
+                if not (isinstance(reset, ast.Call) and isinstance(reset.func, ast.Attribute)
+                        and reset.func.attr == "reset" and isinstance(reset.func.value, ast.Name)
+                        and reset.func.value.id == func.value.id and len(reset.args) == 1
+                        and not reset.keywords and isinstance(reset.args[0], ast.Name)
+                        and reset.args[0].id == token_name):
                     continue
                 approved.append(assign.lineno)
     return sorted(set(approved))

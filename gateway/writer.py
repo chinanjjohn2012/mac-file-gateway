@@ -109,6 +109,12 @@ class FileWriter:
         from collections import Counter
         source = () if previous is None else self.gateway._visibility.classify(canonical, previous)[1]
         candidate = self.gateway._visibility.classify(canonical, raw)[1]
+        if any(kind == "scan_unavailable" for _, kind in (*source, *candidate)):
+            raise GatewayError(
+                "sensitive_content",
+                "Python source could not be completely scanned; no write was permitted.",
+                details={"rule_id": "SCAN_UNAVAILABLE", "severity": "scan_unavailable"},
+            )
         # For replacement, preserve existing unchanged hidden lines separately.
         # New heuristic findings can be accepted only within an active scoped audit.
         if previous is None:
@@ -213,7 +219,14 @@ class FileWriter:
                     previous = b""
                 else:
                     snapshot = self.gateway._snapshot_at(parent, parts[-1])
-                    source_has_sensitive = self.gateway._visibility.is_sensitive(snapshot.text, canonical)
+                    source_classification = self.gateway._visibility.classify(canonical, snapshot.raw)
+                    if any(kind == "scan_unavailable" for _, kind in source_classification[1]):
+                        raise GatewayError(
+                            "sensitive_content",
+                            "Source cannot be completely scanned; no change was permitted.",
+                            details={"rule_id": "SCAN_UNAVAILABLE", "severity": "scan_unavailable"},
+                        )
+                    source_has_sensitive = any(source_classification[0])
                     if operation == "write" and source_has_sensitive:
                         raise GatewayError("sensitive_content", "This source contains redacted data and cannot be whole-file overwritten through the gateway.")
                     if not snapshot.metadata.st_mode & 0o222:

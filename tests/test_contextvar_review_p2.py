@@ -1,7 +1,10 @@
-"""Security regression contracts for independent PR #52 Review #5614007389.
+"""V3 migration of earlier ContextVar identity and binding regression cases.
 
-These use real Gateway file writes and reads, not only a standalone AST probe.
-Workspace source code is parsed but never imported or executed.
+The existing test inputs are retained, including module rebinding, match/case,
+implicit aliases and reset-handle reassignment. Under V3, a runtime identity
+change is not itself source credential material: no type proof is required.
+The Gateway still protects independent literal credentials on the same lines.
+Scanned snippets are never executed or imported by the test host.
 """
 from __future__ import annotations
 
@@ -53,8 +56,8 @@ _FAKE = (
     + "from contextvars import ContextVar\n"
     + "active = ContextVar()\n",
 ])
-def test_review_p2_01_constructor_member_rebinding_denied(tmp_path, header):
-    _assert_fails_closed(tmp_path, header + _SCOPE)
+def test_review_p2_01_constructor_member_rebinding_allowed_as_runtime_code(tmp_path, header):
+    _assert_source_value_only(tmp_path, header + _SCOPE)
 
 
 @pytest.mark.parametrize("header", [
@@ -92,8 +95,8 @@ def test_review_p2_01_constructor_member_rebinding_denied(tmp_path, header):
     + "    pass\n"
     + "active = ctx.ContextVar('active')\n",
 ])
-def test_review_p2_02_implicit_module_binding_denied(tmp_path, header):
-    _assert_fails_closed(tmp_path, header + _SCOPE)
+def test_review_p2_02_implicit_module_binding_allowed_as_runtime_code(tmp_path, header):
+    _assert_source_value_only(tmp_path, header + _SCOPE)
 
 
 @pytest.mark.parametrize("function_body", [
@@ -109,7 +112,7 @@ def test_review_p2_02_implicit_module_binding_denied(tmp_path, header):
     "    except Exception as active:\n"
     "        pass\n",
 ])
-def test_review_p2_02_implicit_function_binding_denied(tmp_path, function_body):
+def test_review_p2_02_implicit_function_binding_allowed_as_runtime_code(tmp_path, function_body):
     source = (
         "from contextvars import ContextVar\n"
         "active = ContextVar('active')\n"
@@ -121,7 +124,7 @@ def test_review_p2_02_implicit_function_binding_denied(tmp_path, function_body):
           "    finally:\n"
           "        active.reset(token)\n"
     )
-    _assert_fails_closed(tmp_path, source)
+    _assert_source_value_only(tmp_path, source)
 
 
 @pytest.mark.parametrize("extra", [
@@ -134,7 +137,7 @@ def test_review_p2_02_implicit_function_binding_denied(tmp_path, function_body):
     "        except Exception as token:\n"
     "            pass\n",
 ])
-def test_review_p2_02_reset_handle_implicitly_rebound_denied(tmp_path, extra):
+def test_review_p2_02_reset_handle_implicitly_rebound_allowed_as_runtime_code(tmp_path, extra):
     source = (
         "from contextvars import ContextVar\n"
         "active = ContextVar('active')\n"
@@ -145,7 +148,7 @@ def test_review_p2_02_reset_handle_implicitly_rebound_denied(tmp_path, extra):
         + "    finally:\n"
           "        active.reset(token)\n"
     )
-    _assert_fails_closed(tmp_path, source)
+    _assert_source_value_only(tmp_path, source)
 
 
 @pytest.mark.parametrize("source", [
@@ -174,23 +177,43 @@ def test_review_normal_contextvar_still_allowed(tmp_path, source):
         gateway.close()
 
 
-def _assert_fails_closed(tmp_path, source):
+
+def _assert_source_value_only(tmp_path, source):
     root = tmp_path / "project"
     root.mkdir()
     gateway = Gateway(root, allow_write=True)
     try:
-        with pytest.raises(GatewayError) as blocked:
-            gateway.create_file("blocked.py", source, dry_run=False)
-        assert blocked.value.code == "sensitive_content"
-        assert not (root / "blocked.py").exists()
+        written = gateway.create_file("ordinary.py", source, dry_run=False)
+        assert written["applied"] is True
+        read = gateway.read_file("ordinary.py")
+        assert read["redacted_lines"] == 0
+        assert "token = active.set(value)" in read["content"]
+        matches = gateway.search_files(
+            "token = active.set(value)", file_glob="ordinary.py"
+        )
+        assert matches["matches"]
+        assert (root / "ordinary.py").read_bytes() == source.encode("utf-8")
+    finally:
+        gateway.close()
 
-        # Even an existing on-disk file must not reveal the handle line through
-        # read_file or search_files, regardless of the write admission result.
-        (root / "existing.py").write_text(source, encoding="utf-8")
-        read = gateway.read_file("existing.py")
-        assert read["redacted_lines"] >= 1
-        assert "token = active.set(value)" not in read["content"]
-        matches = gateway.search_files("token = active.set(value)", file_glob="existing.py")
-        assert matches["matches"] == []
+
+def test_review_dynamic_source_still_rejects_independent_hard_value(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    source = (
+        "import contextvars\n"
+        "contextvars.ContextVar = FakeVar\n"
+        "active = contextvars.ContextVar()\n"
+        + _SCOPE.replace(
+            "token = active.set(value)",
+            'token = active.set(value); password = "real-literal"',
+        )
+    )
+    gateway = Gateway(root, allow_write=True)
+    try:
+        with pytest.raises(GatewayError) as exc:
+            gateway.create_file("blocked.py", source, dry_run=False)
+        assert exc.value.code == "sensitive_content"
+        assert not (root / "blocked.py").exists()
     finally:
         gateway.close()

@@ -68,6 +68,20 @@ _CACHE_MODULE = (
     + "cache.update({'contextvars': FakeModule()})\n"
     + "import contextvars\n"
     + "active = contextvars.ContextVar()\n" + _SCOPE,
+    "from sys import modules as cache\n"
+    + "from types import SimpleNamespace\n"
+    + _FAKE
+    + "cache['contextvars'] = SimpleNamespace(ContextVar=FakeVar)\n"
+    + "from contextvars import ContextVar\n"
+    + "active = ContextVar('active')\n" + _SCOPE,
+    "import sys\n"
+    + "sys.meta_path.insert(0, untrusted_finder)\n"
+    + "from contextvars import ContextVar\n"
+    + "active = ContextVar('active')\n" + _SCOPE,
+    "import builtins\n"
+    + "builtins.__import__ = untrusted_import\n"
+    + "from contextvars import ContextVar\n"
+    + "active = ContextVar('active')\n" + _SCOPE,
     "import sys\n" + _CACHE_MODULE
     + "sys.modules.update({'contextvars': FakeModule()})\n"
     + "from contextvars import ContextVar\n"
@@ -103,6 +117,9 @@ def test_p2_03_untrusted_module_identity_never_exempted(tmp_path, source):
 @pytest.mark.parametrize("head", [
     "import contextvars\nactive = contextvars.ContextVar('active')\n",
     "from contextvars import ContextVar\nactive = ContextVar('active')\n",
+    # Benign sys import/inspection alone should not invalidate provenance.
+    "import sys\nruntime_platform = sys.platform\n"
+    "import contextvars\nactive = contextvars.ContextVar('active')\n",
 ])
 def test_p2_03_normal_contextvar_file_still_accepted(tmp_path, head, newline, bom):
     raw = (bom + head + _SCOPE).replace("\n", newline)

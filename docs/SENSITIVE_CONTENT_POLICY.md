@@ -34,6 +34,17 @@ the **imported member name**, not merely the local alias or literal key;
 disqualified (including opaque reexports). Importing ordinary symbols
 such as `ContextVar` and `Token` continues to support proof.
 
+Imported reflection primitives are classified by their original
+`ImportFrom.alias.name`, **before** applying `as` renames, across builtins
+and opaque module reexports. The same central list covers direct expression
+names, attribute access and imported functions such as `setattr`, `delattr`,
+`getattr`, `vars`, `globals`, `locals`, `exec`, `eval`, `compile`
+and `__import__`. Star imports (`from module import *`) also disable
+provenance exemption because they may overwrite trusted module/constructor
+names without an explicit named assignment. Harmless explicit imports
+(`from builtins import len`, `str`, `print`) remain eligible; unknown
+reflection/namespace sources fail closed without executing project code.
+
 
 The ContextVar proof also fails closed when source code writes or deletes the
 `ContextVar` constructor module attribute or any of its nested members. The

@@ -266,6 +266,61 @@ def test_actual_elf_virtual_load_and_dynamic_mapping_denies_mutants(
         scan.static_executable_ranges(bytes(raw), "Linux")
 
 
+
+@pytest.mark.parametrize("mutation", (
+    "linkedit-vm-byte-overlap",
+    "linkedit-vm-page-alias-without-byte-overlap",
+    "linkedit-vm-end-uint64-overflow",
+    "linkedit-file-vm-displacement",
+    "text-vm-end-uint64-overflow",
+))
+def test_actual_macho_virtual_segments_and_linkedit_mapping_denies_mutants(
+        actual, mutation):
+    """P2-02 RED first on original inert Mach-O bytes, then GREEN.
+
+    These are mutations of memory-only snapshots. They are NEVER passed to
+    dyld, the OS loader or any FFI function.
+    """
+    observed, _summary = actual
+    if observed["platform"] != "Darwin":
+        pytest.skip("Mach-O-specific negative; Linux ELF positives unchanged")
+    raw = bytearray(observed["linked_image_bytes"])
+    text = 32  # original first LC_SEGMENT_64 (152 bytes)
+    linkedit = text + scan.s3._DARWIN_CMDS[0][1]
+    assert struct.unpack_from("<I", raw, text)[0] == 0x19
+    assert struct.unpack_from("<I", raw, linkedit)[0] == 0x19
+    text_vmaddr, text_vmsize = struct.unpack_from("<QQ", raw, text + 24)
+    link_vmaddr, link_vmsize = struct.unpack_from("<QQ", raw, linkedit + 24)
+    assert (text_vmaddr, text_vmsize, link_vmaddr, link_vmsize) == (
+        0, 0x4000, 0x4000, 0x4000
+    )
+    if mutation == "linkedit-vm-byte-overlap":
+        struct.pack_into("<Q", raw, linkedit + 24, text_vmaddr)
+    elif mutation == "linkedit-vm-page-alias-without-byte-overlap":
+        # __TEXT and __LINKEDIT have disjoint VM *bytes*, but two load
+        # commands refer to the same arm64 16 KiB VM page.
+        struct.pack_into("<Q", raw, text + 32, text_vmsize + 0x100)
+        struct.pack_into("<Q", raw, linkedit + 24, link_vmaddr + 0x100)
+    elif mutation == "linkedit-vm-end-uint64-overflow":
+        struct.pack_into("<Q", raw, linkedit + 24, 0xFFFFFFFFFFFFFFF0)
+    elif mutation == "linkedit-file-vm-displacement":
+        # No VM overlap/overflow, yet linkedit maps different VA than the
+        # 0x4000 file offset relative to __TEXT. Existing parser accepts.
+        struct.pack_into("<Q", raw, linkedit + 24, link_vmaddr + 0x4000)
+    elif mutation == "text-vm-end-uint64-overflow":
+        changed = 0xFFFFFFFFFFFFF000
+        struct.pack_into("<Q", raw, text + 24, changed)
+        # Keep __TEXT,__text section-relative offset intact to prevent
+        # the existing per-section check masking the VM overflow.
+        sec = text + 72
+        section_file_offset = struct.unpack_from("<I", raw, sec + 48)[0]
+        struct.pack_into("<Q", raw, sec + 32, changed + section_file_offset)
+    else:
+        raise AssertionError("Unexpected P2-02 negative")
+    with pytest.raises(ValueError):
+        scan.static_executable_ranges(bytes(raw), "Darwin")
+
+
 @pytest.mark.parametrize("source", (None, [], "not bytes", b"", b"x" * 1048577))
 def test_non_binary_or_unbounded_input_is_rejected(source):
     with pytest.raises(ValueError):

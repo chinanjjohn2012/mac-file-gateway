@@ -34,10 +34,6 @@ class SensitiveContentPolicy:
         from .core import CREDENTIAL_ASSIGNMENT, CREDENTIAL_URI, TOKEN_VALUE, PRIVATE_KEY_BEGIN
         text = raw.decode("utf-8-sig")
         flags = self.sensitive_flags(text)
-        proven: set[int] = set()
-        if canonical_path.endswith(".py") and any(flags):
-            from .contextvar_analysis import proven_lines
-            proven = set(proven_lines(raw))
         findings: list[tuple[int, str]] = []
         for i, line in enumerate(text.splitlines(), 1):
             if not flags[i - 1]:
@@ -72,10 +68,7 @@ class SensitiveContentPolicy:
                 or literal
                 or (self._expr is not None and self._expr.search(line) is not None)
             )
-            if i in proven and not hard:
-                flags[i - 1] = False
-            else:
-                findings.append((i, "hard" if hard else "heuristic"))
+            findings.append((i, "hard" if hard else "heuristic"))
         return flags, tuple(findings)
 
     def full_flags(self, canonical_path: str, text: str) -> list[bool]:

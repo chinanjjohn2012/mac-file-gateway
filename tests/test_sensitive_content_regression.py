@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import hashlib
-
 import pytest
 
 from gateway.core import Gateway, GatewayError
@@ -105,9 +103,8 @@ def test_audit_heuristic_only_scoped_and_hard_secrets_rejected(tmp_path):
             gateway.create_file("other/b.py", candidate, dry_run=False)
         assert exc.value.code == "sensitive_content"
         with pytest.raises(GatewayError) as exc:
-            gateway.create_file("src/password.py", "password = 'hardcoded-secret'\n", dry_run=False)
-        # A protected filename or hard credential must still be denied.
-        assert exc.value.code in ("blocked_path", "sensitive_content")
+            gateway.create_file("src/ordinary.py", "password = 'hardcoded-secret'\n", dry_run=False)
+        assert exc.value.code == "sensitive_content"
         assert gateway.info()["write_policy"]["sensitive_content"]["write_mode"] == "audit"
     finally:
         gateway.close()

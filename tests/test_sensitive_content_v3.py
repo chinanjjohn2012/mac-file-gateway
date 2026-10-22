@@ -58,7 +58,7 @@ def test_v3_runtime_references_are_visible_writable_and_searchable(tmp_path, lin
     '# api_key: "actual-key"\n',
     '"""Credentials:\napi_key = "literal"\n"""\n',
     'def f():\n    """password = "abc" """\n    pass\n',
-    '"""api_key = \"abc\""""\n',
+    r'"""api_key = \"abc\""""' + "\n",
     'token = "prefix-" + part\n',
     'token = f"prefix-{runtime}"\n',
     'token = wrapper("literal")\n',

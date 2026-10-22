@@ -320,6 +320,16 @@ def _compile_link_observe() -> dict[str, object]:
             "compiler_entry_sha256_precompile": compiler_pre,
             "compiler_entry_sha256_postlink": compiler_post,
             "manifest_sha256": s0._sha_regular(MANIFEST)[0],
+            # Preserve the REAL S0/S1/S2 hash preimages so the S6 offline
+            # validator can recompute each stage instead of checking only
+            # that digests happen to have 64 valid hexadecimal characters.
+            # These are observations, never an authenticated loader chain.
+            "manifest_entry_count": len(items),
+            "compile_environment": dict(ENV),
+            "object_inspection": {
+                "object_format": desc, "exports": defined,
+                "undefined": undefined,
+            },
             "compile_argv": compile_argv, "link_argv": link_argv,
             "object_sha256": obj_sha, "linked_image_sha256": image_sha,
             "linked_header": kind, "image_owner_uid": image_stat.st_uid,

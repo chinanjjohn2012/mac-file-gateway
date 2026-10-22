@@ -40,6 +40,13 @@ _FAKE = (
     "import contextvars as ctx\n" + _FAKE
     + "ctx.ContextVar: type = FakeVar\n"
     + "active = ctx.ContextVar()\n",
+    # Mutation on the constructor member chain also invalidates proof.
+    "import contextvars as ctx\n" + _FAKE
+    + "ctx.ContextVar.__new__ = FakeVar\n"
+    + "active = ctx.ContextVar('active')\n",
+    "import contextvars as ctx\n" + _FAKE
+    + "del ctx.ContextVar.__doc__\n"
+    + "active = ctx.ContextVar('active')\n",
     # Importing a direct constructor after member rebinding is also unproven.
     "import contextvars\n" + _FAKE
     + "contextvars.ContextVar = FakeVar\n"

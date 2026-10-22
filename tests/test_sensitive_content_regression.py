@@ -244,3 +244,31 @@ def test_audit_does_not_allow_structured_kubernetes_credentials(tmp_path, payloa
         assert not (root / "src" / "cluster.yaml").exists()
     finally:
         gateway.close()
+
+
+def test_audit_expires_during_temporary_file_fsync(tmp_path, monkeypatch):
+    from gateway import write_storage
+    root = tmp_path / "project"
+    (root / "src").mkdir(parents=True)
+    until = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    gateway = Gateway(root, allow_write=True, write_paths=("src",),
+                      sensitive_content_audit_paths=("src",),
+                      sensitive_content_audit_until=until)
+    original_fsync = write_storage.os.fsync
+    calls = []
+
+    def expire_on_fsync(fd):
+        result = original_fsync(fd)
+        calls.append(fd)
+        gateway.sensitive_audit.deadline = 0.0
+        return result
+
+    try:
+        monkeypatch.setattr(write_storage.os, "fsync", expire_on_fsync)
+        with pytest.raises(GatewayError) as exc:
+            gateway.create_file("src/a.py", "token = vault.set(value)\n", dry_run=False)
+        assert exc.value.code == "sensitive_content"
+        assert calls
+        assert not (root / "src" / "a.py").exists()
+    finally:
+        gateway.close()

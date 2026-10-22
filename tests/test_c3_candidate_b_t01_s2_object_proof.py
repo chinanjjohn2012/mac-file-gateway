@@ -39,11 +39,11 @@ def actual_object():
 def test_actual_object_is_bound_to_frozen_source_and_current_git_tree(actual_object):
     report = actual_object
     assert report["source_sha256_precompile"] == (
-        report["source_sha256_postcompile"] == proof.s0.REVIEWED_C_SHA256
-    )
+        report["source_sha256_postcompile"]
+    ) == proof.s0.REVIEWED_C_SHA256
     assert report["header_sha256_precompile"] == (
-        report["header_sha256_postcompile"] == proof.s0.REVIEWED_HEADER_SHA256
-    )
+        report["header_sha256_postcompile"]
+    ) == proof.s0.REVIEWED_HEADER_SHA256
     assert report["reviewed_parent_head"] == (
         "37bd517932b6b99952fa19e091b5b8d94d45939a"
     )
@@ -184,7 +184,7 @@ def test_only_fixed_argv_fixed_tools_and_inert_source_are_available():
         "__future__", "hashlib", "os", "pathlib", "re", "stat",
         "tempfile", "time", "c3_candidate_b_t01_s0_abi_proof",
     }
-    assert "C3B03_TEST_NO_SIGNAL_STUB=1" in proof.FLAGS
+    assert "-DC3B03_TEST_NO_SIGNAL_STUB=1" in proof.FLAGS
     assert all(p.startswith("/usr/bin/") for v in proof.TOOLS.values() for p in v)
     for forbidden in ("ctypes.CDLL(", "cffi", "dlopen(", "killpg(",
                       "os.kill(", "os.getpgid(", "posix_spawn(",

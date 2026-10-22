@@ -203,7 +203,9 @@ class Gateway:
                  exec_runners: tuple[str, ...] = (),
                  protected_content_paths: tuple[str, ...] = (),
                  allow_git: bool = False, git_allowed_commands: tuple[str, ...] = (),
-                 git_state_dir: str | Path | None = None):
+                 git_state_dir: str | Path | None = None,
+                 sensitive_content_audit_paths: tuple[str, ...] = (),
+                 sensitive_content_audit_until: str | None = None):
         if type(allow_write) is not bool:
             raise GatewayError("invalid_argument", "allow_write must be a boolean.")
         if type(backup_retention_days) is not int or not 1 <= backup_retention_days <= 3650:
@@ -229,6 +231,13 @@ class Gateway:
         self._git_adapter_exposed = False
         self.backup_retention_days = backup_retention_days
         self.allow_write = allow_write
+        from .sensitive_audit import SensitiveAudit
+        if (sensitive_content_audit_paths or sensitive_content_audit_until) and not allow_write:
+            raise GatewayError("invalid_argument", "Sensitive audit requires enabled writes.")
+        self.sensitive_audit = SensitiveAudit(
+            paths=sensitive_content_audit_paths, expires_at=sensitive_content_audit_until,
+            write_paths=write_paths,
+        )
         self.allow_exec = allow_exec
         self.limits = limits or Limits()
         from .visibility import SensitiveContentPolicy

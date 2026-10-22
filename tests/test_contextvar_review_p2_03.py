@@ -126,6 +126,13 @@ def test_p2_03_untrusted_module_identity_never_exempted(tmp_path, source):
     ("from contextvars import __dict__ as registry\n"
      "from contextvars import ContextVar",
      "registry['ContextVar'] = FakeVar"),
+    ("from sys import __dict__ as sys_registry",
+     "cache = sys_registry['modules']\n"
+     "cache.update({'contextvars': FakeModule()})"),
+    ("from builtins import __dict__ as builtin_registry",
+     "builtin_registry.update({'__import__': fake_import})"),
+    ("from contextvars import __builtins__ as builtins_registry",
+     "builtins_registry.update({'__import__': fake_import})"),
 ])
 def test_p2_03_imported_module_namespace_never_exempted(tmp_path, namespace_import, mutation):
     # Review #5616180244: ImportFrom.alias is not an ast.Attribute.
@@ -167,6 +174,7 @@ def test_p2_03_imported_module_namespace_never_exempted(tmp_path, namespace_impo
 @pytest.mark.parametrize("head", [
     "import contextvars\nactive = contextvars.ContextVar('active')\n",
     "from contextvars import ContextVar\nactive = ContextVar('active')\n",
+    "from contextvars import ContextVar, Token\nactive = ContextVar('active')\n",
     # Benign sys import/inspection alone should not invalidate provenance.
     "import sys\nruntime_platform = sys.platform\n"
     "import contextvars\nactive = contextvars.ContextVar('active')\n",

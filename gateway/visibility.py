@@ -42,9 +42,9 @@ class SensitiveContentPolicy:
             match = CREDENTIAL_ASSIGNMENT.search(line)
             value = match.group("value").strip() if match else ""
             literal = bool(re.search(
-                r"(?i)\\b(?:api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|"
-                r"password|passwd|token|authorization|database[_-]?url)\\b"
-                r"[\\s\\\"']*(?::=|:|=)\\s*[\\\"']",
+                r"(?i)\b(?:api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|"
+                r"password|passwd|token|authorization|database[_-]?url)\b"
+                r"[\s\"']*(?::=|:|=)\s*[\"']",
                 line,
             ))
             hard = (

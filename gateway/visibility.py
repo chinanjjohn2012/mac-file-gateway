@@ -54,7 +54,8 @@ class SensitiveContentPolicy:
             structured_secret = (
                 not canonical_path.endswith((".py", ".pyi"))
                 and bool(re.search(
-                    r"(?i)\b(?:token|access[_-]?token|refresh[_-]?token|"
+                    r"(?i)\b(?:token|password|passwd|api[_-]?key|secret[_-]?key|client[_-]?secret|" 
+                    r"access[_-]?token|refresh[_-]?token|"
                     r"client[_-]?key[_-]?data|client[_-]?certificate[_-]?data|"
                     r"certificate[_-]?authority[_-]?data)\b\s*:\s*\S",
                     line,

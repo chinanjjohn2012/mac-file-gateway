@@ -1,7 +1,11 @@
 # Multi-Workspace Controlled Exec — Product Candidate (opt-in)
 
-**Status:** Draft implementation; independent Standards/Spec code review and
-macOS native E2E acceptance PENDING. Based directly on `release/ms1`
+**Status:** Draft implementation. Independent Standards/Spec PRODUCT CANDIDATE
+review [#5621997787](https://github.com/chinanjjohn2012/mac-file-gateway/pull/56#pullrequestreview-5621997787)
+was PASS/PASS **only** on old fixed Head
+`933f2bc7d4add6b651e87c7d0a90369440a1ddfe`; subsequent P3
+changes require a fresh fixed-Head independent review. macOS native E2E
+and production acceptance remain NOT_RUN. Based directly on `release/ms1`
 2.5.0, not on unmerged PR #13 or C3 Candidate B native research. Do not
 merge, deploy, or activate production Exec without separate authorization.
 
@@ -21,6 +25,13 @@ merge, deploy, or activate production Exec without separate authorization.
 - REST `POST /run` and MCP `run_command` register only when any Workspace
   has effective Exec permission. Git has independent grants; Local Skills
   remain unsupported in Multi-Workspace.
+- Operator startup logging reports effective Controlled Exec registration
+  separately from Local Skills and Git. Multi `read_only` conservatively
+  means no File Write, Exec, **or registered Git capability**. Because Git
+  can modify repository metadata or invoke helpers even for ostensibly
+  inspect-only commands, a Git-enabled instance reports `read_only=false`.
+  `file_read_only` separately reports only the File Write authorization;
+  both fields agree between `/info` and `/health`.
 
 ## Default-off JSON configuration
 
@@ -59,14 +70,21 @@ Workspace-specific routing must not be described as OS-level containment.
 
 ## What is verified vs still pending
 
-This first candidate exercises real commands in disposable workspaces,
+The product candidate exercises real commands in disposable workspaces,
 REST and MCP routing, strict input rejection, no-Exec defaults, busy
-admission and close-drain leases. It does **not** yet prove
-complete detached-descendant termination, cancellation semantics, crash/
-restart recovery, cross-Workspace OS filesystem confinement, or bounded
-stop of an uninterruptible command. Existing Legacy CommandRunner's
-timeout uses a process-group KILL and waits for its leader; a returned
-result alone is not proof that every descendant was reclaimed.
+admission and close-drain leases. P3 follow-up tests additionally exercise
+four distinct Worker leases rejecting a fifth, actual REST ASGI admission
+with a real disposable child surviving simulated disconnect/cancelled
+awaiter until controlled release, and cancelled MCP SDK tool dispatch with
+a still-held synchronous Worker lease. These are **not** real TCP/Tunnel
+disconnect, macOS ARM64 native or descendant-tree cleanup results.
+
+It does **not** yet prove complete detached-descendant termination, actual
+remote cancellation/disconnection behavior, crash/restart recovery,
+cross-Workspace OS filesystem confinement, or bounded stop of an
+uninterruptible command. Existing Legacy CommandRunner's timeout uses a
+process-group KILL and waits for its leader; a returned result alone is
+not proof that every descendant was reclaimed.
 
 Before any production activation:
 1. Independent fixed-Head Standards + Spec code review, with the real

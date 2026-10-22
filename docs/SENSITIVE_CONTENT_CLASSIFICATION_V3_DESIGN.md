@@ -1,7 +1,7 @@
 # Sensitive Content Classification V3 — Credential Values in Python Source
 
 **Authority:** PR #52 product decision [#6346229197](https://github.com/chinanjjohn2012/mac-file-gateway/pull/52#issuecomment-6346229197).
-**Design status:** DESIGN_READY_FOR_REVIEW; Standards/Spec design review NOT YET PASS.
+**Design status:** DESIGN_FIX_READY after independent [Review #5618129565](https://github.com/chinanjjohn2012/mac-file-gateway/pull/52#pullrequestreview-5618129565); three P2 contracts updated but Standards/Spec design re-review is NOT YET PASS.
 **Baseline at design start:** Base `d3373649b968f23c85b3ee09d8e984eefecea5c3`; PR Head `64e43f72d597001054e4d1dbecc0e62a3d9452cc`.
 **Scope:** exact canonical suffix `.py` or `.pyi` only. Do not treat this document as implemented behavior.
 
@@ -44,7 +44,7 @@ This is a static source-data guard, **not** general runtime secret discovery or 
 ### 3.1 Hard — always protected, including during Audit
 
 Independent of Python grammar:
-- A recognized token/key format anywhere in text (including strings, comments or literals).
+- A recognized token/key format anywhere in text (including strings, comments or literals), including a known-format token assembled from adjacent Python string/bytes constants or literal-only `+` concatenation (§3.3), **even without a credential-named field**. No arbitrary source evaluation.
 - A credential URI with embedded userinfo password or other existing authentication-URI pattern.
 - A PEM `BEGIN ... PRIVATE KEY` through `END ... PRIVATE KEY`, including an unterminated block until EOF.
 - Any exact preconfigured protected absolute path matching current component-boundary logic; likewise the established filesystem path/hidden-name denial rules.
@@ -84,7 +84,9 @@ When a credential field has a value built **partly or wholly** from a nonempty s
 
 For `f"{runtime}"`, `token = get_token()`, `token = str(runtime)`, `token = config.token`, `token = active.set(value)`, `token = os.getenv("API_KEY")`, and comparable **pure runtime references with no credential literal**, return **none** unless an independent hard pattern or protected path is present. AST complexity or a suspicious variable name never by itself reintroduces the old assignment-name heuristic.
 
-The scanner must distinguish environment-variable **lookup keys** and source credential **value literals**. Other unreviewed call arguments that contain a literal in an assigned credential value are conservatively protected. A literal with a recognized known-secret signature is always Hard even if used as an environment-variable key.
+The scanner must distinguish environment-variable **lookup keys** and source credential **value literals**, including `os.environ["..."]`. A known-secret signature in an env key always remains Hard; other unreviewed function arguments containing a literal in a credential-value position are conservatively protected, not name-only dynamic calls.
+
+**Split known-format key (P3):** Static, finite adjacent `str`/`bytes` literals and literal-only `Constant + Constant` expressions MUST be assembled for an independent recognized-key-format check without running project code. For example `marker = ("ghp_" "ABCDEFGHIJKLMNOPQRSTUVWX")` and `marker = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWX"` are **Hard** although `marker` is not a credential field. Support multiline/parenthesized literal-only forms; do not compute arbitrary runtime expressions or guess secret suffixes. Retain the existing signature length and character rules.
 
 This conservatism means a literal prefix such as `token = f"Bearer {value}"` is Hard: an explicit contributing literal exists, even if a human might regard it as scaffolding. A future placeholder/prefix allowlist is out of scope and requires separate review.
 
@@ -102,7 +104,9 @@ This conservatism means a literal prefix such as `token = f"Bearer {value}"` is 
 
 - The old rule “credential-looking left-hand name + arbitrary RHS” is **removed only for Python**. A dynamic Python expression with no detectable embedded credential literal yields `none`, not `heuristic`, regardless of its name.
 - `heuristic` remains available for **observable ambiguous literal-bearing syntax** that cannot be classified exactly without execution (e.g. truncated/malformed composite source with a credential-value literal cue), never a name-only assignment. In `enforce` mode it remains redacted and denied for newly introduced content; within valid scoped `audit` it may be written **without** disabling read/search/diff redaction.
-- A tokenizer/decoder unable to finish within the established input/complexity budget must NOT return `none` for unexamined source bytes. On an unrecoverable scan error, **fail closed at file level** (deny new/changed write, show redacted rather than raw unscanned content, do not permit Audit to override this scanner-integrity failure). This is a distinct `scan_unavailable` result, **not** a revival of the name-based heuristic. Resource limits should scale to existing Gateway file-size bounds and be frozen during the implementation plan with macOS/CI measurements.
+- A tokenizer/decoder unable to finish within the approved input/complexity budget must NOT return `none` for unexamined bytes. Treat `scan_unavailable` as a separate **file-level scanner-integrity failure**, not as a heuristic or a newly inferred credential field. **Temporary Audit MUST NOT bypass it** and cannot turn this result into an allowed write.
+- **User-visible fallback:** `read_file` returns generic redaction placeholder text for the **entire unscannable file** (not partially scanned raw text); count the reliably determined physical lines in the existing `redacted_lines` field, or report one file-level redaction if line counting itself is unavailable. `search_files` returns **no matches/snippets from that file**, using the existing skipped/error accounting with bounded nonsecret reason `scan_unavailable`. No preview/diff may disclose unscanned source bytes: `create_file`, `replace_text` and `write_file` **preview and apply** reject with the existing public error code `sensitive_content`, optionally annotated `rule_id=SCAN_UNAVAILABLE`, no raw values or false line numbers. Replacing from an unscannable original source is likewise denied before mutation. Active Audit changes nothing and does not authorize a backup/install.
+- Before implementation RED, **freeze** lexical token/line/decoded-literal work, resource/CPU/memory/concurrency budgets and failure accounting in the implementation plan. Compare 32 KiB+ and the actual maximum file-size boundaries on Linux/macOS: ordinary in-limit source must not inherit obsolete ContextVar Worker time/size refusal. Failures must not leak bytes through HTTP/MCP errors, status, logs or partial diff.
 - On syntactic parse failure but successful complete lexical scan, retain known secret/URI/PEM/path and evident quoted credential assignments; never silently hide syntax errors by treating arbitrary dynamic assignments as hard. If lexical scanning itself is incomplete, use the fail-closed rule above.
 - All findings have bounded count/size; never expose raw credential fragments in logs, errors, traces, statuses or debug metadata.
 

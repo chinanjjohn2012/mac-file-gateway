@@ -24,7 +24,7 @@ SOURCE = s0.SOURCE
 HEADER = s0.HEADER
 MANIFEST = s0.MANIFEST
 ENV = dict(s2.ENV)
-NAME = "libc3b03_t01_no_signal_s3"
+NAME = "libc3b03_t01_no_signal_inspect"
 SYM = s2.SYMBOL
 _TOOLS = {
     "Darwin": ("/usr/bin/file", "/usr/bin/nm", "/usr/bin/otool"),

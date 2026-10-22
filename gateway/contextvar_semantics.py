@@ -26,6 +26,12 @@ def _touches_constructor_member(target: ast.AST) -> bool:
 _IMPORT_REGISTRY_MEMBERS = frozenset({
     "modules", "meta_path", "path_hooks", "path_importer_cache",
 })
+# ImportFrom stores exported attribute names only in ast.alias.name, never
+# in ast.Name or ast.Attribute nodes. A module namespace can therefore enter
+# scope through an opaque alias without a visible x.__dict__ expression.
+# Conservatively reject namespace mappings, including reexports from other
+# modules, rather than trying to track an arbitrary alias chain.
+_OPAQUE_MODULE_NAMESPACE_EXPORTS = frozenset({"__dict__", "__builtins__"})
 _MODULE_PROVENANCE_MUTATIONS = frozenset({
     "__class__", "__getattribute__", "__getattr__",
     "__import__", "__spec__", "__loader__", "__path__", "__package__",
@@ -54,11 +60,23 @@ def _has_unproven_import_identity(tree: ast.AST) -> bool:
                 return True
             if node.attr in _DYNAMIC_IMPORT_OPERATIONS:
                 return True
-        elif isinstance(node, ast.ImportFrom) and node.level == 0:
-            if node.module == "sys" and any(
+        elif isinstance(node, ast.ImportFrom):
+            # "from contextvars import __dict__ as registry" must not earn
+            # ContextVar provenance, even if registry is then passed through
+            # other variables or modified via .update(), |=, or subscripts.
+            # The same applies to opaque namespace exports from other
+            # modules which static parsing cannot identify as unrelated.
+            if any(alias.name in _OPAQUE_MODULE_NAMESPACE_EXPORTS
+                   for alias in node.names):
+                return True
+            if node.level == 0 and node.module == "contextvars" and any(
+                    alias.name in _MODULE_PROVENANCE_MUTATIONS
+                    for alias in node.names):
+                return True
+            if node.level == 0 and node.module == "sys" and any(
                     alias.name in _IMPORT_REGISTRY_MEMBERS for alias in node.names):
                 return True
-            if node.module in ("importlib", "importlib.util") and any(
+            if node.level == 0 and node.module in ("importlib", "importlib.util") and any(
                     alias.name in _DYNAMIC_IMPORT_OPERATIONS for alias in node.names):
                 return True
         elif isinstance(node, ast.Subscript):

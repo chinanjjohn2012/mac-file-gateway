@@ -1,0 +1,41 @@
+name: Sensitive Content macOS Acceptance
+
+on:
+  pull_request:
+    branches:
+      - release/ms1
+    paths:
+      - ".github/workflows/sensitive-content-macos.yml"
+      - "gateway/**"
+      - "tests/**"
+      - "docs/SENSITIVE_CONTENT_POLICY.md"
+      - "MANIFEST.sha256"
+      - "requirements*.txt"
+      - "verify.sh"
+
+permissions:
+  contents: read
+
+jobs:
+  macos-verify:
+    name: Native macOS verify --require-mcp
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Show native macOS environment
+        run: |
+          uname -a
+          sw_vers
+          python3 --version
+      - name: Install isolated test environment
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install -r requirements-dev.txt
+          .venv/bin/python -m pip check
+      - name: Run full macOS verification
+        run: bash verify.sh --require-mcp

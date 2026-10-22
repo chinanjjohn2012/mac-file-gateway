@@ -149,3 +149,60 @@ def test_v3_normal_python_bom_crlf_create_edit_whole_write(tmp_path, newline, bo
         assert (root / "mod.py").read_bytes() == final.encode()
     finally:
         gateway.close()
+
+
+def test_v3_scan_integrity_failure_is_file_level_and_not_audit_bypass(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from gateway import python_values
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    raw = b"visible = 123\nmarker = 456\n"
+    (root / "existing.py").write_bytes(raw)
+    until = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    gateway = Gateway(
+        root, allow_write=True,
+        sensitive_content_audit_paths=(".",),
+        sensitive_content_audit_until=until,
+    )
+    monkeypatch.setattr(python_values, "MAX_TOKENS", 3)
+    try:
+        read = gateway.read_file("existing.py")
+        assert read["file_sha256"] == hashlib.sha256(raw).hexdigest()
+        assert read["redacted_lines"] == 2
+        assert "visible = 123" not in read["content"]
+        assert "marker = 456" not in read["content"]
+        assert "[REDACTED]" in read["content"]
+
+        search = gateway.search_files("visible", file_glob="existing.py")
+        assert search["matches"] == []
+        assert search["skipped_files_or_directories"] >= 1
+        assert "scan_unavailable" in search["limit_reasons"]
+
+        for dry_run in (True, False):
+            with pytest.raises(GatewayError) as exc:
+                gateway.create_file("candidate.py", "x = 1\ny = 2\n", dry_run=dry_run)
+            assert exc.value.code == "sensitive_content"
+            assert exc.value.details["rule_id"] == "SCAN_UNAVAILABLE"
+            assert not (root / "candidate.py").exists()
+
+            with pytest.raises(GatewayError) as exc:
+                gateway.write_file(
+                    "existing.py", "new = 1\n", read["file_sha256"], dry_run=dry_run,
+                )
+            assert exc.value.code == "sensitive_content"
+            assert exc.value.details["rule_id"] == "SCAN_UNAVAILABLE"
+
+            with pytest.raises(GatewayError) as exc:
+                gateway.replace_text(
+                    "existing.py", "visible", "new", read["file_sha256"],
+                    dry_run=dry_run,
+                )
+            assert exc.value.code == "sensitive_content"
+            assert exc.value.details["rule_id"] == "SCAN_UNAVAILABLE"
+
+        assert (root / "existing.py").read_bytes() == raw
+        assert not (root / "candidate.py").exists()
+        assert not list(root.rglob("*.bak"))
+    finally:
+        gateway.close()

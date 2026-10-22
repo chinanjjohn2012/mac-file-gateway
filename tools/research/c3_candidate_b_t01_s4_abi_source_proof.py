@@ -307,7 +307,7 @@ def _verify_existing_c_assertions(source: str) -> dict[str, object]:
             "field_offsets": {
                 name: {field: getattr(typ, field).offset
                        for field, _ in typ._fields_}
-                for name, typ in STRUCTS.items(),
+                for name, typ in STRUCTS.items()
             }}
 
 

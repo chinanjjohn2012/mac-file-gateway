@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 import tokenize
 
 MAX_BYTES = 32 * 1024
@@ -17,6 +18,7 @@ MAX_STMT_TOKENS = 256
 MAX_DEPTH = 32
 PARSE_TIMEOUT_SECONDS = 0.250
 _WORKER = Path(__file__).with_name("contextvar_worker.py")
+_SLOTS = threading.BoundedSemaphore(2)
 
 
 def _preflight(raw: bytes) -> bool:
@@ -56,6 +58,8 @@ def proven_lines(raw: bytes) -> tuple[int, ...]:
     """A failed proof is no exemption. Never parse arbitrary sources in-process."""
     if not _preflight(raw):
         return ()
+    if not _SLOTS.acquire(blocking=False):
+        return ()
     try:
         # Isolated interpreter, fixed trusted script, no shell, no workspace cwd.
         p = subprocess.run(
@@ -79,3 +83,5 @@ def proven_lines(raw: bytes) -> tuple[int, ...]:
         return tuple(sorted(set(value)))
     except (OSError, subprocess.TimeoutExpired, ValueError, RecursionError):
         return ()
+    finally:
+        _SLOTS.release()

@@ -112,6 +112,56 @@ def test_p2_03_untrusted_module_identity_never_exempted(tmp_path, source):
         gateway.close()
 
 
+@pytest.mark.parametrize("namespace_import,mutation", [
+    ("from contextvars import __dict__ as registry",
+     "registry['ContextVar'] = FakeVar"),
+    ("from contextvars import __dict__ as aliases",
+     "aliases.update({'ContextVar': FakeVar})"),
+    ("from contextvars import __dict__",
+     "__dict__['ContextVar'] = FakeVar"),
+    ("from contextvars import __dict__ as registry",
+     "copy = registry\ncopy['ContextVar'] = FakeVar"),
+    ("from contextvars import __dict__ as registry",
+     "registry |= {'ContextVar': FakeVar}"),
+    ("from contextvars import __dict__ as registry\n"
+     "from contextvars import ContextVar",
+     "registry['ContextVar'] = FakeVar"),
+])
+def test_p2_03_imported_module_namespace_never_exempted(tmp_path, namespace_import, mutation):
+    # Review #5616180244: ImportFrom.alias is not an ast.Attribute.
+    # This file is parsed as untrusted bytes, never executed by Gateway.
+    source = (
+        "import contextvars\n"
+        + namespace_import + "\n"
+        + _FAKE
+        + mutation + "\n"
+        + "active = contextvars.ContextVar('active')\n"
+        + _SCOPE
+    )
+    root = tmp_path / "project"
+    root.mkdir()
+    gateway = Gateway(root, allow_write=True)
+    try:
+        # RED must demonstrate a failure at the actual Gateway security boundary.
+        with pytest.raises(GatewayError) as error:
+            gateway.create_file("blocked.py", source, dry_run=False)
+        assert error.value.code == "sensitive_content"
+        assert not (root / "blocked.py").exists()
+
+        # Existing source must not be visible or searchable.
+        (root / "existing.py").write_bytes(source.encode("utf-8"))
+        visible = gateway.read_file("existing.py")
+        assert visible["redacted_lines"] >= 1
+        assert "token = active.set(value)" not in visible["content"]
+        matches = gateway.search_files(
+            "token = active.set(value)", file_glob="existing.py",
+        )
+        assert matches["matches"] == []
+        assert proven_lines(source.encode("utf-8")) == ()
+    finally:
+        gateway.close()
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
 @pytest.mark.parametrize("bom", ["", "\ufeff"])
 @pytest.mark.parametrize("head", [

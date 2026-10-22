@@ -227,6 +227,7 @@ def test_http_contextvar_cycle_and_temporary_audit(tmp_path):
 
 @pytest.mark.parametrize("payload", [
     "token: opaque-bearer-value\n",
+    "password: opaque-password-value\n",
     "client-key-data: BASE64PRIVATEKEY\n",
     "client-certificate-data: BASE64CERTIFICATE\n",
 ])

@@ -132,8 +132,16 @@ def test_compiled_object_has_zero_undefined_symbols_and_no_syscall_opcode():
         assert len(asm) > 100
         for forbidden in ("svc #", "\tsyscall", "\tsysenter", "int $0x80"):
             assert forbidden not in asm, forbidden
+        # Expose the ORIGINAL object proof to independent GitHub reviewers.
+        # Without pytest -s, successful test stdout is hidden by capture.
         print(f"C3B03_T01_R2B_R2A_OBJECT_SHA256={sha}")
         print("C3B03_T01_R2B_R2A_UNDEFINED_SYMBOLS=0")
+        print("C3B03_T01_R2B_R2A_EXPORTED=" + exported[0].strip())
+        print("C3B03_T01_R2B_R2A_DISASSEMBLY_SHA256=" +
+              hashlib.sha256(disassembly.stdout.encode("utf-8")).hexdigest())
+        print("C3B03_T01_R2B_R2A_DISASSEMBLY_BEGIN")
+        print(disassembly.stdout)
+        print("C3B03_T01_R2B_R2A_DISASSEMBLY_END")
         print("C3B03_T01_R2B_R2A_C_EXECUTED=false")
 
 

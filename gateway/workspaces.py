@@ -305,6 +305,7 @@ class WorkspaceService:
             return {"workspaces": [
                 {"id": ctx.name, "read": True, "write": ctx.settings.allow_write,
                  "exec": False, "local_skills": False,
+                 "sensitive_content": ctx.gateway.sensitive_audit.status(),
                  "git": {"enabled": bool(self.settings.git_enabled
                                          and ctx.settings.git_allowed_commands),
                          "allowed_commands": list(ctx.settings.git_allowed_commands)}}

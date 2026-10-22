@@ -150,6 +150,8 @@ class WorkspaceService:
                     item.root, excludes=item.excludes, allow_hidden_paths=item.hidden_paths,
                     allow_write=item.allow_write, write_paths=item.write_paths,
                     backup_retention_days=item.backup_retention_days,
+                    sensitive_content_audit_paths=item.sensitive_content_audit_paths,
+                    sensitive_content_audit_until=item.sensitive_content_audit_until,
                     protected_content_paths=private_paths,
                     allow_exec=False, exec_paths=(), exec_runners=(),
                 )

@@ -17,6 +17,17 @@ module/frame `__dict__` access cannot prove stable ContextVar binding and
 therefore retain the original conservative heuristic. The static analyzer
 does not execute any user source or guarantee dynamic Python runtime types.
 
+The ContextVar proof also fails closed when source code writes or deletes the
+`ContextVar` constructor module attribute or any of its nested members. The
+binding inventory includes both explicit assignment and implicit Python
+name binding: `match/case` captures (`MatchAs`, `MatchStar`,
+`MatchMapping.rest`), exception handler aliases (`except ... as name`),
+imports, parameters, and declarations. A constructor import, module alias,
+module-level ContextVar variable, or temporary reset handle with an
+unproven shadow/rebinding is not exempted. This can conservatively redact
+some valid code; it must never promote an unknown `.set()/reset()` pair
+into a proven ContextVar.
+
 Python parsing uses a fixed trusted helper program in a separate isolated
 interpreter. Input is limited to 32 KiB, 1,024 physical lines, 2,048
 characters per line, 4,096 tokens, 256 tokens per logical statement and 32

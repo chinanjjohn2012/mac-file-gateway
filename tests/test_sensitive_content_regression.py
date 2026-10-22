@@ -151,3 +151,75 @@ def test_audit_expiry_during_install_prevents_commit(tmp_path, monkeypatch):
         assert not (root / "src" / "a.py").exists()
     finally:
         gateway.close()
+
+
+def test_hard_literal_on_same_line_as_contextvar_never_exempt(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    gateway = Gateway(root, allow_write=True)
+    try:
+        # A proven handle does not neutralize a distinct literal on its line.
+        content = _contextvar_source().replace(
+            "token = active.set(value)",
+            "token = active.set(value); password = 'hardcoded'",
+        )
+        with pytest.raises(GatewayError) as exc:
+            gateway.create_file("mixed.py", content)
+        assert exc.value.code == "sensitive_content"
+    finally:
+        gateway.close()
+
+
+def test_contextvar_reflective_rebinding_fails_closed(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    gateway = Gateway(root, allow_write=True)
+    try:
+        payload = _contextvar_source() + "\nglobals()['active'] = vault\n"
+        with pytest.raises(GatewayError) as exc:
+            gateway.create_file("dynamic.py", payload)
+        assert exc.value.code == "sensitive_content"
+    finally:
+        gateway.close()
+
+
+def test_contextvar_worker_parse_budget_falls_back_to_heuristic(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    gateway = Gateway(root, allow_write=True)
+    try:
+        content = _contextvar_source() + "# " + ("x" * 32768) + "\n"
+        with pytest.raises(GatewayError) as exc:
+            gateway.create_file("large.py", content)
+        assert exc.value.code == "sensitive_content"
+    finally:
+        gateway.close()
+
+
+def test_http_contextvar_cycle_and_temporary_audit(tmp_path):
+    from starlette.testclient import TestClient
+    from gateway.http import create_app
+    root = tmp_path / "project"
+    (root / "src").mkdir(parents=True)
+    until = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    gateway = Gateway(root, allow_write=True, write_paths=("src",),
+                      sensitive_content_audit_paths=("src",),
+                      sensitive_content_audit_until=until)
+    try:
+        with TestClient(create_app(gateway, enable_mcp=False),
+                        base_url="http://127.0.0.1:8765") as client:
+            src = _contextvar_source()
+            preview = client.post("/create", json={"path": "src/a.py", "content": src})
+            assert preview.status_code == 200, preview.text
+            apply = client.post("/create", json={"path": "src/a.py", "content": src, "dry_run": False})
+            assert apply.status_code == 200, apply.text
+            read = client.get("/read", params={"path": "src/a.py"})
+            assert read.status_code == 200
+            assert "token = active.set(value)" in read.json()["content"]
+            assert client.get("/info").json()["write_policy"]["sensitive_content"]["write_mode"] == "audit"
+            hard = client.post("/create", json={"path": "src/hard.py",
+                                                "content": "password = 'hardcoded'\n",
+                                                "dry_run": False})
+            assert hard.status_code == 403 and hard.json()["error"] == "sensitive_content"
+    finally:
+        gateway.close()

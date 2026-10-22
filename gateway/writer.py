@@ -28,8 +28,8 @@ def _preview(old: bytes, new: bytes, path: str, *, policy: SensitiveContentPolic
     if len(old) + len(new) > 524_288:
         return "[Diff omitted: input exceeds the preview budget.]", True
     policy = policy or SensitiveContentPolicy()
-    a = policy.redacted_diff_lines(old.decode("utf-8"))
-    b = policy.redacted_diff_lines(new.decode("utf-8"))
+    a = policy.redacted_diff_lines(old.decode("utf-8"), path)
+    b = policy.redacted_diff_lines(new.decode("utf-8"), path)
     if len(a) + len(b) > 2_000:
         return "[Diff omitted: too many lines for the preview budget.]", True
     pieces: list[str] = []
@@ -165,10 +165,10 @@ class FileWriter:
             _integer(expected_count, "expected_count", 1, 100)
             if not isinstance(old_text, str) or not old_text:
                 raise GatewayError("invalid_argument", "old_text must be a nonempty exact string.")
-            self._content(old_text)
-            self._content(new_text)
+            self._content(old_text, reject_sensitive=False)
+            self._content(new_text, reject_sensitive=False)
         else:
-            self._content(content)
+            self._content(content, reject_sensitive=False)
         canonical = "/".join(parts)
         with self._lock, self.gateway._directory(parts[:-1]) as parent:
             context = nullcontext(None) if dry_run else storage.write_lock(self.gateway._root_fd)
@@ -180,7 +180,7 @@ class FileWriter:
                     previous = b""
                 else:
                     snapshot = self.gateway._snapshot_at(parent, parts[-1])
-                    source_has_sensitive = self.gateway._visibility.is_sensitive(snapshot.text)
+                    source_has_sensitive = self.gateway._visibility.is_sensitive(snapshot.text, canonical)
                     if operation == "write" and source_has_sensitive:
                         raise GatewayError("sensitive_content", "This source contains redacted data and cannot be whole-file overwritten through the gateway.")
                     if not snapshot.metadata.st_mode & 0o222:
@@ -191,19 +191,21 @@ class FileWriter:
                 if operation == "replace":
                     # Unlike displayed text, this preserves BOM, CRLF, and final newlines.
                     source_text = previous.decode("utf-8")
-                    visible_matches = self.gateway._visibility.visible_matches(source_text, old_text)
+                    visible_matches = self.gateway._visibility.visible_matches(source_text, old_text, canonical)
                     replacements = len(visible_matches)
                     if replacements != expected_count:
                         raise GatewayError("match_count", "Exact-match count differs from expected_count in visible source text; no change was applied.")
                     updated_text = self._replace_spans(source_text, visible_matches, new_text)
                     if not self.gateway._visibility.preserves_hidden_lines(
-                            source_text, updated_text, visible_matches, new_text):
+                            source_text, updated_text, visible_matches, new_text, canonical):
                         raise GatewayError("sensitive_content", "Edits may not expose or merge protected source lines.")
-                    if self.gateway._visibility.new_sensitive_content(source_text, updated_text):
+                    if self.gateway._visibility.new_sensitive_content(source_text, updated_text, canonical):
                         raise GatewayError("sensitive_content", "Edits may not introduce protected content.")
                     raw = self._content(updated_text, reject_sensitive=False)
                 else:
-                    raw = self._content(content)
+                    raw = self._content(content, reject_sensitive=False)
+                    if self.gateway._visibility.is_sensitive(raw.decode('utf-8-sig'), canonical):
+                        raise GatewayError('sensitive_content', 'Credential-like content is not accepted by this gateway\'s write policy.')
                 changed = snapshot is None or raw != previous
                 diff, truncated = _preview(previous, raw, canonical, policy=self.gateway._visibility)
                 result = {"operation": operation, "path": canonical, "dry_run": dry_run,

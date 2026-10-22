@@ -1,4 +1,4 @@
-"""RED contract for path-aware sensitive detection and bounded, scoped audit."""
+"""V3 source credential values and scoped Audit — preserved Gateway regressions."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -51,7 +51,7 @@ def test_contextvar_create_read_replace_assignment_and_whole_write(tmp_path, new
         gateway.close()
 
 
-def test_unproven_set_reset_pair_not_exempt(tmp_path):
+def test_runtime_vault_set_reset_pair_is_not_name_only_sensitive(tmp_path):
     root = tmp_path / "project"
     root.mkdir()
     gateway = Gateway(root, allow_write=True)
@@ -64,22 +64,24 @@ def test_unproven_set_reset_pair_not_exempt(tmp_path):
             "    finally:\n"
             "        vault.reset(token)\n"
         )
-        with pytest.raises(GatewayError) as exc:
-            gateway.create_file("bad.py", content)
-        assert exc.value.code == "sensitive_content"
+        assert gateway.create_file("bad.py", content, dry_run=False)["applied"]
+        read = gateway.read_file("bad.py")
+        assert read["redacted_lines"] == 0
+        assert "token = " in read["content"]
     finally:
         gateway.close()
 
 
-def test_rebound_contextvar_not_exempt(tmp_path):
+def test_contextvar_identity_changes_do_not_create_source_credentials(tmp_path):
     root = tmp_path / "project"
     root.mkdir()
     gateway = Gateway(root, allow_write=True)
     try:
         content = _contextvar_source() + "\nactive = make_unknown()\n"
-        with pytest.raises(GatewayError) as exc:
-            gateway.create_file("bad.py", content)
-        assert exc.value.code == "sensitive_content"
+        assert gateway.create_file("bad.py", content, dry_run=False)["applied"]
+        read = gateway.read_file("bad.py")
+        assert read["redacted_lines"] == 0
+        assert "token = " in read["content"]
     finally:
         gateway.close()
 
@@ -95,7 +97,7 @@ def test_audit_heuristic_only_scoped_and_hard_secrets_rejected(tmp_path):
         sensitive_content_audit_until=until,
     )
     try:
-        candidate = "def f(vault):\n    token = vault.set(thing)\n"
+        candidate = 'token = "unterminated\n'
         preview = gateway.create_file("src/a.py", candidate)
         assert preview["applied"] is False
         gateway.create_file("src/a.py", candidate, dry_run=False)
@@ -118,7 +120,7 @@ def test_audit_expired_before_apply_rejects(tmp_path):
                       sensitive_content_audit_paths=("src",),
                       sensitive_content_audit_until=until)
     try:
-        payload = "def f(vault):\n    token = vault.set(value)\n"
+        payload = 'token = "unterminated\n'
         assert gateway.create_file("src/a.py", payload)["applied"] is False
         gateway.sensitive_audit.deadline = 0.0
         with pytest.raises(GatewayError) as exc:
@@ -146,7 +148,7 @@ def test_audit_expiry_during_install_prevents_commit(tmp_path, monkeypatch):
     try:
         monkeypatch.setattr(write_storage, "install_file", expire_before_install)
         with pytest.raises(GatewayError) as exc:
-            gateway.create_file("src/a.py", "token = vault.set(value)\n", dry_run=False)
+            gateway.create_file("src/a.py", 'token = "unterminated\n', dry_run=False)
         assert exc.value.code == "sensitive_content"
         assert not (root / "src" / "a.py").exists()
     finally:
@@ -170,28 +172,28 @@ def test_hard_literal_on_same_line_as_contextvar_never_exempt(tmp_path):
         gateway.close()
 
 
-def test_contextvar_reflective_rebinding_fails_closed(tmp_path):
+def test_reflective_rebinding_without_literals_remains_visible(tmp_path):
     root = tmp_path / "project"
     root.mkdir()
     gateway = Gateway(root, allow_write=True)
     try:
         payload = _contextvar_source() + "\nglobals()['active'] = vault\n"
-        with pytest.raises(GatewayError) as exc:
-            gateway.create_file("dynamic.py", payload)
-        assert exc.value.code == "sensitive_content"
+        assert gateway.create_file("dynamic.py", payload, dry_run=False)["applied"]
+        assert gateway.read_file("dynamic.py")["redacted_lines"] == 0
     finally:
         gateway.close()
 
 
-def test_contextvar_worker_parse_budget_falls_back_to_heuristic(tmp_path):
+def test_large_python_source_above_removed_worker_limit_is_allowed(tmp_path):
     root = tmp_path / "project"
     root.mkdir()
     gateway = Gateway(root, allow_write=True)
     try:
         content = _contextvar_source() + "# " + ("x" * 32768) + "\n"
-        with pytest.raises(GatewayError) as exc:
-            gateway.create_file("large.py", content)
-        assert exc.value.code == "sensitive_content"
+        assert gateway.create_file("large.py", content, dry_run=False)["applied"]
+        read = gateway.read_file("large.py")
+        assert read["redacted_lines"] == 0
+        assert "token = active.set(value)" in read["content"]
     finally:
         gateway.close()
 
@@ -267,7 +269,7 @@ def test_audit_expires_during_temporary_file_fsync(tmp_path, monkeypatch):
     try:
         monkeypatch.setattr(write_storage.os, "fsync", expire_on_fsync)
         with pytest.raises(GatewayError) as exc:
-            gateway.create_file("src/a.py", "token = vault.set(value)\n", dry_run=False)
+            gateway.create_file("src/a.py", 'token = "unterminated\n', dry_run=False)
         assert exc.value.code == "sensitive_content"
         assert calls
         assert not (root / "src" / "a.py").exists()
@@ -281,7 +283,7 @@ def test_audit_expires_during_temporary_file_fsync(tmp_path, monkeypatch):
     "import sys\nsys.modules[__name__].__dict__['active'] = unknown_runtime_object()",
     "reflect = globals\nreflect()['active'] = unknown_runtime_object()",
 ])
-def test_contextvar_dynamic_module_rebinding_must_not_receive_exemption(tmp_path, mutation):
+def test_dynamic_module_rebinding_does_not_imply_hardcoded_value(tmp_path, mutation):
     """Only source-level proven stable ContextVar instances can be exempted.
 
     No source code in this payload is executed by the gateway. A computed
@@ -292,9 +294,9 @@ def test_contextvar_dynamic_module_rebinding_must_not_receive_exemption(tmp_path
     gateway = Gateway(root, allow_write=True)
     try:
         source = _contextvar_source() + "\n" + mutation + "\n"
-        with pytest.raises(GatewayError) as exc:
-            gateway.create_file("dynamic_binding.py", source, dry_run=False)
-        assert exc.value.code == "sensitive_content"
-        assert not (root / "dynamic_binding.py").exists()
+        assert gateway.create_file("dynamic_binding.py", source, dry_run=False)["applied"]
+        read = gateway.read_file("dynamic_binding.py")
+        assert read["redacted_lines"] == 0
+        assert "token = active.set(value)" in read["content"]
     finally:
         gateway.close()

@@ -301,6 +301,19 @@ def test_real_linked_synthetic_mutant_is_blocked_before_load(mutant):
         assert obj.is_file()
         sha, _dev, _ino = _private_custody(root, image)
         assert sha
+        # Diagnostic from real linked Mach-O, still NEVER load this mutant.
+        if mutant == "constructor" and platform == "Darwin":
+            for label, artifact in (("OBJECT", obj), ("LINKED", image)):
+                raw = _tool(["otool", "-l", str(artifact)])
+                marker = [
+                    line.strip() for line in raw.splitlines()
+                    if any(word in line for word in (
+                        "sectname", "segname", "__mod", "__init", "__DATA",
+                        "LC_", "S_MOD_INIT", "type"
+                    ))
+                ]
+                print(f"C3B03_T01_R2B_R2B_R1_CTOR_{label}_SECTIONS=" +
+                      repr(marker))
         with pytest.raises(AssertionError):
             _audit(image, platform)
 

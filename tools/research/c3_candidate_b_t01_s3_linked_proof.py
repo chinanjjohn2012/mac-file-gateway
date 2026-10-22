@@ -161,7 +161,7 @@ def _metadata_gate(platform: str, meta: dict[str, str]) -> str:
             raise ValueError("UNREVIEWED_ELF_TYPE")
         if "X86-64" not in meta["header"] or "INTERP" in meta["program"]:
             raise ValueError("UNREVIEWED_ELF_LOAD_CONFIGURATION")
-        if "There are no relocations in this file." not in meta["reloc"]:
+        if meta["reloc"].strip() != "There are no relocations in this file.":
             raise ValueError("UNREVIEWED_ELF_RELOCATIONS")
         for token in ("(NEEDED)", "(RPATH)", "(RUNPATH)", "(INIT)",
                       "(FINI)", "(INIT_ARRAY)", "(FINI_ARRAY)",

@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import tempfile
 
@@ -148,6 +149,39 @@ def _only_darwin_libsystem_dependency(
     assert lines[2].startswith("/usr/lib/libSystem.B.dylib ("), lines
 
 
+def _inspect_darwin_chained_fixups(image: Path, loads: str) -> None:
+    """No dynamic import may be concealed by LC_DYLD_CHAINED_FIXUPS.
+
+    Decode the header bytes from the final linked image, not C results or a
+    tool's self-report. Constructor sections are checked independently.
+    """
+    pieces = re.split(r"(?m)^Load command \d+\s*$", loads)
+    chunks = [
+        c for c in pieces
+        if re.search(r"(?m)^\s*cmd LC_DYLD_CHAINED_FIXUPS\s*$", c)
+    ]
+    assert len(chunks) <= 1, "duplicate chained fixup commands"
+    if not chunks:
+        return
+    c = chunks[0]
+    off = re.search(r"(?m)^\s*dataoff (\d+)\s*$", c)
+    size = re.search(r"(?m)^\s*datasize (\d+)\s*$", c)
+    assert off is not None and size is not None, "unparseable chained fixups"
+    dataoff, datasize = int(off.group(1)), int(size.group(1))
+    raw = image.read_bytes()
+    assert 28 <= datasize <= len(raw) - dataoff
+    version, starts, imports, symbols, count, fmt, symbol_fmt = struct.unpack_from(
+        "<7I", raw, dataoff
+    )
+    assert version == 0, ("unknown fixups version", version)
+    assert count == 0, ("unreviewed dynamically bound imports", count)
+    assert starts <= datasize and imports <= datasize and symbols <= datasize
+    assert fmt <= 3 and symbol_fmt <= 1
+    print("C3B03_T01_R2B_R2B_R1_DARWIN_CHAINED_IMPORTS=0")
+    print("C3B03_T01_R2B_R2B_R1_DARWIN_FIXUPS_HEADER=" +
+          repr((version, starts, imports, symbols, count, fmt, symbol_fmt)))
+
+
 def _audit(image: Path, platform: str) -> dict[str, str]:
     desc = _tool(["file", "-b", str(image)]).strip()
     if platform == "Darwin":
@@ -173,11 +207,13 @@ def _audit(image: Path, platform: str) -> dict[str, str]:
             "LC_LOAD_WEAK_DYLIB", "LC_REEXPORT_DYLIB",
             "LC_RPATH", "LC_DYLD_ENVIRONMENT", "LC_LOAD_DYLINKER",
             "LC_LOAD_UPWARD_DYLIB", "LC_LAZY_LOAD_DYLIB",
-            "__mod_init_func", "__interpose", "__la_symbol_ptr",
+            "__mod_init_func", "__init_offsets", "__interpose",
+            "__la_symbol_ptr",
             "__nl_symbol_ptr",
         ):
             assert forbidden not in loads, ("unapproved loader/initializer", forbidden)
         _only_darwin_libsystem_dependency(loads, linked, image.name)
+        _inspect_darwin_chained_fixups(image, loads)
         assert not re.search(r"\b[1-9][0-9]*\s+entries\b", relocation), relocation
     else:
         header = _tool(["readelf", "-hW", str(image)])
@@ -301,19 +337,17 @@ def test_real_linked_synthetic_mutant_is_blocked_before_load(mutant):
         assert obj.is_file()
         sha, _dev, _ino = _private_custody(root, image)
         assert sha
-        # Diagnostic from real linked Mach-O, still NEVER load this mutant.
-        if mutant == "constructor" and platform == "Darwin":
-            for label, artifact in (("OBJECT", obj), ("LINKED", image)):
-                raw = _tool(["otool", "-l", str(artifact)])
-                marker = [
-                    line.strip() for line in raw.splitlines()
-                    if any(word in line for word in (
-                        "sectname", "segname", "__mod", "__init", "__DATA",
-                        "LC_", "S_MOD_INIT", "type"
-                    ))
-                ]
-                print(f"C3B03_T01_R2B_R2B_R1_CTOR_{label}_SECTIONS=" +
-                      repr(marker))
+        # This mutation MUST survive the real linker; otherwise the
+        # negative test cannot prove that the final-image gate rejects it.
+        if mutant == "constructor":
+            if platform == "Darwin":
+                initial = _tool(["otool", "-l", str(obj)])
+                final = _tool(["otool", "-l", str(image)])
+                assert "__mod_init_func" in initial
+                assert "__init_offsets" in final or "__mod_init_func" in final
+            else:
+                final = _tool(["readelf", "-SW", str(image)])
+                assert ".init_array" in final
         with pytest.raises(AssertionError):
             _audit(image, platform)
 

@@ -1,0 +1,86 @@
+name: C3 Candidate B T01-R2b-R1 native Contract RED (NO GROUP SIGNAL)
+
+on:
+  push:
+    branches:
+      - research/phase2-lite-c3-candidate-b-kill-t01-r2b-r1-contract-20261022
+  pull_request:
+    paths:
+      - ".github/workflows/c3-candidate-b-t01-r2b-r1-contract-red.yml"
+      - "docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r1-contract.md"
+      - "tests/native/c3_b03_t01_no_signal_contract.h"
+      - "tests/test_c3_candidate_b_t01_r2b_contract_red.py"
+      - "MANIFEST.sha256"
+
+permissions:
+  contents: read
+
+jobs:
+  r2b-r1-native-contract-red-no-signal:
+    if: >-
+      (github.event_name == 'push' &&
+       github.ref == 'refs/heads/research/phase2-lite-c3-candidate-b-kill-t01-r2b-r1-contract-20261022') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'research/phase2-lite-c3-candidate-b-kill-t01-r2b-r1-contract-20261022')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            python-version: "3.13"
+          - os: macos-15
+            python-version: "3.14"
+          - os: ubuntu-latest
+            python-version: "3.13"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 8
+    env:
+      C3B03_T01_R2B_R1_CONTRACT_RED: "true"
+      C3B03_T01_R2B_R1_REAL_GROUP_SIGNAL_AUTHORIZED: "false"
+      C3B03_TEST_NO_SIGNAL_STUB: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Exact Head, manifest, and no live group-signal surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          if [ "${{ matrix.os }}" = "macos-15" ]; then
+            test "$(uname -s)" = Darwin
+            test "$(uname -m)" = arm64
+          fi
+          # R1-only stage absence checks; NEVER put these in shared pytest.
+          test ! -e tools/research/c3_candidate_b_kill.c
+          test ! -e tools/research/run_c3_candidate_b_kill.py
+          test ! -e tools/research/c3_candidate_b_kill_t01_no_signal_probe.py
+          test -f tests/native/c3_b03_t01_no_signal_contract.h
+          test -f tests/test_c3_candidate_b_t01_r2b_contract_red.py
+          test -f docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r1-contract.md
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          for line in Path("MANIFEST.sha256").read_text().splitlines():
+              expected, path = line.split("  ", 1)
+              observed = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+              if observed != expected:
+                  raise AssertionError(f"MANIFEST_DIFF {path} expected={expected} actual={observed}")
+          print("C3B03_T01_R2B_R1_CONTRACT_RED=true")
+          print("C3B03_T01_R2B_R1_REAL_GROUP_SIGNAL_AUTHORIZED=false")
+          print("C3B03_T01_R2B_R1_MANIFEST_OK=true")
+          PY
+          python -m py_compile tests/test_c3_candidate_b_t01_r2b_contract_red.py
+          # Only the declaration header is compiled via the pytest C11
+          # -fsyntax-only guard; no C Helper object/executable is created.
+      - name: Frozen pure Gate GREEN + native stub contract EXPECTED RED
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install pytest==8.4.2
+          python -m pytest -q tests/test_c3_candidate_b_t01_contract_red.py tests/test_c3_candidate_b_t01_pure_gate_r2.py tests/test_c3_candidate_b_t01_r2b_admission_design.py tests/test_c3_candidate_b_t01_r2b_contract_red.py

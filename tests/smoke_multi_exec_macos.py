@@ -317,7 +317,13 @@ def main():
             assert wait_until(lambda: events(jobs, "shutdown") ==
                               ["started", "finished"], 6)
             proc.wait(timeout=14)
-            assert proc.returncode == 0, f"Gateway shutdown status: {proc.returncode}"
+            # Uvicorn may replay the captured SIGTERM after graceful shutdown;
+            # -SIGTERM is not proof that the Worker lease was released early.
+            # The actual ordering proof is: listener alive while Worker blocked,
+            # temporary script finishes after release, then process exits.
+            assert proc.returncode in (0, -signal.SIGTERM), (
+                f"Unexpected Gateway shutdown status: {proc.returncode}"
+            )
             report["checks"].append("real_listener_shutdown_waits_for_worker")
 
             report["status"] = "PARTIAL_NATIVE_ACCEPTANCE_PASS"

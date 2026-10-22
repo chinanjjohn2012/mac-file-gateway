@@ -53,6 +53,20 @@ Legacy CLI mode (with an existing `--allow-write` grant):
 --sensitive-content-audit-until <UTC_TIMESTAMP>
 ```
 
+The expiry must include an explicit UTC timezone marker (for example `Z`
+or `+00:00`). Naive timestamps and nonzero offsets such as `+09:00`
+are rejected, rather than silently converted. Runtime expiration compares
+UTC instants, not formatted timestamp strings, and uses an independent
+monotonic deadline so moving the system clock backward cannot prolong audit.
+
+In Multi-Workspace mode, `/workspaces`, `/info`, and the MCP tools
+`list_workspaces` and `gateway_info` all expose an effective
+`sensitive_content` object under **each workspace** with `write_mode`
+(`enforce` or `audit`), `read_redaction_enabled`, `expires_at`,
+and `audit_scope_count`. This is computed from the live policy, not the
+original config: an expired audit automatically reports `enforce`.
+The responses do not disclose absolute Workspace or private config paths.
+
 Configuration is applied at startup, not by remote request. `gateway_info`
 and `list_workspaces` expose the effective mode and expiry without absolute
 filesystem paths or sensitive values. A monotonic and UTC deadline limits

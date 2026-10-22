@@ -455,8 +455,8 @@ class Gateway:
 
     def _text(self, parts: tuple[str, ...]) -> tuple[list[str], int, int]:
         snapshot = self._snapshot(parts)
-        lines, redacted = self._visibility.redact_lines(snapshot.text)
-        return lines, redacted, len(snapshot.raw), self._visibility.sensitive_flags(snapshot.text)
+        lines, redacted = self._visibility.redact_lines(snapshot.text, '/'.join(parts))
+        return lines, redacted, len(snapshot.raw), self._visibility.full_flags('/'.join(parts), snapshot.text)
 
     def create_directory(self, path: str, parents: bool = False, exist_ok: bool = True,
                          dry_run: bool = True) -> dict[str, Any]:
@@ -545,7 +545,7 @@ class Gateway:
         _integer(start_line, "start_line", 1, 10_000_000)
         _integer(max_lines, "max_lines", 1, self.limits.max_read_lines)
         snapshot = self._snapshot(parts)
-        lines, redacted = self._visibility.redact_lines(snapshot.text)
+        lines, redacted = self._visibility.redact_lines(snapshot.text, '/'.join(parts))
         size = len(snapshot.raw)
         selected: list[str] = []
         output_chars = 0

@@ -1,20 +1,26 @@
 /*
  * B03-T01-R2b-R1 contract ABI. TEST-ONLY. NOT a native signal implementation.
  *
- * This header cannot accept a host PID/PGID. Only the fixed synthetic fixture
- * token is valid in any eventual no-signal adapter. The future Native Owner
+ * This header cannot accept a host PID/PGID. The adapter MUST validate the
+ * fixed synthetic fixture token, exact ABI, mock_only=True and a fresh nonzero
+ * uint64 nonce BEFORE conversion into this C ABI (which has no target string).
+ * The future Native Owner
  * must establish real process identity separately and never use these mock
  * facts as permission to issue an OS group signal.
  */
 #ifndef C3_B03_T01_NO_SIGNAL_CONTRACT_H
 #define C3_B03_T01_NO_SIGNAL_CONTRACT_H
 
-#ifndef C3B03_TEST_NO_SIGNAL_STUB
-#error "C3B03_TEST_NO_SIGNAL_STUB required for contract-only compilation"
+#if !defined(C3B03_TEST_NO_SIGNAL_STUB)
+#error "C3B03_TEST_NO_SIGNAL_STUB must be exactly 1"
+#elif C3B03_TEST_NO_SIGNAL_STUB != 1
+#error "C3B03_TEST_NO_SIGNAL_STUB must be exactly 1"
 #endif
 
 #include <stdint.h>
 #define C3B03_T01_NO_SIGNAL_ABI_VERSION UINT32_C(1)
+#define C3B03_T01_MAX_ATTEMPT_STEPS UINT32_C(3)
+#define C3B03_T01_MAX_SCENARIO_ID UINT32_C(67)
 #define C3B03_T01_SYNTHETIC_TARGET "fixture:synthetic-owned-anchor-group-T01"
 
 typedef enum {
@@ -51,12 +57,23 @@ typedef struct {
     c3b03_t01_phase_t phase;
     /* This is an opaque unit-test value, NEVER a PID, PGID, FD or handle. */
     uint64_t scenario_nonce;
+    /* Validated adapter whitelist maps phase/fault to fixed IDs 1..67.
+     * An unknown/malformed Python phase or fault MUST NOT reach C.
+     * These are finite test cases, never runtime authority or native PID.
+     */
+    uint32_t scenario_fault_id;
+    /* All steps execute on ONE synthetic ledger (max 3, unused=zero).
+     * TERM,TERM and TERM,KILL,KILL expose attempted same-task replays.
+     */
+    uint32_t attempt_sequence_len;
+    c3b03_t01_phase_t attempt_sequence[3];
     /* All of these values are test facts. Real native witnesses are separate. */
     uint64_t term_fact_mask;
     uint64_t kill_fact_mask;
     int64_t now_ms;
     int64_t term_sent_at_ms;
-    c3b03_t01_deadline_t policy;
+    c3b03_t01_deadline_t original_policy;
+    c3b03_t01_deadline_t attempt_policy;
 } c3b03_t01_mock_input_t;
 
 typedef struct {

@@ -6,9 +6,9 @@ no-signal-only implementation: never mark them xfail or skip.
 """
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 from pathlib import Path
+import secrets
 import subprocess
 
 import pytest
@@ -87,21 +87,81 @@ EVIDENCE_DENIALS = (
     "only-note-exit-observed",
     "worker-wait-unknown",
 )
-GATE_MUTANTS = (
+TERM_GATE_MUTANTS = (
     "omit-anchor-term-ignore",
-    "omit-anchor-post-term-witness",
-    "omit-anchor-reap-check",
     "omit-controller-outside-group",
-    "omit-controller-live-check",
     "omit-worker-legal-parent",
     "omit-worker-group-check",
+)
+KILL_GATE_MUTANTS = (
+    "omit-anchor-post-term-witness",
+    "omit-anchor-reap-check",
+    "omit-controller-live-check",
     "omit-kill-cutoff",
     "omit-grace",
     "allow-policy-rebase",
-    "allow-second-term",
-    "allow-second-kill",
 )
+REPLAY_MUTANTS = ("allow-second-term", "allow-second-kill")
+GATE_MUTANTS = TERM_GATE_MUTANTS + KILL_GATE_MUTANTS + REPLAY_MUTANTS
 EVIDENCE_MUTANTS = ("accept-fake-final", "ignore-fd-close")
+
+# Immutable 1-based native test scenario IDs, NOT runtime-selected mutants.
+# Adapter converts these strictly-validated (phase, fault) pairs into the
+# C header's scenario_fault_id. The C ABI has NO generic string/PID channel.
+FAULT_CATALOG = (
+    tuple(("TERM", fault) for fault in TERM_DENIALS)
+    + tuple(("KILL", fault) for fault in KILL_DENIALS)
+    + tuple(("ERRNO", phase + "-" + err) for phase, err in SIGNAL_FAILURES)
+    + tuple(("EVIDENCE", fault) for fault in EVIDENCE_DENIALS)
+    + tuple(("MUTATION", fault) for fault in GATE_MUTANTS)
+    + tuple(("EVIDENCE_MUTATION", fault) for fault in EVIDENCE_MUTANTS)
+    + (("MODE", "different-mode"), ("KILL", "nominal-synthetic"))
+)
+FAULT_IDS = {item: i for i, item in enumerate(FAULT_CATALOG, 1)}
+assert len(FAULT_CATALOG) == len(FAULT_IDS) == 67
+
+REQUEST_FIELDS = frozenset((
+    "abi_version", "mode", "fixture_target", "phase", "fault",
+    "nonce", "original_policy", "attempt_policy", "now_ms",
+    "term_sent_at_ms", "mock_only", "attempt_sequence",
+))
+POLICY_FIELDS = frozenset((
+    "t0_ms", "outer_budget_ms", "cleanup_reserve_ms",
+    "term_grace_ms", "kill_entry_margin_ms", "outer_deadline_ms",
+    "kill_cutoff_ms", "term_cutoff_ms",
+))
+_ISSUED_NONCES = set()
+
+
+def fresh_nonce() -> int:
+    """A fresh nonzero uint64 per distinct scenario in this test process.
+
+    The value is not a credential or a kernel process identifier. Intentional
+    replay tests copy the same nonce to the SAME adapter instance.
+    """
+    for _ in range(64):
+        n = secrets.randbits(64)
+        if n and n not in _ISSUED_NONCES:
+            _ISSUED_NONCES.add(n)
+            return n
+    raise AssertionError("test-only nonce issuer exhausted")
+
+
+def steps_for(phase: str, fault: str) -> tuple[str, ...]:
+    """Native ABI's at-most-3 operations on ONE synthetic ledger."""
+    if phase in {"TERM", "MODE"}:
+        return ("TERM",)
+    if phase == "ERRNO" and fault.startswith("term-"):
+        return ("TERM",)
+    if phase == "MUTATION":
+        if fault in TERM_GATE_MUTANTS:
+            return ("TERM",)
+        if fault == "allow-second-term":
+            return ("TERM", "TERM")
+        if fault == "allow-second-kill":
+            return ("TERM", "KILL", "KILL")
+    return ("TERM", "KILL")
+
 
 
 def policy(*, t0=FIRST_T0, outer=FIRST_BUDGET, reserve=FIRST_RESERVE,
@@ -121,9 +181,7 @@ def policy(*, t0=FIRST_T0, outer=FIRST_BUDGET, reserve=FIRST_RESERVE,
 
 def case(phase: str, fault: str, *, now: int | None = None, original=None,
          replacement=None) -> dict:
-    # Deterministic one-use synthetic nonce: never interpreted as an OS PID.
-    digest = hashlib.sha256((phase + ":" + fault).encode()).digest()
-    token = int.from_bytes(digest[:8], "big") or 1
+    assert (phase, fault) in FAULT_IDS, "only frozen test scenarios allowed"
     p = policy() if original is None else dict(original)
     return {
         "abi_version": 1,
@@ -131,13 +189,14 @@ def case(phase: str, fault: str, *, now: int | None = None, original=None,
         "fixture_target": TARGET,
         "phase": phase,
         "fault": fault,
-        "nonce": token,
+        "nonce": fresh_nonce(),
         "original_policy": p,
         "attempt_policy": dict(p if replacement is None else replacement),
         "now_ms": (FIRST_TERM if phase == "TERM" else FIRST_KILL)
         if now is None else now,
         "term_sent_at_ms": FIRST_TERM,
         "mock_only": True,
+        "attempt_sequence": steps_for(phase, fault),
     }
 
 
@@ -172,10 +231,17 @@ def check_no_signal(result: object, request: dict) -> dict:
         "signals_closed", "group_signals_after_close",
         "decision", "cleanup", "worker_lawful_wait",
         "anchor_lawful_wait", "reuse_proven", "g2_qualified",
-        "mutation_detected",
+        "mutation_detected", "c_adapter_dispatches",
     }
     assert type(result["abi_version"]) is int and result["abi_version"] == 1
-    assert type(result["nonce"]) is int and result["nonce"] == request["nonce"]
+    raw_nonce = request.get("nonce") if type(request) is dict else None
+    expected_nonce = (
+        raw_nonce if type(raw_nonce) is int and 0 < raw_nonce < (1 << 64)
+        else 0
+    )
+    # Bad/missing/Boolean nonce is returned as canonical 0, not echoed
+    # as True==1 or as a misleading live task identity.
+    assert type(result["nonce"]) is int and result["nonce"] == expected_nonce
     assert result["stub_mode"] == "C3B03_TEST_NO_SIGNAL_STUB"
     for name in ("synthetic_only", "signals_closed", "worker_lawful_wait",
                  "anchor_lawful_wait", "reuse_proven", "g2_qualified",
@@ -192,6 +258,8 @@ def check_no_signal(result: object, request: dict) -> dict:
     assert result["term_attempts"] <= 1
     assert result["kill_attempts"] <= 1
     assert result["group_signals_after_close"] == 0
+    assert type(result["c_adapter_dispatches"]) is int
+    assert 0 <= result["c_adapter_dispatches"] <= 1
     assert result["reuse_proven"] is False
     assert result["g2_qualified"] is False
     # Synthetic syscalls never provide actual lawful waitpid or VERIFIED.
@@ -202,9 +270,26 @@ def check_no_signal(result: object, request: dict) -> dict:
     return result
 
 
-def run_mock(request: dict) -> dict:
-    output = probe().run_no_signal_case(request)
-    return check_no_signal(output, request)
+def run_mock(request: dict, *, adapter=None, expected_dispatch=1) -> dict:
+    """Keep the SAME loaded adapter for deliberate nonce replay tests."""
+    module = probe() if adapter is None else adapter
+    output = module.run_no_signal_case(request)
+    result = check_no_signal(output, request)
+    assert result["c_adapter_dispatches"] == expected_dispatch
+    return result
+
+
+def assert_input_rejected(request: dict, *, adapter=None) -> dict:
+    r = run_mock(request, adapter=adapter, expected_dispatch=0)
+    assert r["decision"] == "BLOCK"
+    assert r["fake_term_transport_calls"] == 0
+    assert r["fake_kill_transport_calls"] == 0
+    assert r["term_attempts"] == 0
+    assert r["kill_attempts"] == 0
+    assert r["signals_closed"] is True
+    assert r["group_signals_after_close"] == 0
+    assert r["mutation_detected"] is False
+    return r
 
 
 def test_r2b_r1_contract_has_only_one_owned_fixture_and_frozen_modes():
@@ -226,32 +311,37 @@ def test_r2b_r1_contract_has_only_one_owned_fixture_and_frozen_modes():
 
 
 def test_r2b_r1_c_header_compiles_without_linking_or_executing():
-    # Only test-owned header: a compile-time syntax check, no executable,
-    # native process launch, group signal or OS target involved.
+    # Declaration header only. The C compiler is never asked to link or run.
     code = (
         '#include "c3_b03_t01_no_signal_contract.h"\n'
         '_Static_assert(C3B03_T01_NO_SIGNAL_ABI_VERSION == 1, "ABI");\n'
+        '_Static_assert(C3B03_T01_MAX_ATTEMPT_STEPS == 3, "steps");\n'
+        '_Static_assert(C3B03_T01_MAX_SCENARIO_ID == 67, "scenarios");\n'
         'int contract_syntax(c3b03_t01_mock_input_t *in) {\n'
         '  c3b03_t01_mock_output_t out = {0};\n'
-        '  return (int)in->policy.kill_cutoff_ms + (int)out.abi_version;\n'
+        '  return (int)in->original_policy.kill_cutoff_ms +\n'
+        '         (int)in->attempt_sequence_len + (int)out.abi_version;\n'
         '}\n'
     )
-    cmd = [
+    base_args = [
         "cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic",
-        "-DC3B03_TEST_NO_SIGNAL_STUB=1", "-fsyntax-only",
-        "-I", str(HEADER.parent), "-x", "c", "-",
+        "-fsyntax-only", "-I", str(HEADER.parent), "-x", "c", "-",
     ]
-    good = subprocess.run(
-        cmd, input=code, text=True, capture_output=True,
-        timeout=15, check=False,
-    )
-    assert good.returncode == 0, good.stderr
-    forbidden = subprocess.run(
-        [p for p in cmd if not p.startswith("-DC3B03_TEST_NO_SIGNAL_STUB")],
-        input=code, text=True, capture_output=True, timeout=15, check=False,
-    )
-    assert forbidden.returncode != 0
-    assert "C3B03_TEST_NO_SIGNAL_STUB required" in forbidden.stderr
+    for value in ("1", None, "0", "2"):
+        cmd = list(base_args)
+        if value is not None:
+            cmd.insert(6, "-DC3B03_TEST_NO_SIGNAL_STUB=" + value)
+        compiled = subprocess.run(
+            cmd, input=code, text=True, capture_output=True,
+            timeout=15, check=False,
+        )
+        if value == "1":
+            assert compiled.returncode == 0, compiled.stderr
+        else:
+            assert compiled.returncode != 0, (
+                f"unsafe macro={value!r} unexpectedly accepted"
+            )
+            assert "C3B03_TEST_NO_SIGNAL_STUB must be exactly 1" in compiled.stderr
 
 
 def test_r2b_r1_workflow_is_R1_only_and_never_launches_native_C():
@@ -354,26 +444,70 @@ def test_simulated_transport_never_forges_lawful_wait_or_cleanup(fault):
     assert r["signals_closed"] is True
 
 
-@pytest.mark.parametrize("mutant", GATE_MUTANTS, ids=GATE_MUTANTS)
-def test_each_gate_deletion_mutant_stays_before_fake_transport(mutant):
-    # The mutation is a *fixed compile-time test enum*; never runtime
-    # permission to signal a numeric host PGID. Independent R2 C reviews
-    # must verify compiled mutation binaries and symbol tables.
-    r = run_mock(case("MUTATION", mutant))
+@pytest.mark.parametrize("mutant", TERM_GATE_MUTANTS, ids=TERM_GATE_MUTANTS)
+def test_term_gate_mutant_never_reaches_either_fake_transport(mutant):
+    q = case("MUTATION", mutant)
+    assert q["attempt_sequence"] == ("TERM",)
+    r = run_mock(q)
     assert r["mutation_detected"] is True
     assert r["decision"] == "BLOCK"
+    assert r["fake_term_transport_calls"] == 0
     assert r["fake_kill_transport_calls"] == 0
+    assert r["term_attempts"] == 0
+    assert r["kill_attempts"] == 0
     assert r["signals_closed"] is True
 
 
+@pytest.mark.parametrize("mutant", KILL_GATE_MUTANTS, ids=KILL_GATE_MUTANTS)
+def test_kill_gate_mutant_stops_after_exact_one_valid_fake_term(mutant):
+    q = case("MUTATION", mutant)
+    assert q["attempt_sequence"] == ("TERM", "KILL")
+    r = run_mock(q)
+    assert r["mutation_detected"] is True
+    assert r["decision"] == "BLOCK"
+    assert r["fake_term_transport_calls"] == 1
+    assert r["term_attempts"] == 1
+    assert r["fake_kill_transport_calls"] == 0
+    assert r["kill_attempts"] == 0
+    assert r["signals_closed"] is True
+
+
+@pytest.mark.parametrize(
+    "mutant,steps,expected_term,expected_kill",
+    (
+        ("allow-second-term", ("TERM", "TERM"), 1, 0),
+        ("allow-second-kill", ("TERM", "KILL", "KILL"), 1, 1),
+    ),
+)
+def test_repeat_signal_attempt_in_same_ledger_cannot_rearm(
+    mutant, steps, expected_term, expected_kill,
+):
+    # One request -> one fresh nonce -> one owned ledger -> ordered attempts.
+    q = case("MUTATION", mutant)
+    assert q["attempt_sequence"] == steps
+    r = run_mock(q)
+    assert r["mutation_detected"] is True
+    assert r["decision"] == "BLOCK"
+    assert r["term_attempts"] == expected_term
+    assert r["kill_attempts"] == expected_kill
+    assert r["fake_term_transport_calls"] == expected_term
+    assert r["fake_kill_transport_calls"] == expected_kill
+    assert r["signals_closed"] is True
+    assert r["group_signals_after_close"] == 0
 
 
 @pytest.mark.parametrize("mutant", EVIDENCE_MUTANTS, ids=EVIDENCE_MUTANTS)
 def test_post_signal_evidence_mutants_cannot_upgrade_cleanup(mutant):
     # FINAL and FD close happen after a simulated send, so these checks
     # must block VERIFIED but do not retroactively make the send ineligible.
-    r = run_mock(case("EVIDENCE_MUTATION", mutant))
+    q = case("EVIDENCE_MUTATION", mutant)
+    assert q["attempt_sequence"] == ("TERM", "KILL")
+    r = run_mock(q)
     assert r["mutation_detected"] is True
+    assert r["fake_term_transport_calls"] == 1
+    assert r["term_attempts"] == 1
+    assert r["fake_kill_transport_calls"] == 1
+    assert r["kill_attempts"] == 1
     assert r["decision"] == "BLOCK"
     assert r["cleanup"] == "UNRESOLVED"
     assert r["signals_closed"] is True
@@ -382,10 +516,7 @@ def test_post_signal_evidence_mutants_cannot_upgrade_cleanup(mutant):
 def test_non_T01_modes_always_denied_even_if_orphan_preflight_true(mode):
     q = case("MODE", "different-mode")
     q["mode"] = mode
-    q["nonce"] = int.from_bytes(
-        hashlib.sha256(("MODE:" + mode).encode()).digest()[:8], "big"
-    )
-    r = run_mock(q)
+    r = run_mock(q, expected_dispatch=0)
     assert r["decision"] == "BLOCK"
     assert r["fake_term_transport_calls"] == 0
     assert r["fake_kill_transport_calls"] == 0
@@ -416,3 +547,196 @@ def test_t01_native_stub_uses_exact_original_monotonic_vector(
     assert r["fake_term_transport_calls"] == 1
     assert r["fake_kill_transport_calls"] == 1
     assert r["signals_closed"] is True
+
+def test_every_mock_task_has_fresh_nonzero_uint64_even_same_fault_and_vector():
+    a = case("KILL", "nominal-synthetic")
+    b = case("KILL", "nominal-synthetic")
+    c = case(
+        "KILL", "nominal-synthetic", now=244_000,
+        original=policy(
+            t0=230_000, outer=21_000, reserve=6_000, grace=900, margin=600
+        ),
+    )
+    assert len({a["nonce"], b["nonce"], c["nonce"]}) == 3
+    assert all(type(x["nonce"]) is int and 0 < x["nonce"] < (1 << 64)
+               for x in (a, b, c))
+    assert all(set(x) == REQUEST_FIELDS for x in (a, b, c))
+    assert len(FAULT_IDS) == 67
+    assert FAULT_IDS[("TERM", TERM_DENIALS[0])] == 1
+    assert FAULT_IDS[("KILL", "nominal-synthetic")] == 67
+
+
+@pytest.mark.parametrize("field", sorted(REQUEST_FIELDS))
+def test_missing_adapter_input_field_cannot_reach_c_probe(field):
+    q = case("KILL", "nominal-synthetic")
+    del q[field]
+    assert_input_rejected(q)
+
+
+@pytest.mark.parametrize("name,corrupt", (
+    ("abi_version", 0),
+    ("abi_version", 2),
+    ("abi_version", True),
+    ("abi_version", 1.0),
+    ("abi_version", "1"),
+    ("abi_version", None),
+    ("fixture_target", "fixture:synthetic-owned-anchor-group-T01-other"),
+    ("fixture_target", "host:123"),
+    ("fixture_target", 0),
+    ("fixture_target", True),
+    ("fixture_target", None),
+    ("fixture_target", []),
+    ("mock_only", False),
+    ("mock_only", 0),
+    ("mock_only", "true"),
+    ("mock_only", None),
+    ("nonce", 0),
+    ("nonce", -1),
+    ("nonce", True),
+    ("nonce", False),
+    ("nonce", 1 << 64),
+    ("nonce", 1.0),
+    ("nonce", "1"),
+    ("nonce", None),
+    ("nonce", []),
+    ("mode", ""),
+    ("mode", "Escalate-positive"),
+    ("mode", "unknown-mode"),
+    ("mode", 1),
+    ("mode", True),
+    ("mode", None),
+    ("mode", []),
+    ("phase", "UNKNOWN"),
+    ("phase", "signal"),
+    ("phase", 1),
+    ("phase", True),
+    ("phase", None),
+    ("fault", "unknown-fault"),
+    ("fault", ""),
+    ("fault", 1),
+    ("fault", True),
+    ("fault", None),
+    ("now_ms", True),
+    ("now_ms", None),
+    ("now_ms", "108300"),
+    ("now_ms", -1),
+    ("term_sent_at_ms", True),
+    ("term_sent_at_ms", None),
+    ("term_sent_at_ms", "108000"),
+    ("term_sent_at_ms", -1),
+    ("attempt_sequence", ()),
+    ("attempt_sequence", []),
+    ("attempt_sequence", None),
+    ("attempt_sequence", ("KILL",)),
+    ("attempt_sequence", ("TERM", "TERM")),
+    ("attempt_sequence", ("TERM", "KILL", "TERM", "KILL")),
+    ("attempt_sequence", ("TERM", True)),
+))
+def test_bad_type_or_value_denied_at_adapter_before_c(name, corrupt):
+    q = case("KILL", "nominal-synthetic")
+    q[name] = corrupt
+    assert_input_rejected(q)
+
+
+@pytest.mark.parametrize("field", ("original_policy", "attempt_policy"))
+@pytest.mark.parametrize("damage", (
+    "not-mapping", "missing", "extra", "wrong-type", "negative",
+    "overflow", "inconsistent",
+))
+def test_adapter_policy_schema_and_type_validation_before_native_c(
+    field, damage,
+):
+    q = case("KILL", "nominal-synthetic")
+    source = q[field]
+    if damage == "not-mapping":
+        q[field] = []
+    elif damage == "missing":
+        q[field] = {k: v for k, v in source.items() if k != "t0_ms"}
+    elif damage == "extra":
+        q[field] = {**source, "untrusted_extra": 1}
+    elif damage == "wrong-type":
+        q[field] = {**source, "term_grace_ms": True}
+    elif damage == "negative":
+        q[field] = {**source, "cleanup_reserve_ms": -1}
+    elif damage == "overflow":
+        q[field] = {**source, "outer_deadline_ms": 1 << 63}
+    elif damage == "inconsistent":
+        q[field] = {**source, "kill_cutoff_ms": source["kill_cutoff_ms"] + 1}
+    assert_input_rejected(q)
+
+
+def test_extra_adapter_input_field_denied_before_any_native_dispatch():
+    q = case("KILL", "nominal-synthetic")
+    q["untrusted_extra"] = "not-an-authority"
+    assert_input_rejected(q)
+
+
+@pytest.mark.parametrize("bad_request", (
+    None, True, [], (), "payload", 1,
+))
+def test_non_dict_adapter_request_must_fail_closed_without_exception(bad_request):
+    assert_input_rejected(bad_request)
+
+
+@pytest.mark.parametrize("replay_kind", ("exact", "different-fault", "different-phase"))
+def test_repeated_nonce_rejected_before_c_even_with_new_facts(replay_kind):
+    # Same adapter instance maintains per-task nonce consumption. Two
+    # independent adapter imports would incorrectly bypass replay detection.
+    adapter = probe()
+    first = case("KILL", "nominal-synthetic")
+    accepted = run_mock(first, adapter=adapter)
+    assert accepted["decision"] == "SIMULATED_GATE_ONLY"
+    assert accepted["fake_term_transport_calls"] == 1
+    assert accepted["fake_kill_transport_calls"] == 1
+    if replay_kind == "exact":
+        replay = dict(first)
+    elif replay_kind == "different-fault":
+        replay = case("KILL", "anchor-early-exit")
+        replay["nonce"] = first["nonce"]
+    else:
+        replay = case("TERM", "root-unsafe")
+        replay["nonce"] = first["nonce"]
+    refused = assert_input_rejected(replay, adapter=adapter)
+    assert refused["nonce"] == first["nonce"]
+    assert refused["c_adapter_dispatches"] == 0
+
+
+def test_malformed_input_consumes_valid_nonce_and_cannot_rearm_it():
+    adapter = probe()
+    malformed = case("KILL", "nominal-synthetic")
+    malformed["mock_only"] = False
+    assert_input_rejected(malformed, adapter=adapter)
+    repaired = dict(malformed)
+    repaired["mock_only"] = True
+    assert_input_rejected(repaired, adapter=adapter)
+
+def test_adapter_to_header_identity_mapping_and_scenario_table_are_frozen():
+    """Pre-native static check; should remain GREEN at the R1 RED Head."""
+    h = HEADER.read_text(encoding="utf-8")
+    d = CONTRACT.read_text(encoding="utf-8")
+    for token in (
+        "C3B03_T01_MAX_SCENARIO_ID UINT32_C(67)",
+        "C3B03_T01_MAX_ATTEMPT_STEPS UINT32_C(3)",
+        "uint32_t scenario_fault_id;",
+        "uint64_t scenario_nonce;",
+        "uint32_t attempt_sequence_len;",
+        "c3b03_t01_phase_t attempt_sequence[3];",
+        "c3b03_t01_deadline_t original_policy;",
+        "c3b03_t01_deadline_t attempt_policy;",
+        "#elif C3B03_TEST_NO_SIGNAL_STUB != 1",
+    ):
+        assert token in h, token
+    for token in (
+        "exact 12-field request shape", "Fixed IDs:",
+        "ORIGINAL_POLICY", "c_adapter_dispatches", "nonce=0",
+    ):
+        assert token in d, token
+    assert len(FAULT_IDS) == 67 and set(FAULT_IDS.values()) == set(range(1, 68))
+    assert steps_for("MUTATION", "allow-second-term") == ("TERM", "TERM")
+    assert steps_for("MUTATION", "allow-second-kill") == (
+        "TERM", "KILL", "KILL"
+    )
+    assert steps_for("MUTATION", TERM_GATE_MUTANTS[0]) == ("TERM",)
+    assert steps_for("MUTATION", KILL_GATE_MUTANTS[0]) == ("TERM", "KILL")
+    assert set(case("KILL", "nominal-synthetic")) == REQUEST_FIELDS
+

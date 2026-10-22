@@ -65,7 +65,8 @@ jobs:
           import hashlib
           from pathlib import Path
           lines = Path("MANIFEST.sha256").read_text().splitlines()
-          assert lines == sorted(lines)
+          names = [row.split("  ", 1)[1] for row in lines]
+          assert names == sorted(names) and len(names) == len(set(names))
           for row in lines:
               digest, name = row.split("  ", 1)
               assert hashlib.sha256(Path(name).read_bytes()).hexdigest() == digest, name

@@ -32,6 +32,19 @@ _IMPORT_REGISTRY_MEMBERS = frozenset({
 # Conservatively reject namespace mappings, including reexports from other
 # modules, rather than trying to track an arbitrary alias chain.
 _OPAQUE_MODULE_NAMESPACE_EXPORTS = frozenset({"__dict__", "__builtins__"})
+# Source-level reflection is identified by the *exported* capability, not by
+# whichever local alias receives it. The same vocabulary is used for direct
+# names, attribute accesses and ImportFrom aliases; imported reexports from
+# unknown modules are conservatively treated as equally untrusted.
+_REFLECTIVE_NAMESPACE_OPERATIONS = frozenset({
+    "exec", "eval", "compile", "globals", "locals", "vars",
+    "getattr", "setattr", "delattr", "__import__", "__builtins__",
+})
+_REFLECTIVE_NAMESPACE_ATTRIBUTES = (
+    _REFLECTIVE_NAMESPACE_OPERATIONS
+    | frozenset({"__setattr__", "__delattr__", "__dict__",
+                 "f_globals", "f_locals"})
+)
 _MODULE_PROVENANCE_MUTATIONS = frozenset({
     "__class__", "__getattribute__", "__getattr__",
     "__import__", "__spec__", "__loader__", "__path__", "__package__",
@@ -61,12 +74,17 @@ def _has_unproven_import_identity(tree: ast.AST) -> bool:
             if node.attr in _DYNAMIC_IMPORT_OPERATIONS:
                 return True
         elif isinstance(node, ast.ImportFrom):
-            # "from contextvars import __dict__ as registry" must not earn
-            # ContextVar provenance, even if registry is then passed through
-            # other variables or modified via .update(), |=, or subscripts.
-            # The same applies to opaque namespace exports from other
-            # modules which static parsing cannot identify as unrelated.
-            if any(alias.name in _OPAQUE_MODULE_NAMESPACE_EXPORTS
+            # A star import can rebind trusted names without an ast.Name(Store)
+            # for any of them. More importantly, an exported reflection
+            # primitive can be renamed (from builtins import setattr as f)
+            # or reexported by an unknown module; its original alias.name
+            # is authoritative, never the local spelling alone.
+            unprovable_exports = (
+                _REFLECTIVE_NAMESPACE_ATTRIBUTES
+                | _OPAQUE_MODULE_NAMESPACE_EXPORTS
+                | _DYNAMIC_IMPORT_OPERATIONS
+            )
+            if any(alias.name == "*" or alias.name in unprovable_exports
                    for alias in node.names):
                 return True
             if node.level == 0 and node.module == "contextvars" and any(
@@ -125,15 +143,8 @@ def proven_contextvar_lines(source: str) -> list[int]:
     # Module dictionaries and frame-global mappings can rebind the trusted
     # ContextVar object without creating another ast.Name(Store) node.
     # Unprovable binding stability must preserve heuristic redaction.
-    reflective_names = frozenset({
-        "exec", "eval", "compile", "globals", "locals", "vars",
-        "getattr", "setattr", "delattr", "__import__", "__builtins__",
-    })
-    reflective_attributes = frozenset({
-        "exec", "eval", "globals", "locals", "vars", "getattr",
-        "setattr", "delattr", "__setattr__", "__delattr__",
-        "__dict__", "f_globals", "f_locals",
-    })
+    reflective_names = _REFLECTIVE_NAMESPACE_OPERATIONS
+    reflective_attributes = _REFLECTIVE_NAMESPACE_ATTRIBUTES
     if any(
         (isinstance(node, ast.Name) and node.id in reflective_names)
         or (isinstance(node, ast.Attribute) and node.attr in reflective_attributes)

@@ -28,6 +28,8 @@ The **future** independent PRE-LOAD implementation (not part of this D1 PR) must
 
 **None of S0–S6 evidence collection or approval occurs in THIS PR.** Future PRE-COMPILE must record compiler identity *before* spawning it, not after. A compiler-driver file digest alone is not proof about a dynamically chosen subprocess linker, compiler resource directory, SDK, tool-injected flags or code generation. If transitive toolchain identity cannot be pinned on the runner, future load remains BLOCK. No generic system-wrapper exemption.
 
+**Identifier types are distinct:** in this repository, reviewed Git commit Head and Git Tree are exact **40-character lowercase hexadecimal Git object IDs**; file/tool/artifact SHA256 digests are **64-character lowercase hexadecimal hashes**. Treating Head/Tree as 64-digit SHA256 is a false rejection; treating an artifact as a 40-digit Git OID is a provenance failure. Synthetic-fixture lints check both formats separately but never confer authority.
+
 The evidence record must bind a single build_session_sha and previous-stage digest across S0→S1→S2→S3→S4→S5→S6, review Head/Tree, full Manifest byte digest, compiler/ld/SDK resource SHA, ordered argv/environment, output object SHA, final linked SHA, Adapter+import closure SHA, ABI layout SHA, unique filename/dev/inode and loader-path custody. **A synthetic hash chain is not proof of its claimed observations**. Independent original GitHub Jobs and physical byte identity are necessary.
 
 ## 3. Exact future ABI and real Adapter-to-C call chain

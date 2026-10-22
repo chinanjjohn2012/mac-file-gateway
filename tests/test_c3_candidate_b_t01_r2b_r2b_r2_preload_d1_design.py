@@ -34,8 +34,9 @@ STAGES = (
     "S5_PRE_LOAD_PATH_CUSTODY_LOCK",
     "S6_INDEPENDENT_PRELOAD_DECISION",
 )
+GIT_OBJECT_FIELDS = ("reviewed_head", "reviewed_tree")
 HEX_FIELDS = (
-    "reviewed_head", "reviewed_tree", "manifest_sha256",
+    "manifest_sha256",
     "source_sha256", "header_sha256", "adapter_source_sha256",
     "transitive_import_graph_sha256", "compiler_binary_sha256",
     "linker_binary_sha256", "toolchain_resource_sha256",
@@ -63,8 +64,9 @@ FALSE_FIELDS = (
 )
 ALL_FIELDS = frozenset((
     "fixture_kind", "build_session_sha256", "platform", "stages",
-) + HEX_FIELDS + GATE_FIELDS + FALSE_FIELDS)
+) + GIT_OBJECT_FIELDS + HEX_FIELDS + GATE_FIELDS + FALSE_FIELDS)
 HEX_RE = re.compile(r"[0-9a-f]{64}")
+GIT_OID_RE = re.compile(r"[0-9a-f]{40}")
 
 
 def _digest(value: str) -> str:
@@ -118,6 +120,13 @@ def _offline_design_lint(fixture: object) -> str:
     if any(
         type(fixture[key]) is not str or HEX_RE.fullmatch(fixture[key]) is None
         for key in HEX_FIELDS
+    ):
+        return "REJECT"
+    # Git's reviewed Head and Tree are 40-hex OIDs in this repository, NOT
+    # 64-hex SHA256 byte digests. Conflation would reject genuine evidence.
+    if any(
+        type(fixture[key]) is not str or GIT_OID_RE.fullmatch(fixture[key]) is None
+        for key in GIT_OBJECT_FIELDS
     ):
         return "REJECT"
     if fixture["reviewed_head"] != PARENT_HEAD:
@@ -179,6 +188,16 @@ def test_missing_any_provenance_claim_is_rejected(field):
 @pytest.mark.parametrize("field", sorted(HEX_FIELDS))
 @pytest.mark.parametrize("invalid", ("", "not-a-sha256", "0" * 63, "F" * 64, None))
 def test_absent_malformed_or_case_changed_sha_is_rejected(field, invalid):
+    fixture = _synthetic_submission()
+    fixture[field] = invalid
+    assert _offline_design_lint(fixture) == "REJECT"
+
+
+@pytest.mark.parametrize("field", GIT_OBJECT_FIELDS)
+@pytest.mark.parametrize("invalid", (
+    "", "not-a-git-oid", "0" * 39, "0" * 41, "F" * 40, None,
+))
+def test_git_head_tree_are_exact_40_lowercase_hex_and_not_sha256(field, invalid):
     fixture = _synthetic_submission()
     fixture[field] = invalid
     assert _offline_design_lint(fixture) == "REJECT"

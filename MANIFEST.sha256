@@ -59,7 +59,7 @@ a6ef8f7b8ef516853d4c15fa73c6e3c81ee1088a251248bc8c069c3a6d5123e6  ./docs/researc
 9c9ee46a08677b054321952a94b76262eb1aee6d1dbe437d11fd8c6ec3bc7c90  ./docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2a-source-admission.md
 adeadae68e33559338f2c5ec5249070ac4b0392e7ec7d4ac91c08b5fa4d4bb3b  ./docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2b-d0-linked-adapter-provenance-design.md
 120bbe4e2e78d720861a33f29d408284b74dcb3657df180fb9e9aeb147762634  ./docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2b-r1-linked-binary-inspection.md
-06b3da3c1e1e55c49cdc1834073f9914c7e13df4deed3a6aac857ac79046a54a  ./docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2b-r2-preload-provenance-d1-design.md
+b76a9ac2bc4bd087798c8dd04152e165016c77cbf36d299017ae456337a726ee  ./docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2b-r2-preload-provenance-d1-design.md
 8017f39e9c15351785f04d878a5c3f122fe3614fc9ff1f23d358f1625fd225ed  ./docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2b-r2-source-only-adapter.md
 1fa8e0b8fa1fc3ccdbea276ec782c050f6dc60af46f156887f000eade32a68e5  ./docs/research/phase2-lite-c3/candidate-b-isolated-plan.md
 1e95a8424b5cae7d8c47cbb30269ea0b773edc50df03eb78151f93553f5ee284  ./docs/superpowers/plans/2026-09-22-guarded-writes.md
@@ -128,7 +128,7 @@ cb40b0ee7bf5b120f20610722da916a913677eb95d59618bb81190de98129c89  ./tests/test_c
 ccbd61b4736e8137ba8f68169814f89b77cd9a744134fbd01cbc4f23717ce367  ./tests/test_c3_candidate_b_t01_r2b_r2a_source_admission.py
 6cc4608d0000dfee5da62d94043eaeb2336d7914c924a1ade036ebbca5a32b13  ./tests/test_c3_candidate_b_t01_r2b_r2b_d0_provenance_design.py
 1e8e4464bad0d9bafbcb44bafb4bac547a0a496efe4e11fd8c5128038d379610  ./tests/test_c3_candidate_b_t01_r2b_r2b_r1_linked_inspection.py
-db1cdbe9533a0b67bafcc752646fe49e1158dfb3b9af015f23ac2873356852f0  ./tests/test_c3_candidate_b_t01_r2b_r2b_r2_preload_d1_design.py
+7bec05c8a57d3c57f7675db092b560feabc9e4d9f41d8b66c5a86e1a48456c6c  ./tests/test_c3_candidate_b_t01_r2b_r2b_r2_preload_d1_design.py
 985d2466a026e2d4fa2f4bacff5656bb9016db62c5443b975dc5d8fdd4bf7092  ./tests/test_c3_candidate_b_t01_r2b_r2b_r2_source_only_adapter.py
 060d09c5d6a102c9ae9aa5689b066ef1baf59e72dcb0f8fdb8f3b48e58c1ee01  ./tests/test_c3_candidate_b_term.py
 199ec7e6958c1f21aa8ca14ac1af8b9868490621e02f67e9a3926eaf5957cef1  ./tests/test_cli.py

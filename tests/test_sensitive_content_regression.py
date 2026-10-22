@@ -108,3 +108,46 @@ def test_audit_heuristic_only_scoped_and_hard_secrets_rejected(tmp_path):
         assert gateway.info()["write_policy"]["sensitive_content"]["write_mode"] == "audit"
     finally:
         gateway.close()
+
+
+def test_audit_expired_before_apply_rejects(tmp_path):
+    root = tmp_path / "project"
+    (root / "src").mkdir(parents=True)
+    until = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    gateway = Gateway(root, allow_write=True, write_paths=("src",),
+                      sensitive_content_audit_paths=("src",),
+                      sensitive_content_audit_until=until)
+    try:
+        payload = "def f(vault):\n    token = vault.set(value)\n"
+        assert gateway.create_file("src/a.py", payload)["applied"] is False
+        gateway.sensitive_audit.deadline = 0.0
+        with pytest.raises(GatewayError) as exc:
+            gateway.create_file("src/a.py", payload, dry_run=False)
+        assert exc.value.code == "sensitive_content"
+        assert not (root / "src" / "a.py").exists()
+    finally:
+        gateway.close()
+
+
+def test_audit_expiry_during_install_prevents_commit(tmp_path, monkeypatch):
+    from gateway import write_storage
+    root = tmp_path / "project"
+    (root / "src").mkdir(parents=True)
+    until = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    gateway = Gateway(root, allow_write=True, write_paths=("src",),
+                      sensitive_content_audit_paths=("src",),
+                      sensitive_content_audit_until=until)
+    original_install = write_storage.install_file
+
+    def expire_before_install(parent, name, raw, mode, verify, *, create):
+        gateway.sensitive_audit.deadline = 0.0
+        return original_install(parent, name, raw, mode, verify, create=create)
+
+    try:
+        monkeypatch.setattr(write_storage, "install_file", expire_before_install)
+        with pytest.raises(GatewayError) as exc:
+            gateway.create_file("src/a.py", "token = vault.set(value)\n", dry_run=False)
+        assert exc.value.code == "sensitive_content"
+        assert not (root / "src" / "a.py").exists()
+    finally:
+        gateway.close()

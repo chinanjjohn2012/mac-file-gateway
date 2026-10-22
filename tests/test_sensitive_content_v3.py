@@ -71,20 +71,20 @@ def test_v3_source_credential_literals_are_hard(tmp_path, source):
     root = tmp_path / "workspace"
     root.mkdir()
     policy = SensitiveContentPolicy()
-    flags, findings = policy.classify("credentials.py", source.encode("utf-8"))
+    flags, findings = policy.classify("sample.py", source.encode("utf-8"))
     assert any(flags)
     assert "hard" in [kind for _, kind in findings]
     gateway = Gateway(root, allow_write=True)
     try:
         with pytest.raises(GatewayError) as exc:
-            gateway.create_file("credentials.py", source, dry_run=False)
+            gateway.create_file("sample.py", source, dry_run=False)
         assert exc.value.code == "sensitive_content"
-        assert not (root / "credentials.py").exists()
-        (root / "credentials.py").write_text(source, encoding="utf-8")
-        seen = gateway.read_file("credentials.py")
+        assert not (root / "sample.py").exists()
+        (root / "sample.py").write_text(source, encoding="utf-8")
+        seen = gateway.read_file("sample.py")
         assert seen["redacted_lines"] >= 1
         assert "[REDACTED]" in seen["content"]
-        assert gateway.search_files('literal', file_glob="credentials.py")["matches"] == []
+        assert gateway.search_files('literal', file_glob="sample.py")["matches"] == []
     finally:
         gateway.close()
 

@@ -43,12 +43,26 @@ class SensitiveContentPolicy:
             value = match.group("value").strip() if match else ""
             literal = bool(re.search(
                 r"(?i)\b(?:api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|"
-                r"password|passwd|token|authorization|database[_-]?url)\b"
+                r"password|passwd|token|access[_-]?token|refresh[_-]?token|auth[_-]?token|"
+                r"authorization|database[_-]?url|client[_-]?key[_-]?data|"
+                r"client[_-]?certificate[_-]?data|certificate[_-]?authority[_-]?data)\b"
                 r"[\s\"']*(?::=|:|=)\s*[\"']",
                 line,
             ))
+            # Structured credential payloads (not ordinary Python local
+            # variables) remain protected even if the value is unquoted.
+            structured_secret = (
+                not canonical_path.endswith((".py", ".pyi"))
+                and bool(re.search(
+                    r"(?i)\b(?:token|access[_-]?token|refresh[_-]?token|"
+                    r"client[_-]?key[_-]?data|client[_-]?certificate[_-]?data|"
+                    r"certificate[_-]?authority[_-]?data)\b\s*:\s*\S",
+                    line,
+                ))
+            )
             hard = (
-                TOKEN_VALUE.search(line) is not None
+                structured_secret
+                or TOKEN_VALUE.search(line) is not None
                 or CREDENTIAL_URI.search(line) is not None
                 or PRIVATE_KEY_BEGIN.search(line) is not None
                 or literal

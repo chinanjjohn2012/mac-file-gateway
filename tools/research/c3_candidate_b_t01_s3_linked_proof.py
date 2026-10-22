@@ -63,6 +63,57 @@ def _run_inspection(argv: tuple[str, ...], platform: str) -> str:
     return p.stdout
 
 
+
+# Research snapshot ceiling, NOT a production input size or a loader policy.
+_STATIC_ARTIFACT_LIMIT = 1024 * 1024
+
+
+def _static_artifact_bytes(path: Path, expected_sha: str,
+                           expected: os.stat_result) -> bytes:
+    """Read bounded artifact bytes from one nofollow FD, never execute/load.
+
+    This ties THIS read's bytes to the reported digest and observed file
+    identity. A later process or dynamic loader is NOT pinned to this inode.
+    """
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        raise ValueError("STATIC_ARTIFACT_NOFOLLOW_UNAVAILABLE")
+    if not (0 < expected.st_size <= _STATIC_ARTIFACT_LIMIT):
+        raise ValueError("STATIC_ARTIFACT_SIZE_OUT_OF_BOUNDS")
+    fd = os.open(
+        path, os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+    )
+    def identity(st: os.stat_result) -> tuple[int, ...]:
+        return (st.st_dev, st.st_ino, st.st_uid, st.st_nlink,
+                stat.S_IMODE(st.st_mode), st.st_size, st.st_mtime_ns,
+                st.st_ctime_ns)
+    try:
+        first = os.fstat(fd)
+        if (not stat.S_ISREG(first.st_mode) or first.st_nlink != 1 or
+                first.st_uid != os.getuid() or
+                identity(first) != identity(expected)):
+            raise ValueError("STATIC_ARTIFACT_IDENTITY_CHANGED")
+        data = bytearray()
+        while len(data) <= _STATIC_ARTIFACT_LIMIT:
+            part = os.read(fd, 65536)
+            if not part:
+                break
+            data.extend(part)
+        if len(data) > _STATIC_ARTIFACT_LIMIT:
+            raise ValueError("STATIC_ARTIFACT_TOO_LARGE")
+        last = os.fstat(fd)
+        if identity(last) != identity(first) or len(data) != first.st_size:
+            raise ValueError("STATIC_ARTIFACT_CHANGED_DURING_READ")
+        actual = hashlib.sha256(data).hexdigest()
+        if actual != expected_sha:
+            raise ValueError("STATIC_ARTIFACT_BYTE_SHA_MISMATCH")
+        if identity(os.stat(path, follow_symlinks=False)) != identity(first):
+            raise ValueError("STATIC_ARTIFACT_PATH_CHANGED")
+        return bytes(data)
+    finally:
+        os.close(fd)
+
+
 def _link_args(compiler: Path, obj: Path, image: Path, platform: str
                ) -> tuple[str, ...]:
     if platform == "Darwin":
@@ -268,6 +319,8 @@ def _compile_link_observe() -> dict[str, object]:
         obj_sha, obj_stat = s0._sha_regular(obj)
         if obj_stat.st_uid != os.getuid() or obj_stat.st_nlink != 1:
             raise ValueError("S3_OBJECT_CUSTODY")
+        # In-memory copy is static evidence, not something later loaded.
+        obj_bytes = _static_artifact_bytes(obj, obj_sha, obj_stat)
         nm = _TOOLS[platform][1]
         other = _TOOLS[platform][2]
         desc = _run_inspection((_TOOLS[platform][0], str(obj)), platform)
@@ -295,6 +348,9 @@ def _compile_link_observe() -> dict[str, object]:
             header = f.read(4096)
         kind = _linked_header_gate(header, platform, image.name)
         metadata = _inspect(platform, image)
+        image_bytes = _static_artifact_bytes(image, image_sha, image_stat)
+        if header != image_bytes[:4096]:
+            raise ValueError("LINKED_HEADER_BYTES_NOT_BOUND_TO_IMAGE")
         # Fresh checks AFTER linker and inspection: still observational,
         # no atomic binding to actual child exec or any future loader inode.
         compiler_after, compiler_post = s0._compiler_entry()
@@ -332,6 +388,9 @@ def _compile_link_observe() -> dict[str, object]:
             },
             "compile_argv": compile_argv, "link_argv": link_argv,
             "object_sha256": obj_sha, "linked_image_sha256": image_sha,
+            # Actual captured bytes stay in memory; only hashes/sizes are
+            # logged by tests. They are never imported, loaded or called.
+            "object_bytes": obj_bytes, "linked_image_bytes": image_bytes,
             "linked_header": kind, "image_owner_uid": image_stat.st_uid,
             "image_device": image_stat.st_dev, "image_inode": image_stat.st_ino,
             "stage_digests": {

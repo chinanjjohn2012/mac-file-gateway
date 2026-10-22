@@ -55,6 +55,11 @@ def test_real_same_job_partial_s3_s4_s5_never_grants_load(actual):
     assert summary["full_s6_independent_decision_made"] is False
     assert summary["s0_s3_stage_digest_consistency_recomputed"] is True
     assert summary["object_inspection_preimage_recorded"] is True
+    assert summary["actual_static_object_bytes_sha_recomputed"] is True
+    assert summary["actual_static_linked_bytes_sha_recomputed"] is True
+    assert summary["actual_static_linked_header_prefix_checked"] is True
+    assert 0 < summary["static_object_byte_count"] <= s6.s3._STATIC_ARTIFACT_LIMIT
+    assert 0 < summary["static_linked_byte_count"] <= s6.s3._STATIC_ARTIFACT_LIMIT
     assert summary["author_or_synthetic_self_approval_accepted"] is False
     assert summary["first_c_load_authorized"] is False
     assert summary["native_dispatches"] == 0
@@ -78,6 +83,11 @@ def test_fresh_actual_frozen_inputs_and_stage_artifacts(actual):
         "SIZE": 9, "ALIGN": 6, "OFF": 31, "FIELD_SIZE": 31,
     }
     assert a["linked_image_bytes_observed"] is True
+    assert type(a["object_bytes"]) is bytes
+    assert type(a["linked_image_bytes"]) is bytes
+    assert hashlib.sha256(a["object_bytes"]).hexdigest() == a["object_sha256"]
+    assert hashlib.sha256(a["linked_image_bytes"]).hexdigest() == a["linked_image_sha256"]
+    assert a["image_header_bytes"] == a["linked_image_bytes"][:4096]
     assert set(a["object_inspection"]) == {
         "object_format", "exports", "undefined",
     }
@@ -121,6 +131,12 @@ def test_fresh_actual_frozen_inputs_and_stage_artifacts(actual):
     "changed-object-undefined-preimage",
     "missing-object-inspection", "missing-manifest-count",
     "changed-manifest-count", "changed-compile-environment",
+    # S3/S6 byte-to-SHA binding: raw evidence must match both hashes.
+    "missing-object-bytes", "missing-linked-bytes",
+    "modified-object-bytes", "modified-linked-bytes",
+    "linked-bytes-not-bytes", "object-bytes-too-large",
+    "linked-header-contradicts-bytes", "valid-hex-object-rehash-only",
+    "valid-hex-linked-rehash-only",
 ))
 def test_missing_spliced_mutated_or_self_authorized_fails_closed(actual, mutation):
     real, summary = actual
@@ -197,6 +213,39 @@ def test_missing_spliced_mutated_or_self_authorized_fails_closed(actual, mutatio
         a["manifest_entry_count"] += 1
     elif mutation == "changed-compile-environment":
         a["compile_environment"]["LC_ALL"] = "C.UTF-8"
+    elif mutation == "missing-object-bytes":
+        del a["object_bytes"]
+    elif mutation == "missing-linked-bytes":
+        del a["linked_image_bytes"]
+    elif mutation == "modified-object-bytes":
+        a["object_bytes"] = b"X" + a["object_bytes"][1:]
+    elif mutation == "modified-linked-bytes":
+        a["linked_image_bytes"] = b"X" + a["linked_image_bytes"][1:]
+    elif mutation == "linked-bytes-not-bytes":
+        a["linked_image_bytes"] = "not raw bytes"
+    elif mutation == "object-bytes-too-large":
+        a["object_bytes"] = b"x" * (s6.s3._STATIC_ARTIFACT_LIMIT + 1)
+    elif mutation == "linked-header-contradicts-bytes":
+        a["image_header_bytes"] = (
+            a["image_header_bytes"][:100] + b"Z" +
+            a["image_header_bytes"][101:]
+        )
+    elif mutation == "valid-hex-object-rehash-only":
+        a["object_sha256"] = hashlib.sha256(
+            b"DIFFERENT UNOBSERVED ARTIFACT"
+        ).hexdigest()
+        a["stage_digests"] = s6._recomputed_s3_stages(
+            a, head=summary["head"], tree=summary["tree"],
+            manifest_sha=summary["manifest_sha256"],
+        )
+    elif mutation == "valid-hex-linked-rehash-only":
+        a["linked_image_sha256"] = hashlib.sha256(
+            b"DIFFERENT UNOBSERVED LINKED IMAGE"
+        ).hexdigest()
+        a["stage_digests"] = s6._recomputed_s3_stages(
+            a, head=summary["head"], tree=summary["tree"],
+            manifest_sha=summary["manifest_sha256"],
+        )
     assert _verdict(bundle, summary) == "REJECT"
 
 
@@ -251,6 +300,17 @@ def test_p2_01_self_consistent_fake_sha_still_never_grants_load(actual):
     assert entry["object_sha256"] != "0" * 64
     entry["object_sha256"] = "0" * 64
     assert _verdict(fake, summary) == "REJECT"
+    entry["stage_digests"] = s6._recomputed_s3_stages(
+        entry, head=summary["head"], tree=summary["tree"],
+        manifest_sha=summary["manifest_sha256"],
+    )
+    # Fully consistent hash chain but submitted bytes still disagree -> REJECT.
+    assert _verdict(fake, summary) == "REJECT"
+    # A fully forged dictionary CAN submit internally self-consistent raw
+    # bytes, object SHA and all stage digests. That is not authentication.
+    counterfeit = b"X" + entry["object_bytes"][1:]
+    entry["object_bytes"] = counterfeit
+    entry["object_sha256"] = hashlib.sha256(counterfeit).hexdigest()
     entry["stage_digests"] = s6._recomputed_s3_stages(
         entry, head=summary["head"], tree=summary["tree"],
         manifest_sha=summary["manifest_sha256"],

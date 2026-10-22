@@ -17,6 +17,17 @@ module/frame `__dict__` access cannot prove stable ContextVar binding and
 therefore retain the original conservative heuristic. The static analyzer
 does not execute any user source or guarantee dynamic Python runtime types.
 
+A stable `import contextvars` spelling is **not** sufficient to establish
+module-object identity. The proof fails closed for source-level changes to
+module classes (`__class__`) or import implementation attributes,
+`sys.modules` access and aliases, `sys.meta_path` / other import-hook
+registries, importlib reload/import operations and registry-key mutation
+targeting `contextvars`. This is deliberately conservative: the analyzer
+cannot safely execute source to decide what an opaque import-cache mapping
+refers to. Ordinary `import sys` plus unrelated inspection such as
+`sys.platform` does not disable an otherwise proven ContextVar handle.
+
+
 The ContextVar proof also fails closed when source code writes or deletes the
 `ContextVar` constructor module attribute or any of its nested members. The
 binding inventory includes both explicit assignment and implicit Python

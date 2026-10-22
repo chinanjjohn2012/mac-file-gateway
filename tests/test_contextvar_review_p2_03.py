@@ -261,6 +261,50 @@ def test_p2_03_unrelated_imports_preserve_normal_proof(tmp_path, safe_import):
         gateway.close()
 
 
+@pytest.mark.parametrize("reflected", [False, True])
+def test_p2_03_generator_yield_finally_contextvar_provenance(tmp_path, reflected):
+    """Original generator-style case: allow proven and deny aliased reflection."""
+    generator = (
+        "def scope(value):\n"
+        "    token = active.set(value)\n"
+        "    try:\n"
+        "        yield value\n"
+        "    finally:\n"
+        "        active.reset(token)\n"
+    )
+    code = (
+        "import contextvars\n"
+        + (
+            "from builtins import setattr as mutate\n"
+            + _FAKE
+            + "mutate(contextvars, 'ContextVar', FakeVar)\n"
+            if reflected else ""
+        )
+        + "active = contextvars.ContextVar('active')\n"
+        + generator
+    )
+    root = tmp_path / "project"
+    root.mkdir()
+    gateway = Gateway(root, allow_write=True)
+    try:
+        proof = proven_lines(code.encode("utf-8"))
+        if reflected:
+            assert proof == ()
+            with pytest.raises(GatewayError) as error:
+                gateway.create_file("generator.py", code, dry_run=False)
+            assert error.value.code == "sensitive_content"
+            assert not (root / "generator.py").exists()
+        else:
+            assert len(proof) == 1
+            response = gateway.create_file("generator.py", code, dry_run=False)
+            assert response["applied"] is True
+            visible = gateway.read_file("generator.py")
+            assert visible["redacted_lines"] == 0
+            assert "token = active.set(value)" in visible["content"]
+    finally:
+        gateway.close()
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
 @pytest.mark.parametrize("bom", ["", "\ufeff"])
 @pytest.mark.parametrize("head", [

@@ -169,6 +169,98 @@ def test_p2_03_imported_module_namespace_never_exempted(tmp_path, namespace_impo
         gateway.close()
 
 
+@pytest.mark.parametrize("reflection_import, mutation", [
+    ("from builtins import setattr as mutate",
+     "mutate(contextvars, 'ContextVar', FakeVar)"),
+    ("from builtins import vars as registry_of",
+     "registry_of(contextvars)['ContextVar'] = FakeVar"),
+    ("from builtins import getattr as resolve",
+     "resolve(contextvars, '__dict__')['ContextVar'] = FakeVar"),
+    ("from builtins import delattr as remove",
+     "remove(contextvars, 'ContextVar')"),
+    ("from builtins import exec as apply",
+     "apply('contextvars.ContextVar = FakeVar')"),
+    ("from builtins import eval as evaluate",
+     "evaluate('vars(contextvars)')['ContextVar'] = FakeVar"),
+    ("from builtins import globals as namespace",
+     "namespace()['contextvars'] = FakeVar"),
+    ("from builtins import __import__ as loader",
+     "loader('contextvars')"),
+    # The reflection-capable callable may be re-exported from another module.
+    # Its original import member spelling must remain suspect after aliasing.
+    ("from helper import setattr as mutate",
+     "mutate(contextvars, 'ContextVar', FakeVar)"),
+    ("from helper import vars as registry_of",
+     "registry_of(contextvars)['ContextVar'] = FakeVar"),
+    # Star imports may redefine trusted constructor names and aliases without
+    # yielding a corresponding ast.Name(Store) binding.
+    ("from untrusted_helpers import *",
+     "object_is_unknown = 1"),
+])
+def test_p2_03_imported_reflection_aliases_fail_closed(tmp_path, reflection_import, mutation):
+    """Exercise Gateway admission + read/search visibility + real parse worker.
+
+    The scanned source is never imported/executed in this test process.
+    """
+    source = (
+        "import contextvars\n"
+        + reflection_import + "\n"
+        + _FAKE
+        + mutation + "\n"
+        + "active = contextvars.ContextVar('active')\n"
+        + _SCOPE
+    )
+    root = tmp_path / "project"
+    root.mkdir()
+    gateway = Gateway(root, allow_write=True)
+    try:
+        # First assert actual Gateway behavior, not merely an AST predicate.
+        with pytest.raises(GatewayError) as error:
+            gateway.create_file("blocked.py", source, dry_run=False)
+        assert error.value.code == "sensitive_content"
+        assert not (root / "blocked.py").exists()
+
+        (root / "existing.py").write_bytes(source.encode("utf-8"))
+        read = gateway.read_file("existing.py")
+        assert read["redacted_lines"] >= 1
+        assert "token = active.set(value)" not in read["content"]
+        matches = gateway.search_files(
+            "token = active.set(value)", file_glob="existing.py",
+        )
+        assert matches["matches"] == []
+        assert proven_lines(source.encode("utf-8")) == ()
+    finally:
+        gateway.close()
+
+
+@pytest.mark.parametrize("safe_import", [
+    "from builtins import len as count\n",
+    "from builtins import str as make_text\n",
+    "from builtins import print as emit\n",
+    "from types import ModuleType\n",
+])
+def test_p2_03_unrelated_imports_preserve_normal_proof(tmp_path, safe_import):
+    """Reject only unprovable provenance, not harmless imported names."""
+    source = (
+        safe_import
+        + "from contextvars import ContextVar\n"
+        + "active = ContextVar('active')\n"
+        + _SCOPE
+    )
+    root = tmp_path / "project"
+    root.mkdir()
+    gateway = Gateway(root, allow_write=True)
+    try:
+        assert len(proven_lines(source.encode("utf-8"))) == 1
+        result = gateway.create_file("good.py", source, dry_run=False)
+        assert result["applied"] is True
+        read = gateway.read_file("good.py")
+        assert read["redacted_lines"] == 0
+        assert "token = active.set(value)" in read["content"]
+    finally:
+        gateway.close()
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
 @pytest.mark.parametrize("bom", ["", "\ufeff"])
 @pytest.mark.parametrize("head", [

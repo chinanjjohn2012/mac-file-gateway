@@ -27,9 +27,11 @@ merge, deploy, or activate production Exec without separate authorization.
   remain unsupported in Multi-Workspace.
 - Operator startup logging reports effective Controlled Exec registration
   separately from Local Skills and Git. Multi `read_only` conservatively
-  means no File Write, Exec, **or registered Git capability**. Because Git
-  can modify repository metadata or invoke helpers even for ostensibly
-  inspect-only commands, a Git-enabled instance reports `read_only=false`.
+  means no File Write, Exec, **or an authorized and initialized Git
+  command capability**. It reflects eligible grants even during `--check`,
+  before REST/MCP adapter registration. Because Git can modify repository
+  metadata or invoke helpers even for ostensibly inspect-only commands,
+  a Git-enabled instance with granted commands reports `read_only=false`.
   `file_read_only` separately reports only the File Write authorization;
   both fields agree between `/info` and `/health`.
 

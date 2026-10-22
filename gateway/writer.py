@@ -109,7 +109,6 @@ class FileWriter:
         from collections import Counter
         source = () if previous is None else self.gateway._visibility.classify(canonical, previous)[1]
         candidate = self.gateway._visibility.classify(canonical, raw)[1]
-        source_counts = Counter((line, kind) for (line, kind) in source)
         # For replacement, preserve existing unchanged hidden lines separately.
         # New heuristic findings can be accepted only within an active scoped audit.
         if previous is None:
@@ -126,9 +125,15 @@ class FileWriter:
         if not introduced:
             return False
         if "hard" in introduced:
-            raise GatewayError("sensitive_content", "Credential-like content is not accepted by this gateway's write policy.")
+            first = next((n for n, kind in candidate if kind == "hard"), 0)
+            raise GatewayError("sensitive_content",
+                "Credential-like content is not accepted by this gateway's write policy.",
+                details={"rule_id": "CREDENTIAL_HARD", "line": first, "severity": "hard"})
         if not self.gateway.sensitive_audit.allows(canonical):
-            raise GatewayError("sensitive_content", "Credential-like content is not accepted by this gateway's write policy.")
+            first = next((n for n, kind in candidate if kind == "heuristic"), 0)
+            raise GatewayError("sensitive_content",
+                "Credential-like content is not accepted by this gateway's write policy.",
+                details={"rule_id": "CREDENTIAL_ASSIGNMENT", "line": first, "severity": "heuristic"})
         return True
 
     @staticmethod
@@ -239,7 +244,8 @@ class FileWriter:
                           "old_sha256": snapshot.sha256 if snapshot else None,
                           "new_sha256": _digest(raw), "size_bytes": len(raw),
                           "diff": diff, "diff_truncated": truncated, "backup_path": None,
-                          "warnings": [], "content_trust": "untrusted_file_data"}
+                          "warnings": (["Temporary heuristic write audit active; inspect content locally."] if audit_needed else []),
+                          "content_trust": "untrusted_file_data"}
                 if replacements is not None:
                     result["replacements"] = replacements
                 if dry_run or not changed:
@@ -266,6 +272,6 @@ class FileWriter:
                         raise GatewayError("conflict", "Destination changed before commit; read it again.")
 
                 mode = stat.S_IMODE(snapshot.metadata.st_mode) if snapshot else 0o600
-                result["warnings"] = storage.install_file(parent, parts[-1], raw, mode, verify, create=snapshot is None)
+                result["warnings"] += storage.install_file(parent, parts[-1], raw, mode, verify, create=snapshot is None)
                 result["applied"] = True
                 return result

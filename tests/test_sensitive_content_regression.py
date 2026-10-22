@@ -273,3 +273,28 @@ def test_audit_expires_during_temporary_file_fsync(tmp_path, monkeypatch):
         assert not (root / "src" / "a.py").exists()
     finally:
         gateway.close()
+
+
+@pytest.mark.parametrize("mutation", [
+    "vars()['active'] = unknown_runtime_object()",
+    "import builtins\nbuiltins.vars()['active'] = unknown_runtime_object()",
+    "import sys\nsys.modules[__name__].__dict__['active'] = unknown_runtime_object()",
+    "reflect = globals\nreflect()['active'] = unknown_runtime_object()",
+])
+def test_contextvar_dynamic_module_rebinding_must_not_receive_exemption(tmp_path, mutation):
+    """Only source-level proven stable ContextVar instances can be exempted.
+
+    No source code in this payload is executed by the gateway. A computed
+    namespace rewrite should conservatively preserve the original heuristic.
+    """
+    root = tmp_path / "project"
+    root.mkdir()
+    gateway = Gateway(root, allow_write=True)
+    try:
+        source = _contextvar_source() + "\n" + mutation + "\n"
+        with pytest.raises(GatewayError) as exc:
+            gateway.create_file("dynamic_binding.py", source, dry_run=False)
+        assert exc.value.code == "sensitive_content"
+        assert not (root / "dynamic_binding.py").exists()
+    finally:
+        gateway.close()

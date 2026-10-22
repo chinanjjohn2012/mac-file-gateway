@@ -38,7 +38,7 @@ def test_contextvar_create_read_replace_assignment_and_whole_write(tmp_path, new
         assert "token = active.set(value)" in read["content"]
         sha = read["file_sha256"]
         old = "token = active.set(value)"
-        new = "token = active.set(value + 1)"
+        new = "token = active.set(42)"  # statically inert new value (no overloaded __add__)
         gateway.replace_text("src/confirmation.py", old, new, sha, dry_run=False)
         read = gateway.read_file("src/confirmation.py")
         assert read["redacted_lines"] == 0

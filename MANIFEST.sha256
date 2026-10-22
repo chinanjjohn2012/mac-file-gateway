@@ -56,7 +56,7 @@ a6ef8f7b8ef516853d4c15fa73c6e3c81ee1088a251248bc8c069c3a6d5123e6  ./docs/researc
 9cc8e4f558aa597a0364876f7254336bfe2638412137e8b3a66d4a16b6d52e21  ./docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r1-contract.md
 9c9ee46a08677b054321952a94b76262eb1aee6d1dbe437d11fd8c6ec3bc7c90  ./docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2a-source-admission.md
 adeadae68e33559338f2c5ec5249070ac4b0392e7ec7d4ac91c08b5fa4d4bb3b  ./docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2b-d0-linked-adapter-provenance-design.md
-3bad4ab9f96dc59ec63c104fa589e0a0e711b61834c73db159f35c46626e98a2  ./docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2b-r1-linked-binary-inspection.md
+9f503d4d5ff8f726d7c19862ee1a830ee341df29950caf6486054b1ac8a967d5  ./docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2b-r1-linked-binary-inspection.md
 1fa8e0b8fa1fc3ccdbea276ec782c050f6dc60af46f156887f000eade32a68e5  ./docs/research/phase2-lite-c3/candidate-b-isolated-plan.md
 1e95a8424b5cae7d8c47cbb30269ea0b773edc50df03eb78151f93553f5ee284  ./docs/superpowers/plans/2026-09-22-guarded-writes.md
 9844da6b4c1cd80fdc462b86d39654108b07d163802c622d380e56f301610942  ./docs/superpowers/specs/2026-09-22-guarded-writes.md
@@ -123,7 +123,7 @@ e8c49e81526ed2e38b5bd0d0eba6a0c5c3cb29c9d82e4b38d3eb2e9ba3c94021  ./tests/test_c
 cb40b0ee7bf5b120f20610722da916a913677eb95d59618bb81190de98129c89  ./tests/test_c3_candidate_b_t01_r2b_contract_red.py
 ccbd61b4736e8137ba8f68169814f89b77cd9a744134fbd01cbc4f23717ce367  ./tests/test_c3_candidate_b_t01_r2b_r2a_source_admission.py
 6cc4608d0000dfee5da62d94043eaeb2336d7914c924a1ade036ebbca5a32b13  ./tests/test_c3_candidate_b_t01_r2b_r2b_d0_provenance_design.py
-54119fac49732e796df7056b86469eca5843bbf0f5afa03f6b049040c69b2626  ./tests/test_c3_candidate_b_t01_r2b_r2b_r1_linked_inspection.py
+0c2c26e1bef708420b032bcb4ad6f4986a140fa4888367474fd0ff792bb66c24  ./tests/test_c3_candidate_b_t01_r2b_r2b_r1_linked_inspection.py
 060d09c5d6a102c9ae9aa5689b066ef1baf59e72dcb0f8fdb8f3b48e58c1ee01  ./tests/test_c3_candidate_b_term.py
 199ec7e6958c1f21aa8ca14ac1af8b9868490621e02f67e9a3926eaf5957cef1  ./tests/test_cli.py
 599bdd040fa4fd89f1baa9a431e5fe230e6f4509938008cda22d86caccc1db37  ./tests/test_command_http.py

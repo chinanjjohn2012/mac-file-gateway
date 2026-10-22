@@ -71,6 +71,9 @@ def _compile_link(root: Path, platform: str, *, source: Path = SOURCE):
         link_argv = [
             "cc", "-dynamiclib", "-nostdlib", "-Wl,-undefined,error",
             "-Wl,-install_name," + image.name, "-o", str(image), str(obj),
+            # macOS dyld/linker requires one libSystem load command for dylibs.
+            # Whitelist EXACTLY this dependency at PRE-LOAD, no C execution.
+            "-lSystem",
         ]
     else:
         link_argv = [
@@ -125,6 +128,26 @@ def _exact_export(nm_global: str, platform: str) -> None:
     assert symbol.group(2) == expected, ("alias or unexpected export", lines)
 
 
+def _only_darwin_libsystem_dependency(
+    load_commands: str, linked_list: str, own_name: str
+) -> None:
+    """Fail-closed one-platform exception: exactly one libSystem dependency."""
+    chunks = re.split(r"(?m)^Load command \d+\s*$", load_commands)
+    explicit = [
+        c for c in chunks
+        if re.search(r"(?m)^\s*cmd LC_LOAD_DYLIB\s*$", c)
+    ]
+    assert len(explicit) == 1, ("unexpected count of LC_LOAD_DYLIB", len(explicit))
+    assert re.search(
+        r"(?m)^\s*name /usr/lib/libSystem\.B\.dylib \(offset \d+\)\s*$",
+        explicit[0],
+    ), ("unexpected dependency", explicit[0])
+    lines = [x.strip() for x in linked_list.splitlines() if x.strip()]
+    assert len(lines) == 3, ("unapproved dependency list", lines)
+    assert lines[1].startswith(own_name + " ("), lines
+    assert lines[2].startswith("/usr/lib/libSystem.B.dylib ("), lines
+
+
 def _audit(image: Path, platform: str) -> dict[str, str]:
     desc = _tool(["file", "-b", str(image)]).strip()
     if platform == "Darwin":
@@ -147,14 +170,14 @@ def _audit(image: Path, platform: str) -> dict[str, str]:
         disassembly = _tool(["otool", "-tv", str(image)])
         assert "LC_ID_DYLIB" in loads, loads
         for forbidden in (
-            "LC_LOAD_DYLIB", "LC_LOAD_WEAK_DYLIB", "LC_REEXPORT_DYLIB",
+            "LC_LOAD_WEAK_DYLIB", "LC_REEXPORT_DYLIB",
             "LC_RPATH", "LC_DYLD_ENVIRONMENT", "LC_LOAD_DYLINKER",
             "LC_LOAD_UPWARD_DYLIB", "LC_LAZY_LOAD_DYLIB",
             "__mod_init_func", "__interpose", "__la_symbol_ptr",
             "__nl_symbol_ptr",
         ):
             assert forbidden not in loads, ("unapproved loader/initializer", forbidden)
-        assert len([x for x in linked.splitlines() if x.strip()]) == 2, linked
+        _only_darwin_libsystem_dependency(loads, linked, image.name)
         assert not re.search(r"\b[1-9][0-9]*\s+entries\b", relocation), relocation
     else:
         header = _tool(["readelf", "-hW", str(image)])
@@ -309,3 +332,41 @@ def test_document_manifest_and_workflow_scope_are_no_load():
     ):
         assert forbidden not in y, forbidden
     assert ROOT.joinpath("tests/test_c3_candidate_b_t01_r2b_contract_red.py").is_file()
+
+@pytest.mark.parametrize("dependency", (
+    "/usr/lib/libobjc.A.dylib", "/usr/lib/libSystem.B.dylib.extra",
+    "@rpath/libSystem.B.dylib", "/tmp/libSystem.B.dylib", "",
+))
+def test_mach_o_dependency_override_or_fallback_is_denied_offline(dependency):
+    """Synthetic load-command negatives complement actual Mach-O inspection."""
+    chunk = (
+        "Load command 1\n      cmd LC_LOAD_DYLIB\n"
+        "  cmdsize 56\n"
+        f"     name {dependency} (offset 24)\n"
+    )
+    linked = (
+        "libc3b03_t01_no_signal_inspect.dylib:\n"
+        "    libc3b03_t01_no_signal_inspect.dylib (compatibility version 0.0.0)\n"
+        f"    {dependency} (compatibility version 1.0.0)\n"
+    )
+    with pytest.raises(AssertionError):
+        _only_darwin_libsystem_dependency(
+            chunk, linked, "libc3b03_t01_no_signal_inspect.dylib"
+        )
+
+
+def test_mach_o_exact_libsystem_dependency_fixture():
+    chunk = (
+        "Load command 1\n      cmd LC_LOAD_DYLIB\n"
+        "  cmdsize 56\n"
+        "     name /usr/lib/libSystem.B.dylib (offset 24)\n"
+    )
+    linked = (
+        "libc3b03_t01_no_signal_inspect.dylib:\n"
+        "    libc3b03_t01_no_signal_inspect.dylib (compatibility version 0.0.0)\n"
+        "    /usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n"
+    )
+    _only_darwin_libsystem_dependency(
+        chunk, linked, "libc3b03_t01_no_signal_inspect.dylib"
+    )
+

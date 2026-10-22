@@ -3,6 +3,46 @@
 Status: implementation in progress. Based on the Standards/Spec approved design against
 `d3373649b968f23c85b3ee09d8e984eefecea5c3`.
 
+## Positive static provenance subset (P2-03)
+
+ContextVar exemption is an **opt-in static proof**, not a claim that
+arbitrary Python can be security-verified. The parser first checks a
+**positive AST grammar** and only then performs the existing stable-binding
+and matching set/finally-reset checks. An unsupported construct returns an
+empty proof, retaining the original heuristic protection on reads, search,
+diff, create, replace and whole-file writes.
+
+The admitted source-local grammar is intentionally limited:
+
+- Explicit imports only from reviewed standard modules
+  (\`contextvars\`, \`contextlib\`, \`builtins\`, \`types\`, \`sys\`, \`typing\`)
+  and a finite set of exported symbols. No star import, arbitrary third-party
+  module, unknown re-export or dynamic import receives an exemption.
+- Module-level declarations may include inert string expressions, literal
+  or name assignments, a recognized \`ContextVar(...)\` constructor, and
+  undecorated class/function definitions that themselves use the checked
+  grammar. The only admitted import-time attribute read is a stable
+  \`sys.platform\`. Unreviewed module-level calls, dynamic expressions,
+  class bases/metaclasses, arbitrary decorators, evaluated annotations and
+  default expressions cannot establish trusted provenance.
+- A reviewed \`contextlib.contextmanager\` decorator may wrap a function.
+  Function statements are limited to passive assignments, simple returns
+  or yields, a recognized \`active.set(value)\` and matching
+  \`try/finally: active.reset(token)\`. No unknown calls, dynamic control
+  flow, arbitrary operators, custom hash/iterator evaluations, or
+  reflection are allowed to influence this static proof.
+- AST nodes or language versions outside the explicitly recognized grammar
+  are rejected conservatively. Failing to prove does **not** authorize
+  writes; the original read-redaction and sensitive-write policy apply.
+
+This is a source-local guarantee under ordinary trusted Python standard
+library semantics. It does not verify code execution, other processes, or
+external monkeypatching at runtime. A complex but legitimate Python module
+may be denied this exemption; the operator can use the explicitly scoped,
+short-lived heuristic audit policy when its separate authorization and
+time constraints permit. The audit path never disables hard credential
+blocking, file/path protection or read redaction.
+
 ## Detection
 
 The gateway continues to redact sensitive file lines on read, search, and

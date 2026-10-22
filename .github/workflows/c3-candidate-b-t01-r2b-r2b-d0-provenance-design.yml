@@ -1,0 +1,96 @@
+name: C3 B03-T01 R2b-R2b-D0 linked artifact / Adapter provenance DESIGN (NO LOAD)
+
+on:
+  push:
+    branches:
+      - research/phase2-lite-c3-candidate-b-kill-t01-r2b-r2b-d0-linked-adapter-design-20261022
+  pull_request:
+    paths:
+      - ".github/workflows/c3-candidate-b-t01-r2b-r2b-d0-provenance-design.yml"
+      - "docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2b-d0-linked-adapter-provenance-design.md"
+      - "tests/test_c3_candidate_b_t01_r2b_r2b_d0_provenance_design.py"
+      - "MANIFEST.sha256"
+
+permissions:
+  contents: read
+
+jobs:
+  linked-adapter-provenance-design-no-load:
+    if: >-
+      (github.event_name == 'push' &&
+       github.ref == 'refs/heads/research/phase2-lite-c3-candidate-b-kill-t01-r2b-r2b-d0-linked-adapter-design-20261022') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'research/phase2-lite-c3-candidate-b-kill-t01-r2b-r2b-d0-linked-adapter-design-20261022')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            python-version: "3.13"
+          - os: macos-15
+            python-version: "3.14"
+          - os: ubuntu-latest
+            python-version: "3.13"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 9
+    env:
+      C3B03_T01_R2B_R2B_D0_NO_LOAD_NO_EXECUTE: "true"
+      C3B03_T01_R2B_R2B_D0_GROUP_SIGNAL_AUTHORIZED: "false"
+      C3B03_TEST_NO_SIGNAL_STUB: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Exact reviewed parent inputs, manifest and no-load stage guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          if [ "${{ matrix.os }}" = "macos-15" ]; then
+            test "$(uname -s)" = Darwin
+            test "$(uname -m)" = arm64
+          fi
+          test ! -e tools/research/c3_candidate_b_kill.c
+          test ! -e tools/research/c3_candidate_b_kill_t01_no_signal_probe.py
+          test ! -e tools/research/run_c3_candidate_b_kill.py
+          test ! -e tools/research/c3_candidate_b_t01_no_signal_candidate.dylib
+          test ! -e tools/research/c3_candidate_b_t01_no_signal_candidate.so
+          test -f docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2b-d0-linked-adapter-provenance-design.md
+          test -f tests/test_c3_candidate_b_t01_r2b_r2b_d0_provenance_design.py
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          for line in Path("MANIFEST.sha256").read_text().splitlines():
+              expected, path = line.split("  ", 1)
+              observed = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+              if observed != expected:
+                  raise AssertionError(f"MANIFEST_DIFF {path} expected={expected} actual={observed}")
+          expected_parent = {
+              "tools/research/c3_candidate_b_t01_no_signal_candidate.c":
+                  "5a1292787584632fac20c86bbe62e50153e82b0ecb36ad190446bf4b7b714195",
+              "tests/native/c3_b03_t01_no_signal_contract.h":
+                  "7c9bd037ecf65da8de91605846c4ac4fc7ceaebbd0ca2fe983ecfef630c9958e",
+          }
+          for path, digest in expected_parent.items():
+              observed = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+              if observed != digest:
+                  raise AssertionError(f"REVIEWED_PARENT_CHANGED {path}")
+          print("C3B03_T01_R2B_R2B_D0_MANIFEST_OK=true")
+          print("C3B03_T01_R2B_R2B_D0_NO_LOAD_NO_EXECUTE=true")
+          print("C3B03_T01_R2B_R2B_D0_GROUP_SIGNAL_AUTHORIZED=false")
+          print("C3B03_T01_R2B_R2B_D0_PARENT_SOURCE_FROZEN=true")
+          PY
+          python -m py_compile tests/test_c3_candidate_b_t01_r2b_r2b_d0_provenance_design.py
+      - name: Offline provenance design falsifications plus frozen pure and object checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install pytest==8.4.2
+          # The previously reviewed R2a test may COMPILE a C object for
+          # nm/otool/objdump inspection, but NEVER links/loads/executes C.
+          python -m pytest -q tests/test_c3_candidate_b_t01_contract_red.py tests/test_c3_candidate_b_t01_pure_gate_r2.py tests/test_c3_candidate_b_t01_r2b_admission_design.py tests/test_c3_candidate_b_t01_r2b_r2a_source_admission.py tests/test_c3_candidate_b_t01_r2b_r2b_d0_provenance_design.py

@@ -118,14 +118,14 @@ def test_review_p2_02_implicit_function_binding_denied(tmp_path, function_body):
 
 
 @pytest.mark.parametrize("extra", [
-    "    match {'obj': 7}:\n"
-    "        case {'obj': token}: pass\n",
-    "    match [7]:\n"
-    "        case [*token]: pass\n",
-    "    try:\n"
-    "        raise Exception('shadow')\n"
-    "    except Exception as token:\n"
-    "        pass\n",
+    "        match {'obj': 7}:\n"
+    "            case {'obj': token}: pass\n",
+    "        match [7]:\n"
+    "            case [*token]: pass\n",
+    "        try:\n"
+    "            raise Exception('shadow')\n"
+    "        except Exception as token:\n"
+    "            pass\n",
 ])
 def test_review_p2_02_reset_handle_implicitly_rebound_denied(tmp_path, extra):
     source = (

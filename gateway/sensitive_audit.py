@@ -1,7 +1,7 @@
 """Server-owned, startup-only bounded heuristic write-audit policy."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import time
 
 from .core import GatewayError, _parts
@@ -12,6 +12,7 @@ class SensitiveAudit:
                  write_paths: tuple[str, ...] = ()):
         self.paths: tuple[tuple[str, ...], ...] = ()
         self.expires_at: str | None = None
+        self._expires_utc: datetime | None = None
         self.deadline: float | None = None
         if not paths and expires_at is None:
             return
@@ -19,11 +20,11 @@ class SensitiveAudit:
             raise GatewayError("invalid_argument", "Sensitive audit requires paths and an absolute expiry.")
         try:
             date = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-            if date.tzinfo is None or date.utcoffset() is None:
+            # Check the original offset before normalizing. Converting first
+            # would silently accept non-UTC offsets such as +09:00.
+            if date.tzinfo is None or date.utcoffset() != timedelta(0):
                 raise ValueError
             date = date.astimezone(timezone.utc)
-            if date.utcoffset().total_seconds() != 0:
-                raise ValueError
         except (ValueError, OverflowError):
             raise GatewayError("invalid_argument", "Sensitive audit expiry must be UTC.") from None
         remaining = (date - datetime.now(timezone.utc)).total_seconds()
@@ -38,14 +39,11 @@ class SensitiveAudit:
             raise GatewayError("invalid_argument", "Sensitive audit scopes must lie inside writable scopes.")
         self.paths = scopes
         self.expires_at = date.isoformat()
+        self._expires_utc = date
         self.deadline = time.monotonic() + remaining
 
     def allows(self, canonical_path: str) -> bool:
-        if self.deadline is None:
-            return False
-        if datetime.now(timezone.utc).isoformat() >= self.expires_at:
-            return False
-        if time.monotonic() >= self.deadline:
+        if not self.allows_scope_time():
             return False
         parts = _parts(canonical_path)
         return any(parts[:len(path)] == path for path in self.paths)
@@ -58,5 +56,8 @@ class SensitiveAudit:
                 "audit_scope_count": len(self.paths) if active else 0}
 
     def allows_scope_time(self) -> bool:
-        return (self.deadline is not None and time.monotonic() < self.deadline
-                and datetime.now(timezone.utc).isoformat() < self.expires_at)
+        # A wall-clock forward jump must expire audit immediately; a backward
+        # jump must not extend the monotonic cap.
+        return (self.deadline is not None and self._expires_utc is not None
+                and time.monotonic() < self.deadline
+                and datetime.now(timezone.utc) < self._expires_utc)

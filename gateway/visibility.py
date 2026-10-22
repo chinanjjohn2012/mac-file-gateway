@@ -41,8 +41,12 @@ class SensitiveContentPolicy:
                 continue
             match = CREDENTIAL_ASSIGNMENT.search(line)
             value = match.group("value").strip() if match else ""
-            literal = (bool(value) and value[0] in ("'", '"')
-                       and not value.startswith(('"""', "'''")))
+            literal = bool(re.search(
+                r"(?i)\\b(?:api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|"
+                r"password|passwd|token|authorization|database[_-]?url)\\b"
+                r"[\\s\\\"']*(?::=|:|=)\\s*[\\\"']",
+                line,
+            ))
             hard = (
                 TOKEN_VALUE.search(line) is not None
                 or CREDENTIAL_URI.search(line) is not None

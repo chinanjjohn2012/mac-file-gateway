@@ -36,7 +36,7 @@ _FAKE_MODULE = (
 )
 
 _CACHE_MODULE = (
-    + _FAKE
+    _FAKE
     + "class FakeModule:\n"
     "    def ContextVar(self): return FakeVar()\n"
 )

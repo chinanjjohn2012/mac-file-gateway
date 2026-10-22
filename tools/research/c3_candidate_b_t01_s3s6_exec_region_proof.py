@@ -18,6 +18,10 @@ PARENT_HEAD = "27f959e305cec18e36bbc75126b602d78b9fd7f9"
 PARENT_TREE = "161da4d379f772359a7c03671c333c744991daec"
 NO_LOAD = "REVIEW_REQUIRED_NO_LOAD"
 MAX_HEADERS = 128
+# Frozen research ABI observes Linux 4 KiB load pages. VM intervals and
+# page aliases are checked without asking any OS loader to map the image.
+_ELF_PAGE_SIZE = 4096
+_UINT64_SPACE = 1 << 64
 
 # A deliberately finite *observed* ELF tag list from this research compiler.
 # Unknown tags -> reject; these are not a generic dynamic-loader policy.
@@ -124,8 +128,74 @@ def _elf(raw: bytes) -> dict[str, object]:
     ):
         raise ValueError("ELF_LOAD_FILE_INTERVALS")
 
-    # Read the real dynamic table bytes, not a copied readelf screenshot.
+    # File-offset non-overlap is NOT VM isolation. Treat every PT_LOAD
+    # separately, including file-zero BSS, and enforce both byte-level
+    # virtual non-overlap and 4 KiB page-level isolation. Reject aliases
+    # even with identical flags: this finite static ledger has no proof
+    # about actual overlapping page permission resolution.
+    loads = [part for part in segments if part["type"] == 1]
+    if len(loads) != 4:
+        raise ValueError("ELF_UNREVIEWED_LOAD_COUNT")
+    virtual = []
+    pages = []
+    for load in loads:
+        start, memsz = load["vaddr"], load["memsz"]
+        if start > _UINT64_SPACE - 1 - memsz:
+            raise ValueError("ELF_LOAD_VIRTUAL_ADDRESS_OVERFLOW")
+        if not memsz:
+            if load["filesz"]:
+                raise ValueError("ELF_EMPTY_LOAD_WITH_FILE_BYTES")
+            continue
+        end = start + memsz
+        virtual.append((start, end, load["flags"]))
+        pages.append((
+            start // _ELF_PAGE_SIZE,
+            ((end - 1) // _ELF_PAGE_SIZE) + 1,
+            load["flags"],
+        ))
+    virtual.sort()
+    if any(left[1] > right[0] for left, right in zip(
+            virtual, virtual[1:])):
+        raise ValueError("ELF_LOAD_VIRTUAL_INTERVAL_OVERLAP")
+    pages.sort()
+    if any(left[1] > right[0] for left, right in zip(
+            pages, pages[1:])):
+        raise ValueError("ELF_LOAD_VIRTUAL_PAGE_ALIAS")
+    for load in loads:
+        if load["memsz"] and (
+            load["offset"] % _ELF_PAGE_SIZE !=
+            load["vaddr"] % _ELF_PAGE_SIZE
+        ):
+            raise ValueError("ELF_LOAD_PAGE_FILE_VM_DISPLACEMENT")
+
+    # PT_DYNAMIC tags taken from raw bytes mean nothing unless its file
+    # range and declared VM range are the SAME displacement into ONE
+    # uniquely identified mapped, writable-and-readable PT_LOAD.
     dyn = dynamic[0]
+    if (dyn["flags"] != 6 or dyn["memsz"] != dyn["filesz"] or
+            dyn["vaddr"] > _UINT64_SPACE - 1 - dyn["memsz"]):
+        raise ValueError("ELF_UNREVIEWED_DYNAMIC_VM_OR_PERMISSIONS")
+    file_containers = [
+        load for load in loads
+        if load["filesz"] and
+        load["offset"] <= dyn["offset"] and
+        dyn["offset"] + dyn["filesz"] <=
+        load["offset"] + load["filesz"]
+    ]
+    if len(file_containers) != 1:
+        raise ValueError("ELF_DYNAMIC_FILE_LOAD_NOT_UNIQUE")
+    mapped = file_containers[0]
+    if not (
+        mapped["flags"] == 6 and
+        mapped["vaddr"] <= dyn["vaddr"] and
+        dyn["vaddr"] + dyn["memsz"] <=
+        mapped["vaddr"] + mapped["memsz"] and
+        dyn["vaddr"] - mapped["vaddr"] ==
+        dyn["offset"] - mapped["offset"]
+    ):
+        raise ValueError("ELF_DYNAMIC_VIRTUAL_LOAD_MISMATCH")
+
+    # Read the real dynamic table bytes, not a copied readelf screenshot.
     tags = []
     terminated = False
     for at in range(dyn["offset"], dyn["offset"] + dyn["filesz"], 16):
@@ -200,6 +270,9 @@ def _elf(raw: bytes) -> dict[str, object]:
         "dynamic_tag_values": tags,
         "executable_regions": executable,
         "one_code_section_bound_to_one_exec_load": True,
+        "load_virtual_intervals_disjoint": True,
+        "load_virtual_pages_disjoint": True,
+        "dynamic_file_vm_displacement_proven_for_this_snapshot": True,
         "complete_cfg_proven": False,
         "all_loader_side_effects_proven": False,
     }

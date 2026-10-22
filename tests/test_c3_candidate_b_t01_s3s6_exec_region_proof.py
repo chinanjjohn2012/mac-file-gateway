@@ -74,6 +74,9 @@ def test_real_platform_ledger_observations(actual):
         assert ledger["format"] == "ELF64_LINUX_X86_64_STATIC_PARTIAL"
         assert ledger["section_header_count"] == 13
         assert ledger["program_header_count"] == 10
+        assert ledger["load_virtual_intervals_disjoint"] is True
+        assert ledger["load_virtual_pages_disjoint"] is True
+        assert ledger["dynamic_file_vm_displacement_proven_for_this_snapshot"] is True
         assert ledger["executable_regions"][0]["name"] == ".text"
         assert 0 not in ledger["dynamic_tag_values"][:-1]
         assert ledger["dynamic_tag_values"][-1] == 0
@@ -249,7 +252,17 @@ def test_actual_elf_virtual_load_and_dynamic_mapping_denies_mutants(
         struct.pack_into("<Q", raw, rw + 48, 1)
     else:
         raise AssertionError("unhandled P2-01 mutation")
-    with pytest.raises(ValueError):
+    expected_errors = {
+        "overlap-rw-with-rx-vm": "ELF_LOAD_VIRTUAL_INTERVAL_OVERLAP",
+        "rw-rx-alias-on-single-page-without-byte-overlap": (
+            "ELF_LOAD_VIRTUAL_PAGE_ALIAS"),
+        "dynamic-vaddr-unmapped": "ELF_DYNAMIC_VIRTUAL_LOAD_MISMATCH",
+        "dynamic-vaddr-mapped-to-wrong-load": (
+            "ELF_DYNAMIC_VIRTUAL_LOAD_MISMATCH"),
+        "writable-load-virtual-address-wraparound": (
+            "ELF_LOAD_VIRTUAL_ADDRESS_OVERFLOW"),
+    }
+    with pytest.raises(ValueError, match=expected_errors[mutation]):
         scan.static_executable_ranges(bytes(raw), "Linux")
 
 

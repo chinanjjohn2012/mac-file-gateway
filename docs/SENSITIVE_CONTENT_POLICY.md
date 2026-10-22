@@ -1,0 +1,64 @@
+# Sensitive content policy (V2)
+
+Status: implementation in progress. Based on the Standards/Spec approved design against
+`d3373649b968f23c85b3ee09d8e984eefecea5c3`.
+
+## Detection
+
+The gateway continues to redact sensitive file lines on read, search, and
+diff, and reject credential-like content on guarded writes. Python .py files
+can use a bounded static ContextVar proof to avoid misclassifying a genuine
+ContextVar.set() restoration handle as a credential. Only statically proven
+imports, stable module-level bindings and matching try/finally reset calls
+qualify. Unknown or syntactically invalid sources fall back to the
+conservative heuristic scanner.
+
+Python parsing uses a fixed trusted helper program in a separate isolated
+interpreter. Input is limited to 32 KiB, 1,024 physical lines, 2,048
+characters per line, 4,096 tokens, 256 tokens per logical statement and 32
+delimiter nesting levels. Parsing times out after 250 ms. An error, timeout
+or ambiguous binding grants no exemption.
+
+## Temporary heuristic audit
+
+The default mode is `enforce`. A trusted local administrator may explicitly
+configure a temporary `audit` period, *only* within an already writable
+subtree of one workspace. During this period, heuristic findings may be
+written, but hard credential findings remain denied. File access checks,
+the source-hash guard, full-file write restrictions for redacted sources,
+existing hidden-line provenance, backup safeguards and read/search/diff
+redaction remain in force.
+
+Multi-workspace `gateway.json`, inside one workspace's `write` object:
+
+```json
+{
+  "sensitive_content": {
+    "mode": "audit",
+    "paths": ["src"],
+    "expires_at": "2026-10-22T19:30:00+00:00"
+  }
+}
+```
+
+The timestamp is illustrative and is already expired; set a UTC deadline
+within the next 60 minutes for a real session. Remove this block or use
+`"mode": "enforce"` for normal operation. Config is strict; invalid or
+incomplete mode settings cause a startup error.
+
+Legacy CLI mode (with an existing `--allow-write` grant):
+
+```text
+--sensitive-content-audit-path src
+--sensitive-content-audit-until <UTC_TIMESTAMP>
+```
+
+Configuration is applied at startup, not by remote request. `gateway_info`
+and `list_workspaces` expose the effective mode and expiry without absolute
+filesystem paths or sensitive values. A monotonic and UTC deadline limits
+the lifetime; audit authorization is rechecked after acquiring the write
+lock and immediately before the atomic file installation. A write already
+committed before expiry is not rolled back due to a later parent fsync.
+
+This is a narrow operational escape hatch, not a credential management
+workflow. Never intentionally write real credentials through the gateway.

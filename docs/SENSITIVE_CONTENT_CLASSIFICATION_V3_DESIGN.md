@@ -60,9 +60,17 @@ Recognized Python value positions:
 - Target of `Assign`, `AnnAssign`, and `NamedExpr` (including `config.password` / `self.token` only as an actual assignment target).
 - Constant-string keys in dictionary literal entries, e.g. `{"api_key": "abc"}`.
 - Explicit keyword argument values, e.g. `request(password="abc")` (only the matching keyword, not all arguments).
-- Literal-bearing values within those expressions, including multiline/parenthesized assignments and implicitly concatenated string literals.
+- **Function parameter defaults** of `FunctionDef`, `AsyncFunctionDef`, and `Lambda`: pair `arguments.defaults` from the right with the combined `posonlyargs + args`; pair `arguments.kw_defaults` positionally with `kwonlyargs` (a `None` AST slot means no default). Only a default on a credential-named parameter is a credential-value position. Thus `def connect(api_key="abc"): pass`, `async def send(*, password="secret"): pass`, and `lambda token="abc": token` are **Hard**. A parameter name or annotation without a credential literal is not a finding; `api_key=None` and `token=get_token()` are **none** absent other Hard evidence.
+- Literal-bearing values within all the above expressions and defaults, including multiline/parenthesized forms, string/bytes, f-strings and implicit/explicit concatenation. Never execute default expressions; protect their original physical lines and the declaration line when needed to avoid partial disclosure. Findings for nonempty credential-value literals are **Hard** and cannot be Audit-bypassed.
 
-Do **not** classify `token` merely because it appears as a reference, an annotation, a function name, import alias, comment word, a key whose value is dynamic, or a nested string containing the word. A literal in a **known reference-call key argument** is not automatically a credential value: `api_key = os.getenv("API_KEY")` and `api_key = os.environ.get("API_KEY")` are allowed. A nonempty hard-coded fallback such as `os.getenv("API_KEY", "fallback-secret")` is protected as a credential literal. Similar env references remain governed by already existing safe-reference recognition; do not treat the call's mere presence as suspicious.
+Do **not** classify `token` merely because it appears as a reference, annotation, function name, import alias, comment word, dictionary key with dynamic value, or prose string containing the word. Quoted **lookup keys** are not source credential **values**.
+
+These finite, syntax-recognized environment reference expressions MUST be **none** when the key contains no independent known-secret signature and no other hard evidence:
+- `api_key = os.getenv("API_KEY")`
+- `api_key = os.environ.get("API_KEY")`
+- `api_key = os.environ["API_KEY"]`
+
+The same reference/key distinction applies inside credential-named function defaults and call keyword values. `api_key = os.getenv("API_KEY", "fallback-secret")` and `api_key = os.environ.get("API_KEY", "fallback-secret")` are **Hard** because the nonempty fallback is a candidate credential **value**. A known token signature in even the lookup key is independently **Hard**. Do not generalize these specific reference patterns to an arbitrary call/subscript on an unknown object or infer dynamic runtime values; absent actual credential-value literal evidence, do not revert to name-only assignment blocking.
 
 ### 3.3 Literal composition, f-strings and dynamic values
 

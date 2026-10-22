@@ -69,7 +69,9 @@ def create_multi_app(service: WorkspaceService, *, enable_mcp: bool = True,
                 if route == '/health':
                     value = {'status': 'ok', 'mode': 'multi',
                              'workspace_count': len(service.settings.workspaces),
-                             'read_only': not (service.any_write or service.any_exec), 'mcp_enabled': enable_mcp}
+                             'read_only': not (service.any_write or service.any_exec or service.any_git),
+                             'file_read_only': not service.any_write,
+                             'mcp_enabled': enable_mcp}
                 elif route == '/info':
                     value = service.info()
                 else:

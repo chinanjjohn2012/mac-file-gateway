@@ -39,7 +39,7 @@ _SPECS: dict[str, tuple[dict[str, type], dict[str, type]]] = {
                          {'argv': list, 'timeout_seconds': int}),
 }
 _GLOBAL = {'gateway_info', 'list_workspaces'}
-_PHASE2 = {'run_command', 'local_skill_info', 'begin_local_skill',
+_PHASE2 = {'local_skill_info', 'begin_local_skill',
            'read_skill_file', 'run_skill_script'}
 
 
@@ -66,6 +66,10 @@ def validate_tool_arguments(name: str, arguments: Any, *, multi: bool) -> dict[s
     if 'argv' in arguments and (len(arguments['argv']) > 64 or
                                 any(type(x) is not str for x in arguments['argv'])):
         raise GatewayError('invalid_argument', 'Invalid argv argument.')
+    if name == 'run_command':
+        seconds = arguments.get('timeout_seconds', 60)
+        if not 1 <= seconds <= 300:
+            raise GatewayError('invalid_argument', 'Exec timeout must be from 1 to 300.')
     if name == 'run_git':
         # Strict nested input validation occurs before SDK/Pydantic coercion.
         # It is pure: no Git process, repository read or symlink dereference.

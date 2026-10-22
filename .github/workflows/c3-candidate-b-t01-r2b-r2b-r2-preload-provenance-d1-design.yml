@@ -1,0 +1,105 @@
+name: C3 B03-T01 R2b-R2b-R2-D1 PRE-LOAD provenance DESIGN ONLY (NO LOAD)
+
+on:
+  push:
+    branches:
+      - research/phase2-lite-c3-candidate-b-kill-t01-r2b-r2b-r2-preload-provenance-d1-20261022
+  pull_request:
+    paths:
+      - ".github/workflows/c3-candidate-b-t01-r2b-r2b-r2-preload-provenance-d1-design.yml"
+      - "docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2b-r2-preload-provenance-d1-design.md"
+      - "tests/test_c3_candidate_b_t01_r2b_r2b_r2_preload_d1_design.py"
+      - "MANIFEST.sha256"
+
+permissions:
+  contents: read
+
+jobs:
+  offline-provenance-design-no-native-load:
+    if: >-
+      (github.event_name == 'push' &&
+       github.ref == 'refs/heads/research/phase2-lite-c3-candidate-b-kill-t01-r2b-r2b-r2-preload-provenance-d1-20261022') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'research/phase2-lite-c3-candidate-b-kill-t01-r2b-r2b-r2-preload-provenance-d1-20261022')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            python-version: "3.13"
+          - os: macos-15
+            python-version: "3.14"
+          - os: ubuntu-latest
+            python-version: "3.13"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    env:
+      C3B03_T01_R2B_R2B_D1_DESIGN_ONLY: "true"
+      C3B03_T01_R2B_R2B_D1_NO_LOAD: "true"
+      C3B03_T01_R2B_R2B_D1_GROUP_SIGNAL_AUTHORIZED: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Frozen parent, complete SHA256 Manifest, source-only import graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          if [ "${{ matrix.os }}" = "macos-15" ]; then
+            test "$(uname -s)" = Darwin
+            test "$(uname -m)" = arm64
+          fi
+          test ! -e tools/research/c3_candidate_b_kill.c
+          test ! -e tools/research/c3_candidate_b_kill_t01_no_signal_probe.py
+          test ! -e tools/research/run_c3_candidate_b_kill.py
+          test ! -e tools/research/c3_candidate_b_t01_no_signal_candidate.dylib
+          test ! -e tools/research/c3_candidate_b_t01_no_signal_candidate.so
+          python - <<'PY'
+          import ast
+          import hashlib
+          from pathlib import Path
+          for row in Path("MANIFEST.sha256").read_text().splitlines():
+              expected, name = row.split("  ", 1)
+              actual = hashlib.sha256(Path(name).read_bytes()).hexdigest()
+              if actual != expected:
+                  raise AssertionError("MANIFEST_DIFF " + name)
+          frozen = {
+              "tools/research/c3_candidate_b_t01_no_signal_candidate.c":
+                  "5a1292787584632fac20c86bbe62e50153e82b0ecb36ad190446bf4b7b714195",
+              "tests/native/c3_b03_t01_no_signal_contract.h":
+                  "7c9bd037ecf65da8de91605846c4ac4fc7ceaebbd0ca2fe983ecfef630c9958e",
+          }
+          for name, expected in frozen.items():
+              if hashlib.sha256(Path(name).read_bytes()).hexdigest() != expected:
+                  raise AssertionError("FROZEN_PARENT_DIFF " + name)
+          source = Path("tools/research/c3_candidate_b_t01_r2_source_only_adapter.py")
+          tree = ast.parse(source.read_text())
+          for node in ast.walk(tree):
+              if isinstance(node, (ast.Import, ast.ImportFrom)):
+                  names = (
+                      [a.name.split(".")[0] for a in node.names]
+                      if isinstance(node, ast.Import)
+                      else [(node.module or "").split(".")[0]]
+                  )
+                  if any(n not in {"__future__", "dataclasses"} for n in names):
+                      raise AssertionError("SOURCE_IMPORT_DIFF " + str(names))
+          print("C3B03_T01_R2B_R2B_D1_MANIFEST_OK=true")
+          print("C3B03_T01_R2B_R2B_D1_DESIGN_ONLY=true")
+          print("C3B03_T01_R2B_R2B_D1_NO_LOAD=true")
+          print("C3B03_T01_R2B_R2B_D1_NATIVE_DISPATCHES=0")
+          print("C3B03_T01_R2B_R2B_D1_GROUP_SIGNAL_AUTHORIZED=false")
+          PY
+          python -m py_compile tests/test_c3_candidate_b_t01_r2b_r2b_r2_preload_d1_design.py
+      - name: Pure offline synthetic provenance negatives and source-only validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install pytest==8.4.2
+          # Only read docs and synthetic in-memory fixtures; no native build.
+          python -m pytest -q tests/test_c3_candidate_b_t01_r2b_r2b_r2_preload_d1_design.py tests/test_c3_candidate_b_t01_r2b_r2b_r2_source_only_adapter.py tests/test_c3_candidate_b_t01_r2b_r2b_d0_provenance_design.py

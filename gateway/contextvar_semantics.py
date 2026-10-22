@@ -8,6 +8,37 @@ from __future__ import annotations
 import ast
 
 
+def _bound_names(node: ast.AST) -> tuple[str, ...]:
+    """Names bound or deleted by explicit *and implicit* Python syntax.
+
+    ast.Name(Store/Del) omits string-valued binders in patterns, except
+    handlers, imports, function declarations and type parameters. A binding
+    not accounted for here must never be treated as proof of stable identity.
+    """
+    if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+        return (node.id,)
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return (node.name,)
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return tuple(alias.asname or alias.name.split(".")[0] for alias in node.names)
+    if isinstance(node, ast.arg):
+        return (node.arg,)
+    if isinstance(node, (ast.MatchAs, ast.MatchStar)):
+        return (node.name,) if node.name is not None else ()
+    if isinstance(node, ast.MatchMapping):
+        return (node.rest,) if node.rest is not None else ()
+    if isinstance(node, ast.ExceptHandler):
+        return (node.name,) if node.name is not None else ()
+    # Python 3.12+ type parameter syntax introduces additional binders.
+    type_parameter_types = tuple(
+        getattr(ast, attr) for attr in ("TypeVar", "TypeVarTuple", "ParamSpec")
+        if hasattr(ast, attr)
+    )
+    if type_parameter_types and isinstance(node, type_parameter_types):
+        return (node.name,)
+    return ()
+
+
 def proven_contextvar_lines(source: str) -> list[int]:
     """Return assignment line numbers with a conservative ContextVar proof."""
     tree = ast.parse(source)
@@ -33,6 +64,18 @@ def proven_contextvar_lines(source: str) -> list[int]:
         for node in ast.walk(tree)
     ):
         return []
+    # A module import can be stable while its ContextVar constructor member
+    # is rebound. Attribute(Store/Del), including annotated/augmented
+    # assignment and deletion, is invisible to ast.Name(Store/Del).
+    # Reject the *whole* proof in this case, including direct constructor
+    # imports which may have occurred after the reassignment.
+    if any(
+        isinstance(node, ast.Attribute)
+        and isinstance(node.ctx, (ast.Store, ast.Del))
+        and node.attr == "ContextVar"
+        for node in ast.walk(tree)
+    ):
+        return []
     module_aliases: set[str] = set()
     constructor_aliases: set[str] = set()
     for node in tree.body:
@@ -47,21 +90,15 @@ def proven_contextvar_lines(source: str) -> list[int]:
     if not module_aliases and not constructor_aliases:
         return []
 
+    # Collect all name bindings once; this inventory is shared by global
+    # import/constructor stability and local set/reset handle checks.
+    binding_sites: dict[str, list[ast.AST]] = {}
+    for node in ast.walk(tree):
+        for name in _bound_names(node):
+            binding_sites.setdefault(name, []).append(node)
+
     def bindings(name: str) -> list[ast.AST]:
-        result = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)) and node.id == name:
-                result.append(node)
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == name:
-                result.append(node)
-            elif isinstance(node, (ast.Import, ast.ImportFrom)):
-                for alias in node.names:
-                    target = alias.asname or alias.name.split(".")[0]
-                    if target == name:
-                        result.append(node)
-            elif isinstance(node, ast.arg) and node.arg == name:
-                result.append(node)
-        return result
+        return binding_sites.get(name, [])
 
     def constructor(expr: ast.AST) -> bool:
         if not isinstance(expr, ast.Call):
@@ -96,10 +133,8 @@ def proven_contextvar_lines(source: str) -> list[int]:
         subnodes = list(ast.walk(function))
         if any(isinstance(n, (ast.Global, ast.Nonlocal)) for n in subnodes):
             continue
-        locally_assigned = {n.id for n in subnodes
-                            if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del))}
-        locally_assigned.update(n.arg for n in subnodes if isinstance(n, ast.arg))
-        if vars & locally_assigned:
+        local_bindings = [name for node in subnodes for name in _bound_names(node)]
+        if vars & set(local_bindings):
             continue
         for candidate in subnodes:
             if not isinstance(candidate, ast.Try) or not candidate.finalbody:
@@ -129,10 +164,7 @@ def proven_contextvar_lines(source: str) -> list[int]:
                 if value.keywords:
                     continue
                 # No additional writes/deletes to handle in its function scope.
-                if sum(isinstance(n, ast.Name) and n.id == token_name
-                       and isinstance(n.ctx, (ast.Store, ast.Del)) for n in subnodes) != 1:
-                    continue
-                if any(isinstance(n, ast.arg) and n.arg == token_name for n in subnodes):
+                if local_bindings.count(token_name) != 1:
                     continue
                 # The cleanup must be a direct, unconditional reset call.
                 if len(candidate.finalbody) != 1:

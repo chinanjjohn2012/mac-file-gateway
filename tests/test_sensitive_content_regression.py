@@ -223,3 +223,24 @@ def test_http_contextvar_cycle_and_temporary_audit(tmp_path):
             assert hard.status_code == 403 and hard.json()["error"] == "sensitive_content"
     finally:
         gateway.close()
+
+
+@pytest.mark.parametrize("payload", [
+    "token: opaque-bearer-value\n",
+    "client-key-data: BASE64PRIVATEKEY\n",
+    "client-certificate-data: BASE64CERTIFICATE\n",
+])
+def test_audit_does_not_allow_structured_kubernetes_credentials(tmp_path, payload):
+    root = tmp_path / "project"
+    (root / "src").mkdir(parents=True)
+    until = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    gateway = Gateway(root, allow_write=True, write_paths=("src",),
+                      sensitive_content_audit_paths=("src",),
+                      sensitive_content_audit_until=until)
+    try:
+        with pytest.raises(GatewayError) as exc:
+            gateway.create_file("src/cluster.yaml", payload, dry_run=False)
+        assert exc.value.code == "sensitive_content"
+        assert not (root / "src" / "cluster.yaml").exists()
+    finally:
+        gateway.close()

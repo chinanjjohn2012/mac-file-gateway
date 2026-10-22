@@ -11,7 +11,11 @@ can use a bounded static ContextVar proof to avoid misclassifying a genuine
 ContextVar.set() restoration handle as a credential. Only statically proven
 imports, stable module-level bindings and matching try/finally reset calls
 qualify. Unknown or syntactically invalid sources fall back to the
-conservative heuristic scanner.
+conservative heuristic scanner. Dynamic namespace operations such as
+`vars()`, `globals()`, first-class aliases of reflective builtins, and
+module/frame `__dict__` access cannot prove stable ContextVar binding and
+therefore retain the original conservative heuristic. The static analyzer
+does not execute any user source or guarantee dynamic Python runtime types.
 
 Python parsing uses a fixed trusted helper program in a separate isolated
 interpreter. Input is limited to 32 KiB, 1,024 physical lines, 2,048

@@ -8,6 +8,7 @@ f51466ce926363089257e536910ae00550142367b3a222dc1c6608c78ee452af  ./.github/work
 51d8303183d550bc1b5d6c71f7a659e704a8330a562b0c3146589d77529b9549  ./.github/workflows/c3-candidate-b-t01-pure-gate.yml
 858209c6de7abb8c4c23c881f9e0515528da581a2149cfbe2878de18522cf2ef  ./.github/workflows/c3-candidate-b-t01-r2b-design.yml
 be0ef43c58833d832ca5543e6be3b36689504263359926e1ddb51a61b7397bc7  ./.github/workflows/c3-candidate-b-t01-r2b-r1-contract-red.yml
+019981e08278bb3cedf7af1187795491278b64ab17e18c1c7eb8071eec3ded43  ./.github/workflows/c3-candidate-b-t01-r2b-r2a-source-admission.yml
 dced66ab5b87cee6c0e38244b8581be0de69b0e06534a54dc2b585972359a0ad  ./.github/workflows/c3-candidate-b-term-native.yml
 0dadaf6bd4f57a24546f103bfb110685ad12964dc442f9d41bdb8d72cfd05e56  ./.github/workflows/controlled-exec-tests.yml
 ef06acea97a3c12d0a236a36d6d1bd74b735c62b712e3ad69e50c6f87ac90b90  ./.gitignore
@@ -51,6 +52,7 @@ a6ef8f7b8ef516853d4c15fa73c6e3c81ee1088a251248bc8c069c3a6d5123e6  ./docs/researc
 2b788d16a4cd858bd677649deda80e02e14cc0e8ce10b57c3453fee776fb7388  ./docs/research/phase2-lite-c3/candidate-b-b03-t01-r2-pure-gate.md
 02b341d7e802fdb070ff43d900e5e5096a7a72b3a709af470baf6ac2ee24c1f2  ./docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-native-admission-design.md
 9cc8e4f558aa597a0364876f7254336bfe2638412137e8b3a66d4a16b6d52e21  ./docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r1-contract.md
+9c9ee46a08677b054321952a94b76262eb1aee6d1dbe437d11fd8c6ec3bc7c90  ./docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2a-source-admission.md
 1fa8e0b8fa1fc3ccdbea276ec782c050f6dc60af46f156887f000eade32a68e5  ./docs/research/phase2-lite-c3/candidate-b-isolated-plan.md
 1e95a8424b5cae7d8c47cbb30269ea0b773edc50df03eb78151f93553f5ee284  ./docs/superpowers/plans/2026-09-22-guarded-writes.md
 9844da6b4c1cd80fdc462b86d39654108b07d163802c622d380e56f301610942  ./docs/superpowers/specs/2026-09-22-guarded-writes.md
@@ -115,6 +117,7 @@ e8c49e81526ed2e38b5bd0d0eba6a0c5c3cb29c9d82e4b38d3eb2e9ba3c94021  ./tests/test_c
 670762ccbcf5ed018340d55c130d2fc91bc548ee1f11aa64d9b04b2087dc3e6c  ./tests/test_c3_candidate_b_t01_pure_gate_r2.py
 970ef3e44d9ad74454dd76708095348e85ded3fd07aa419e247a52398448fea5  ./tests/test_c3_candidate_b_t01_r2b_admission_design.py
 cb40b0ee7bf5b120f20610722da916a913677eb95d59618bb81190de98129c89  ./tests/test_c3_candidate_b_t01_r2b_contract_red.py
+607a596c4878a75767b126dfa4438885b3ac0b575042e393aabc57d36e1d9e5f  ./tests/test_c3_candidate_b_t01_r2b_r2a_source_admission.py
 060d09c5d6a102c9ae9aa5689b066ef1baf59e72dcb0f8fdb8f3b48e58c1ee01  ./tests/test_c3_candidate_b_term.py
 199ec7e6958c1f21aa8ca14ac1af8b9868490621e02f67e9a3926eaf5957cef1  ./tests/test_cli.py
 599bdd040fa4fd89f1baa9a431e5fe230e6f4509938008cda22d86caccc1db37  ./tests/test_command_http.py
@@ -174,6 +177,7 @@ d4c009b8db994234522713addff672089869728d0ac81788dc27effba3168fdb  ./tools/check_
 df9e860e07dbac8ee27694695b8dc8602ddcd4ddc7fa9bcfe2e96472f6fe1019  ./tools/research/c3_candidate_b_anchor.c
 6e0cf1994ee92221ced45988721e7592afe01297aa12232425de010bd956e175  ./tools/research/c3_candidate_b_kill_preflight.c
 1e22cbd69f43c869a3cded359d98df47e2639d015e5041128a3de3fde194f93a  ./tools/research/c3_candidate_b_kill_t01_gate.py
+5a1292787584632fac20c86bbe62e50153e82b0ecb36ad190446bf4b7b714195  ./tools/research/c3_candidate_b_t01_no_signal_candidate.c
 1a4dd92a92eca37b96933d076abcc1f1bd47b343d6081e6e22e5f567c7172ab6  ./tools/research/c3_candidate_b_term.c
 b7b5d835d57f8d0b3cd173d6ad138457b7ccef1f7aef97be067abd01486689d3  ./tools/research/run_c1_fd_probe.py
 c18800caf862377a3dfabc08f95e525fa8fc0c6e1d305327656261315ad81b2f  ./tools/research/run_c2_pgid_probe.py

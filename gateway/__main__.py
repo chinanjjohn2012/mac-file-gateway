@@ -20,6 +20,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-hidden-path", action="append", default=argparse.SUPPRESS, help="Allow one exact project-relative hidden directory (repeatable; protected names remain denied)")
     parser.add_argument("--allow-write", action="store_true", default=argparse.SUPPRESS, help="Enable guarded file writes and directory creation (default: read-only)")
     parser.add_argument("--write-path", action="append", default=argparse.SUPPRESS, help="Writable relative subtree or file; repeatable; requires --allow-write")
+    parser.add_argument("--sensitive-content-audit-path", action="append", default=argparse.SUPPRESS,
+                        help="Temporary heuristic write audit subtree; repeatable; requires --allow-write and --sensitive-content-audit-until")
+    parser.add_argument("--sensitive-content-audit-until", default=argparse.SUPPRESS,
+                        help="Temporary heuristic write audit UTC expiry, at most 60 minutes from startup")
     parser.add_argument("--backup-retention-days", type=int, default=argparse.SUPPRESS, help="Backup retention in UTC days (1-3650; default 15)")
     parser.add_argument("--allow-exec", action="store_true", default=argparse.SUPPRESS, help="Enable controlled project command execution (default: disabled)")
     parser.add_argument("--exec-path", action="append", default=argparse.SUPPRESS, help="Executable relative subtree; repeatable; required with --allow-exec")
@@ -37,6 +41,7 @@ def main(argv: list[str] | None = None) -> int:
     legacy_defaults = {
         'root': None, 'port': 8765, 'exclude': [], 'allow_hidden_path': [],
         'allow_write': False, 'write_path': [], 'backup_retention_days': 15,
+        'sensitive_content_audit_path': [], 'sensitive_content_audit_until': None,
         'allow_exec': False, 'exec_path': [], 'exec_runner': [],
         'allow_git': False, 'git_command': [],
         'local_skill_root': None, 'local_skill_policy_dir': None,
@@ -62,6 +67,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--port must be from 1024 to 65535")
     if args.http_only and args.transport != "http":
         parser.error("--http-only requires --transport http")
+    if (args.sensitive_content_audit_path or args.sensitive_content_audit_until) and not args.allow_write:
+        parser.error('Sensitive content audit requires --allow-write')
+    if bool(args.sensitive_content_audit_path) != bool(args.sensitive_content_audit_until):
+        parser.error('Sensitive content audit requires both path and UTC expiry')
     if args.write_path and not args.allow_write:
         parser.error("--write-path requires --allow-write")
     if not 1 <= args.backup_retention_days <= 3650:
@@ -76,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--allow-git requires at least one --git-command")
     gateway = None
     try:
-        gateway = Gateway(args.root, excludes=tuple(args.exclude), allow_hidden_paths=tuple(args.allow_hidden_path), allow_write=args.allow_write, write_paths=tuple(args.write_path), backup_retention_days=args.backup_retention_days, allow_exec=args.allow_exec, exec_paths=tuple(args.exec_path), exec_runners=tuple(args.exec_runner), allow_git=args.allow_git, git_allowed_commands=tuple(args.git_command))
+        gateway = Gateway(args.root, excludes=tuple(args.exclude), allow_hidden_paths=tuple(args.allow_hidden_path), allow_write=args.allow_write, write_paths=tuple(args.write_path), backup_retention_days=args.backup_retention_days, sensitive_content_audit_paths=tuple(args.sensitive_content_audit_path), sensitive_content_audit_until=args.sensitive_content_audit_until, allow_exec=args.allow_exec, exec_paths=tuple(args.exec_path), exec_runners=tuple(args.exec_runner), allow_git=args.allow_git, git_allowed_commands=tuple(args.git_command))
         local_skill_bridge = None
         if args.local_skill_root:
             from .local_skills import LocalSkillBridge

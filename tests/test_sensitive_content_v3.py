@@ -208,3 +208,38 @@ def test_v3_scan_integrity_failure_is_file_level_and_not_audit_bypass(tmp_path, 
         assert not list(root.rglob("*.bak"))
     finally:
         gateway.close()
+
+
+@pytest.mark.parametrize("target_size", [32769, 130000, 1048576])
+def test_v3_python_scans_to_default_gateway_max_without_worker_limit(tmp_path, target_size):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    lead = "token = get_token()\n# "
+    payload = lead + ("x" * (target_size - len(lead) - 1)) + "\n"
+    assert len(payload.encode("utf-8")) == target_size
+    gateway = Gateway(root, allow_write=True)
+    try:
+        preview = gateway.create_file("maxsize.py", payload)
+        assert preview["applied"] is False
+        result = gateway.create_file("maxsize.py", payload, dry_run=False)
+        assert result["applied"]
+        assert (root / "maxsize.py").stat().st_size == target_size
+        response = gateway.read_file("maxsize.py")
+        assert response["redacted_lines"] == 0
+        assert response["file_sha256"] == hashlib.sha256(payload.encode()).hexdigest()
+    finally:
+        gateway.close()
+
+
+def test_v3_pyi_is_classified_by_python_values_not_legacy_variable_names(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    payload = 'api_key = os.environ["API_KEY"]\n'
+    gateway = Gateway(root, allow_write=True)
+    try:
+        assert gateway.create_file("types.pyi", payload, dry_run=False)["applied"]
+        read = gateway.read_file("types.pyi")
+        assert read["redacted_lines"] == 0
+        assert "os.environ" in read["content"]
+    finally:
+        gateway.close()

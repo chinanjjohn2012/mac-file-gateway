@@ -8,6 +8,21 @@ from __future__ import annotations
 import ast
 
 
+_TYPE_PARAMETER_CLASSES = tuple(
+    getattr(ast, name) for name in ("TypeVar", "TypeVarTuple", "ParamSpec")
+    if hasattr(ast, name)
+)
+
+
+def _touches_constructor_member(target: ast.AST) -> bool:
+    """Detect writes/deletes to ContextVar itself or objects under it."""
+    if isinstance(target, ast.Attribute):
+        return target.attr == "ContextVar" or _touches_constructor_member(target.value)
+    if isinstance(target, ast.Subscript):
+        return _touches_constructor_member(target.value)
+    return False
+
+
 def _bound_names(node: ast.AST) -> tuple[str, ...]:
     """Names bound or deleted by explicit *and implicit* Python syntax.
 
@@ -30,11 +45,7 @@ def _bound_names(node: ast.AST) -> tuple[str, ...]:
     if isinstance(node, ast.ExceptHandler):
         return (node.name,) if node.name is not None else ()
     # Python 3.12+ type parameter syntax introduces additional binders.
-    type_parameter_types = tuple(
-        getattr(ast, attr) for attr in ("TypeVar", "TypeVarTuple", "ParamSpec")
-        if hasattr(ast, attr)
-    )
-    if type_parameter_types and isinstance(node, type_parameter_types):
+    if _TYPE_PARAMETER_CLASSES and isinstance(node, _TYPE_PARAMETER_CLASSES):
         return (node.name,)
     return ()
 
@@ -70,9 +81,9 @@ def proven_contextvar_lines(source: str) -> list[int]:
     # Reject the *whole* proof in this case, including direct constructor
     # imports which may have occurred after the reassignment.
     if any(
-        isinstance(node, ast.Attribute)
+        isinstance(node, (ast.Attribute, ast.Subscript))
         and isinstance(node.ctx, (ast.Store, ast.Del))
-        and node.attr == "ContextVar"
+        and _touches_constructor_member(node)
         for node in ast.walk(tree)
     ):
         return []

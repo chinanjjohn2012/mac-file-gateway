@@ -243,7 +243,7 @@ def test_global_four_slots_reject_fifth_until_one_releases(tmp_path, monkeypatch
         root = projects / name
         root.mkdir()
         (root / "src").mkdir()
-        (root / "src" / "hello.py").write_text("print('disposable')\\n")
+        (root / "src" / "hello.py").write_text("print('disposable')\n")
         config["workspaces"][name] = {
             "root": str(root),
             "exec": {"enabled": True, "paths": ["src"],
@@ -349,15 +349,15 @@ def test_asgi_rest_disconnect_keeps_real_worker_until_exit(setup):
     a, b, _config, _runtime = setup
     src = a / "src"
     (src / "hold.py").write_text(
-        "from pathlib import Path\\n"
-        "import time\\n"
-        "Path('started').write_text('started')\\n"
-        "end = time.monotonic() + 8\\n"
-        "while not Path('release').exists():\\n"
-        "    if time.monotonic() > end:\\n"
-        "        raise RuntimeError('no test release')\\n"
-        "    time.sleep(0.01)\\n"
-        "Path('finished').write_text('finished')\\n"
+        "from pathlib import Path\n"
+        "import time\n"
+        "Path('started').write_text('started')\n"
+        "end = time.monotonic() + 8\n"
+        "while not Path('release').exists():\n"
+        "    if time.monotonic() > end:\n"
+        "        raise RuntimeError('no test release')\n"
+        "    time.sleep(0.01)\n"
+        "Path('finished').write_text('finished')\n"
     )
     svc = _service(setup)
     app = create_multi_app(svc, enable_mcp=False)

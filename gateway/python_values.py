@@ -256,7 +256,9 @@ def classify_python(
 
     try:
         comments, _ = _scan_tokens(text, deadline)
-        for lineno, comment in comments:
+        for comment_index, (lineno, comment) in enumerate(comments):
+            if comment_index % 128 == 0 and time.monotonic() >= deadline:
+                raise _ScanUnavailable
             value = _lexical_field_cue(comment)
             if value == "hard":
                 line_hard(lineno)
@@ -292,6 +294,8 @@ def classify_python(
                     first = max(1, body[0].lineno)
                     last = min(len(lines), body[0].end_lineno or first)
                     for lineno in range(first, last + 1):
+                        if (lineno - first) % 128 == 0 and time.monotonic() >= deadline:
+                            raise _ScanUnavailable
                         kind = _lexical_field_cue(lines[lineno - 1])
                         if kind == "hard":
                             line_hard(lineno)
@@ -340,6 +344,8 @@ def classify_python(
             # known keys and obvious quoted field=value pairs. Never treat a
             # bare name with a dynamic RHS as credential evidence.
             for number, line in enumerate(lines, 1):
+                if number % 128 == 0 and time.monotonic() >= deadline:
+                    raise _ScanUnavailable
                 value = _lexical_field_cue(line)
                 if value == "hard":
                     line_hard(number)

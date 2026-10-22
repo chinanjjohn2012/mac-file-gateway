@@ -1,0 +1,95 @@
+name: C3 B03-T01 R2b-R2b-R2-S4 static ABI and Source-only graph (NO LOAD NO C EXEC)
+
+on:
+  push:
+    branches:
+      - research/phase2-lite-c3-b03-t01-s4-abi-source-20261022
+  pull_request:
+    paths:
+      - ".github/workflows/c3-candidate-b-t01-r2b-r2b-r2-s4-abi-source-proof.yml"
+      - "docs/research/phase2-lite-c3/candidate-b-b03-t01-r2b-r2b-r2-s4-abi-source-proof.md"
+      - "tools/research/c3_candidate_b_t01_s4_abi_source_proof.py"
+      - "tests/test_c3_candidate_b_t01_s4_abi_source_proof.py"
+      - "MANIFEST.sha256"
+permissions:
+  contents: read
+jobs:
+  static-source-abi-no-candidate-load:
+    if: >-
+      (github.event_name == 'push' &&
+       github.ref == 'refs/heads/research/phase2-lite-c3-b03-t01-s4-abi-source-20261022') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'research/phase2-lite-c3-b03-t01-s4-abi-source-20261022')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            python-version: "3.13"
+          - os: macos-15
+            python-version: "3.14"
+          - os: ubuntu-latest
+            python-version: "3.13"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    env:
+      C3B03_S4_ABI_DATA_ONLY: "true"
+      C3B03_S4_GROUP_SIGNAL_AUTHORIZED: "false"
+      C3B03_S4_CANDIDATE_LOAD_AUTHORIZED: "false"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Exact HEAD, full manifest, frozen reviewed inputs and no Native helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          test ! -e tools/research/c3_candidate_b_kill.c
+          test ! -e tools/research/c3_candidate_b_kill_t01_no_signal_probe.py
+          test ! -e tools/research/run_c3_candidate_b_kill.py
+          test ! -e tools/research/c3_candidate_b_t01_no_signal_candidate.so
+          test ! -e tools/research/c3_candidate_b_t01_no_signal_candidate.dylib
+          if [ "${{ matrix.os }}" = "macos-15" ]; then
+            test "$(uname -s)" = Darwin
+            test "$(uname -m)" = arm64
+          else
+            test "$(uname -s)" = Linux
+            test "$(uname -m)" = x86_64
+          fi
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          lines = Path("MANIFEST.sha256").read_text(encoding="ascii").splitlines()
+          names = [row.split("  ", 1)[1] for row in lines]
+          assert names == sorted(names) and len(names) == len(set(names))
+          for row in lines:
+              digest, name = row.split("  ", 1)
+              assert name.startswith("./")
+              assert hashlib.sha256(Path(name).read_bytes()).hexdigest() == digest, name
+          frozen = {
+              "tools/research/c3_candidate_b_t01_no_signal_candidate.c": "5a1292787584632fac20c86bbe62e50153e82b0ecb36ad190446bf4b7b714195",
+              "tests/native/c3_b03_t01_no_signal_contract.h": "7c9bd037ecf65da8de91605846c4ac4fc7ceaebbd0ca2fe983ecfef630c9958e",
+          }
+          for name, digest in frozen.items():
+              assert hashlib.sha256(Path(name).read_bytes()).hexdigest() == digest, name
+          print("C3B03_S4_MANIFEST_OK=true")
+          print("C3B03_S4_CANDIDATE_LOADED=false")
+          print("C3B03_S4_GROUP_SIGNAL_AUTHORIZED=false")
+          PY
+      - name: C11 ABI compile-only and Python data-layout plus source-only AST verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install pytest==8.4.2
+          python -m pytest -q -s \
+            tests/test_c3_candidate_b_t01_s4_abi_source_proof.py \
+            tests/test_c3_candidate_b_t01_s0_abi_proof.py \
+            tests/test_c3_candidate_b_t01_r2b_r2b_r2_source_only_adapter.py \
+            tests/test_c3_candidate_b_t01_r2b_r2b_r2_preload_d1_design.py

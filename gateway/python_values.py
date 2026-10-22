@@ -115,6 +115,19 @@ def _joined_static_literal(node: ast.AST, depth: int = 0) -> str | bytes | None:
         if len(node.value) > MAX_LITERAL_CHARS:
             raise _ScanUnavailable
         return node.value
+    if isinstance(node, ast.JoinedStr):
+        # A fully static f-string has the same source value as adjacent
+        # string literals, even if no credential-named target is present.
+        pieces = []
+        size = 0
+        for part in node.values:
+            if not isinstance(part, ast.Constant) or type(part.value) is not str:
+                return None
+            size += len(part.value)
+            if size > MAX_LITERAL_CHARS:
+                raise _ScanUnavailable
+            pieces.append(part.value)
+        return "".join(pieces)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         a = _joined_static_literal(node.left, depth + 1)
         b = _joined_static_literal(node.right, depth + 1)
@@ -269,6 +282,13 @@ def classify_python(
                 if (body and isinstance(body[0], ast.Expr)
                         and isinstance(body[0].value, ast.Constant)
                         and type(body[0].value.value) is str):
+                    # Docstring escaping can hide quoted values in the raw
+                    # source representation. Use the safely parsed Constant
+                    # value too, marking the whole original docstring span
+                    # when the decoded text contains explicit credentials.
+                    if any(_lexical_field_cue(part) == "hard"
+                           for part in body[0].value.value.splitlines()):
+                        mark(body[0])
                     first = max(1, body[0].lineno)
                     last = min(len(lines), body[0].end_lineno or first)
                     for lineno in range(first, last + 1):
@@ -306,7 +326,7 @@ def classify_python(
 
                 # A known token format is Hard independently of assignment
                 # name, even if adjacent literals/Constant+Constant split it.
-                if isinstance(node, (ast.Constant, ast.BinOp)):
+                if isinstance(node, (ast.Constant, ast.JoinedStr, ast.BinOp)):
                     joined = _joined_static_literal(node)
                     if joined is not None:
                         if type(joined) is bytes:

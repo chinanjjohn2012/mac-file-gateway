@@ -67,7 +67,7 @@ class _TrustedLoopbackListener:
             app = create_multi_app(self._service, enable_mcp=True, port=self.port)
             config = uvicorn.Config(
                 app, host=self.host, port=self.port, log_level="error",
-                lifespan="off", access_log=False, server_header=False,
+                lifespan="on", access_log=False, server_header=False,
                 date_header=False,
             )
             self._server = uvicorn.Server(config)

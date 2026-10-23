@@ -77,6 +77,55 @@ must use the identical test blob and prove the whole existing
 1157-pass product suite is still GREEN. The GitHub original CI
 Jobs and fixed SHA/Git Trees are required for independent review.
 
+## P2-01 / P2-02 targeted qualification corrections
+
+The old B1-A green Head was independently reviewed at
+\`7012a5dd922c6ab24ce80b49fe32a2cd5b8d8921\`
+([Review #5626954348](https://github.com/chinanjjohn2012/mac-file-gateway/pull/64#pullrequestreview-5626954348)),
+with **Standards FAIL / Spec FAIL, two P2**. Both were defects of the
+*internal disposable acceptance predicate*, not a demonstrated production
+Worker exploit (there is no Worker grant integration).
+
+- **P2-01 — actual owner lock lease**: merely comparing
+  \`os.fstat(store._lock_fd)\` with an issuance snapshot is insufficient.
+  A nonblocking, independently opened, \`dir_fd=state_fd\`,
+  \`O_NOFOLLOW\` descriptor to the **current canonical** owner.lock must
+  match the pinned identity, mode, owner UID and single-link invariant.
+  Its independent \`LOCK_EX|LOCK_NB\` **must be denied**. If the probe
+  acquires exclusivity, the original lock is no longer held: revoke.
+  Reconfirm \`LOCK_EX|LOCK_NB\` on the original owner FD and recheck
+  canonical inode after the probe; unexpected lock errors conservatively
+  revoke. This is a POSIX advisory lease observation in a trusted,
+  disposable test process, **not** OS isolation or cryptographic
+  proof against code operating outside the Gateway's control.
+- **P2-02 — whole ancestor chain**: the old single terminal
+  \`os.lstat(path)\` still followed **intermediate** symlinks. New
+  physical validation uses \`open_pinned_directory\` from the filesystem
+  root with \`O_DIRECTORY|O_NOFOLLOW\` on **each component**, and captures
+  the entire original sequence of \`(st_dev,st_ino)\` identifiers.
+  Every subsequent qualification compares against the issuance
+  ancestor chain for the fixture root, state root **and** each approved
+  Workspace, as well as the existing pinned root FD / UID / mode checks.
+  Any component swap, symlink alias or mismatch is one-way revocation.
+
+On test-only RED Head \`c762ec9a14122aa61cd828b588565fa9f9e7d98c\`,
+four new **physical** regression cases verified that the previous code
+incorrectly returned True: owner.lock moved to another same-filesystem
+path and a second store acquired a newly created canonical lock; explicit
+\`flock(LOCK_UN)\` with the same lock FD still open and a second owner;
+a Workspace ancestor symlink alias preserving the leaf inode; and the
+equivalent Exec-state ancestor alias. Every fixture restores disposable
+filesystem paths through \`finally\` and verifies **no requalification**
+after revocation. The final B1-A repair must turn these exact unchanged
+test Git Blob cases GREEN and preserve all existing product regressions.
+
+Neither lease probes nor ancestor checks claim complete freedom from
+trusted same-UID OS mutations or time-of-check/time-of-use races. Do not
+wire this grant to a real Worker without B1-B trusted listener evidence,
+ordinary no-proof DENY, and separately reviewed durable attempt/finalize
+checks. The Linux RED/GREEN results are **not macOS ARM64 native
+flock acceptance**; that remains an R3 gate.
+
 Historical P3 remains partially open: Git independence under Exec
 quarantine and exact sanitized /health,/info,error priority
 combinations. The B1-A acceptance object is only a building block

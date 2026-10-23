@@ -10,6 +10,8 @@ prove an actual Gateway listener's network binding or descendant cleanup.
 """
 from __future__ import annotations
 
+import errno
+import fcntl
 import os
 from pathlib import Path
 import stat
@@ -17,7 +19,7 @@ import tempfile
 import weakref
 from typing import Any
 
-from .private_fs import PrivateFileError
+from .private_fs import PrivateFileError, open_pinned_directory
 
 _ISSUE_KEY = object()
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -30,15 +32,85 @@ def _identity(fd: int) -> tuple[int, int]:
     return result.st_dev, result.st_ino
 
 
-def _private_same_directory(path: Path, identity: tuple[int, int]) -> bool:
-    """Observe current path vs pinned FD; never follow an injected symlink."""
-    item = os.lstat(path)
-    return (
-        stat.S_ISDIR(item.st_mode)
-        and stat.S_IMODE(item.st_mode) == 0o700
-        and item.st_uid == os.geteuid()
-        and (item.st_dev, item.st_ino) == identity
-    )
+def _checked_directory_chain(
+        path: Path, identity: tuple[int, int]) -> tuple[tuple[int, int], ...]:
+    """Open EVERY absolute path component without following symlinks.
+
+    An endpoint lstat follows middle symlinks. Pinning the full ancestry on
+    each qualification check also rejects a replaced intermediate directory
+    even when it reaches the same final inode. We compare the whole chain
+    with its issuance snapshot; the resulting FD is closed on every path.
+    """
+    pinned = open_pinned_directory(path, private_leaf=True)
+    try:
+        item = os.fstat(pinned.fd)
+        if (not stat.S_ISDIR(item.st_mode)
+                or stat.S_IMODE(item.st_mode) != 0o700
+                or item.st_uid != os.geteuid()
+                or (item.st_dev, item.st_ino) != identity):
+            raise PrivateFileError("Disposable directory identity is unsafe.")
+        return tuple(pinned.ancestor_ids)
+    finally:
+        pinned.close()
+
+
+def _owner_lock_proven(
+        state_fd: int, lock_fd: int, original: os.stat_result) -> bool:
+    """A non-mutating, non-blocking second-FD owner lease witness.
+
+    In addition to comparing the physical current owner.lock to the pinned
+    lock descriptor, use a separately opened OFD to challenge its advisory
+    exclusive lock. The probe MUST fail to lock; success proves the original
+    lock has been released. Then reassert nonblocking exclusivity on the
+    originally owned descriptor: if a different holder owns that inode,
+    this fails instead of accepting a foreign lock as our own.
+
+    This is a POSIX test-only lease observation, not a cryptographic or
+    cross-process proof against trusted-user native code outside Python.
+    """
+    def same_lock(st: os.stat_result) -> bool:
+        return (
+            stat.S_ISREG(st.st_mode)
+            and (st.st_dev, st.st_ino) == (original.st_dev, original.st_ino)
+            and st.st_nlink == 1
+            and st.st_uid == os.geteuid()
+            and stat.S_IMODE(st.st_mode) == 0o600
+        )
+
+    probe_fd = -1
+    try:
+        if not same_lock(os.fstat(lock_fd)):
+            return False
+        probe_fd = os.open(
+            "owner.lock",
+            os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+            dir_fd=state_fd,
+        )
+        if not same_lock(os.fstat(probe_fd)):
+            return False
+
+        try:
+            fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno not in (
+                    errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+                return False
+        else:
+            # The independent descriptor obtained an exclusive lock: the
+            # original owner's lock had been lost, even if its FD survived.
+            fcntl.flock(probe_fd, fcntl.LOCK_UN)
+            return False
+
+        # Confirm the saved OFD is still (or, in a race, can be) the actual
+        # exclusive holder. A competitor locking the same inode blocks this.
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        now = os.stat("owner.lock", dir_fd=state_fd, follow_symlinks=False)
+        return same_lock(now) and same_lock(os.fstat(probe_fd))
+    except (OSError, TypeError, ValueError):
+        return False
+    finally:
+        if probe_fd >= 0:
+            os.close(probe_fd)
 
 
 class TestOnlyGroupRetirementGrant:
@@ -66,9 +138,13 @@ class TestOnlyGroupRetirementGrant:
         self._root_path = Path(fixture.root)
         self._root_fd = fixture._root_fd
         self._root_id = _identity(self._root_fd)
+        self._root_chain = _checked_directory_chain(
+            self._root_path, self._root_id)
         self._state_path = Path(fixture.state_path)
         self._state_fd = store._fd
         self._state_id = _identity(self._state_fd)
+        self._state_chain = _checked_directory_chain(
+            self._state_path, self._state_id)
         self._lock_fd = store._lock_fd
         self._lock_stat = os.fstat(self._lock_fd)
         self._pid = os.getpid()
@@ -77,15 +153,20 @@ class TestOnlyGroupRetirementGrant:
         allowed = {}
         for name, ctx in service._workspaces.items():
             if (service.settings.exec_enabled and ctx.settings.exec_enabled):
-                allowed[name] = _identity(ctx.pinned_root.fd)
+                pinned_id = _identity(ctx.pinned_root.fd)
+                chain = _checked_directory_chain(
+                    Path(ctx.settings.root), pinned_id)
+                if chain != tuple(ctx.pinned_root.ancestor_ids):
+                    raise PrivateFileError("Disposable Workspace ancestor changed.")
+                allowed[name] = (pinned_id, chain)
         if not allowed:
             raise PrivateFileError("No disposable Workspace Exec scope.")
         self._allowed = allowed
 
-        if not _private_same_directory(self._root_path, self._root_id):
-            raise PrivateFileError("Disposable fixture root identity mismatch.")
-        if not _private_same_directory(self._state_path, self._state_id):
-            raise PrivateFileError("Disposable state root identity mismatch.")
+        # Bind the canonical owner.lock identity even before the first
+        # qualification. A surviving old FD does not prove its path or flock.
+        if not _owner_lock_proven(self._state_fd, self._lock_fd, self._lock_stat):
+            raise PrivateFileError("Disposable owner lock is not held.")
 
     def __repr__(self):
         return "<TestOnlyGroupRetirementGrant disposable test-only>"
@@ -145,21 +226,18 @@ class TestOnlyGroupRetirementGrant:
                 return self._revoke()
             if _identity(self._root_fd) != self._root_id:
                 return self._revoke()
-            if not _private_same_directory(self._root_path, self._root_id):
+            if _checked_directory_chain(
+                    self._root_path, self._root_id) != self._root_chain:
                 return self._revoke()
             if store._fd != self._state_fd or store._lock_fd != self._lock_fd:
                 return self._revoke()
             if _identity(self._state_fd) != self._state_id:
                 return self._revoke()
-            if not _private_same_directory(self._state_path, self._state_id):
+            if _checked_directory_chain(
+                    self._state_path, self._state_id) != self._state_chain:
                 return self._revoke()
-            lock = os.fstat(self._lock_fd)
-            if (lock.st_dev, lock.st_ino) != (
-                    self._lock_stat.st_dev, self._lock_stat.st_ino):
-                return self._revoke()
-            if (not stat.S_ISREG(lock.st_mode) or lock.st_nlink != 1
-                    or stat.S_IMODE(lock.st_mode) != 0o600
-                    or lock.st_uid != os.geteuid()):
+            if not _owner_lock_proven(
+                    self._state_fd, self._lock_fd, self._lock_stat):
                 return self._revoke()
             if store.durability_state != "healthy":
                 return self._revoke()
@@ -169,10 +247,12 @@ class TestOnlyGroupRetirementGrant:
                 return self._revoke()
             pinned_id = _identity(ctx.pinned_root.fd)
             gateway_id = _identity(ctx.gateway._root_fd)
-            if pinned_id != self._allowed[workspace] or gateway_id != pinned_id:
+            permitted_id, permitted_chain = self._allowed[workspace]
+            if pinned_id != permitted_id or gateway_id != pinned_id:
                 return self._revoke()
-            if not _private_same_directory(
-                    Path(ctx.settings.root), pinned_id):
+            if (_checked_directory_chain(
+                    Path(ctx.settings.root), pinned_id) != permitted_chain
+                    or permitted_chain != tuple(ctx.pinned_root.ancestor_ids)):
                 return self._revoke()
             return True
         except (OSError, ValueError, TypeError, AttributeError):
@@ -199,9 +279,7 @@ class _DisposableAcceptance:
             self.root = Path(self._temp.name).resolve(strict=True)
             self.root.chmod(0o700)
             self._root_fd = os.open(self.root, _DIR_FLAGS)
-            if not _private_same_directory(
-                    self.root, _identity(self._root_fd)):
-                raise PrivateFileError("Disposable fixture root is not private.")
+            _checked_directory_chain(self.root, _identity(self._root_fd))
 
             project_dir = self.root / "projects"
             project_dir.mkdir(mode=0o700)

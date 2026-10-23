@@ -52,7 +52,19 @@ class _HostProcessGuard:
         return forbidden
 
     def install(self, patch):
-        patch.setattr(subprocess, "Popen", self._block("subprocess.Popen"))
+        # Keep Popen a CLASS: SDKs legitimately inspect Popen[bytes] while
+        # importing their type annotations. Replacing it with a function
+        # causes an unrelated TypeError and corrupts RED evidence.
+        # __new__ denies every actual instance construction before
+        # Popen.__init__ can reach any OS spawn primitive.
+        base_popen = subprocess.Popen
+        guard = self
+
+        class _ForbiddenPopen(base_popen):
+            def __new__(cls, *args, **kwargs):
+                return guard._block("subprocess.Popen")(*args, **kwargs)
+
+        patch.setattr(subprocess, "Popen", _ForbiddenPopen)
         for name in (
             "kill", "killpg", "fork", "forkpty", "posix_spawn",
             "posix_spawnp", "system", "spawnl", "spawnle", "spawnlp",
@@ -957,9 +969,14 @@ def test_witness_selftest_rejects_broken_durable_order(
 def test_host_guard_selftest_blocks_spawn_and_host_signal(
         disposable, monkeypatch):
     """GREEN: process/signal denial remains active even around teardown."""
+    # Generic runtime annotations such as Popen[bytes] must remain legal.
+    assert isinstance(subprocess.Popen, type)
+    assert subprocess.Popen[bytes]
     local_guard = _HostProcessGuard()
     with monkeypatch.context() as m:
         local_guard.install(m)
+        assert isinstance(subprocess.Popen, type)
+        assert subprocess.Popen[bytes]
         with pytest.raises(AssertionError, match="HOST_PROCESS_OR_SIGNAL_FORBIDDEN"):
             subprocess.Popen(["python", "forbidden-host-process.py"])
         with pytest.raises(AssertionError, match="HOST_PROCESS_OR_SIGNAL_FORBIDDEN"):

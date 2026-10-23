@@ -474,7 +474,7 @@ def classify_python(
                                 and type(recovered_node.value.value) is str
                                 and any(_lexical_field_cue(part) == "hard"
                                         for part in recovered_node.value.value.splitlines())):
-                            mark(recovered_node, line_offset=start_line - 1)
+                            mark(recovered_node, start_line - 1)
                     scan_ast(recovered, line_offset=start_line - 1)
                 else:
                     # Preserve the prior bounded heuristic for an obviously

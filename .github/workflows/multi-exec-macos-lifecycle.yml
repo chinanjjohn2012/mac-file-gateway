@@ -1,0 +1,71 @@
+name: Multi-Workspace Exec macOS ARM64 native lifecycle (product only)
+
+on:
+  pull_request:
+    branches:
+      - feature/multi-workspace-exec-product-v1-20261023
+    paths:
+      - ".github/workflows/multi-exec-macos-lifecycle.yml"
+      - "tests/smoke_multi_exec_macos.py"
+      - "gateway/**"
+      - "MANIFEST.sha256"
+
+permissions:
+  contents: read
+
+jobs:
+  real-macos-arm64:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'test/multi-exec-macos-lifecycle-20261023'
+    runs-on: macos-15
+    timeout-minutes: 18
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      GATEWAY_NATIVE_C_ALLOWED: "false"
+      C3B03_S3S6_FIRST_C_LOAD_AUTHORIZED: "false"
+      C3B03_S3S6_GROUP_SIGNAL_AUTHORIZED: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Fixed Head, real macOS ARM64 and complete Git-tracked Manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          import subprocess
+          rows = Path("MANIFEST.sha256").read_text(encoding="ascii").splitlines()
+          names = [r.split("  ", 1)[1] for r in rows]
+          assert names == sorted(names) and len(names) == len(set(names))
+          tracked = set(subprocess.check_output(["git", "ls-files", "-z"])
+                        .decode("utf-8").strip("\0").split("\0"))
+          tracked.discard("MANIFEST.sha256")
+          assert set(names) == {"./" + x for x in tracked}, "Manifest is not exhaustive"
+          for row in rows:
+              digest, filename = row.split("  ", 1)
+              assert hashlib.sha256(Path(filename).read_bytes()).hexdigest() == digest, filename
+          print("MULTI_EXEC_MACOS_HEAD=" + subprocess.check_output(
+              ["git", "rev-parse", "HEAD"], text=True).strip())
+          print("MULTI_EXEC_MACOS_TREE=" + subprocess.check_output(
+              ["git", "rev-parse", "HEAD^{tree}"], text=True).strip())
+          print("MULTI_EXEC_MACOS_MANIFEST=OK")
+          print("MULTI_EXEC_NATIVE_C=false; NO PRIVATE TUNNEL")
+          PY
+      - name: Install existing product test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Run disposable Multi Exec product regressions on macOS ARM64
+        run: python -m pytest -q tests/test_multi_exec_product.py
+      - name: Actual loopback TCP REST/MCP and real disposable subprocess lifecycle
+        run: python -u tests/smoke_multi_exec_macos.py
+      - name: Compile acceptance script
+        run: python -m py_compile tests/smoke_multi_exec_macos.py

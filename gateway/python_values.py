@@ -130,6 +130,49 @@ def _value_literal(node: ast.AST, depth: int = 0) -> bool:
     return any(_value_literal(child, depth + 1) for child in ast.iter_child_nodes(node))
 
 
+def _assignment_value_has_literal(target: ast.AST, value: ast.AST, depth: int = 0) -> bool:
+    """Only literals actually bound to a credential target are Hard.
+
+    Tuple/list destructuring must pair corresponding target and source
+    positions. Literal values assigned to *unrelated* siblings are never
+    evidence for a token/password target; dynamic RHS calls are not
+    evaluated or guessed into a static tuple.
+    """
+    if depth > MAX_AST_DEPTH:
+        raise _ScanUnavailable
+    if isinstance(target, ast.Starred):
+        return _assignment_value_has_literal(target.value, value, depth + 1)
+    if isinstance(target, (ast.Tuple, ast.List)):
+        if not isinstance(value, (ast.Tuple, ast.List)):
+            # A single static str/bytes value can itself be unpacked, but
+            # opaque runtime results (even with string arguments) cannot
+            # associate one unrelated literal with a target position.
+            return (isinstance(value, ast.Constant)
+                    and type(value.value) in (str, bytes)
+                    and bool(value.value) and _assignment_target(target))
+        left = target.elts
+        right = value.elts
+        starred = [i for i, item in enumerate(left) if isinstance(item, ast.Starred)]
+        if not starred and len(left) == len(right):
+            return any(_assignment_value_has_literal(a, b, depth + 1)
+                       for a, b in zip(left, right))
+        if len(starred) == 1 and len(right) >= len(left) - 1:
+            pivot = starred[0]
+            suffix = len(left) - pivot - 1
+            leading = any(_assignment_value_has_literal(a, b, depth + 1)
+                          for a, b in zip(left[:pivot], right[:pivot]))
+            trailing = any(_assignment_value_has_literal(a, b, depth + 1)
+                           for a, b in zip(left[pivot + 1:],
+                                           right[len(right) - suffix:]))
+            middle = any(_assignment_value_has_literal(left[pivot], b, depth + 1)
+                         for b in right[pivot:len(right) - suffix])
+            return leading or trailing or middle
+        # The source structure cannot be mapped, so do not infer a
+        # credential solely from a string in some unrelated sibling.
+        return False
+    return _assignment_target(target) and _value_literal(value, depth + 1)
+
+
 def _joined_static_literal(node: ast.AST, depth: int = 0) -> str | bytes | None:
     if depth > MAX_AST_DEPTH:
         raise _ScanUnavailable
@@ -332,9 +375,10 @@ def classify_python(
             for node in ast.walk(tree):
                 if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
                     targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                    if any(_assignment_target(target) for target in targets):
-                        if node.value is not None and _value_literal(node.value):
-                            mark(node)
+                    if node.value is not None and any(
+                            _assignment_value_has_literal(target, node.value)
+                            for target in targets):
+                        mark(node)
                 elif isinstance(node, ast.Dict):
                     for key, value in zip(node.keys, node.values):
                         if (isinstance(key, ast.Constant) and type(key.value) is str

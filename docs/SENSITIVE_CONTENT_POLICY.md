@@ -127,3 +127,40 @@ status: `write_mode`, `read_redaction_enabled`, `expires_at`,
 
 This policy is source-only credential evidence protection, not general
 runtime secret detection or a guarantee that project code is safe to run.
+
+
+## 5. V3 physical-line and malformed-source integrity
+
+Python classification and every display/authorization consumer use **one**
+physical line model: CRLF, CR and LF delimit lines, with the same numbering as
+Python's AST/tokenizer. The other characters recognized by
+`str.splitlines()` (including Unicode U+2028/U+2029, U+0085, vertical tab,
+form feed and information separators) remain characters within their original
+physical source line. This same model determines the read response's
+`total_lines`/`redacted_lines`, protected searches, diff previews,
+visible replacement spans, hidden-line provenance and newly introduced Hard
+findings. Source bytes, BOM, CRLF and the raw `file_sha256` are preserved.
+If the classification flag/line counts cannot be reconciled, display and
+editing fail closed rather than exposing unmatched lines.
+
+When Python is fully tokenizable but the complete module has a
+`SyntaxError`, source credential evidence is recovered by grouping bounded
+**logical statements** and parsing each independently; statement line
+offsets are mapped back to original physical lines. Thus a valid
+multiline `token = ("literal")` cannot be ignored merely because another
+statement later in the file is invalid. If a credential-named malformed
+statement with string evidence cannot be attributed reliably, the scanner
+fails closed as `scan_unavailable`. Dynamic getters without embedded
+credential values remain ordinary code; clearly incomplete quoted values
+may be heuristic only under existing narrow Audit policy.
+
+For explicit `tuple`/`list` destructuring, each credential-named target
+is matched only to its own statically corresponding RHS element, with a
+bounded positional starred-target case. The unrelated `"ok"` assigned
+to `label` in `token, label = get_token(), "ok"` is not a token
+credential; `token, label = "secret", "ok"` remains Hard. Known secret
+signatures and protected paths remain Hard independently of any target name.
+
+This section records implementation refinements following PR #52's initial
+independent CODE_FIX_REQUIRED review; it **does not** replace the approved
+V3 design or claim a subsequent independent CODE PASS.

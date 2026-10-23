@@ -40,8 +40,9 @@ Design goals:
   timed out, or failed. This is a **persisted uncertain attempt**, not success.
 - `QUARANTINED`: global Exec admission has been disabled because an
   `UNKNOWN` or untrusted persisted state exists.
-- `RETIRED`: an intent was durably closed under its explicitly documented,
-  bounded evidence contract. This does not mean every detached child was reaped.
+- `RETIRED`: an intent was durably closed with direct-leader and original-group
+  evidence. This is an explicitly **group-only** completion for trusted,
+  disposable product tests, not proof that every detached child was reaped.
 
 Two separate facts must never be conflated: `original_group_clean` (bounded
 leader/group evidence) and `full_descendant_tree_clean` (not established
@@ -66,7 +67,10 @@ file, atomic rename, fsync directory. On all durability errors, latch
 Record a version, random per-attempt ID, Workspace ID, pinned root dev/ino,
 phase, attempt timestamp (diagnostic only), and bounded cleanup observations.
 Do not persist arbitrary argv, stdout/stderr, environment, tokens or content.
-Never use timestamps or PIDs as sole authority.
+Never use timestamps or PIDs as sole authority. If an intent fsync fails
+**before** any spawn, launching is prohibited, so a later boot cannot
+inherit an unrecorded child. If finalization fails **after** a spawn,
+the earlier fsynced PREPARED/RUNNING record must remain as a restart hazard.
 
 Boot ordering: open and scan the private state **before** any Exec-enabled
 API can accept requests. Every surviving `PREPARED`, `RUNNING` or
@@ -128,15 +132,17 @@ separately granted File Write/Git gates independent, unless their existing
 policies independently deny the operation. Never auto-retry or silently
 restart the same command.
 
-If a command exits and only the bounded original-group contract can be
-confirmed, report `cleanup_scope=original_group_only` and
-`full_descendant_tree_clean=false/not_proven`; do **not** label this
-"all descendants clean." If detached descendants are observed or cleanup
-fails, quarantine even if the direct leader has already exited. Design
-review must decide whether any ordinary-success attempt can retire with
-this explicitly limited guarantee; until that decision, production
-activation remains blocked. No progress- or heartbeat-only test can
-satisfy the unresolved full-tree gate.
+**D0 decision:** when the directly owned leader was reaped **and** the
+original process group was verified absent under the bounded policy,
+the attempt may be durably RETIRED **for trusted, disposable product
+acceptance only**. Report `cleanup_scope=original_group_only` and
+`full_descendant_tree_clean=false/not_proven`; another product-test
+request may be admitted after durable retirement. This is **not** a
+full-tree clean result, and production activation remains blocked until
+a separately reviewed full-descendant contract is proven. If a detached
+descendant is positively observed or original-group cleanup fails, enter
+UNKNOWN and quarantine even if the direct leader has exited. No
+progress- or heartbeat-only test satisfies the unresolved full-tree gate.
 
 Crash windows are conservative: after intent fsync/before Popen; after
 Popen/before PID metadata; after leader exit/before cleanup verification;

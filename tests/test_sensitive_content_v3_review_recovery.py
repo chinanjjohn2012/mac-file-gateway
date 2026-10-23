@@ -131,18 +131,22 @@ def test_unrecoverable_multiline_decorator_literal_has_actual_hard_line(
         assert target.read_bytes() == raw
         assert not (root / ("new" + suffix)).exists()
 
+        # Match the complete visible physical line; "    pass" alone
+        # would also be a string prefix of the protected "    password".
+        old_visible = "    pass" + newline
+        new_visible = "    return None" + newline
         preview = gateway.replace_text(
-            path, "    pass", "    return None", read["file_sha256"], dry_run=True,
+            path, old_visible, new_visible, read["file_sha256"], dry_run=True,
         )
         assert "abc" not in preview["diff"]
         assert target.read_bytes() == raw
         applied = gateway.replace_text(
-            path, "    pass", "    return None", read["file_sha256"], dry_run=False,
+            path, old_visible, new_visible, read["file_sha256"], dry_run=False,
         )
         assert applied["applied"] is True
         assert "abc" not in applied["diff"]
         assert target.read_bytes() == source.replace(
-            "    pass", "    return None",
+            old_visible, new_visible,
         ).encode("utf-8")
         assert gateway.read_file(path)["file_sha256"] == hashlib.sha256(
             target.read_bytes()

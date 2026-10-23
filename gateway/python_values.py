@@ -378,7 +378,7 @@ def classify_python(
                 elif isinstance(node, ast.Call):
                     for keyword in node.keywords:
                         if keyword.arg is not None and _field(keyword.arg) and _value_literal(keyword.value):
-                            mark(keyword.value)
+                            mark(keyword.value, line_offset)
                 elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                     args = node.args
                     positional = [*args.posonlyargs, *args.args]
@@ -466,6 +466,15 @@ def classify_python(
                     ast_budget -= _count_ast_nodes(recovered, deadline)
                     if ast_budget < 0:
                         raise _ScanUnavailable
+                    # A malformed full module skips the ordinary docstring
+                    # pass. Preserve explicit fields in recovered strings.
+                    for recovered_node in recovered.body:
+                        if (isinstance(recovered_node, ast.Expr)
+                                and isinstance(recovered_node.value, ast.Constant)
+                                and type(recovered_node.value.value) is str
+                                and any(_lexical_field_cue(part) == "hard"
+                                        for part in recovered_node.value.value.splitlines())):
+                            mark(recovered_node, line_offset=start_line - 1)
                     scan_ast(recovered, line_offset=start_line - 1)
                 else:
                     # Preserve the prior bounded heuristic for an obviously

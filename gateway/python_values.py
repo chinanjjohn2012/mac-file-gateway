@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import io
 import re
+import textwrap
 import time
 import tokenize
 from typing import Pattern
@@ -239,22 +240,40 @@ def _lexical_field_cue(line: str) -> str:
     return "none"
 
 
-def _scan_tokens(text: str, deadline: float) -> tuple[list[tuple[int, str]], int]:
+def _scan_tokens(text: str, deadline: float) -> tuple[list[tuple[int, str]], list[tuple[int, int]]]:
+    """Tokenize the whole file, recording complete *logical statements*.
+
+    A terminal SyntaxError in another statement must not discard an earlier
+    multiline credential assignment. Only tokenization failure is a scanner
+    integrity failure; tokens and comments use the same CR/LF line model.
+    """
     comments: list[tuple[int, str]] = []
+    statements: list[tuple[int, int]] = []
+    start: int | None = None
     count = 0
     try:
-        for item in tokenize.generate_tokens(io.StringIO(text).readline):
+        # The tokenizer must see CR-only lines just as ast.parse does.
+        for item in tokenize.generate_tokens(io.StringIO(text, newline=None).readline):
             count += 1
             if count > MAX_TOKENS or (count % 256 == 0 and time.monotonic() >= deadline):
                 raise _ScanUnavailable
             if item.type == tokenize.COMMENT:
                 comments.append((item.start[0], item.string[1:]))
+            if start is None and item.type not in (
+                    tokenize.NL, tokenize.NEWLINE, tokenize.COMMENT,
+                    tokenize.INDENT, tokenize.DEDENT, tokenize.ENDMARKER):
+                start = item.start[0]
+            if item.type == tokenize.NEWLINE and start is not None:
+                statements.append((start, item.end[0]))
+                start = None
+            if item.type == tokenize.ENDMARKER and start is not None:
+                statements.append((start, item.start[0]))
+                start = None
     except (tokenize.TokenError, IndentationError, UnicodeError, RecursionError, MemoryError):
         raise _ScanUnavailable from None
-    return comments, count
+    return comments, statements
 
-
-def _count_ast_nodes(tree: ast.Module, deadline: float) -> None:
+def _count_ast_nodes(tree: ast.Module, deadline: float) -> int:
     stack = [(tree, 0)]
     count = 0
     while stack:
@@ -265,6 +284,7 @@ def _count_ast_nodes(tree: ast.Module, deadline: float) -> None:
         if count % 256 == 0 and time.monotonic() >= deadline:
             raise _ScanUnavailable
         stack.extend((child, depth + 1) for child in ast.iter_child_nodes(node))
+    return count
 
 
 def _unavailable(text: str) -> tuple[list[bool], tuple[tuple[int, str], ...]]:
@@ -325,7 +345,7 @@ def classify_python(
             return _unavailable(text)
 
     try:
-        comments, _ = _scan_tokens(text, deadline)
+        comments, statements = _scan_tokens(text, deadline)
         for comment_index, (lineno, comment) in enumerate(comments):
             if comment_index % 128 == 0 and time.monotonic() >= deadline:
                 raise _ScanUnavailable

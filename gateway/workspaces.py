@@ -20,6 +20,7 @@ from .git_policy import GIT_V1_COMMANDS
 from .git_cli import GitCLIExecutor
 from .git_repository import GitRepositoryCoordinator
 from .git_state import GitStateStore
+from .exec_state import ExecStateStore
 
 _READ = frozenset({"list_files", "read_file", "search_files"})
 _WRITE = frozenset({"create_directory", "delete_directory", "create_file", "write_file",
@@ -123,6 +124,10 @@ class WorkspaceService:
         self._git_adapter_exposed = False
         self._exec_adapter_exposed = False
         self._exec_active: set[str] = set()
+        # B0: own the private Exec state across the service lifetime.
+        # Healthy no-proof admission is separately gated in B1/C.
+        self._exec_state: ExecStateStore | None = None
+        self._exec_state_issue: str | None = None
         config_root: PinnedDirectory | None = None
         try:
             config_root = open_pinned_directory(config_dir, private_leaf=True)
@@ -159,6 +164,17 @@ class WorkspaceService:
                     gateway.close()
                     raise PrivateFileError("Workspace root changed before Gateway initialization.")
                 self._workspaces[item.name] = WorkspaceContext(item.name, item, pin, gateway)
+            # Scan and acquire the private state before REST/MCP can accept
+            # work. State IO/ownership failure must not disable File/Git.
+            if settings.exec_enabled and any(w.exec_enabled for w in settings.workspaces):
+                try:
+                    exec_path = Path(config_dir).resolve(strict=True) / "exec-state"
+                    self._exec_state = ExecStateStore(
+                        exec_path,
+                        workspace_roots=tuple(w.root for w in settings.workspaces),
+                    )
+                except (PrivateFileError, GatewayError, OSError, ValueError):
+                    self._exec_state_issue = "state_io_unavailable"
             if settings.git_enabled:
                 # The private state directory is outside all Workspace roots.
                 # Git-only initialization failure does not break file APIs.
@@ -205,6 +221,8 @@ class WorkspaceService:
                     cleanup.callback(self._inventory.close)
                     if self._git_state is not None:
                         cleanup.callback(self._git_state.close)
+                    if self._exec_state is not None:
+                        cleanup.callback(self._exec_state.close)
                     for ctx in self._workspaces.values():
                         cleanup.callback(ctx.pinned_root.close)
                         cleanup.callback(ctx.gateway.close)
@@ -269,6 +287,13 @@ class WorkspaceService:
         """
         with self._lifecycle:
             ctx = self.require_exec(name)
+            # B0: deny both previews and applies against an untrusted store.
+            # A separate reviewed B1 step will deny *healthy* applies when
+            # no approved full-tree cleanup proof/acceptance grant exists.
+            if self._exec_state is None:
+                raise GatewayError(
+                    "exec_state_unavailable", "Exec durable state is unavailable.")
+            self._exec_state.require_healthy()
             if name in self._exec_active or len(self._exec_active) >= 4:
                 raise GatewayError("busy", "A controlled command already occupies this execution slot.")
             self._exec_active.add(name)
@@ -353,6 +378,17 @@ class WorkspaceService:
 
     def info(self) -> dict[str, Any]:
         with self._lifecycle:
+            effective = self.any_exec
+            if not effective:
+                durability, reason = "disabled", None
+            elif self._exec_state is None:
+                durability, reason = ("unavailable",
+                                      self._exec_state_issue or "state_io_unavailable")
+            else:
+                durability = self._exec_state.durability_state
+                reason = self._exec_state.quarantine_reason_code
+                if durability == "unavailable" and reason is None:
+                    reason = "state_io_unavailable"
             return {"name": "Mac File Gateway", "version": "2.5.0", "mode": "multi",
                     "workspace_count": len(self._workspaces),
                     "read_only": not (self.any_write or self.any_exec or self.any_git),
@@ -360,8 +396,13 @@ class WorkspaceService:
                     "workspaces": self.list_workspaces()["workspaces"],
                     "exec_policy": {
                         "enabled": self.settings.exec_enabled,
-                        "available": self.any_exec,
+                        # B0 retains historical healthy eligibility until
+                        # B1's proof gate and test-only acceptance bridge.
+                        "available": effective and durability == "healthy",
                         "adapter_exposed": self._exec_adapter_exposed,
+                        "durability_state": durability,
+                        "quarantined": durability == "quarantined",
+                        "quarantine_reason_code": reason,
                         "max_concurrent_per_workspace": 1,
                         "max_concurrent_total": 4,
                         "dry_run_default": True,

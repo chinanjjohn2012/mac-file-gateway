@@ -1,0 +1,81 @@
+name: Multi-Workspace Exec B1-B1-A normal default-DENY expected RED
+
+on:
+  pull_request:
+    branches:
+      - feature/multi-exec-recovery-r2-t02-b1b0-bound-listener-20261023
+    paths:
+      - ".github/workflows/multi-exec-b1b1-default-deny-red.yml"
+      - "tests/b1b1_contracts/**"
+      - "tools/verify_multi_exec_b1b1_default_deny_red.py"
+      - "docs/MULTI_WORKSPACE_EXEC_R2_T02_B1B1_A.md"
+      - "MANIFEST.sha256"
+
+permissions:
+  contents: read
+
+jobs:
+  b1b1-expected-red:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'test/multi-exec-recovery-r2-t02-b1b1-default-deny-red-20261024'
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      GATEWAY_NATIVE_C_ALLOWED: "false"
+      C3B03_S3S6_FIRST_C_LOAD_AUTHORIZED: "false"
+      C3B03_S3S6_GROUP_SIGNAL_AUTHORIZED: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Pin exact PR Head, parent and tracked-file manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          test "$(git rev-parse HEAD^)" = "682949dde29f35567a67748b3edde8196d910d9d"
+          test -z "$(git status --porcelain)"
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          import subprocess
+          names = []
+          for row in Path("MANIFEST.sha256").read_text(encoding="ascii").splitlines():
+              digest, filename = row.split("  ", 1)
+              assert filename.startswith("./")
+              names.append(filename)
+              assert hashlib.sha256(Path(filename).read_bytes()).hexdigest() == digest, filename
+          assert names == sorted(set(names))
+          tracked = {x.decode("utf-8") for x in subprocess.check_output(
+              ["git", "ls-files", "-z"]).split(b"\0") if x}
+          tracked.remove("MANIFEST.sha256")
+          assert set(names) == {"./" + x for x in tracked}, "Incomplete Manifest"
+          print("B1B1_EXPECTED_RED_HEAD=" + subprocess.check_output(
+              ["git", "rev-parse", "HEAD"], text=True).strip())
+          print("B1B1_EXPECTED_RED_TREE=" + subprocess.check_output(
+              ["git", "rev-parse", "HEAD^{tree}"], text=True).strip())
+          print("B1B1_MANIFEST=PASS")
+          PY
+      - name: Existing real-Exec and original T02-A contracts must be byte-for-byte untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code 682949dde29f35567a67748b3edde8196d910d9d HEAD -- \
+            gateway/workspaces.py gateway/exec_state.py gateway/executor.py \
+            gateway/http_multi.py gateway/mcp_multi.py gateway/multi_admission.py \
+            gateway/_exec_test_grant.py gateway/_exec_test_transport.py \
+            tests/test_multi_exec_product.py tests/t02_contracts/contract_multi_exec_admission_t02.py \
+            tools/verify_multi_exec_r2_t02_admission_red.py
+          echo "B1B1_PRODUCT_AND_PRIOR_CONTRACT_BLOBS=UNCHANGED"
+      - name: Install product test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Entire existing product CI tests must remain GREEN
+        run: python -m pytest -q
+      - name: Strict new B1-B1-A ordinary DENY must be expected RED
+        run: python tools/verify_multi_exec_b1b1_default_deny_red.py

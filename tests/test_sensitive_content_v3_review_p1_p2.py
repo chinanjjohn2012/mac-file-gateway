@@ -235,3 +235,105 @@ def test_p2_unpacking_still_protects_literal_assigned_to_credential(tmp_path, so
         assert gateway.search_files("secret", file_glob="sample.py")["matches"] == []
     finally:
         gateway.close()
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize("separator", ["\u2028", "\u0085", "\x0c"])
+def test_p1_real_multi_rest_mcp_unicode_secret_never_exposed(
+    tmp_path, transport, separator,
+):
+    import json
+
+    from starlette.testclient import TestClient
+
+    from gateway.http_multi import create_multi_app
+    from gateway.workspaces import ActiveRuntimeInventory, WorkspaceService
+    from gateway.workspaces_config import parse_workspace_config
+
+    projects = tmp_path / "projects"
+    root = projects / "a"
+    config = tmp_path / "config"
+    runtime = tmp_path / "runtime"
+    for folder in (root, config, runtime):
+        folder.mkdir(parents=True)
+
+    source = '# header' + separator + '\npassword = "abc"\n'
+    raw = source.encode("utf-8")
+    (root / "sample.py").write_bytes(raw)
+    settings = parse_workspace_config({
+        "schema_version": 1,
+        "workspaces": {"a": {
+            "root": str(root), "write": {"enabled": True, "paths": ["."]},
+        }},
+    })
+    service = WorkspaceService(
+        settings, config_dir=config,
+        inventory=ActiveRuntimeInventory(paths=(runtime,)),
+    )
+    try:
+        with TestClient(
+            create_multi_app(service), base_url="http://127.0.0.1:8765",
+        ) as client:
+            headers = {"Accept": "application/json, text/event-stream"}
+            if transport == "mcp":
+                initialized = client.post("/mcp", headers=headers, json={
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": {},
+                        "clientInfo": {"name": "v3-p1-regression", "version": "1"},
+                    },
+                })
+                assert initialized.status_code == 200
+
+                def tool(name, args, request_id):
+                    response = client.post("/mcp", headers=headers, json={
+                        "jsonrpc": "2.0", "id": request_id,
+                        "method": "tools/call",
+                        "params": {"name": name, "arguments": {
+                            "workspace": "a", **args,
+                        }},
+                    })
+                    assert response.status_code == 200, response.text
+                    return response.json()["result"]
+
+                read = tool("read_file", {"path": "sample.py"}, 2)
+                assert read.get("isError") is not True
+                assert "abc" not in json.dumps(read)
+                matches = tool("search_files", {
+                    "query": "abc", "file_glob": "sample.py",
+                }, 3)
+                assert matches.get("isError") is not True
+                assert not matches.get("structuredContent", {}).get("matches", [])
+                attempt = tool("replace_text", {
+                    "path": "sample.py",
+                    "old_text": 'password = "abc"',
+                    "new_text": 'password = "def"',
+                    "expected_sha256": hashlib.sha256(raw).hexdigest(),
+                    "dry_run": False,
+                }, 4)
+                assert attempt.get("isError") is True
+                assert "abc" not in json.dumps(attempt)
+            else:
+                read = client.get("/read", params={
+                    "workspace": "a", "path": "sample.py",
+                })
+                assert read.status_code == 200
+                assert "abc" not in read.json()["content"]
+                matches = client.get("/search", params={
+                    "workspace": "a", "q": "abc", "file_glob": "sample.py",
+                })
+                assert matches.status_code == 200
+                assert matches.json()["matches"] == []
+                attempt = client.post("/replace", json={
+                    "workspace": "a", "path": "sample.py",
+                    "old_text": 'password = "abc"',
+                    "new_text": 'password = "def"',
+                    "expected_sha256": hashlib.sha256(raw).hexdigest(),
+                    "dry_run": False,
+                })
+                assert attempt.status_code != 200
+                assert "abc" not in attempt.text
+            assert (root / "sample.py").read_bytes() == raw
+    finally:
+        service.close()

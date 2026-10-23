@@ -243,6 +243,98 @@ def test_r2_t01_real_durability_syscall_failure_latches_unavailable(
         store.close()
 
 
+
+@pytest.mark.parametrize("huge_timestamp", [
+    "9" * 1000,
+    "-" + "9" * 1000,
+])
+def test_r2_t01_huge_integer_record_quarantines_preserves_bytes_and_owner_lock(
+        tmp_path, huge_timestamp):
+    """A valid-sized corrupt record must NEVER escape boot as OverflowError.
+
+    Check actual single-linked, 0600 disk bytes (rather than an API result).
+    While quarantined the owner lock must stay held; after close a new owner
+    must acquire it and still conservatively quarantine the unchanged record.
+    """
+    first, state_path = _fresh(tmp_path)
+    attempt = first.prepare("a", (1, 2))
+    filename, _, record = _record(state_path, attempt)
+    first.close()
+    record["created_at"] = 0
+    data = json.dumps(record, sort_keys=True)
+    assert data.count('"created_at": 0') == 1
+    corrupt = data.replace('"created_at": 0',
+                           '"created_at": ' + huge_timestamp).encode("ascii")
+    assert 0 < len(corrupt) <= 4096
+    filename.write_bytes(corrupt)
+    info = filename.stat(follow_symlinks=False)
+    assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+    assert stat.S_IMODE(info.st_mode) == 0o600
+    assert filename.read_bytes() == corrupt
+
+    owner = ExecStateStore(state_path)
+    try:
+        assert owner.durability_state == "quarantined"
+        assert owner.quarantine_reason_code == "corrupt_record"
+        with pytest.raises(GatewayError) as exc:
+            owner.require_healthy()
+        assert exc.value.code == "exec_quarantined"
+        assert filename.read_bytes() == corrupt
+
+        contender = ExecStateStore(state_path)
+        try:
+            assert contender.durability_state == "unavailable"
+            assert contender.quarantine_reason_code == "owner_lock_unavailable"
+        finally:
+            contender.close()
+    finally:
+        owner.close()
+
+    restored = ExecStateStore(state_path)
+    try:
+        assert restored.durability_state == "quarantined"
+        assert restored.quarantine_reason_code == "corrupt_record"
+        assert filename.read_bytes() == corrupt
+    finally:
+        restored.close()
+
+
+def test_r2_t01_unexpected_boot_exception_closes_every_acquired_fd(
+        tmp_path, monkeypatch):
+    """An internal unexpected failure may propagate, but must NOT leak lock.
+
+    Unlike bad on-disk input this is an injected RuntimeError in the internal
+    scan. Record the exact pinned FDs; verifying EBADF avoids relying on GC.
+    """
+    store, path = _fresh(tmp_path)
+    store.close()
+    captured = {}
+
+    def unexpected_scan(self):
+        captured["directory"] = self._fd
+        captured["owner_lock"] = self._lock_fd
+        assert captured["directory"] >= 0
+        assert captured["owner_lock"] >= 0
+        raise RuntimeError("R2 injected unexpected boot scanner failure")
+
+    with monkeypatch.context() as m:
+        m.setattr(ExecStateStore, "_boot_scan", unexpected_scan)
+        with pytest.raises(RuntimeError, match="unexpected boot scanner failure"):
+            ExecStateStore(path)
+
+    assert set(captured) == {"directory", "owner_lock"}
+    for fd in captured.values():
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+    recovered = ExecStateStore(path)
+    try:
+        assert recovered.durability_state == "healthy"
+        assert recovered.quarantine_reason_code is None
+        recovered.require_healthy()
+    finally:
+        recovered.close()
+
 def test_r2_t01_unique_attempts_never_replace_unresolved_intent(tmp_path):
     store, path = _fresh(tmp_path)
     try:

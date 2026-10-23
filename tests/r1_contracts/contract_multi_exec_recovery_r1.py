@@ -613,6 +613,110 @@ class _ExternalWitness:
         return records
 
 
+
+
+# These GREEN checks certify only the test's independent witness wiring.
+# They do not constitute product durability/cleanup success evidence.
+
+def test_witness_selftest_file_fsync_fault_never_spawns(disposable, monkeypatch):
+    root = disposable.state_root
+    root.mkdir(mode=0o700)
+    witness = _ExternalWitness(root, "intent_file_fsync_failure")
+    path = root / "fixture-io.json"
+    with monkeypatch.context() as m:
+        witness.install(m)
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            os.write(fd, b'{"phase":"PREPARED"}')
+            with pytest.raises(OSError, match="R1 injected state"):
+                os.fsync(fd)
+        finally:
+            os.close(fd)
+    assert witness.fired == ["intent_file_fsync_failure"]
+    assert witness.events.count("record_fsync") == 1
+    assert path.exists() and not witness.spawns
+
+
+def test_witness_selftest_atomic_rename_fault_never_spawns(
+        disposable, monkeypatch):
+    root = disposable.state_root
+    root.mkdir(mode=0o700)
+    before = root / "fixture.tmp"
+    after = root / "fixture-record.json"
+    before.write_bytes(b'{"phase":"PREPARED"}')
+    witness = _ExternalWitness(root, "intent_atomic_rename_failure")
+    with monkeypatch.context() as m:
+        witness.install(m)
+        with pytest.raises(OSError, match="R1 injected atomic rename"):
+            os.replace(before, after)
+    assert witness.fired == ["intent_atomic_rename_failure"]
+    assert witness.events == ["state_atomic_rename"]
+    assert before.exists() and not after.exists() and not witness.spawns
+
+
+def test_witness_selftest_prepared_visible_at_dummy_popen(
+        disposable, monkeypatch):
+    root = disposable.state_root
+    root.mkdir(mode=0o700)
+    state = root / "fixture-prepared.json"
+    body = json.dumps({"attempt_id": "ab" * 16, "workspace": "a",
+                       "phase": "PREPARED"}).encode("utf-8")
+    witness = _ExternalWitness(root, "ambiguous_popen_failure")
+    with monkeypatch.context() as m:
+        witness.install(m)
+        fd = os.open(state, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            os.write(fd, body)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        rootfd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(rootfd)
+        finally:
+            os.close(rootfd)
+        with pytest.raises(OSError, match="R1 injected ambiguous fake Popen"):
+            subprocess.Popen(["python", "fixture-prepared.py"])
+    assert witness.fired == ["ambiguous_popen_failure"]
+    assert len(witness.spawns) == 1 and not witness.signal_attempts
+    witness.assert_fsynced_before_spawn()
+    assert witness.snapshot_at_spawn[0][0][1]["phase"] == "PREPARED"
+
+
+def test_witness_selftest_only_retired_record_unlinked(
+        disposable, monkeypatch):
+    root = disposable.state_root
+    root.mkdir(mode=0o700)
+    unresolved = root / "unknown.json"
+    retired = root / "retired.json"
+    original = b'{"attempt_id":"ab","workspace":"a","phase":"UNKNOWN"}'
+    unresolved.write_bytes(original)
+    retired.write_bytes(
+        b'{"attempt_id":"cd","workspace":"a","phase":"RETIRED"}')
+    witness = _ExternalWitness(root)
+    with monkeypatch.context() as m:
+        witness.install(m)
+        os.unlink(retired)
+        fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    assert witness.unlinked == [str(retired)]
+    assert "state_unlink" in witness.events
+    assert "directory_fsync" in witness.events[
+        witness.events.index("state_unlink") + 1:]
+    assert unresolved.read_bytes() == original and not witness.spawns
+
+
+def test_witness_selftest_lifecycle_callback_reports_injected_crash():
+    hooks = _LifecycleFaultHooks("restart_after_prepared_before_popen")
+    with pytest.raises(_SyntheticWorkerCrash, match="after_prepared_fsync"):
+        hooks.on_event("after_prepared_fsync")
+    assert hooks.events == ["after_prepared_fsync"]
+    assert hooks.fired == ["after_prepared_fsync"]
+
+
 def _attempt(service):
     """No real child. The test's Popen stub is installed before this call."""
     try:

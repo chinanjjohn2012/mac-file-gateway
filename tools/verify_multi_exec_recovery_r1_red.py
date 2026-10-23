@@ -101,7 +101,14 @@ GREEN_GUARDS = (
     "test_unrelated_git_authority_not_inferred",
     "test_no_remote_unquarantine_route",
 )
-EXPECTED = set(RED) | set(GREEN_GUARDS)
+WITNESS_SELFTESTS = (
+    "test_witness_selftest_file_fsync_fault_never_spawns",
+    "test_witness_selftest_atomic_rename_fault_never_spawns",
+    "test_witness_selftest_prepared_visible_at_dummy_popen",
+    "test_witness_selftest_only_retired_record_unlinked",
+    "test_witness_selftest_lifecycle_callback_reports_injected_crash",
+)
+EXPECTED = set(RED) | set(GREEN_GUARDS) | set(WITNESS_SELFTESTS)
 assert len(RED) == 51 and len(GREEN_GUARDS) == 4, (
     "R1_NODE_LEDGER_CHANGED_WITHOUT_EXPLICIT_REVIEW")
 
@@ -132,6 +139,7 @@ def main() -> int:
                 bad.append("NodeID " + name + ": got " + str(found[name]))
         red_count = 0
         guard_count = 0
+        witness_green = 0
         missing_fixture_count = 0
         live_red_count = 0
         for node in nodes:
@@ -168,20 +176,26 @@ def main() -> int:
                     bad.append(name + ": existing guard failed")
                 else:
                     guard_count += 1
+            elif name in WITNESS_SELFTESTS:
+                if failure is not None:
+                    bad.append(name + ": test-owned witness selftest failed")
+                else:
+                    witness_green += 1
             else:
                 bad.append("Unexpected testcase " + name)
         if result.returncode != 1:
             bad.append("Expected pytest assertion exit=1, got " +
                        str(result.returncode))
-        if red_count != 51 or guard_count != 4:
-            bad.append("Observed RED/GREEN counts wrong: " +
-                       repr((red_count, guard_count)))
+        if red_count != 51 or guard_count != 4 or witness_green != 5:
+            bad.append("Observed RED/GREEN/witness counts wrong: " +
+                       repr((red_count, guard_count, witness_green)))
         if bad:
             for item in bad:
                 print("R1_RED_VERIFICATION_FAIL: " + item, flush=True)
             return 1
         print("R1_EXPECTED_RED=" + str(red_count))
         print("R1_EXISTING_GUARDS_GREEN=" + str(guard_count))
+        print("R1_TEST_OWNED_WITNESSES_GREEN=" + str(witness_green))
         print("R1_LIVE_CONTRACT_RED=" + str(live_red_count))
         print("R1_PRIVATE_FIXTURE_NOT_YET_IMPLEMENTED=" +
               str(missing_fixture_count))

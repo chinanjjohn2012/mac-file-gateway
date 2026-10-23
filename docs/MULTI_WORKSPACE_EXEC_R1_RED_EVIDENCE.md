@@ -21,7 +21,8 @@ PR #56/#57/#58 implementation and native research remain untouched.
   explicitly. The verifier requires exact fully parameterized JUnit test
   names (including all 24 distinct scenario IDs), unique nodes, a specific
   controlled R1_RED failure marker for **each** node, no collection or
-  fixture errors, and four independently passing legacy guard cases.
+  fixture errors, and four independently passing product guards plus five test-owned
+  fault-witness self-checks.
   It rejects unrelated HTTP 421, wrong REST/MCP codes, skipped cases,
   swapped parameter IDs, unexpectedly GREEN cases and generic failures.
 - This isolated workflow's SUCCESS means only
@@ -119,7 +120,28 @@ as production evidence, and the real unlink/fsync/size boundaries are
 checked by the test after staging. UNKNOWN-at-capacity is tested
 separately and must never be evicted to make room.
 
-## 4. P3 improvements
+## 4. Test-owned witness self-checks (GREEN, not product GREEN)
+
+Five extra ordinary passing R1-suite guards exercise the evidence machinery
+itself, in a separate disposable temporary state root:
+
+- A genuine os.fsync file-descriptor fault fires before any dummy spawn.
+- A real os.replace attempt is fault-injected without changing the target.
+- A real test-side fsynced PREPARED file and directory are visible at the
+  exact intercepted Popen attempt; that Popen is a dummy and raises.
+- A RETIRED fixture is unlinked with a subsequent directory fsync while an
+  UNKNOWN fixture's bytes remain identical and no process is spawned.
+- An exact lifecycle callback raises its synthetic crash at its specified
+  event, rather than returning a canned result.
+
+These are explicitly **test-infrastructure self-checks**; no product Exec
+state machine, OS process, user Workspace, native signal or reboot runs in
+these five tests. Together with the four existing product policy guards,
+the strict R1 verifier requires five witness-selfcheck GREEN and four
+policy-guard GREEN, while preserving all separately enumerated RED cases.
+Failures of any self-check make the dedicated CI workflow FAIL.
+
+## 5. P3 improvements
 
 P3-01: verifier now pins fully qualified parametrized JUnit NodeIDs,
 including exact env names, foreign-record filename, three historical
@@ -137,14 +159,15 @@ then scanned by a freshly constructed ordinary Gateway. The old
 untrusted-name/corrupt-json tests remain separate and do not
 substitute for this schema-valid boot evidence.
 
-## 5. Scope, review criteria, and stop
+## 6. Scope, review criteria, and stop
 
 Independent review must read this PR's new fixed Head and Git Tree,
 the updated exact-node RED verifier, actual tests, original normal
 GREEN CI and strict RED CI Job logs, D0 accepted fixed-SHA design, and
 the earlier Spec FAIL Review. It should distinguish (a) direct live
 entrypoint RED, (b) missing private factory/codec RED, (c) independent
-future OS/disk fault witness requirements, and (d) guard GREEN.
+test-witness selfchecks GREEN versus future R2 actual disk/fault evidence,
+and (d) existing product guard GREEN.
 
 Only after independent R1 Standards+Spec PASS may R2 implement Python
 durable state and test-only fixture construction. Later R3 macOS

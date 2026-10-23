@@ -12,6 +12,7 @@ import json
 import os
 import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -186,6 +187,131 @@ def test_b1b0_close_revokes_transport_before_teardown_and_no_reuse():
         assert not listener._thread.is_alive()
     finally:
         env.close()
+
+
+
+def test_b1b0_p2_join_exception_retains_real_service_state_until_retry(monkeypatch):
+    """Real Uvicorn thread; synthetic join error must not close pinned FDs.
+
+    This is not a fake result dict or a fake thread. With old code,
+    _BoundDisposableAcceptance.close() unconditionally entered fixture.close()
+    even when listener.close() failed, invalidating actual owner.lock/root FDs.
+    """
+    env = _new()
+    service = env.service
+    store = service._exec_state
+    listener = env.listener
+    pinned = service.get("a").pinned_root.fd
+    try:
+        assert listener._thread.is_alive()
+        assert _qualified(env)
+        failures = []
+
+        def failed_join(timeout):
+            failures.append(timeout)
+            raise TimeoutError("B1B0_INJECTED_JOIN_ERROR")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(listener._thread, "join", failed_join)
+            with pytest.raises(TimeoutError, match="B1B0_INJECTED_JOIN_ERROR"):
+                env.close()
+            assert failures and all(
+                isinstance(x, (int, float)) and 0 < x <= 7 for x in failures)
+            assert _qualified(env) is False  # grant revoked BEFORE join error
+            assert not service._closing and not service._closed
+            assert store.durability_state == "healthy"
+            os.fstat(store._lock_fd)
+            os.fstat(store._fd)
+            os.fstat(pinned)
+            assert listener._socket.fileno() == -1  # reject new connections
+        env.close()  # second bounded attempt after fault injection removed
+        assert not listener._thread.is_alive()
+        assert service._closed
+    finally:
+        env.close()
+
+
+def test_b1b0_p2_join_returns_alive_during_real_inflight_request(monkeypatch):
+    """An active real HTTP preview pins the network thread during shutdown.
+
+    A bounded/no-op join is injected, NOT a fake is_alive() result. Old code
+    then calls fixture.close() and blocks inside service.close(), violating
+    listener-first teardown. The test observes that in a separate closer.
+    """
+    env = _new()
+    service = env.service
+    store = service._exec_state
+    listener = env.listener
+    gateway = service.get("a").gateway
+    pinned = service.get("a").pinned_root.fd
+    entered, release = threading.Event(), threading.Event()
+    finished_close = threading.Event()
+    observed = []
+    close_errors = []
+    caller = closer = None
+    real_run = gateway.run_command
+
+    def held_preview(cwd, argv, timeout_seconds=60, dry_run=True):
+        entered.set()
+        if not release.wait(6):
+            raise AssertionError("B1B0 held preview was not released")
+        return real_run(cwd, argv, timeout_seconds, dry_run)
+
+    def request():
+        try:
+            observed.append(_request(env.port, "/run", {
+                "workspace": "a", "cwd": "src",
+                "argv": ["python", "hello.py"]}))
+        except (OSError, ValueError) as exc:
+            observed.append(type(exc).__name__)
+
+    def shutdown():
+        try:
+            env.close()
+        except BaseException as exc:
+            close_errors.append(exc)
+        finally:
+            finished_close.set()
+
+    try:
+        monkeypatch.setattr(gateway, "run_command", held_preview)
+        caller = threading.Thread(target=request, daemon=True)
+        caller.start()
+        assert entered.wait(3), "A real HTTP preview did not enter the Worker"
+        assert listener._thread.is_alive() and not finished_close.is_set()
+
+        def join_without_draining(timeout):
+            assert isinstance(timeout, (int, float)) and 0 < timeout <= 7
+            assert listener._thread.is_alive()  # actual live Uvicorn thread
+            return None  # injected timeout, not simulated thread death
+
+        with monkeypatch.context() as patch:
+            patch.setattr(listener._thread, "join", join_without_draining)
+            closer = threading.Thread(target=shutdown, daemon=True)
+            closer.start()
+            assert finished_close.wait(2), (
+                "Listener timeout attempted fixture.close() before HTTP "
+                "request/Listener completed")
+            assert len(close_errors) == 1
+            assert isinstance(close_errors[0], RuntimeError)
+            assert "did not shut down" in str(close_errors[0])
+            assert listener._thread.is_alive()
+            assert _qualified(env) is False
+            assert not service._closing and not service._closed
+            assert store.durability_state == "healthy"
+            os.fstat(store._lock_fd)
+            os.fstat(store._fd)
+            os.fstat(pinned)
+            assert listener._socket.fileno() == -1
+    finally:
+        release.set()
+        if caller is not None:
+            caller.join(timeout=5)
+        if closer is not None:
+            closer.join(timeout=5)
+        env.close()  # retry after thread is permitted to finish
+    assert not listener._thread.is_alive()
+    assert service._closed
 
 
 def test_b1b0_closed_socket_invalidates_even_with_live_old_service():

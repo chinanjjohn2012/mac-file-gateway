@@ -12,9 +12,11 @@ reviewed D0 outcome is not yet enforced. See R1 acceptance evidence document.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import os
+import signal
 import stat
 import subprocess
 import threading
@@ -30,9 +32,55 @@ from gateway.workspaces_config import parse_workspace_config
 from gateway.http_multi import create_multi_app
 
 
+class _HostProcessGuard:
+    """Fail-closed Python-level host process/signal boundary for full fixture.
+
+    This is a deterministic in-process R1 test guard, NOT an OS sandbox.
+    Any unexpected call is counted and rejected (including calls caught by
+    R2); fixture teardown also fails on attempted unsafe host operations.
+    The only permitted spawn simulator is a nested _ExternalWitness.popen.
+    """
+
+    def __init__(self):
+        self.violations = []
+
+    def _block(self, name):
+        def forbidden(*args, **kwargs):
+            self.violations.append(name)
+            raise AssertionError(
+                "R1_TEST_INFRA_HOST_PROCESS_OR_SIGNAL_FORBIDDEN: " + name)
+        return forbidden
+
+    def install(self, patch):
+        patch.setattr(subprocess, "Popen", self._block("subprocess.Popen"))
+        for name in (
+            "kill", "killpg", "fork", "forkpty", "posix_spawn",
+            "posix_spawnp", "system", "spawnl", "spawnle", "spawnlp",
+            "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe",
+            "execl", "execle", "execlp", "execlpe", "execv", "execve",
+            "execvp", "execvpe",
+        ):
+            if hasattr(os, name):
+                patch.setattr(os, name, self._block("os." + name))
+        for name in ("pthread_kill", "raise_signal"):
+            if hasattr(signal, name):
+                patch.setattr(signal, name, self._block("signal." + name))
+        for name in ("create_subprocess_exec", "create_subprocess_shell"):
+            if hasattr(asyncio, name):
+                patch.setattr(asyncio, name, self._block("asyncio." + name))
+
+    def assert_untouched(self):
+        if self.violations:
+            pytest.fail(
+                "R1_TEST_INFRA_HOST_PROCESS_GUARD_VIOLATED: " +
+                repr(self.violations), pytrace=False)
+
+
 @pytest.fixture
-def disposable(tmp_path):
+def disposable(tmp_path, monkeypatch):
     """Fully disposable two-Workspace service; never launches a real process."""
+    host_guard = _HostProcessGuard()
+    host_guard.install(monkeypatch)  # before any WorkspaceService construction
     roots = tmp_path / "projects"
     roots.mkdir()
     for name in ("a", "b"):
@@ -100,11 +148,20 @@ def disposable(tmp_path):
     scene.roots = roots
     scene.runtime = runtime
     scene.services = services
+    scene.host_guard = host_guard
     try:
         yield scene
     finally:
+        errors = []
+        # The fixture-wide guard is STILL installed throughout every close.
         for svc in reversed(services):
-            svc.close()
+            try:
+                svc.close()
+            except BaseException as exc:
+                errors.append(exc)
+        host_guard.assert_untouched()  # even swallowed forbidden calls fail CI
+        if errors:
+            raise errors[0]
 
 
 def _must_deny(func, code, red):
@@ -481,11 +538,14 @@ class _DummyProcess:
 
 
 class _ExternalWitness:
-    """Owned by the test: syscall tracing + actual disk inspection.
+    """Test-owned syscall witness: the SAME attempt's ordered durable intent.
 
-    A future implementation cannot pass this test by returning a canned dict.
-    Every induced fault needs a traced call at the intended OS boundary,
-    and terminal/reboot claims are checked by a separate filesystem scan.
+    Recording that fsync and a visible JSON file occurred somewhere is not
+    sufficient. A successful launch requires one complete PREPARED written to
+    the temporary inode, successful file fsync of that inode, *successful*
+    atomic rename to the inspected destination, pinned directory fsync after
+    rename, and then an inert intercepted Popen. Each step is independently
+    bound by (st_dev, st_ino, attempt_id, exact bytes SHA-256).
     """
     def __init__(self, state_root, fault=None):
         self.root = state_root
@@ -494,20 +554,25 @@ class _ExternalWitness:
         self.fired = []
         self.spawns = []
         self.snapshot_at_spawn = []
+        self.identity_at_spawn = []   # authoritative inode/bytes at Popen time
         self.unlinked = []
         self.state_writes = []
         self.signal_attempts = []
+        self.transactions = []  # only successful steps, not attempted fsyncs
+
+    @staticmethod
+    def _identity(st):
+        return (st.st_dev, st.st_ino)
 
     def _fd_kind(self, fd):
         try:
-            st = os.fstat(fd)
-            root = self.root.stat()
-            if (st.st_dev, st.st_ino) == (root.st_dev, root.st_ino):
+            identity = self._identity(os.fstat(fd))
+            if identity == self._identity(self.root.stat()):
                 return "directory"
             for path in self.root.iterdir():
                 try:
-                    item = path.stat(follow_symlinks=False)
-                    if (st.st_dev, st.st_ino) == (item.st_dev, item.st_ino):
+                    if identity == self._identity(
+                            path.stat(follow_symlinks=False)):
                         return "record"
                 except OSError:
                     pass
@@ -520,56 +585,152 @@ class _ExternalWitness:
             return True
         return str(path).startswith(str(self.root) + os.sep)
 
+    def _resolve(self, path, dir_fd=None):
+        if dir_fd is not None and self._fd_kind(dir_fd) == "directory":
+            return self.root / path
+        return Path(path)
+
+    def _fd_record(self, fd):
+        """Actual bytes on disk at file-fsync time, keyed by open FD inode."""
+        try:
+            identity = self._identity(os.fstat(fd))
+            for path in self.root.iterdir():
+                if self._identity(path.stat(follow_symlinks=False)) != identity:
+                    continue
+                data = path.read_bytes()
+                obj = json.loads(data)
+                if (isinstance(obj, dict) and
+                    obj.get("phase") in ("PREPARED", "RUNNING", "UNKNOWN",
+                                         "RETIRED") and
+                    isinstance(obj.get("attempt_id"), str) and
+                    obj.get("workspace") == "a"):
+                    return {
+                        "inode": identity, "attempt": obj["attempt_id"],
+                        "digest": hashlib.sha256(data).hexdigest(),
+                    }
+        except (OSError, ValueError, UnicodeDecodeError):
+            pass
+        return None
+
     def install(self, monkeypatch):
         original_write, original_fsync = os.write, os.fsync
-        original_replace, original_unlink = os.replace, os.unlink
+        original_replace, original_rename = os.replace, os.rename
+        original_unlink = os.unlink
 
         def write(fd, payload):
-            kind = self._fd_kind(fd)
-            if kind == "record":
+            count = original_write(fd, payload)
+            if self._fd_kind(fd) == "record":
                 self.events.append("state_write")
-                self.state_writes.append(bytes(payload))
-            return original_write(fd, payload)
+                self.state_writes.append(bytes(payload[:count]))
+            return count
 
         def fsync(fd):
             kind = self._fd_kind(fd)
             if kind:
+                # The complete serialized bytes must exist BEFORE file fsync.
+                before = self._fd_record(fd) if kind == "record" else None
+                if before:
+                    self.transactions.append({
+                        "kind": "write_complete", **before,
+                    })
                 self.events.append(kind + "_fsync")
-                trigger = (self.fault == "intent_file_fsync_failure"
-                           and kind == "record" and not self.spawns) or (
-                           self.fault == "intent_directory_fsync_failure"
-                           and kind == "directory" and not self.spawns) or (
-                           self.fault == "post_spawn_finalization_fsync_failure"
-                           and kind == "record" and bool(self.spawns)
-                           and any(b'RETIRED' in chunk for chunk in self.state_writes))
-                if (self.fault == "retired_prune_directory_fsync_failure"
-                        and kind == "directory" and self.unlinked):
-                    trigger = True
+                trigger = (
+                    (self.fault == "intent_file_fsync_failure"
+                     and kind == "record" and not self.spawns)
+                    or (self.fault == "intent_directory_fsync_failure"
+                        and kind == "directory" and not self.spawns)
+                    or (self.fault == "post_spawn_finalization_fsync_failure"
+                        and kind == "record" and bool(self.spawns)
+                        and any(b'RETIRED' in chunk for chunk in
+                                self.state_writes))
+                    or (self.fault == "retired_prune_directory_fsync_failure"
+                        and kind == "directory" and bool(self.unlinked))
+                )
                 if trigger:
                     self.fired.append(self.fault)
                     raise OSError("R1 injected state " + str(self.fault))
-            return original_fsync(fd)
+            outcome = original_fsync(fd)
+            if kind == "record" and before:
+                self.transactions.append({"kind": "file_fsync", **before})
+            elif kind == "directory":
+                self.transactions.append({
+                    "kind": "directory_fsync",
+                    "inode": self._identity(os.fstat(fd)),
+                })
+            return outcome
 
-        def replace(source, target, *args, **kwargs):
-            if self._is_state_path(target, kwargs.get("dst_dir_fd")):
+        def rename_common(operation, name, source, target, *args, **kwargs):
+            src_dir_fd = kwargs.get("src_dir_fd")
+            dst_dir_fd = kwargs.get("dst_dir_fd")
+            src = self._resolve(source, src_dir_fd)
+            dst = self._resolve(target, dst_dir_fd)
+            is_state = (self._is_state_path(target, dst_dir_fd)
+                        and self._is_state_path(source, src_dir_fd))
+            if is_state:
                 self.events.append("state_atomic_rename")
                 if self.fault == "intent_atomic_rename_failure" and not self.spawns:
                     self.fired.append(self.fault)
                     raise OSError("R1 injected atomic rename fault")
-            return original_replace(source, target, *args, **kwargs)
+            before = None
+            if is_state:
+                try:
+                    st = src.stat(follow_symlinks=False)
+                    before = (self._identity(st), src.read_bytes())
+                except OSError:
+                    pass
+            result = operation(source, target, *args, **kwargs)
+            if is_state and before and src != dst:
+                identity, bytes_before = before
+                st_after = dst.stat(follow_symlinks=False)
+                bytes_after = dst.read_bytes()
+                if (identity == self._identity(st_after)
+                        and bytes_before == bytes_after):
+                    try:
+                        obj = json.loads(bytes_after)
+                    except (ValueError, UnicodeDecodeError):
+                        obj = None
+                    if (isinstance(obj, dict) and
+                            obj.get("phase") in ("PREPARED", "RUNNING") and
+                            obj.get("workspace") == "a" and
+                            isinstance(obj.get("attempt_id"), str)):
+                        self.transactions.append({
+                            "kind": "rename", "inode": identity,
+                            "attempt": obj["attempt_id"],
+                            "digest": hashlib.sha256(bytes_after).hexdigest(),
+                            "target": dst.name,
+                        })
+            return result
+
+        def replace(source, target, *args, **kwargs):
+            return rename_common(original_replace, "replace",
+                                 source, target, *args, **kwargs)
+
+        def rename(source, target, *args, **kwargs):
+            return rename_common(original_rename, "rename",
+                                 source, target, *args, **kwargs)
 
         def unlink(path, *args, **kwargs):
-            if self._is_state_path(path, kwargs.get("dir_fd")):
+            tracked = self._is_state_path(path, kwargs.get("dir_fd"))
+            result = original_unlink(path, *args, **kwargs)
+            if tracked:
                 self.events.append("state_unlink")
                 self.unlinked.append(str(path))
-                # A prune fault is injected only at a directory fsync after
-                # an actual RETIRED unlink, never by fabricating a response.
-            return original_unlink(path, *args, **kwargs)
+            return result
 
         def popen(*args, **kwargs):
             self.events.append("spawn_attempt")
             self.spawns.append((args, kwargs))
-            self.snapshot_at_spawn.append(_on_disk_records(self.root))
+            snapshot = _on_disk_records(self.root)
+            self.snapshot_at_spawn.append(snapshot)
+            identities = {}
+            for filename, obj in snapshot:
+                file = self.root / filename
+                identities[filename] = (
+                    self._identity(file.stat(follow_symlinks=False)),
+                    hashlib.sha256(file.read_bytes()).hexdigest(),
+                )
+            self.identity_at_spawn.append(identities)
+            self.transactions.append({"kind": "spawn"})
             if self.fault in ("ambiguous_popen_failure",
                               "restart_after_popen_before_identity"):
                 self.fired.append(self.fault)
@@ -578,7 +739,7 @@ class _ExternalWitness:
 
         def forbid_signals(*args, **kwargs):
             self.signal_attempts.append((args, kwargs))
-            # Signal 0 is a group-presence probe, not real termination.
+            # Group-probe signal 0 is simulated, never sent to the real PID.
             if len(args) >= 2 and args[1] == 0:
                 raise ProcessLookupError("R1 dummy group is absent")
             self.events.append("signal_intercepted")
@@ -587,32 +748,76 @@ class _ExternalWitness:
         monkeypatch.setattr(os, "write", write)
         monkeypatch.setattr(os, "fsync", fsync)
         monkeypatch.setattr(os, "replace", replace)
+        monkeypatch.setattr(os, "rename", rename)
         monkeypatch.setattr(os, "unlink", unlink)
+        # These are nested over the default fixture-wide process guard.
         monkeypatch.setattr(subprocess, "Popen", popen)
         monkeypatch.setattr(os, "killpg", forbid_signals)
         monkeypatch.setattr(os, "kill", forbid_signals)
 
     def assert_fsynced_before_spawn(self, *, required=True):
-        if self.spawns:
-            first = self.events.index("spawn_attempt")
-            leading = self.events[:first]
-            _require("record_fsync" in leading and
-                     "directory_fsync" in leading and
-                     bool(self.snapshot_at_spawn[0]) and
-                     bool([v for _, v in self.snapshot_at_spawn[0]
-                           if v["phase"] in ("PREPARED", "RUNNING")]),
-                     "DURABLE_INTENT_PRECEDES_SPAWN",
-                     "real fsync + directory fsync + readable PREPARED absent")
-        elif required:
-            pytest.fail("R1_RED_SPAWN_NOT_WITNESSED", pytrace=False)
+        if not self.spawns:
+            if required:
+                pytest.fail("R1_RED_SPAWN_NOT_WITNESSED", pytrace=False)
+            return
+        steps = self.transactions
+        first_spawn = next(
+            (i for i, v in enumerate(steps) if v["kind"] == "spawn"), None)
+        valid = []
+        if first_spawn is not None and self.snapshot_at_spawn:
+            snap = self.snapshot_at_spawn[0]
+            for filename, obj in snap:
+                if (obj.get("phase") != "PREPARED" or
+                        not isinstance(obj.get("attempt_id"), str) or
+                        obj.get("workspace") != "a" or
+                        filename not in self.identity_at_spawn[0]):
+                    continue
+                # NEVER read post-finalization contents as if they were
+                # the bytes present at launch; R2 may later mark UNKNOWN.
+                inode, digest = self.identity_at_spawn[0][filename]
+                attempt = obj["attempt_id"]
+                def matching(step, kind):
+                    return (step["kind"] == kind and
+                            step.get("inode") == inode and
+                            step.get("attempt") == attempt and
+                            step.get("digest") == digest)
+                # Require a single exact, successful, same-inode transaction:
+                # complete temporary bytes < fsync < rename < directory
+                # fsync (pinned root) < *first* Popen.
+                for ri, ren in enumerate(steps[:first_spawn]):
+                    if not matching(ren, "rename"):
+                        continue
+                    if ren["target"] != filename:
+                        continue
+                    fi = next((j for j in range(ri - 1, -1, -1)
+                               if matching(steps[j], "file_fsync")), None)
+                    wi = (next((j for j in range(fi - 1, -1, -1)
+                                if matching(steps[j], "write_complete")), None)
+                          if fi is not None else None)
+                    di = next((j for j in range(ri + 1, first_spawn)
+                               if (steps[j]["kind"] == "directory_fsync" and
+                                   steps[j]["inode"] ==
+                                   self._identity(self.root.stat()))), None)
+                    if (wi is not None and fi is not None and
+                            di is not None and wi < fi < ri < di < first_spawn):
+                        valid.append((filename, attempt, inode, wi, fi, ri, di))
+        _require(
+            len(valid) == 1,
+            "DURABLE_INTENT_PRECEDES_SPAWN",
+            "same-attempt write-all < file fsync < atomic rename < "
+            "pinned-directory fsync < dummy Popen not proven; "
+            "ordered steps=" + repr(steps[:first_spawn])[:1000],
+        )
 
-    def assert_unknown_on_disk(self):
-        records = _state_contains(self.root, {"PREPARED", "RUNNING", "UNKNOWN"})
-        _require(bool(records), "UNCERTAIN_RECORD_MISSING",
-                 "actual unresolved durable intent not found")
+    def assert_unknown_on_disk(self, *, allow_unresolved_only=False):
+        phases = ({"PREPARED", "RUNNING", "UNKNOWN"}
+                  if allow_unresolved_only else {"UNKNOWN"})
+        records = _state_contains(self.root, phases)
+        _require(bool(records),
+                 "UNCERTAIN_RECORD_MISSING" if allow_unresolved_only
+                 else "DURABLE_UNKNOWN_MISSING",
+                 "no qualifying actual on-disk " + repr(phases) + " record")
         return records
-
-
 
 
 # These GREEN checks certify only the test's independent witness wiring.
@@ -658,18 +863,20 @@ def test_witness_selftest_prepared_visible_at_dummy_popen(
         disposable, monkeypatch):
     root = disposable.state_root
     root.mkdir(mode=0o700)
+    temp = root / "fixture-prepared.tmp"
     state = root / "fixture-prepared.json"
     body = json.dumps({"attempt_id": "ab" * 16, "workspace": "a",
                        "phase": "PREPARED"}).encode("utf-8")
     witness = _ExternalWitness(root, "ambiguous_popen_failure")
     with monkeypatch.context() as m:
         witness.install(m)
-        fd = os.open(state, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        fd = os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         try:
-            os.write(fd, body)
+            assert os.write(fd, body) == len(body)
             os.fsync(fd)
         finally:
             os.close(fd)
+        os.replace(temp, state)
         rootfd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
             os.fsync(rootfd)
@@ -681,6 +888,90 @@ def test_witness_selftest_prepared_visible_at_dummy_popen(
     assert len(witness.spawns) == 1 and not witness.signal_attempts
     witness.assert_fsynced_before_spawn()
     assert witness.snapshot_at_spawn[0][0][1]["phase"] == "PREPARED"
+    # All five stages were witnessed on the *same* file inode/attempt.
+    assert [s["kind"] for s in witness.transactions] == [
+        "write_complete", "file_fsync", "rename", "directory_fsync",
+        "spawn",
+    ]
+
+
+@pytest.mark.parametrize(
+    "broken", ["missing_rename", "directory_fsync_before_rename",
+               "different_attempt_file_fsync"],
+)
+def test_witness_selftest_rejects_broken_durable_order(
+        disposable, monkeypatch, broken):
+    """GREEN: deliberate violations MUST fail witness verification itself."""
+    root = disposable.state_root
+    root.mkdir(mode=0o700)
+    target = root / "record.json"
+    temp = root / "pending.tmp"
+    body = json.dumps({"attempt_id": "ab" * 16, "workspace": "a",
+                       "phase": "PREPARED"}).encode("utf-8")
+    w = _ExternalWitness(root, "ambiguous_popen_failure")
+
+    def write_file(path, data, *, sync):
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            assert os.write(fd, data) == len(data)
+            if sync:
+                os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def sync_dir():
+        fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    with monkeypatch.context() as m:
+        w.install(m)
+        if broken == "missing_rename":
+            write_file(target, body, sync=True)
+            sync_dir()
+        elif broken == "directory_fsync_before_rename":
+            write_file(temp, body, sync=True)
+            sync_dir()
+            os.replace(temp, target)
+        else:
+            # A successful fsync on a DIFFERENT temp/attempt is irrelevant.
+            foreign = root / "foreign.tmp"
+            foreign_body = json.dumps({
+                "attempt_id": "cd" * 16, "workspace": "a",
+                "phase": "PREPARED",
+            }).encode("utf-8")
+            write_file(foreign, foreign_body, sync=True)
+            write_file(temp, body, sync=False)
+            os.replace(temp, target)
+            sync_dir()
+        with pytest.raises(OSError, match="R1 injected ambiguous fake Popen"):
+            subprocess.Popen(["python", "fixture-prepared.py"])
+    assert len(w.spawns) == 1
+    with pytest.raises(pytest.fail.Exception,
+                       match="R1_RED_DURABLE_INTENT_PRECEDES_SPAWN"):
+        w.assert_fsynced_before_spawn()
+
+
+def test_host_guard_selftest_blocks_spawn_and_host_signal(
+        disposable, monkeypatch):
+    """GREEN: process/signal denial remains active even around teardown."""
+    local_guard = _HostProcessGuard()
+    with monkeypatch.context() as m:
+        local_guard.install(m)
+        with pytest.raises(AssertionError, match="HOST_PROCESS_OR_SIGNAL_FORBIDDEN"):
+            subprocess.Popen(["python", "forbidden-host-process.py"])
+        with pytest.raises(AssertionError, match="HOST_PROCESS_OR_SIGNAL_FORBIDDEN"):
+            os.killpg(_DummyProcess.pid, signal.SIGTERM)
+        if hasattr(os, "posix_spawn"):
+            with pytest.raises(AssertionError, match="HOST_PROCESS_OR_SIGNAL_FORBIDDEN"):
+                os.posix_spawn("/bin/echo", ["/bin/echo"], {})
+    expected = ["subprocess.Popen", "os.killpg"]
+    if hasattr(os, "posix_spawn"):
+        expected.append("os.posix_spawn")
+    assert local_guard.violations == expected
+    disposable.host_guard.assert_untouched()
 
 
 def test_witness_selftest_only_retired_record_unlinked(
@@ -860,6 +1151,7 @@ def test_ambiguous_state_survives_service_restart(disposable, monkeypatch):
     _assert_quarantined(second)
     _require(record.read_bytes() == first_bytes, "RESTART_REPLAYED_UNKNOWN",
              "second boot modified unresolved record")
+    disposable.host_guard.assert_untouched()
 
 
 @pytest.mark.parametrize("phase", ["PREPARED", "RUNNING", "UNKNOWN"])
@@ -1130,7 +1422,9 @@ def test_internal_state_fault_injection_contract(
                  _LifecycleFaultHooks.EVENTS.get(case) in hooks.fired,
                  "POSTSPAWN_FAULT_NOT_FIRED",
                  repr({"syscalls": w.events, "callbacks": hooks.events}))
-        w.assert_unknown_on_disk()
+        w.assert_unknown_on_disk(
+            allow_unresolved_only=(
+                case == "post_spawn_finalization_fsync_failure"))
         _assert_quarantined(svc)
         svc.close()
         again = disposable.service()
@@ -1148,14 +1442,26 @@ def test_internal_state_fault_injection_contract(
         ], "RESTART_CRASH_WINDOW_NOT_INJECTED", repr(hooks.events))
         before = _on_disk_records(disposable.state_root)
         _require(bool(before), "RESTART_RECORD_NOT_PERSISTED", repr(w.events))
+        before_bytes = {
+            name: (disposable.state_root / name).read_bytes()
+            for name, _obj in before
+        }
+        prior_blocked = len(disposable.host_guard.violations)
         svc.close()
         again = disposable.service()
+        disposable.host_guard.assert_untouched()
+        after_bytes = {
+            name: (disposable.state_root / name).read_bytes()
+            for name, _obj in _on_disk_records(disposable.state_root)
+        }
         if case == "restart_after_retire_before_response":
             _require(bool(_state_contains(disposable.state_root, {"RETIRED"})),
                      "RETIRED_NOT_DURABLE", repr(before))
             _assert_quarantined(again)  # prior test-only scope is NOT a grant
-            _require(not hasattr(again, "_r1_contract_probe"),
-                     "REPLAY_SIDE_CHANNEL", "product exposed test probe")
+            _require(prior_blocked == len(disposable.host_guard.violations) and
+                     before_bytes == after_bytes and len(w.spawns) == 1,
+                     "RESTART_REPLAYED_RETIRED_ATTEMPT",
+                     "actual persisted bytes changed or illegal new spawn")
         else:
             _assert_quarantined(again)
             _require(bool(_state_contains(

@@ -107,9 +107,13 @@ WITNESS_SELFTESTS = (
     "test_witness_selftest_prepared_visible_at_dummy_popen",
     "test_witness_selftest_only_retired_record_unlinked",
     "test_witness_selftest_lifecycle_callback_reports_injected_crash",
+    "test_witness_selftest_rejects_broken_durable_order[missing_rename]",
+    "test_witness_selftest_rejects_broken_durable_order[directory_fsync_before_rename]",
+    "test_witness_selftest_rejects_broken_durable_order[different_attempt_file_fsync]",
+    "test_host_guard_selftest_blocks_spawn_and_host_signal",
 )
 EXPECTED = set(RED) | set(GREEN_GUARDS) | set(WITNESS_SELFTESTS)
-assert len(RED) == 51 and len(GREEN_GUARDS) == 4, (
+assert len(RED) == 51 and len(GREEN_GUARDS) == 4 and len(WITNESS_SELFTESTS) == 9, (
     "R1_NODE_LEDGER_CHANGED_WITHOUT_EXPLICIT_REVIEW")
 
 
@@ -186,7 +190,7 @@ def main() -> int:
         if result.returncode != 1:
             bad.append("Expected pytest assertion exit=1, got " +
                        str(result.returncode))
-        if red_count != 51 or guard_count != 4 or witness_green != 5:
+        if red_count != 51 or guard_count != 4 or witness_green != 9:
             bad.append("Observed RED/GREEN/witness counts wrong: " +
                        repr((red_count, guard_count, witness_green)))
         if bad:

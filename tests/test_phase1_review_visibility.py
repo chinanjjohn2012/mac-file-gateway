@@ -53,11 +53,12 @@ def replace(client, transport, **args):
 @pytest.mark.parametrize('dry_run', [True, False])
 @pytest.mark.parametrize('newline', ['\n', '\r\n'])
 @pytest.mark.parametrize('bom', ['', '\ufeff'])
-@pytest.mark.parametrize('kind', ['credential', 'protected_path'])
 @pytest.mark.parametrize('secret', ['alpha', 'beta'])
-def test_visible_newline_removal_cannot_expose_hidden_source(surface, transport, dry_run, newline, bom, kind, secret):
+def test_visible_newline_removal_cannot_expose_hidden_source(surface, transport, dry_run, newline, bom, secret):
+    # The hidden line must contain actual credential evidence. Ordinary
+    # pathname strings are intentionally tested as V1 visible content.
     client, paths, service = surface
-    hidden = f'password="{secret}"' if kind == 'credential' else str(paths['b'] / f'{secret}.py')
+    hidden = f'password="{secret}"'
     source = (bom + 'x' + newline + hidden + newline).encode('utf-8')
     target = paths['a'] / 'sample.py'
     target.write_bytes(source)

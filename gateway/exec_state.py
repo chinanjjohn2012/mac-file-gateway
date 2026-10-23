@@ -38,6 +38,9 @@ _RECORD_MAX = 4096
 _RECORD_COUNT_MAX = 4096
 _PAYLOAD_MAX = 16 * 1024 * 1024
 _LOCK_NAME = "owner.lock"
+# created_at is diagnostic-only, never process identity or recovery authority.
+# Cap before any integer-to-float conversion (year 9999, UTC).
+_MAX_DIAGNOSTIC_TIMESTAMP = 253402300799
 
 
 def _strict_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -72,8 +75,18 @@ def _strict_record(data: bytes, filename: str) -> dict[str, Any]:
     for field in ("workspace_dev", "workspace_ino"):
         if type(item[field]) is not int or item[field] < 0:
             raise ValueError("Invalid pinned Workspace identity.")
-    if (type(item["created_at"]) not in (int, float) or
-            not math.isfinite(item["created_at"]) or item["created_at"] < 0):
+    timestamp = item["created_at"]
+    # math.isfinite(1000_digit_int) raises OverflowError while JSON and the
+    # 4096-byte record bound can both still accept that integer.  Check int
+    # bounds with exact integer arithmetic BEFORE any float conversion.
+    if type(timestamp) is int:
+        timestamp_valid = 0 <= timestamp <= _MAX_DIAGNOSTIC_TIMESTAMP
+    elif type(timestamp) is float:
+        timestamp_valid = (math.isfinite(timestamp) and
+                           0 <= timestamp <= _MAX_DIAGNOSTIC_TIMESTAMP)
+    else:
+        timestamp_valid = False
+    if not timestamp_valid:
         raise ValueError("Invalid attempt timestamp.")
     if type(item["phase"]) is not str or item["phase"] not in _PHASES:
         raise ValueError("Invalid attempt phase.")
@@ -119,6 +132,9 @@ class ExecStateStore:
         self._payload_bytes = 0
         self._state = "unavailable"
         self._reason: str | None = "state_io_unavailable"
+        # Cleanup is based on completion, not on a mutable policy state:
+        # _boot_scan starts after state="healthy" and may fail unexpectedly.
+        initialized = False
         try:
             raw = os.fspath(state_dir)
             if (type(raw) is not str or not raw.startswith("/") or
@@ -159,12 +175,18 @@ class ExecStateStore:
             os.fsync(self._fd)  # persist the fixed owner-lock object
             self._state, self._reason = "healthy", None
             self._boot_scan()
-        except (OSError, ValueError, TypeError) as exc:
+            # Valid boot (including conservatively quarantined input)
+            # owns its FD-pinned state and lock until close().
+            initialized = True
+        except (OSError, ValueError, TypeError, OverflowError):
             # Never silently create an in-memory fallback or open admission.
             if self._state != "quarantined":
                 self._state, self._reason = "unavailable", "state_io_unavailable"
         finally:
-            if self._state == "unavailable":
+            # Also close on unexpected exceptions (e.g. RuntimeError from an
+            # internal scanner bug), even if state had become "healthy".
+            # Valid corrupt-record quarantine retains exclusive ownership.
+            if not initialized or self._state == "unavailable":
                 self._release_fds()
 
     @property
@@ -248,7 +270,10 @@ class ExecStateStore:
                 if value["phase"] in _PHASES:
                     self._state, self._reason = "quarantined", "cleanup_unknown"
                     break
-        except (OSError, ValueError, TypeError, UnicodeError):
+        except (OSError, ValueError, TypeError, UnicodeError,
+                OverflowError, RecursionError):
+            # Treat all bounded-record parsing anomalies as untrusted data,
+            # not as constructor errors. Never delete the forensic bytes.
             self._state, self._reason = "quarantined", "corrupt_record"
 
     def _unavailable(self) -> None:

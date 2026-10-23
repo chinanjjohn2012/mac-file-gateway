@@ -22,6 +22,28 @@ MAX_AST_DEPTH = 512
 MAX_LITERAL_CHARS = 1_048_576
 MAX_SCAN_SECONDS = 3.0
 
+_PHYSICAL_NEWLINE = re.compile(r"\r\n|\r|\n")
+
+
+def physical_lines(text: str, *, keepends: bool = False) -> list[str]:
+    """Source line model shared by Python AST, tokens and Gateway visibility.
+
+    Python newlines are CRLF, CR or LF. Unicode NEL/LS/PS, vertical tab
+    and form feed do NOT advance ast.lineno; str.splitlines() incorrectly
+    counts them as extra lines. Preserve original bytes/characters.
+    """
+    if not text:
+        return []
+    result: list[str] = []
+    begin = 0
+    for match in _PHYSICAL_NEWLINE.finditer(text):
+        result.append(text[begin:match.end()] if keepends else text[begin:match.start()])
+        begin = match.end()
+    if begin < len(text):
+        result.append(text[begin:])
+    return result
+
+
 _CREDENTIAL_FIELDS = frozenset({
     "api_key", "access_key", "access_key_id", "secret_key", "client_secret",
     "password", "passwd", "token", "access_token", "refresh_token",
@@ -204,7 +226,7 @@ def _count_ast_nodes(tree: ast.Module, deadline: float) -> None:
 
 def _unavailable(text: str) -> tuple[list[bool], tuple[tuple[int, str], ...]]:
     # One explicit file-level reason; flags redact all physical source lines.
-    return [True] * max(1, len(text.splitlines())), ((1, "scan_unavailable"),)
+    return [True] * max(1, len(physical_lines(text))), ((1, "scan_unavailable"),)
 
 
 def classify_python(
@@ -224,21 +246,26 @@ def classify_python(
         return _unavailable("")
     if len(raw) > MAX_SOURCE_BYTES:
         return _unavailable(text)
-    lines = text.splitlines()
+    lines = physical_lines(text)
     if len(lines) > MAX_PHYSICAL_LINES:
         return _unavailable(text)
     deadline = time.monotonic() + MAX_SCAN_SECONDS
     hard: set[int] = set()
     heuristic: set[int] = set()
 
-    def mark(node: ast.AST) -> None:
-        first = max(1, getattr(node, "lineno", 1))
-        last = min(len(lines), getattr(node, "end_lineno", first))
-        hard.update(range(first, last + 1))
+    def mark(node: ast.AST, offset: int = 0) -> None:
+        first = getattr(node, "lineno", None)
+        last = getattr(node, "end_lineno", first)
+        if (type(first) is not int or type(last) is not int
+                or not 1 <= first <= last
+                or first + offset > len(lines) or last + offset > len(lines)):
+            raise _ScanUnavailable
+        hard.update(range(first + offset, last + offset + 1))
 
     def line_hard(line: int) -> None:
-        if 1 <= line <= len(lines):
-            hard.add(line)
+        if not 1 <= line <= len(lines):
+            raise _ScanUnavailable
+        hard.add(line)
 
     # Independent patterns are not dependent on Python variable names or
     # syntactic validity. Keep the original private-key multi-line behavior.

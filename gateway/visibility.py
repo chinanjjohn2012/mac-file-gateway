@@ -22,26 +22,17 @@ def source_lines(text: str, canonical_path: str = '', *, keepends: bool = False)
 
 class SensitiveContentPolicy:
     def __init__(self, protected_paths: tuple[str, ...] = ()):
-        # Retain only real absolute paths with stable character boundaries.
-        paths = set()
-        for raw in protected_paths:
-            if type(raw) is not str or not raw.startswith('/') or raw == '/':
-                continue
-            item = raw.rstrip('/')
-            if item:
-                paths.add(item)
-        # Match a protected directory/path as a complete segment, not a prefix
-        # of some unrelated filename (e.g. /repo vs /repository).
-        self._paths = tuple(sorted(paths, key=len, reverse=True))
-        self._expr = (re.compile(r'(?<![\w./-])(?:' + '|'.join(re.escape(x) for x in self._paths)
-                                 + r')(?=$|[/\\\s"\x27:;,)\]}])') if self._paths else None)
+        # Kept for backwards-compatible callers only. A filesystem path in
+        # source text is not a credential, even when its target is private.
+        # Filesystem access restrictions are enforced by Gateway separately.
+        del protected_paths
 
 
     def classify(self, canonical_path: str, raw: bytes) -> tuple[list[bool], tuple[tuple[int, str], ...]]:
         """Path-aware, full-document classification with conservative fallback."""
         if canonical_path.endswith((".py", ".pyi")):
             from .python_values import classify_python
-            return classify_python(raw, self._expr)
+            return classify_python(raw)
         from .core import CREDENTIAL_ASSIGNMENT, CREDENTIAL_URI, TOKEN_VALUE, PRIVATE_KEY_BEGIN
         text = raw.decode("utf-8-sig")
         flags = self.sensitive_flags(text)
@@ -77,7 +68,6 @@ class SensitiveContentPolicy:
                 or CREDENTIAL_URI.search(line) is not None
                 or PRIVATE_KEY_BEGIN.search(line) is not None
                 or literal
-                or (self._expr is not None and self._expr.search(line) is not None)
             )
             findings.append((i, "hard" if hard else "heuristic"))
         return flags, tuple(findings)
@@ -87,11 +77,7 @@ class SensitiveContentPolicy:
 
     def sensitive_flags(self, text: str) -> list[bool]:
         from .core import _sensitive_line_flags
-        flags = _sensitive_line_flags(text)
-        if self._expr is not None:
-            return [flag or bool(self._expr.search(line))
-                    for flag, line in zip(flags, text.splitlines())]
-        return flags
+        return _sensitive_line_flags(text)
 
     def redact_lines(self, text: str, canonical_path: str = '') -> tuple[list[str], int]:
         flags = self.full_flags(canonical_path, text) if canonical_path else self.sensitive_flags(text)

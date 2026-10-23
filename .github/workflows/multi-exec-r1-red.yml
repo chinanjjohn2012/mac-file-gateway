@@ -1,0 +1,73 @@
+name: Multi-Workspace Exec R1 deterministic RED contracts (product only)
+
+on:
+  pull_request:
+    branches:
+      - design/multi-exec-recovery-d0-20261023
+    paths:
+      - ".github/workflows/multi-exec-r1-red.yml"
+      - "tests/r1_contracts/**"
+      - "tools/verify_multi_exec_recovery_r1_red.py"
+      - "docs/MULTI_WORKSPACE_EXEC_R1_RED_EVIDENCE.md"
+      - "MANIFEST.sha256"
+
+permissions:
+  contents: read
+
+jobs:
+  r1-contract-red:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'test/multi-exec-recovery-r1-red-20261023'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      GATEWAY_NATIVE_C_ALLOWED: "false"
+      C3B03_S3S6_FIRST_C_LOAD_AUTHORIZED: "false"
+      C3B03_S3S6_GROUP_SIGNAL_AUTHORIZED: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Pin PR Head, Tree and full Git tracked Manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import subprocess
+          rows = Path("MANIFEST.sha256").read_text(encoding="ascii").splitlines()
+          fields = [line.split("  ", 1) for line in rows]
+          assert all(len(p) == 2 for p in fields), "Invalid Manifest row"
+          names = [name for _digest, name in fields]
+          assert names == sorted(set(names)), "Manifest must be sorted and unique"
+          tracked = {b.decode("utf-8") for b in
+                     subprocess.check_output(["git", "ls-files", "-z"]).split(b"\0") if b}
+          tracked.remove("MANIFEST.sha256")
+          assert set(names) == {"./" + name for name in tracked}, "Manifest is not exhaustive"
+          for digest, name in fields:
+              assert hashlib.sha256(Path(name).read_bytes()).hexdigest() == digest, name
+          print("R1_RED_HEAD=" + subprocess.check_output(
+              ["git", "rev-parse", "HEAD"], text=True).strip())
+          print("R1_RED_TREE=" + subprocess.check_output(
+              ["git", "rev-parse", "HEAD^{tree}"], text=True).strip())
+          print("R1_RED_MANIFEST=PASS")
+          print("R1_NO_NATIVE_C_NO_TUNNEL_NO_SIGNALS=TRUE")
+          PY
+      - name: Install existing product test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Syntax check test-only R1 assets
+        run: |
+          python -m py_compile tests/r1_contracts/contract_multi_exec_recovery_r1.py
+          python -m py_compile tools/verify_multi_exec_recovery_r1_red.py
+      - name: Existing product suite must remain GREEN
+        run: python -m pytest -q
+      - name: Verify explicit contract suite intentionally RED (no collection/import errors)
+        run: python tools/verify_multi_exec_recovery_r1_red.py

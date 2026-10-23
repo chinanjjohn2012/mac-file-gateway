@@ -45,8 +45,10 @@ GREEN = (
     "test_t02_guard_file_read_independent_of_exec_quarantine",
     "test_t02_guard_external_configuration_cannot_inject_private_grant",
     "test_t02_guard_host_interceptor_rejects_process_and_group_signal",
+    "test_t02_guard_witness_rejects_write_then_delete_even_if_denial[store.prepare]",
+    "test_t02_guard_witness_rejects_write_then_delete_even_if_denial[raw.replace]",
 )
-assert len(RED) == 14 and len(GREEN) == 4
+assert len(RED) == 14 and len(GREEN) == 6
 EXPECTED = set(RED) | set(GREEN)
 
 
@@ -106,7 +108,7 @@ def main() -> int:
         if result.returncode != 1:
             problems.append("expected pytest assertion exit=1; got " +
                             str(result.returncode))
-        if red != 14 or green != 4:
+        if red != 14 or green != 6:
             problems.append("incorrect RED/GREEN counts: " +
                             repr((red, green)))
         if problems:
@@ -114,7 +116,7 @@ def main() -> int:
                 print("T02_ADMISSION_RED_FAIL: " + x, flush=True)
             return 1
         print("T02_ADMISSION_EXPECTED_RED=14")
-        print("T02_ADMISSION_GUARDS_GREEN=4")
+        print("T02_ADMISSION_GUARDS_GREEN=6")
         print("T02_ADMISSION_STAGE=CONTRACT_RED_NOT_IMPLEMENTATION")
         print("T02_NO_HOST_POPEN_OR_SIGNAL=TRUE")
         return 0

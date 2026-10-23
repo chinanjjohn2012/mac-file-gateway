@@ -19,7 +19,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from gateway.core import GatewayError
-from gateway.exec_state import ExecStateStore
+from gateway.exec_state import ExecStateStore, _encoded
 from gateway.http_multi import create_multi_app
 from gateway.private_fs import PrivateFileError
 from gateway.workspaces import ActiveRuntimeInventory, WorkspaceService
@@ -218,6 +218,114 @@ def _disk_snapshot(scene):
             if p.is_file() and not p.is_symlink()}
 
 
+
+class _AttemptMutationWitness:
+    """Test-owned no-brief-PREPARED witness, installed AFTER service boot.
+
+    Observe API admission as well as physical write-open, atomic replacement,
+    rename and unlink of attempt/temp entries under the *pinned* state inode.
+    Keep observations even if a deliberately incorrect Worker later deletes
+    its record, swallows the error, and returns a normal proof denial.
+    """
+
+    def __init__(self, state_root: Path):
+        self._root = os.path.abspath(os.fspath(state_root))
+        self.events: list[str] = []
+
+    @staticmethod
+    def _attempt_name(name):
+        if not isinstance(name, (str, bytes, os.PathLike)):
+            return False
+        basename = os.path.basename(os.fsdecode(os.fspath(name)))
+        return (basename.startswith("r-") and basename.endswith(".json")
+                or basename.startswith("temp-") and basename.endswith(".tmp"))
+
+    def _in_state_root(self, path, fd):
+        try:
+            name = os.fsdecode(os.fspath(path))
+            if os.path.isabs(name):
+                return os.path.dirname(os.path.abspath(name)) == self._root
+            if fd is None:
+                return os.path.dirname(os.path.abspath(name)) == self._root
+            root = os.stat(self._root, follow_symlinks=False)
+            pinned = os.fstat(fd)
+            return ((root.st_dev, root.st_ino) ==
+                    (pinned.st_dev, pinned.st_ino))
+        except (OSError, TypeError, ValueError):
+            return False
+
+    def _matches(self, path, fd=None):
+        return (self._attempt_name(path) and
+                self._in_state_root(path, fd))
+
+    def install(self, patch):
+        real_prepare = ExecStateStore.prepare
+        real_atomic = ExecStateStore._atomic_write
+        real_open = os.open
+        real_replace = os.replace
+        real_rename = os.rename
+        real_unlink = os.unlink
+        witness = self
+
+        def prepare(store, *args, **kwargs):
+            # Capture an ATTEMPT even when a store refuses its write.
+            witness.events.append("prepare")
+            return real_prepare(store, *args, **kwargs)
+
+        def atomic(store, path, data):
+            if witness._matches(path, store._fd):
+                witness.events.append("atomic_write")
+            return real_atomic(store, path, data)
+
+        def open_spy(path, flags, *args, **kwargs):
+            if (flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC)
+                    and witness._matches(path, kwargs.get("dir_fd"))):
+                witness.events.append("open_write")
+            return real_open(path, flags, *args, **kwargs)
+
+        def replace_spy(src, dst, *args, **kwargs):
+            if witness._matches(dst, kwargs.get("dst_dir_fd")):
+                witness.events.append("replace")
+            return real_replace(src, dst, *args, **kwargs)
+
+        def rename_spy(src, dst, *args, **kwargs):
+            if witness._matches(dst, kwargs.get("dst_dir_fd")):
+                witness.events.append("rename")
+            return real_rename(src, dst, *args, **kwargs)
+
+        def unlink_spy(path, *args, **kwargs):
+            if witness._matches(path, kwargs.get("dir_fd")):
+                witness.events.append("unlink")
+            return real_unlink(path, *args, **kwargs)
+
+        patch.setattr(ExecStateStore, "prepare", prepare)
+        patch.setattr(ExecStateStore, "_atomic_write", atomic)
+        patch.setattr(os, "open", open_spy)
+        patch.setattr(os, "replace", replace_spy)
+        patch.setattr(os, "rename", rename_spy)
+        patch.setattr(os, "unlink", unlink_spy)
+
+
+def _no_transient_attempt(witness, before, after):
+    # The final disk snapshot alone is NOT admissible cleanup proof.
+    return not witness.events and before == after
+
+
+def _actual_prepared_bytes(scene, attempt):
+    st = scene.a.stat()
+    return _encoded({
+        "schema_version": 1,
+        "attempt_id": attempt,
+        "workspace": "a",
+        "workspace_dev": st.st_dev,
+        "workspace_ino": st.st_ino,
+        "phase": "PREPARED",
+        "created_at": 1,
+        "cleanup_scope": "none",
+        "full_descendant_tree_clean": "not_proven",
+    })
+
+
 def test_t02_boot_pins_state_and_owns_exclusive_lock(scene):
     svc = scene.service()
     _require(scene.state.is_dir() and (scene.state / "owner.lock").is_file(),
@@ -235,28 +343,40 @@ def test_t02_normal_apply_requires_proof_before_worker_or_intent(
         scene, monkeypatch):
     svc = scene.service()
     calls = _fake_runner(scene, svc, monkeypatch)
-    before = _disk_snapshot(scene)
-    code, _ = _direct_result(svc)
-    after = _disk_snapshot(scene)
+    witness = _AttemptMutationWitness(scene.state)
+    with monkeypatch.context() as patch:
+        witness.install(patch)  # install only after WorkspaceService initialized
+        before = _disk_snapshot(scene)
+        code, _ = _direct_result(svc)
+        after = _disk_snapshot(scene)
     _require(code == "exec_cleanup_proof_required"
-             and not calls and before == after,
+             and not calls and _no_transient_attempt(witness, before, after),
              "NORMAL_PROOF_GATE",
              {"code": code, "runner_calls": len(calls),
-              "physical_state_changed": before != after})
+              "physical_state_changed": before != after,
+              "attempt_mutations": witness.events})
 
 
 def test_t02_rest_apply_is_structured_503_and_zero_runner_calls(
         scene, monkeypatch):
     svc = scene.service()
     calls = _fake_runner(scene, svc, monkeypatch)
-    with TestClient(create_multi_app(svc, enable_mcp=False),
-                    base_url="http://127.0.0.1:8765") as client:
-        response = client.post("/run", json=_ARGUMENTS)
+    witness = _AttemptMutationWitness(scene.state)
+    with monkeypatch.context() as patch:
+        witness.install(patch)
+        before = _disk_snapshot(scene)
+        with TestClient(create_multi_app(svc, enable_mcp=False),
+                        base_url="http://127.0.0.1:8765") as client:
+            response = client.post("/run", json=_ARGUMENTS)
+        after = _disk_snapshot(scene)
     _require(response.status_code == 503 and
              response.json() == {"error": "exec_cleanup_proof_required"} and
-             not calls, "REST_PROOF_GATE",
+             not calls and _no_transient_attempt(witness, before, after),
+             "REST_PROOF_GATE",
              {"http": response.status_code, "body": response.text[:150],
-              "runner_calls": len(calls)})
+              "runner_calls": len(calls),
+              "physical_state_changed": before != after,
+              "attempt_mutations": witness.events})
 
 
 def test_t02_mcp_tools_call_structured_proof_error_before_runner(
@@ -264,28 +384,36 @@ def test_t02_mcp_tools_call_structured_proof_error_before_runner(
     pytest.importorskip("mcp")
     svc = scene.service()
     calls = _fake_runner(scene, svc, monkeypatch)
-    with TestClient(create_multi_app(svc),
-                    base_url="http://127.0.0.1:8765") as client:
-        init = client.post("/mcp", headers=_HEADERS, json={
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {"protocolVersion": "2025-11-25",
-                       "capabilities": {},
-                       "clientInfo": {"name": "t02-admission", "version": "1"}}})
-        assert init.status_code == 200 and "result" in init.json()
-        client.post("/mcp", headers=_HEADERS, json={
-            "jsonrpc": "2.0", "method": "notifications/initialized"})
-        response = client.post("/mcp", headers=_HEADERS, json={
-            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": {"name": "run_command", "arguments": _ARGUMENTS}})
+    witness = _AttemptMutationWitness(scene.state)
+    with monkeypatch.context() as patch:
+        witness.install(patch)
+        before = _disk_snapshot(scene)
+        with TestClient(create_multi_app(svc),
+                        base_url="http://127.0.0.1:8765") as client:
+            init = client.post("/mcp", headers=_HEADERS, json={
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25",
+                           "capabilities": {},
+                           "clientInfo": {"name": "t02-admission", "version": "1"}}})
+            assert init.status_code == 200 and "result" in init.json()
+            client.post("/mcp", headers=_HEADERS, json={
+                "jsonrpc": "2.0", "method": "notifications/initialized"})
+            response = client.post("/mcp", headers=_HEADERS, json={
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "run_command", "arguments": _ARGUMENTS}})
+        after = _disk_snapshot(scene)
     body = response.json() if response.status_code == 200 else {}
     result = body.get("result", {})
     structured = result.get("structuredContent") or {}
     _require(response.status_code == 200 and
              result.get("isError") is True and
              structured.get("error") == "exec_cleanup_proof_required" and
-             not calls, "MCP_PROOF_GATE",
+             not calls and _no_transient_attempt(witness, before, after),
+             "MCP_PROOF_GATE",
              {"http": response.status_code,
-              "result": repr(result)[:160], "runner_calls": len(calls)})
+              "result": repr(result)[:160], "runner_calls": len(calls),
+              "physical_state_changed": before != after,
+              "attempt_mutations": witness.events})
 
 
 def test_t02_normal_policy_reports_no_available_cleanup_qualification(scene):
@@ -454,6 +582,80 @@ def test_t02_guard_host_interceptor_rejects_process_and_group_signal(
             os.killpg(os.getpgrp(), signal.SIGTERM)
     assert local.violations == ["subprocess.Popen", "os.killpg"]
 
+
+
+
+@pytest.mark.parametrize("write_path", ["store.prepare", "raw.replace"])
+def test_t02_guard_witness_rejects_write_then_delete_even_if_denial(
+        scene, monkeypatch, write_path):
+    """Negative selftest: a fake bad Worker must NEVER fool admission.
+
+    A real PREPARED inode reaches file+directory fsync, is deleted+fsynced,
+    and an ordinary proof error is returned with zero runner calls.
+    Final on-disk bytes equal the pre-call snapshot, but our test-owned
+    witness must still reject both public-store and direct syscall paths.
+    No host child or signal is started.
+    """
+    store = ExecStateStore(
+        scene.state, workspace_roots=(str(scene.a), str(scene.b)))
+    try:
+        assert store.durability_state == "healthy"
+        witness = _AttemptMutationWitness(scene.state)
+        with monkeypatch.context() as patch:
+            witness.install(patch)
+            before = _disk_snapshot(scene)
+
+            # This function emulates deliberately DEFECTIVE future Worker
+            # code; the mutation itself is not an authorized product action.
+            def invalid_worker():
+                attempt = "c1" * 16
+                st = scene.a.stat()
+                if write_path == "store.prepare":
+                    attempt = store.prepare("a", (st.st_dev, st.st_ino))
+                else:
+                    # Bypass ExecStateStore.prepare AND _atomic_write.
+                    # Witness must independently see the physical create,
+                    # replace and later deletion under the pinned root.
+                    file = "temp-" + attempt + ".tmp"
+                    fd = os.open(file, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                                 os.O_NOFOLLOW, 0o600, dir_fd=store._fd)
+                    try:
+                        payload = _actual_prepared_bytes(scene, attempt)
+                        assert os.write(fd, payload) == len(payload)
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                    os.replace(file, "r-" + attempt + ".json",
+                               src_dir_fd=store._fd, dst_dir_fd=store._fd)
+                    os.fsync(store._fd)
+
+                physical = scene.state / ("r-" + attempt + ".json")
+                assert json.loads(physical.read_bytes())["phase"] == "PREPARED"
+                os.unlink("r-" + attempt + ".json", dir_fd=store._fd)
+                os.fsync(store._fd)
+                raise GatewayError(
+                    "exec_cleanup_proof_required",
+                    "No qualifying full-tree cleanup evidence.")
+
+            with pytest.raises(GatewayError) as denied:
+                invalid_worker()
+            after = _disk_snapshot(scene)
+        code = denied.value.code
+        runner_calls = []
+        # Old test contract is shown to be *insufficient* by construction.
+        assert code == "exec_cleanup_proof_required"
+        assert not runner_calls and before == after
+        # NEW oracle rejects this write-then-delete even after fsync/unlink.
+        assert not _no_transient_attempt(witness, before, after)
+        assert {"replace", "unlink"} <= set(witness.events)
+        if write_path == "store.prepare":
+            assert {"prepare", "atomic_write"} <= set(witness.events)
+        else:
+            assert "prepare" not in witness.events
+            assert "atomic_write" not in witness.events
+            assert "open_write" in witness.events
+    finally:
+        store.close()
 
 
 def test_t02_guard_external_configuration_cannot_inject_private_grant(scene):

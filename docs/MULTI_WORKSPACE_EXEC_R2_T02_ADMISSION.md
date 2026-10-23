@@ -21,7 +21,10 @@ and Review #5624517768. D0 authority: PR #58 independent Review
    non-preview apply must fail as exec_cleanup_proof_required *before*
    any PREPARED, real runner, Popen or PID/group signal. REST must
    return HTTP 503; MCP tools/call must use isError=true with a stable
-   structured error code. No fake result-dict authority.
+   structured error code. No fake result-dict authority. **Transient
+   PREPARED followed by unlink/fync is also forbidden:** returned error,
+   zero runner calls, and unchanged final file bytes are insufficient
+   unless the actual attempt-creation/mutation history is empty.
 3. Any physical stale PREPARED, RUNNING or UNKNOWN, corrupt record or
    competing owner must fail closed at construction. Do not replay
    a command, signal a stale PID, delete forensic evidence or infer
@@ -49,9 +52,10 @@ and Review #5624517768. D0 authority: PR #58 independent Review
   MANIFEST.sha256, runs the existing product suite unchanged, then
   calls tools/verify_multi_exec_r2_t02_admission_red.py. The verifier
   pins **14 fully parameterized RED NodeIDs** with expected exact
-  T02_RED markers plus **4 GREEN baseline guards**. Collection/import
-  errors, skipped tests, wrong markers, replaced parameter IDs, or
-  unexpected current GREEN fail the workflow.
+  T02_RED markers plus **6 GREEN guards**, including two negative
+  witness selftests. Collection/import errors, skipped tests, wrong
+  markers, replaced parameter IDs, or unexpected current GREEN fail
+  the workflow.
 - Workflow SUCCESS proves **expected missing behavior only**.
   It does not mean integrated admission works, stored UNKNOWN is handled
   by the Worker, 28 R1 private-fault cases have run, or process cleanup
@@ -82,3 +86,37 @@ No production Exec enablement, private Tunnel, real local Gateway
 restart, C3 Native C, actual unmanaged group-signal experiments,
 tag, deployment or automatic quarantine release. This PR modifies
 test/CI/evidence/Manifest only.
+
+## P2-01 test-oracle repair (Review #5625582650)
+
+The previous oracle compared only final on-disk snapshots, denial code and
+fake runner call count, so a broken Worker could fsync PREPARED, unlink it,
+fsync again, and still satisfy an apparent GREEN. The repaired contract
+attaches a **test-side observation scope after WorkspaceService startup**
+to the ordinary direct apply, REST 503 and SDK MCP tools/call paths.
+Within that scope it records ExecStateStore.prepare attempts and
+_atomic_write calls, plus OS write-opens,
+atomic replace/rename and unlink of r-*.json and temp-*.tmp entries
+under the pinned exec-state dev/ino. Owner-lock initialization is
+deliberately outside the scope; generic request/SDK file IO is not
+treated as an Exec attempt. Each denial requires:
+
+- correct proof-denial code, zero fake runner calls;
+- unchanged before/after physical state **and zero attempt-mutation events**.
+
+The two additional GREEN *negative witness selftests* use disposable
+real on-disk PREPARED bytes and real fsync operations without any child.
+One uses ExecStateStore.prepare; one bypasses that API with raw OS
+write/open/replace. Both unlink+directory-fsync their records and return
+a simulated proof denial. They explicitly demonstrate the old end-state
+predicate would have passed (byte-identical before/after) while the
+new event-history oracle rejects the mutation. Exact parameter IDs are
+checked in the RED verifier. The Python process/signal interception
+continues to cover the entire test lifecycle.
+
+This witness is a test contract, not a kernel audit, and does not
+claim monitoring against malicious same-user monkeypatch bypasses.
+No product runtime, D0, R1, Worker or Gateway instance was changed
+in this P2-01 repair. Historical P3 items (File read under genuine
+quarantine, sanitized status/error precedence) remain outside this
+targeted fix and are not silently closed.

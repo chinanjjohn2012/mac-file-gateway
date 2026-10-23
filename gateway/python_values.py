@@ -468,12 +468,19 @@ def classify_python(
                         raise _ScanUnavailable
                     scan_ast(recovered, line_offset=start_line - 1)
                 else:
-                    # If an unparseable logical statement mixes an actual
-                    # named credential field with a string token, safe value
-                    # association is unknown. Do not silently downgrade to
-                    # none or make this bypassable by temporary Audit.
-                    if any(_field(match.group("name"))
-                           for match in _FIELD_CUE.finditer(fragment)):
+                    # Preserve the prior bounded heuristic for an obviously
+                    # incomplete quoted RHS. Ordinary name-only dynamic
+                    # references still classify as none.
+                    clue = _lexical_field_cue(fragment)
+                    if clue == "hard":
+                        line_hard(start_line)
+                    elif clue == "heuristic":
+                        heuristic.add(start_line)
+                    # If no lexical cue can safely relate a string token
+                    # to a named credential field, fail the whole scan rather
+                    # than silently accepting uninspected secret material.
+                    if clue == "none" and any(_field(match.group("name"))
+                                             for match in _FIELD_CUE.finditer(fragment)):
                         try:
                             has_string = any(
                                 token.type == tokenize.STRING for token in

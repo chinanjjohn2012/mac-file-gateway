@@ -45,6 +45,16 @@ class _TrustedLoopbackListener:
         self._error = None
         self.host = "127.0.0.1"
         self.port = 0
+
+    def start(self) -> None:
+        """Start only after wrapper owns this instance for failure cleanup.
+
+        The outer fixture must retain a reference BEFORE Uvicorn can become
+        active. A startup exception followed by failed join cannot orphan a
+        live listener while releasing the service's FD-pinned state root.
+        """
+        if self._socket is not None or self._thread is not None:
+            raise RuntimeError("Disposable Listener may only start once.")
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._socket = sock
@@ -79,6 +89,8 @@ class _TrustedLoopbackListener:
             self._wait_for_real_wire()
             self._active = True
         except BaseException:
+            # close() is bounded and retains pinned service resources when
+            # an actual listener thread has not been proven exited.
             self.close()
             raise
 
@@ -148,12 +160,18 @@ class _TrustedLoopbackListener:
             self._fixture.grant.revoke()
         if self._server is not None:
             self._server.should_exit = True
+        # Stop accepting NEW connections before waiting for existing
+        # requests and Uvicorn's ASGI lifespan to drain. In particular,
+        # a failed/timeout join cannot leave the bound socket accepting.
+        # Closing a listener does not terminate an already accepted request.
+        if self._socket is not None:
+            self._socket.close()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=7)
             if self._thread.is_alive():
+                # The wrapper MUST retain service, pinned Workspace root,
+                # ExecStateStore and owner lock for a later bounded retry.
                 raise RuntimeError("Disposable Uvicorn Listener did not shut down.")
-        if self._socket is not None:
-            self._socket.close()
 
 
 class _BoundDisposableAcceptance:
@@ -172,7 +190,11 @@ class _BoundDisposableAcceptance:
             self.fixture = create_private_disposable_acceptance()
             self.service = self.fixture.service
             self.grant = self.fixture.grant
+            # Retain partial listener ownership BEFORE any socket/thread
+            # startup so a failed constructor cannot drop the fixture
+            # while a live Uvicorn thread still references its resources.
             self.listener = _TrustedLoopbackListener(self.fixture, _key=_KEY)
+            self.listener.start()
             # The only attachment happens here, after a physical
             # loopback bind+listen and successful REST /health wire read.
             if getattr(self.fixture, "_trusted_bound_listener", None) is not None:
@@ -193,12 +215,14 @@ class _BoundDisposableAcceptance:
         return False
 
     def close(self) -> None:
-        try:
-            if self.listener is not None:
-                self.listener.close()
-        finally:
-            if self.fixture is not None:
-                self.fixture.close()
+        # NEVER put fixture.close() in a finally: a failed or timed-out
+        # join leaves an actual network thread alive with service/FD
+        # references. Preserve ownership and propagate the shutdown
+        # error; retry later, after Listener exit is independently proven.
+        if self.listener is not None:
+            self.listener.close()
+        if self.fixture is not None:
+            self.fixture.close()
 
 
 def create_private_bound_transport():

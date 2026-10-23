@@ -45,6 +45,49 @@ and close the listener before releasing the disposable service. It
 must be legal to call close twice, and forbidden to resume a revoked
 grant even if an endpoint/port appears again.
 
+## P2-01 — Listener shutdown failure retains FD ownership
+
+[Independent Review #5628369472](https://github.com/chinanjjohn2012/mac-file-gateway/pull/65#pullrequestreview-5628369472)
+found a B1-B0-only shutdown ordering defect on original fixed Head
+\`852067f295ae6c28dad173ef29969d7852737166\`. The earlier
+\`_BoundDisposableAcceptance.close()\` put \`fixture.close()\` in a
+\`finally\` after \`listener.close()\`: a bounded \`thread.join()\`
+timeout/exception still released the private ExecStateStore owner lock,
+state root and pinned Workspace FDs although Uvicorn could be running.
+
+**Required corrected order**:
+
+1. Invalidate the entire test grant immediately and permanently.
+2. Request Uvicorn shutdown and explicitly close the original listening
+   socket so that the fixture no longer accepts new connections, even
+   when later join/wait raises or times out.
+3. Observe the actual Uvicorn thread's termination using a bounded
+   \`join(timeout=7)\`. A timeout, join exception or still-alive thread
+   reports a shutdown failure, and **retains** the entire disposable
+   service, owner lock, Exec state-root FD and pinned Workspace roots;
+   there is no \`finally: fixture.close()\` escape hatch.
+4. Only after the real thread has stopped may \`fixture.close()\` free
+   the protected resources. Calling \`close()\` again after a transient
+   fault retries bounded termination before releasing ownership. No
+   unbounded join, silently swallowed error, or new real subprocess.
+5. On partial startup failure, the outer disposable wrapper must own
+   the Listener object **before** socket/thread startup begins; if
+   startup teardown fails, this same keep-service rule applies instead
+   of losing the only reference to a live listener.
+
+Fixed test-only RED Head
+\`0b9a2782d60c43b28252fb281a42daeeb8bdf5e8\` adds two
+physical negative cases: (a) \`thread.join\` raises while a real
+Listener exists, and (b) a real loopback HTTP \`/run\` preview blocks
+in the synchronous handler, leaving the actual Listener thread alive
+while a bounded synthetic join returns without draining it. Both
+must verify immediate grant revocation, closed listening FD,
+**Service not closing/closed**, still-valid owner-lock/state/workspace
+FDs, and complete bounded cleanup after the injected fault is removed.
+Tests must keep their original Git Blob byte-identical between RED and
+GREEN. This is an internal disposable fixture invariant; it is NOT
+production Worker lifecycle, descendant cleanup or native macOS R3.
+
 ## Concrete RED/then GREEN gates
 
 A default-collected test suite must run the actual socket listener and

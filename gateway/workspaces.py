@@ -1,7 +1,7 @@
-"""Phase-1 WorkspaceService: immutable authorized roots and file-only routing.
+"""WorkspaceService: pinned authorized roots and independently gated operations.
 
-No implicit workspace, no execution fallback, no cross-root move, and no
-HTTP/MCP parsing lives in this module. Adapters must call this single service.
+No implicit workspace or cross-root file move; controlled Exec and Git have
+separate synchronous Worker admission, never reflective file dispatch.
 """
 from __future__ import annotations
 
@@ -121,6 +121,8 @@ class WorkspaceService:
         self._git_state: GitStateStore | None = None
         self._git_executor: GitCLIExecutor | None = None
         self._git_adapter_exposed = False
+        self._exec_adapter_exposed = False
+        self._exec_active: set[str] = set()
         config_root: PinnedDirectory | None = None
         try:
             config_root = open_pinned_directory(config_dir, private_leaf=True)
@@ -149,7 +151,9 @@ class WorkspaceService:
                     backup_retention_days=item.backup_retention_days,
                     sensitive_content_audit_paths=item.sensitive_content_audit_paths,
                     sensitive_content_audit_until=item.sensitive_content_audit_until,
-                    allow_exec=False, exec_paths=(), exec_runners=(),
+                    allow_exec=settings.exec_enabled and item.exec_enabled,
+                    exec_paths=item.exec_paths if settings.exec_enabled and item.exec_enabled else (),
+                    exec_runners=item.exec_runners if settings.exec_enabled and item.exec_enabled else (),
                 )
                 if (os.fstat(gateway._root_fd).st_dev, os.fstat(gateway._root_fd).st_ino) != pin.ancestor_ids[-1]:
                     gateway.close()
@@ -247,6 +251,37 @@ class WorkspaceService:
             result = getattr(ctx.gateway, operation)(*args, **kwargs)
             return {**result, "workspace": name}
 
+    def require_exec(self, name: str) -> WorkspaceContext:
+        """Require both instance and Workspace execution grants."""
+        ctx = self.get(name)
+        if not self.settings.exec_enabled or not ctx.settings.exec_enabled:
+            raise GatewayError("exec_disabled", "Exec is not enabled for this Workspace.")
+        return ctx
+
+    def invoke_exec(self, name: str, cwd: str, argv: list[str],
+                    timeout_seconds: int = 60, dry_run: bool = True) -> dict[str, Any]:
+        """Own one synchronous attempt until CommandRunner returns.
+
+        No queued waiter, no automatic replay after a lost response, and no
+        release of pinned roots while a worker is active. This deliberately
+        reuses the Legacy allowlist/runner; it is not an OS sandbox or a
+        claim that every descendant has exited after a group timeout.
+        """
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if name in self._exec_active or len(self._exec_active) >= 4:
+                raise GatewayError("busy", "A controlled command already occupies this execution slot.")
+            self._exec_active.add(name)
+            self._active_operations += 1
+        try:
+            return {**ctx.gateway.run_command(cwd, argv, timeout_seconds, dry_run),
+                    "workspace": name}
+        finally:
+            with self._lifecycle:
+                self._exec_active.remove(name)
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
     def require_git(self, name: str, command: str) -> WorkspaceContext:
         """Independent authorization, always repeated in sync Worker."""
         ctx = self.get(name)
@@ -292,6 +327,13 @@ class WorkspaceService:
             )
 
     @property
+    def any_exec(self) -> bool:
+        with self._lifecycle:
+            return self.settings.exec_enabled and any(
+                ctx.settings.exec_enabled for ctx in self._workspaces.values()
+            )
+
+    @property
     def any_write(self) -> bool:
         with self._lifecycle:
             return any(ctx.settings.allow_write for ctx in self._workspaces.values())
@@ -300,7 +342,8 @@ class WorkspaceService:
         with self._lifecycle:
             return {"workspaces": [
                 {"id": ctx.name, "read": True, "write": ctx.settings.allow_write,
-                 "exec": False, "local_skills": False,
+                 "exec": bool(self.settings.exec_enabled and ctx.settings.exec_enabled),
+                  "local_skills": False,
                  "sensitive_content": ctx.gateway.sensitive_audit.status(),
                  "git": {"enabled": bool(self.settings.git_enabled
                                          and ctx.settings.git_allowed_commands),
@@ -312,8 +355,18 @@ class WorkspaceService:
         with self._lifecycle:
             return {"name": "Mac File Gateway", "version": "2.5.0", "mode": "multi",
                     "workspace_count": len(self._workspaces),
-                    "read_only": not self.any_write, "path_base": ".",
+                    "read_only": not (self.any_write or self.any_exec or self.any_git),
+                    "file_read_only": not self.any_write, "path_base": ".",
                     "workspaces": self.list_workspaces()["workspaces"],
+                    "exec_policy": {
+                        "enabled": self.settings.exec_enabled,
+                        "available": self.any_exec,
+                        "adapter_exposed": self._exec_adapter_exposed,
+                        "max_concurrent_per_workspace": 1,
+                        "max_concurrent_total": 4,
+                        "dry_run_default": True,
+                        "warning": "Exec runs project code with the Gateway OS user's privileges; path scopes are not an OS sandbox.",
+                    },
                     "git_policy": {
                         "enabled": self.settings.git_enabled,
                         "available": bool(self._git_executor is not None

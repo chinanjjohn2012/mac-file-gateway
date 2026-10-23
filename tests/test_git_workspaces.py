@@ -72,7 +72,8 @@ def test_git_pull_can_change_parent_repo_outside_granted_workspace(tmp_path):
         assert info["git_policy"]["adapter_exposed"] is False
         assert str(repo) not in json.dumps(info)
         assert str(config) not in json.dumps(info)
-        assert info["read_only"] is True
+        assert info["read_only"] is False  # Git pull may mutate parent repo despite File Write off.
+        assert info["file_read_only"] is True
         assert service.list_workspaces()["workspaces"][0]["git"]["allowed_commands"] == ["status"]
         preview = service.invoke_git("b", "pull", options={"remote": "origin", "branch": "main"})
         assert preview["dry_run"] is True and preview["execute_started"] is False

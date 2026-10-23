@@ -29,6 +29,8 @@ _POST_ROUTES: dict[str, tuple[str, set[str], set[str]]] = {
     '/git/run': ('run_git',
                  {'command', 'cwd', 'options', 'paths', 'timeout_seconds', 'dry_run'},
                  {'command'}),
+    '/run': ('run_command', {'cwd', 'argv', 'timeout_seconds', 'dry_run'},
+             {'cwd', 'argv'}),
     '/mkdir': ('create_directory', {'path', 'parents', 'exist_ok', 'dry_run'}, {'path'}),
     '/rmdir': ('delete_directory', {'path', 'dry_run'}, {'path'}),
     '/create': ('create_file', {'path', 'content', 'dry_run'}, {'path', 'content'}),
@@ -67,7 +69,9 @@ def create_multi_app(service: WorkspaceService, *, enable_mcp: bool = True,
                 if route == '/health':
                     value = {'status': 'ok', 'mode': 'multi',
                              'workspace_count': len(service.settings.workspaces),
-                             'read_only': not service.any_write, 'mcp_enabled': enable_mcp}
+                             'read_only': not (service.any_write or service.any_exec or service.any_git),
+                             'file_read_only': not service.any_write,
+                             'mcp_enabled': enable_mcp}
                 elif route == '/info':
                     value = service.info()
                 else:
@@ -97,12 +101,14 @@ def create_multi_app(service: WorkspaceService, *, enable_mcp: bool = True,
     async def write_endpoint(request: Request) -> JSONResponse:
         try:
             operation, fields, required = _POST_ROUTES[request.url.path]
-            if operation == 'run_git' and len(await request.body()) > MAX_GIT_BODY:
+            if operation in {'run_git', 'run_command'} and len(await request.body()) > MAX_GIT_BODY:
                 raise GatewayError('too_large', 'Git request body exceeds its fixed limit.')
             args = await _json_params(request, fields | {'workspace'}, required | {'workspace'})
             validate_tool_arguments(operation, args, multi=True)
             workspace = args.pop('workspace')
-            if operation == 'run_git':
+            if operation == 'run_command':
+                result = await run_in_threadpool(service.invoke_exec, workspace, **args)
+            elif operation == 'run_git':
                 # Each actual synchronous Git Worker repeats global/Workspace
                 # authorization and retains root FD until terminal cleanup.
                 command = args.pop('command')
@@ -120,7 +126,8 @@ def create_multi_app(service: WorkspaceService, *, enable_mcp: bool = True,
 
     routes = [Route(path, read_endpoint, methods=['GET']) for path in
               ('/health', '/info', '/workspaces', '/list', '/read', '/search')]
-    routes.extend(Route(path, write_endpoint, methods=['POST']) for path in _POST_ROUTES)
+    routes.extend(Route(path, write_endpoint, methods=['POST']) for path in _POST_ROUTES
+                  if path != '/run' or service.any_exec)
     if enable_mcp:
         from .mcp_multi import build_multi_mcp
         from .mcp_transport import build_streamable_http_app
@@ -133,6 +140,8 @@ def create_multi_app(service: WorkspaceService, *, enable_mcp: bool = True,
     built = Boundary(StrictPostAdmission(app), port=port, token=token, max_body=MAX_RAW_BODY)
     if service.any_git:
         service._git_adapter_exposed = True
+    if service.any_exec:
+        service._exec_adapter_exposed = True
     return built
 
 

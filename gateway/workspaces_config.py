@@ -1,4 +1,4 @@
-"""Strict Multi-Workspace JSON schema; Git is separately opt-in."""
+"""Strict Multi-Workspace JSON schema; Git and controlled Exec opt in separately."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -30,6 +30,9 @@ class WorkspaceSettings:
     git_allowed_commands: tuple[str, ...] = ()
     sensitive_content_audit_paths: tuple[str, ...] = ()
     sensitive_content_audit_until: str | None = None
+    exec_enabled: bool = False
+    exec_paths: tuple[str, ...] = ()
+    exec_runners: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,7 @@ class GatewaySettings:
     port: int
     workspaces: tuple[WorkspaceSettings, ...]
     git_enabled: bool = False
+    exec_enabled: bool = False
 
 
 def _keys(obj: Any, allowed: set[str], context: str) -> dict[str, Any]:
@@ -90,9 +94,11 @@ def parse_workspace_config(config: dict[str, Any]) -> GatewaySettings:
     obj = _keys(config, {"schema_version", "server", "workspaces"}, "top-level")
     if type(obj.get("schema_version")) is not int or obj["schema_version"] != 1:
         raise PrivateFileError("Unsupported workspace schema version.")
-    server = _keys(obj.get("server", {}), {"port", "transport", "git"}, "server")
+    server = _keys(obj.get("server", {}), {"port", "transport", "git", "exec"}, "server")
     git = _keys(server.get("git", {}), {"enabled"}, "server.git")
     git_enabled = _bool_field(git, "enabled", False)
+    server_exec = _keys(server.get("exec", {}), {"enabled"}, "server.exec")
+    exec_enabled = _bool_field(server_exec, "enabled", False)
     port = server.get("port", 8765)
     if type(port) is not int or not 1024 <= port <= 65535:
         raise PrivateFileError("Invalid Gateway port.")
@@ -145,10 +151,28 @@ def parse_workspace_config(config: dict[str, Any]) -> GatewaySettings:
                 raise PrivateFileError("Sensitive audit requires writable scope, paths and expiry.")
         elif audit_paths or audit_until is not None:
             raise PrivateFileError("Sensitive audit paths/expiry require mode=audit.")
-        for option in ("exec", "local_skills"):
-            access = _keys(item.get(option, {}), {"enabled"}, option)
-            if _bool_field(access, "enabled", False):
-                raise PrivateFileError("Phase 1 rejects unreviewed execution capabilities.")
+        exec_config = _keys(item.get("exec", {}), {"enabled", "paths", "runners"}, "workspace.exec")
+        workspace_exec = _bool_field(exec_config, "enabled", False)
+        exec_paths = _bounded_tuple(exec_config.get("paths", []), "exec.paths", count=32)
+        exec_runners = _bounded_tuple(exec_config.get("runners", []), "exec.runners", count=32)
+        if workspace_exec and not exec_enabled:
+            raise PrivateFileError("Workspace exec requires server.exec.enabled=true.")
+        if workspace_exec and not exec_paths:
+            raise PrivateFileError("Workspace exec requires an explicit nonempty path scope.")
+        if not workspace_exec and (exec_paths or exec_runners):
+            raise PrivateFileError("Exec paths/runners require workspace.exec.enabled=true.")
+        for value in exec_paths:
+            _relative(value, "exec.paths")
+        for value in exec_runners:
+            if value.count("=") != 1:
+                raise PrivateFileError("Exec runner must be PATH=direct or PATH=pipenv.")
+            path, runner = value.split("=", 1)
+            _relative(path, "exec.runners")
+            if runner not in {"direct", "pipenv"}:
+                raise PrivateFileError("Unsupported exec runner.")
+        skills = _keys(item.get("local_skills", {}), {"enabled"}, "local_skills")
+        if _bool_field(skills, "enabled", False):
+            raise PrivateFileError("Local Skills are not supported in Multi-Workspace.")
         git = _keys(item.get("git", {}), {"allowed_commands"}, "workspace.git")
         commands = _bounded_tuple(git.get("allowed_commands", []), "git.allowed_commands",
                                   count=len(GIT_V1_COMMANDS))
@@ -157,8 +181,10 @@ def parse_workspace_config(config: dict[str, Any]) -> GatewaySettings:
         if commands and not git_enabled:
             raise PrivateFileError("Git command grants require server.git.enabled=true.")
         result.append(WorkspaceSettings(name, root, excludes, hidden, allow_write,
-                                        write_paths, retention, commands, audit_paths, audit_until))
-    return GatewaySettings(port, tuple(result), git_enabled)
+                                        write_paths, retention, commands,
+                                        audit_paths, audit_until,
+                                        workspace_exec, exec_paths, exec_runners))
+    return GatewaySettings(port, tuple(result), git_enabled, exec_enabled)
 
 
 def read_workspace_config(path: str) -> GatewaySettings:

@@ -1,0 +1,76 @@
+name: Multi-Workspace Exec R2-T02-A normal admission RED (no host process)
+
+on:
+  pull_request:
+    branches:
+      - feature/multi-exec-recovery-r2-t01-20261023
+    paths:
+      - ".github/workflows/multi-exec-r2-t02-admission-red.yml"
+      - "tests/t02_contracts/**"
+      - "tools/verify_multi_exec_r2_t02_admission_red.py"
+      - "docs/MULTI_WORKSPACE_EXEC_R2_T02_ADMISSION.md"
+      - "MANIFEST.sha256"
+
+permissions:
+  contents: read
+
+jobs:
+  t02-a-expected-red:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'feature/multi-exec-recovery-r2-t02-admission-20261023'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      GATEWAY_NATIVE_C_ALLOWED: "false"
+      C3B03_S3S6_FIRST_C_LOAD_AUTHORIZED: "false"
+      C3B03_S3S6_GROUP_SIGNAL_AUTHORIZED: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Pin fixed Head and exhaustive tracked-file Manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import subprocess
+
+          rows = Path("MANIFEST.sha256").read_text(encoding="ascii").splitlines()
+          fields = [line.split("  ", 1) for line in rows]
+          assert all(len(p) == 2 and len(p[0]) == 64 for p in fields)
+          names = [name for digest, name in fields]
+          assert names == sorted(set(names)), "Manifest paths unsorted or repeated"
+          tracked = {
+              item.decode("utf-8")
+              for item in subprocess.check_output(["git", "ls-files", "-z"]).split(b"\0")
+              if item
+          }
+          tracked.remove("MANIFEST.sha256")
+          assert set(names) == {"./" + x for x in tracked}, "Manifest incomplete"
+          for digest, name in fields:
+              assert hashlib.sha256(Path(name).read_bytes()).hexdigest() == digest, name
+          print("R2_T02_RED_HEAD=" + subprocess.check_output(
+              ["git", "rev-parse", "HEAD"], text=True).strip())
+          print("R2_T02_RED_TREE=" + subprocess.check_output(
+              ["git", "rev-parse", "HEAD^{tree}"], text=True).strip())
+          print("R2_T02_RED_MANIFEST=PASS")
+          PY
+      - name: Install existing product test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Syntax-check new test-only R2-T02 assets
+        run: |
+          python -m py_compile tests/t02_contracts/contract_multi_exec_admission_t02.py
+          python -m py_compile tools/verify_multi_exec_r2_t02_admission_red.py
+      - name: Existing product regression must remain GREEN
+        run: python -m pytest -q
+      - name: Strict targeted admission tests must be expected RED
+        run: python tools/verify_multi_exec_r2_t02_admission_red.py

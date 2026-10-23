@@ -7,11 +7,13 @@ is attempted here. Worker proof-gate and terminal cleanup are future gates.
 """
 from __future__ import annotations
 
+import errno
 import importlib
 import json
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -64,8 +66,18 @@ def test_b1b0_real_listener_is_bound_to_loopback_and_serves_actual_gateway():
         assert env.host == "127.0.0.1"
         assert env.listener._socket.fileno() >= 0
         assert env.listener._socket.getsockname() == ("127.0.0.1", env.port)
-        assert env.listener._socket.getsockopt(
-            socket.SOL_SOCKET, socket.SO_ACCEPTCONN) == 1
+        try:
+            is_listening = env.listener._socket.getsockopt(
+                socket.SOL_SOCKET, socket.SO_ACCEPTCONN)
+        except OSError as exc:
+            # Darwin exposes this constant but does not support the
+            # corresponding getsockopt. The private identity probe
+            # still requires an actual TCP handshake on that platform.
+            assert sys.platform == "darwin"
+            assert exc.errno == errno.ENOPROTOOPT
+            assert env.listener._proves_live() is True
+        else:
+            assert is_listening == 1
         assert env.listener._thread.is_alive()
         assert env.listener._server.started is True
         status, health = _request(env.port, "/health")
@@ -356,6 +368,53 @@ def test_b1b0_transport_factory_does_not_spawn_or_signal_os_process(monkeypatch)
             assert status == 200 and health["status"] == "ok"
             assert _qualified(env)
     assert calls == []
+
+
+def test_b1b0_darwin_unavailable_so_acceptconn_probes_and_fails_closed(monkeypatch):
+    """Exercise the Darwin fallback on Linux CI and macOS alike."""
+    from gateway import _exec_test_transport as transport
+    with _new() as env:
+        pinned = env.listener._socket
+        real_getsockopt = socket.socket.getsockopt
+        real_connection = socket.create_connection
+
+        def unsupported(self, level, option, *args):
+            if (self is pinned and level == socket.SOL_SOCKET and
+                    option == socket.SO_ACCEPTCONN):
+                raise OSError(errno.ENOPROTOOPT, "Protocol not available")
+            return real_getsockopt(self, level, option, *args)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(transport, "_DARWIN", True)
+            patch.setattr(socket.socket, "getsockopt", unsupported)
+            assert _qualified(env) is True  # real loopback handshake
+
+            def no_listener(*args, **kwargs):
+                raise ConnectionRefusedError(errno.ECONNREFUSED, "No listener")
+
+            patch.setattr(transport.socket, "create_connection", no_listener)
+            assert _qualified(env) is False
+            patch.setattr(transport.socket, "create_connection", real_connection)
+            assert _qualified(env) is False  # cannot re-enable revoked grant
+
+
+def test_b1b0_unexpected_so_acceptconn_error_does_not_open_fallback(monkeypatch):
+    from gateway import _exec_test_transport as transport
+    with _new() as env:
+        pinned = env.listener._socket
+        original = socket.socket.getsockopt
+
+        def unexpected(self, level, option, *args):
+            if (self is pinned and level == socket.SOL_SOCKET and
+                    option == socket.SO_ACCEPTCONN):
+                raise OSError(errno.EINVAL, "Unexpected option failure")
+            return original(self, level, option, *args)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(transport, "_DARWIN", True)
+            patch.setattr(socket.socket, "getsockopt", unexpected)
+            assert _qualified(env) is False
+            assert _qualified(env) is False  # terminal denial
 
 
 def test_b1b0_normal_product_cli_and_service_have_no_transport_factory_import():

@@ -10,9 +10,11 @@ transport string or source-IP as substitute proof.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import socket
+import sys
 import stat
 import threading
 import time
@@ -24,6 +26,7 @@ import uvicorn
 from ._exec_test_grant import create_private_disposable_acceptance
 
 _KEY = object()
+_DARWIN = sys.platform == "darwin"
 
 
 class _TrustedLoopbackListener:
@@ -124,6 +127,27 @@ class _TrustedLoopbackListener:
             time.sleep(0.025)
         raise RuntimeError("Disposable Listener never became wire-ready.")
 
+    def _listening_socket_proven(self, sock: socket.socket) -> bool:
+        """Fail closed on all platforms; Darwin lacks SO_ACCEPTCONN getsockopt.
+
+        Linux checks the pinned listener FD directly. On Darwin, and ONLY
+        for the unsupported-option errno, require a bounded real loopback
+        TCP handshake to the previously bound port. The caller additionally
+        proves original FD identity, sockaddr, active owner, actual HTTP
+        readiness and live Uvicorn thread. No Host string alone is trusted.
+        """
+        try:
+            return sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN) == 1
+        except OSError as exc:
+            if not (_DARWIN and exc.errno == errno.ENOPROTOOPT):
+                return False
+            try:
+                with socket.create_connection(
+                        (self.host, self.port), timeout=0.35) as probe:
+                    return probe.getpeername() == (self.host, self.port)
+            except (OSError, ValueError):
+                return False
+
     def _proves_live(self) -> bool:
         """Witness the still-open *original socket* and real served app."""
         if (not self._active or not self._wire_ready or
@@ -142,7 +166,7 @@ class _TrustedLoopbackListener:
                     (st.st_dev, st.st_ino) != self._socket_identity):
                 return False
             if (sock.getsockname() != ("127.0.0.1", self.port) or
-                    sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN) != 1):
+                    not self._listening_socket_proven(sock)):
                 return False
             if not self._thread.is_alive() or not self._server.started:
                 return False

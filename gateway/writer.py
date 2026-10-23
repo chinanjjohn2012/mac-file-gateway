@@ -12,7 +12,7 @@ from typing import Any, TYPE_CHECKING
 
 from .core import FileSnapshot, GatewayError, _integer, _parts, _redact, _sensitive_line_flags
 from . import write_storage as storage
-from .visibility import SensitiveContentPolicy
+from .visibility import SensitiveContentPolicy, source_lines
 
 if TYPE_CHECKING:
     from .core import Gateway
@@ -122,8 +122,8 @@ class FileWriter:
         else:
             # Lines may move after an edit; compare exact hidden line text with
             # classification severity, never compare only a count of findings.
-            source_text = previous.decode('utf-8-sig').splitlines()
-            candidate_text = raw.decode('utf-8-sig').splitlines()
+            source_text = source_lines(previous.decode('utf-8-sig'), canonical)
+            candidate_text = source_lines(raw.decode('utf-8-sig'), canonical)
             old = Counter((source_text[n - 1], kind) for n, kind in source)
             new = Counter((candidate_text[n - 1], kind) for n, kind in candidate)
             introduced = list((new - old).elements())

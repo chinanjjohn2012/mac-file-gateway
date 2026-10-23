@@ -164,6 +164,98 @@ def test_b1a_owner_lock_fd_loss_revokes_grant():
         assert _qualified(fx) is False
 
 
+
+def test_b1a_p2_owner_lock_relocated_and_second_owner_revokes_old_grant():
+    """P2-01 physical counterexample: old lock FD remains valid, canonical
+    inode changes and a second store acquires the new exclusive lock.
+    """
+    from gateway.exec_state import ExecStateStore
+    with _new() as fx:
+        assert _qualified(fx)
+        store = fx.service._exec_state
+        pinned = os.fstat(store._lock_fd)
+        canonical = fx.state_path / "owner.lock"
+        relocated = fx.root / "relocated-owner.lock"
+        canonical.rename(relocated)  # same filesystem, still one hard link
+        contender = None
+        try:
+            moved = os.fstat(store._lock_fd)
+            assert (pinned.st_dev, pinned.st_ino, pinned.st_nlink) == (
+                moved.st_dev, moved.st_ino, moved.st_nlink)
+            assert relocated.stat().st_nlink == 1
+            contender = ExecStateStore(fx.state_path)
+            assert contender.durability_state == "healthy"
+            newer = canonical.lstat()
+            assert (newer.st_dev, newer.st_ino) != (
+                pinned.st_dev, pinned.st_ino)
+            assert store.durability_state == "healthy"
+            assert _qualified(fx) is False
+        finally:
+            if contender is not None:
+                contender.close()
+            canonical.unlink(missing_ok=True)
+            relocated.rename(canonical)
+        assert _qualified(fx) is False  # no authorization resurrection
+
+
+def test_b1a_p2_owner_lock_explicit_unlock_revokes_even_while_fd_open():
+    """P2-01 independently acquired nonblocking lock proves lost flock."""
+    import fcntl
+    from gateway.exec_state import ExecStateStore
+    with _new() as fx:
+        assert _qualified(fx)
+        store = fx.service._exec_state
+        pinned = os.fstat(store._lock_fd)
+        fcntl.flock(store._lock_fd, fcntl.LOCK_UN)
+        assert os.fstat(store._lock_fd).st_ino == pinned.st_ino
+        contender = ExecStateStore(fx.state_path)
+        try:
+            assert contender.durability_state == "healthy"
+            assert _qualified(fx) is False
+        finally:
+            contender.close()
+        assert _qualified(fx) is False
+
+
+def test_b1a_p2_workspace_ancestor_symlink_alias_revokes_with_same_leaf():
+    """P2-02: a leaf lstat still sees its original inode via parent symlink."""
+    with _new() as fx:
+        assert _qualified(fx)
+        ancestor = fx.root / "projects"
+        moved = fx.root / "projects-moved"
+        leaf_id = fx.workspace_root("a").stat().st_ino
+        ancestor.rename(moved)
+        ancestor.symlink_to(moved, target_is_directory=True)
+        try:
+            assert fx.workspace_root("a").lstat().st_ino == leaf_id
+            assert fx.service.get("a").pinned_root.fd >= 0
+            assert _qualified(fx) is False
+        finally:
+            ancestor.unlink()
+            moved.rename(ancestor)
+        assert _qualified(fx) is False  # alias removal never re-qualifies
+
+
+def test_b1a_p2_state_ancestor_symlink_alias_revokes_with_same_leaf():
+    """The exact same no-follow ancestor boundary applies to state root."""
+    with _new() as fx:
+        assert _qualified(fx)
+        ancestor = fx.root / "control"
+        moved = fx.root / "control-moved"
+        state_id = fx.state_path.stat().st_ino
+        ancestor.rename(moved)
+        ancestor.symlink_to(moved, target_is_directory=True)
+        try:
+            assert fx.state_path.lstat().st_ino == state_id
+            assert fx.service._exec_state.durability_state == "healthy"
+            assert _qualified(fx) is False
+        finally:
+            ancestor.unlink()
+            moved.rename(ancestor)
+        assert _qualified(fx) is False
+
+
+
 def test_b1a_service_close_revokes_without_transferring_to_restarted_service():
     fx = _new()
     try:

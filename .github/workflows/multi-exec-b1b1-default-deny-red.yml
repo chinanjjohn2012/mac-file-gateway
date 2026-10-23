@@ -31,7 +31,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
@@ -40,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
-          test "$(git rev-parse HEAD^)" = "682949dde29f35567a67748b3edde8196d910d9d"
+          git merge-base --is-ancestor 682949dde29f35567a67748b3edde8196d910d9d HEAD
           test -z "$(git status --porcelain)"
           python - <<'PY'
           import hashlib

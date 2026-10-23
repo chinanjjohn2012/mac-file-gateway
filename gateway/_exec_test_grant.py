@@ -261,6 +261,36 @@ class TestOnlyGroupRetirementGrant:
             return self._revoke()
 
 
+    def qualifies_transport(self, service: object, workspace: object, *,
+                            transport: object) -> bool:
+        """Strict private Listener provenance, never a client Host string.
+
+        This is a TEST credential/transport predicate, not permission to
+        spawn any process and not a full descendant-cleanup mechanism.
+        The actual Worker default-DENY gate is a later reviewed stage.
+        """
+        if self._revoked:
+            return False
+        fixture = self._fixture()
+        if fixture is None:
+            return self._revoke()
+        # Import only on an internal acceptance probe. Ordinary Gateway
+        # startup, REST/MCP handling and run_multi() never import or mint a
+        # private test transport. An unbound B1-A fixture has no witness.
+        from ._exec_test_transport import _TrustedLoopbackListener
+        if type(transport) is not _TrustedLoopbackListener:
+            return False
+        if getattr(fixture, "_trusted_bound_listener", None) is not transport:
+            return False
+        if transport._service is not service or self._service() is not service:
+            return False
+        if not transport._proves_live():
+            return self._revoke()
+        # Physical loopback socket is the authority for the constant host,
+        # not a passed Host header or an externally supplied port/string.
+        return self.qualifies(service, workspace, listener_host="127.0.0.1")
+
+
 class _DisposableAcceptance:
     """Self-minting, fresh test-only fixture; cannot take an external path."""
 

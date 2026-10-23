@@ -361,6 +361,46 @@ def classify_python(
         except (ValueError, RecursionError, MemoryError):
             raise _ScanUnavailable from None
 
+        def scan_ast(parsed_tree: ast.Module, *, line_offset: int = 0) -> None:
+            for node in ast.walk(parsed_tree):
+                if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    if node.value is not None and any(
+                            _assignment_value_has_literal(target, node.value)
+                            for target in targets):
+                        mark(node, line_offset)
+                elif isinstance(node, ast.Dict):
+                    for key, value in zip(node.keys, node.values):
+                        if (isinstance(key, ast.Constant) and type(key.value) is str
+                                and _field(key.value) and _value_literal(value)):
+                            mark(value, line_offset)
+                            mark(key, line_offset)
+                elif isinstance(node, ast.Call):
+                    for keyword in node.keywords:
+                        if keyword.arg is not None and _field(keyword.arg) and _value_literal(keyword.value):
+                            mark(keyword.value)
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    args = node.args
+                    positional = [*args.posonlyargs, *args.args]
+                    for param, default in zip(positional[len(positional) - len(args.defaults):], args.defaults):
+                        if _field(param.arg) and _value_literal(default):
+                            mark(default, line_offset)
+                    for param, default in zip(args.kwonlyargs, args.kw_defaults):
+                        if default is not None and _field(param.arg) and _value_literal(default):
+                            mark(default, line_offset)
+
+                # A known token format is Hard independently of assignment
+                # name, even if adjacent literals/Constant+Constant split it.
+                if isinstance(node, (ast.Constant, ast.JoinedStr, ast.BinOp)):
+                    joined = _joined_static_literal(node)
+                    if joined is not None:
+                        if type(joined) is bytes:
+                            joined = joined.decode("ascii", errors="ignore")
+                        if TOKEN_VALUE.search(joined):
+                            mark(node, line_offset)
+                if time.monotonic() >= deadline:
+                    raise _ScanUnavailable
+
         if tree is not None:
             _count_ast_nodes(tree, deadline)
             # Find docstrings by syntax: first statement in module/class/function
@@ -392,56 +432,63 @@ def classify_python(
                         elif kind == "heuristic":
                             heuristic.add(lineno)
 
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
-                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                    if node.value is not None and any(
-                            _assignment_value_has_literal(target, node.value)
-                            for target in targets):
-                        mark(node)
-                elif isinstance(node, ast.Dict):
-                    for key, value in zip(node.keys, node.values):
-                        if (isinstance(key, ast.Constant) and type(key.value) is str
-                                and _field(key.value) and _value_literal(value)):
-                            mark(value)
-                            mark(key)
-                elif isinstance(node, ast.Call):
-                    for keyword in node.keywords:
-                        if keyword.arg is not None and _field(keyword.arg) and _value_literal(keyword.value):
-                            mark(keyword.value)
-                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                    args = node.args
-                    positional = [*args.posonlyargs, *args.args]
-                    for param, default in zip(positional[len(positional) - len(args.defaults):], args.defaults):
-                        if _field(param.arg) and _value_literal(default):
-                            mark(default)
-                    for param, default in zip(args.kwonlyargs, args.kw_defaults):
-                        if default is not None and _field(param.arg) and _value_literal(default):
-                            mark(default)
-
-                # A known token format is Hard independently of assignment
-                # name, even if adjacent literals/Constant+Constant split it.
-                if isinstance(node, (ast.Constant, ast.JoinedStr, ast.BinOp)):
-                    joined = _joined_static_literal(node)
-                    if joined is not None:
-                        if type(joined) is bytes:
-                            joined = joined.decode("ascii", errors="ignore")
-                        if TOKEN_VALUE.search(joined):
-                            mark(node)
-                if time.monotonic() >= deadline:
-                    raise _ScanUnavailable
+            scan_ast(tree)
         else:
-            # Complete lexing despite an invalid Python parse: retain visible
-            # known keys and obvious quoted field=value pairs. Never treat a
-            # bare name with a dynamic RHS as credential evidence.
-            for number, line in enumerate(lines, 1):
-                if number % 128 == 0 and time.monotonic() >= deadline:
+            # Entire-module AST failed but tokenization succeeded. Recover
+            # complete logical statements (including multiline RHS literals)
+            # without executing source or treating a bare variable name as a
+            # credential. The source line offset is carried into Hard flags.
+            complete_lines = physical_lines(text, keepends=True)
+            ast_budget = MAX_AST_NODES
+            for index, (start_line, end_line) in enumerate(statements):
+                if index % 128 == 0 and time.monotonic() >= deadline:
                     raise _ScanUnavailable
-                value = _lexical_field_cue(line)
-                if value == "hard":
-                    line_hard(number)
-                elif value == "heuristic":
-                    heuristic.add(number)
+                if not 1 <= start_line <= end_line <= len(complete_lines):
+                    raise _ScanUnavailable
+                statement = "".join(complete_lines[start_line - 1:end_line])
+                normalized = statement.replace("\r\n", "\n").replace("\r", "\n")
+                fragment = textwrap.dedent(normalized)
+                try:
+                    recovered = ast.parse(fragment)
+                except (SyntaxError, IndentationError):
+                    recovered = None
+                    # A function or class declaration may be valid in isolation
+                    # apart from its missing body in this logical-statement
+                    # slice. Adding an inert pass parses keyword/defaults.
+                    if fragment.rstrip().endswith(":"):
+                        try:
+                            recovered = ast.parse(fragment + "\n    pass\n")
+                        except (SyntaxError, IndentationError):
+                            pass
+                except (RecursionError, ValueError, MemoryError):
+                    raise _ScanUnavailable from None
+                if recovered is not None:
+                    ast_budget -= _count_ast_nodes(recovered, deadline)
+                    if ast_budget < 0:
+                        raise _ScanUnavailable
+                    scan_ast(recovered, line_offset=start_line - 1)
+                else:
+                    # If an unparseable logical statement mixes an actual
+                    # named credential field with a string token, safe value
+                    # association is unknown. Do not silently downgrade to
+                    # none or make this bypassable by temporary Audit.
+                    if any(_field(match.group("name"))
+                           for match in _FIELD_CUE.finditer(fragment)):
+                        try:
+                            has_string = any(
+                                token.type == tokenize.STRING for token in
+                                tokenize.generate_tokens(
+                                    io.StringIO(fragment, newline=None).readline
+                                )
+                            )
+                        except (tokenize.TokenError, IndentationError,
+                                RecursionError, ValueError):
+                            raise _ScanUnavailable from None
+                        if has_string:
+                            raise _ScanUnavailable
+            # Comments were classified during the whole-file lexical pass.
+            # No independent per-line RHS shortcut: it cannot understand
+            # multiline assignments, dict key/value positions or env keys.
 
         if time.monotonic() >= deadline:
             raise _ScanUnavailable

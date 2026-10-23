@@ -72,10 +72,14 @@ service instance and the explicitly enumerated disposable Workspace
 identities (name plus pinned root dev/ino), and refuse production/user roots
 or an already-used state root. It returns a single service-scoped grant
 valid only for this fixture lifetime; it is invalidated by service close,
-process exit, fork or restart and cannot be copied to another service,
-state root, Workspace or execution attempt. The harness, **not a client**,
-injects it once while creating the disposable service; a subsequent REST
-or MCP call can only use its predetermined scope, never alter it. This is
+process exit, fork or restart and cannot be transferred to a different
+service, state root or unlisted Workspace. The harness, **not a client**,
+injects it once while creating the disposable service. Each admitted
+attempt captures the grant's matching fixture identity and rechecks it
+at finalization. Sequential attempts within the same authorized disposable
+scope may use the grant **only while the service remains healthy**; one
+attempt's failure or quarantine invalidates further admission. A REST
+or MCP caller can only use its predetermined scope, never alter it. This is
 an application admission boundary under the existing trusted-local-user
 model, **not** a cryptographic secret or an OS sandbox against code already
 running with the Gateway user's privileges.

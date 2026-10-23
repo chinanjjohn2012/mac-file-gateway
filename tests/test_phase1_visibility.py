@@ -15,17 +15,20 @@ def test_hidden_lines_do_not_leak_via_search_or_replace_matching():
     assert policy.visible_matches(a, '[REDACTED]') == []
 
 
-def test_paths_are_classified_and_redacted_before_diff():
+def test_plain_path_text_is_visible_in_reads_search_and_diff():
     policy=SensitiveContentPolicy(('/tmp/project-b', '/tmp/project-a/config.json'))
     data='before\nroot=/tmp/project-b/lib/x.py\nafter\n'
     lines,n=policy.redact_lines(data)
-    assert n==1
-    assert '/tmp/project-b' not in '\n'.join(lines)
+    assert n==0
+    assert '/tmp/project-b/lib/x.py' in '\n'.join(lines)
     diff=''.join(policy.redacted_diff_lines(data))
-    assert '/tmp/project-b' not in diff
-    assert 'root=' not in diff
-    assert policy.is_sensitive('hello /tmp/project-b/path')
+    assert '/tmp/project-b/lib/x.py' in diff
+    assert 'root=' in diff
+    assert policy.visible_matches(data, '/tmp/project-b/lib/x.py')
+    assert not policy.is_sensitive('hello /tmp/project-b/path')
     assert not policy.is_sensitive('hello /tmp/project-b-other/path')
+    # Credential evidence stays protected even if a path appears on its line.
+    assert policy.is_sensitive('password="abc" # /tmp/project-b/path')
 
 
 def test_new_sensitive_lines_are_rejected_not_existing_ones():
@@ -33,5 +36,5 @@ def test_new_sensitive_lines_are_rejected_not_existing_ones():
     old='password=alpha\nedit=hello\n'
     assert not p.new_sensitive_content(old, 'password=alpha\nedit=world\n')
     assert p.new_sensitive_content(old, 'password=alpha\nedit=password=beta\n')
-    assert p.new_sensitive_content(old, 'password=alpha\nedit=/tmp/project-b/path\n')
+    assert not p.new_sensitive_content(old, 'password=alpha\nedit=/tmp/project-b/path\n')
     assert p.new_sensitive_content(old, 'password=alpha\npassword=alpha\nedit=hello\n')

@@ -9,6 +9,17 @@ import re
 from typing import Callable
 
 
+def source_lines(text: str, canonical_path: str = '', *, keepends: bool = False) -> list[str]:
+    """Same Python physical-line mapping for AST, display, search and edits.
+
+    Legacy non-Python files deliberately keep the old splitlines behavior.
+    """
+    if canonical_path.endswith((".py", ".pyi")):
+        from .python_values import physical_lines
+        return physical_lines(text, keepends=keepends)
+    return text.splitlines(keepends=keepends)
+
+
 class SensitiveContentPolicy:
     def __init__(self, protected_paths: tuple[str, ...] = ()):
         # Retain only real absolute paths with stable character boundaries.
@@ -84,13 +95,19 @@ class SensitiveContentPolicy:
 
     def redact_lines(self, text: str, canonical_path: str = '') -> tuple[list[str], int]:
         flags = self.full_flags(canonical_path, text) if canonical_path else self.sensitive_flags(text)
+        lines = source_lines(text, canonical_path)
+        if len(flags) != len(lines):
+            flags = [True] * len(lines)
         return (["[REDACTED] protected content" if flag else line
-                 for line, flag in zip(text.splitlines(), flags)], sum(flags))
+                 for line, flag in zip(lines, flags)], sum(flags))
 
     def redacted_diff_lines(self, text: str, canonical_path: str = '') -> list[str]:
         flags = self.full_flags(canonical_path, text) if canonical_path else self.sensitive_flags(text)
+        lines = source_lines(text, canonical_path, keepends=True)
+        if len(flags) != len(lines):
+            flags = [True] * len(lines)
         result = []
-        for line, hidden in zip(text.splitlines(keepends=True), flags):
+        for line, hidden in zip(lines, flags):
             if hidden:
                 terminator = '\r\n' if line.endswith('\r\n') else '\n' if line.endswith('\n') else '\r' if line.endswith('\r') else ''
                 result.append('[REDACTED] protected content' + terminator)
@@ -106,10 +123,13 @@ class SensitiveContentPolicy:
         left as-is; writer uses raw source when applying eligible matches.
         """
         flags = self.full_flags(canonical_path, text) if canonical_path else self.sensitive_flags(text)
+        lines = source_lines(text, canonical_path, keepends=True)
+        if len(flags) != len(lines):
+            flags = [True] * len(lines)
         offset = 0
         start = None
         runs: list[tuple[int, int]] = []
-        for line, hidden in zip(text.splitlines(keepends=True), flags):
+        for line, hidden in zip(lines, flags):
             end = offset + len(line)
             if hidden:
                 if start is not None:
@@ -157,13 +177,19 @@ class SensitiveContentPolicy:
             previous_end = right
         updated_lines: dict[int, tuple[int, str, bool]] = {}
         offset = 0
-        for line, hidden in zip(updated.splitlines(keepends=True), self.full_flags(canonical_path, updated) if canonical_path else self.sensitive_flags(updated)):
+        candidate_lines = source_lines(updated, canonical_path, keepends=True)
+        candidate_flags = self.full_flags(canonical_path, updated) if canonical_path else self.sensitive_flags(updated)
+        source_split = source_lines(source, canonical_path, keepends=True)
+        source_flags = self.full_flags(canonical_path, source) if canonical_path else self.sensitive_flags(source)
+        if len(candidate_lines) != len(candidate_flags) or len(source_split) != len(source_flags):
+            return False
+        for line, hidden in zip(candidate_lines, candidate_flags):
             end = offset + len(line)
             updated_lines[offset] = (end, line, hidden)
             offset = end
 
         offset = displacement = edit_index = 0
-        for line, hidden in zip(source.splitlines(keepends=True), self.full_flags(canonical_path, source) if canonical_path else self.sensitive_flags(source)):
+        for line, hidden in zip(source_split, source_flags):
             end = offset + len(line)
             if hidden:
                 while edit_index < len(spans) and spans[edit_index][1] <= offset:
@@ -185,8 +211,8 @@ class SensitiveContentPolicy:
         it does not by itself establish original hidden-line preservation.
         """
         from collections import Counter
-        old_hidden = Counter(line for line, hidden in zip(old.splitlines(), self.full_flags(canonical_path, old) if canonical_path else self.sensitive_flags(old)) if hidden)
-        new_hidden = Counter(line for line, hidden in zip(new.splitlines(), self.full_flags(canonical_path, new) if canonical_path else self.sensitive_flags(new)) if hidden)
+        old_hidden = Counter(line for line, hidden in zip(source_lines(old, canonical_path), self.full_flags(canonical_path, old) if canonical_path else self.sensitive_flags(old)) if hidden)
+        new_hidden = Counter(line for line, hidden in zip(source_lines(new, canonical_path), self.full_flags(canonical_path, new) if canonical_path else self.sensitive_flags(new)) if hidden)
         return bool(new_hidden - old_hidden)
 
     def safe_text(self, text: str) -> str:

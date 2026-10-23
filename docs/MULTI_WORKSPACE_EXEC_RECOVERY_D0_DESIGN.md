@@ -51,6 +51,68 @@ silence, or `killpg` success alone must never set the second fact.
 A future full-tree qualification requires a separately reviewed mechanism.
 This D0 is a **contract**, not a claim that Python can discover all descendants.
 
+### 2.1. Machine-checkable, test-only group-retirement qualification (P2-01)
+
+**Default: DENY.** The ordinary installed Gateway, including a process with
+both `server.exec.enabled=true` and Workspace `exec.enabled=true`, has
+`group_only_test_grant=None`. Those two configuration grants allow choosing
+*whether to request* Exec, but are **not** cleanup-evidence qualification.
+No `gateway.json` field, CLI flag, environment variable, REST/MCP body,
+header, metadata, Workspace path/name, test-named command, CI flag or
+`PYTEST_CURRENT_TEST` value can create or activate this qualification.
+
+For R1, only a **separately maintained, trusted disposable acceptance
+harness** may construct a private, in-memory, nonserializable, instance-bound
+`TestOnlyGroupRetirementGrant` via an **internal acceptance-only factory**.
+The normal CLI / server factory MUST NOT call that factory or accept a grant
+from any external input. The factory must first verify ownership of a newly
+created private temporary fixture root and Exec state root, pin both by FD
+identity, restrict the listener to loopback, identify the exact Gateway
+service instance and the explicitly enumerated disposable Workspace
+identities (name plus pinned root dev/ino), and refuse production/user roots
+or an already-used state root. It returns a single service-scoped grant
+valid only for this fixture lifetime; it is invalidated by service close,
+process exit, fork or restart and cannot be copied to another service,
+state root, Workspace or execution attempt. The harness, **not a client**,
+injects it once while creating the disposable service; a subsequent REST
+or MCP call can only use its predetermined scope, never alter it. This is
+an application admission boundary under the existing trusted-local-user
+model, **not** a cryptographic secret or an OS sandbox against code already
+running with the Gateway user's privileges.
+
+The Worker must evaluate the following **non-client-controllable**
+predicate both at admission and immediately before durable finalization:
+
+```text
+group_only_test_qualified =
+    service.has_internal_test_grant
+    AND grant.identity_is(service.instance, state_root.dev_ino)
+    AND grant.is_live_in_same_process
+    AND workspace.name_and_pinned_dev_ino IN grant.disposable_scopes
+    AND fixture_is_private_and_loopback
+    AND server_exec_granted AND workspace_exec_granted
+    AND state_owner_lock_held AND state_is_healthy AND NOT quarantined
+```
+
+A positive result selects only the **test-scoped original-group** evidence
+policy for the identified attempt. It does not skip the original Exec
+allowlist, durable `PREPARED`, checks for observed detached descendants,
+or any quarantine. A late grant, injected client parameter or previously
+quarantined attempt can **never** change `UNKNOWN` back to `RETIRED`.
+R1 must provide a narrow internal test seam to construct this condition
+without exporting it via the normal Gateway product API. If the harness
+cannot prove any required identity/fixture property, the predicate is false.
+
+The separate future **full-descendant-cleanup qualified** path is NOT
+implemented or assumed in D0/R1. In ordinary Gateways without that future
+reviewed proof mechanism, non-preview apply MUST be rejected **before**
+`Popen` with `exec_cleanup_proof_required`; an attempt already RUNNING
+that produces only original-group evidence MUST end `UNKNOWN` and global
+quarantine, not `RETIRED`. A disposable test with the exact internal grant
+may retire only after direct-leader reap, verified original-group absence,
+and no positively observed detached descendant, using the limited
+evidence marker defined in §5.
+
 ## 3. Durable state and fail-closed boot scan
 
 State root: a Gateway-owned `<private-config-dir>/exec-state` outside **all**
@@ -76,14 +138,38 @@ Boot ordering: open and scan the private state **before** any Exec-enabled
 API can accept requests. Every surviving `PREPARED`, `RUNNING` or
 `UNKNOWN` marker, invalid schema, incomplete atomic update, corrupt entry,
 unexpected filename, or untrusted directory results in **global Exec
-quarantine**. Healthy empty/retired state can be admitted. No automatic
-"the old PID is gone, so recover" shortcut. A new Gateway process must
+quarantine**. Healthy empty/retired state can be admitted only under matching evidence
+qualification: a normal Gateway MUST quarantine on seeing any test-only
+`RETIRED` record copied into or left inside a normal state root, rather
+than treating its group-only evidence as full-tree proof. Each test fixture
+uses an exclusive disposable state root; its grant does not survive restart.
+No automatic "the old PID is gone, so recover" shortcut. A new Gateway process must
 not signal a previously recorded PID/PGID merely because it exists.
 
 Only one owner may modify the same state root: require an interprocess
 ownership lock for the whole Gateway Exec state lifetime, and fail closed
 if it cannot be taken. File API and separately authorized Git must not
 inherit Exec permission or silently bypass the lock.
+
+**P3-01 — finite capacity and retired-only reclamation.** R1 must enforce
+at most **4096 durable attempt records**, **4096 bytes per record** and
+**16 MiB total attempt-record payload** per Exec state root (plus one
+fixed owner-lock object and one in-flight atomic temp entry). Validate the
+limits before admitting a new `PREPARED` record. At capacity, prune only
+records already durably marked `RETIRED`, whose attempt is not referenced
+by any unresolved marker; select candidates by bounded
+`(retired_at, attempt_id)` ordering (timestamps affect reclamation
+order **only**, never process identity, grant, or recovery authority).
+Prune via pinned-FD unlink and directory fsync, never by wildcard cleanup,
+TTL-based deletion of unresolved records, or a client-accessible endpoint.
+A crash while deleting an already retired record may leave that safe
+retired record present or absent; a leftover ambiguous temp entry must
+fail closed at boot. `PREPARED`, `RUNNING`, `UNKNOWN`, quarantined,
+corrupt and unexplained entries are **never** quota-evicted. If no safely
+reclaimable `RETIRED` entries remain or a prune/write/fsync fails, deny
+the request **before spawn**, report `exec_state_unavailable`, latch
+global Exec admission closed, and preserve any surviving unresolved intent
+for offline review. No optimistic empty-state reset or automatic replay.
 
 ## 4. Exact launch ordering and Worker ownership
 
@@ -94,6 +180,10 @@ or writing a RUNNING intent; quarantined Exec must still be visibly denied
 On `dry_run=false`:
 1. In the actual synchronous Worker, check global and Workspace grants,
    state health, Workspace slot and four-instance admission limit.
+   Resolve the internal proof qualification of §2.1 before any spawn:
+   without a full-tree proof implementation, a normal (non-test) apply
+   fails `exec_cleanup_proof_required` before writing `PREPARED`.
+   Do not derive test qualification from the request or config.
 2. Reserve the slot **before** any possible child launch; keep it through
    durable finalization, including if REST/MCP waiter disconnects.
 3. Persist+fsync `PREPARED` before trying `Popen`.
@@ -105,9 +195,13 @@ On `dry_run=false`:
 5. If a leader exists, record `RUNNING` observations, independently
    handle bounded streams and cleanup without holding the global state
    gate during potentially blocking IO.
-6. Under the held Worker ownership, either durably retire according to
-   the **bounded** evidence contract, or durably mark `UNKNOWN` and
-   quarantine; only then free the in-memory slot and reply.
+6. Under the held Worker ownership, **recheck the same internal proof
+   qualification from §2.1**, then durably retire only if the selected
+   evidence contract is satisfied. With only original-group evidence and
+   no valid test grant, mark `UNKNOWN` and quarantine globally instead.
+   A proven full-tree contract is a future separate review gate. Only
+   after durable retirement or conservative `UNKNOWN` finalization may
+   the in-memory Worker slot be released and a response sent.
 7. A lost or cancelled response never starts a replacement Worker.
    The caller must not treat absent response as an unsuccessful apply.
 
@@ -132,17 +226,24 @@ separately granted File Write/Git gates independent, unless their existing
 policies independently deny the operation. Never auto-retry or silently
 restart the same command.
 
-**D0 decision:** when the directly owned leader was reaped **and** the
-original process group was verified absent under the bounded policy,
-the attempt may be durably RETIRED **for trusted, disposable product
-acceptance only**. Report `cleanup_scope=original_group_only` and
-`full_descendant_tree_clean=false/not_proven`; another product-test
-request may be admitted after durable retirement. This is **not** a
-full-tree clean result, and production activation remains blocked until
-a separately reviewed full-descendant contract is proven. If a detached
-descendant is positively observed or original-group cleanup fails, enter
-UNKNOWN and quarantine even if the direct leader has exited. No
-progress- or heartbeat-only test satisfies the unresolved full-tree gate.
+**D0 decision (P2-01):** the directly owned leader must be reaped, the
+original group must be verified absent under a bounded policy, and the
+**same live internal §2.1 group-only test grant must be valid at admission
+and finalization**. Only then may a disposable fixture attempt become
+durably `RETIRED` with `cleanup_scope=original_group_only` and
+`full_descendant_tree_clean=not_proven`; a later test request within the
+same healthy fixture may be admitted. A normal Gateway with both Exec
+opt-ins but **no separate full-tree proof** never qualifies for this
+`RETIRED` transition: reject unsupported new apply before spawn, or
+persist `UNKNOWN` and global quarantine if an already-running attempt
+has only original-group evidence. A grant never clears an earlier
+quarantine. Positive evidence of a detached descendant, any uncertain
+leader/group cleanup, lost state ownership, invalidated test qualification,
+or failed persistence forces `UNKNOWN` and global quarantine even inside
+the harness. This is **not** a full-tree clean result, and production
+activation remains blocked until a separately reviewed full-descendant
+contract is proven. Heartbeat silence or PGID disappearance alone cannot
+satisfy the future full-tree gate.
 
 Crash windows are conservative: after intent fsync/before Popen; after
 Popen/before PID metadata; after leader exit/before cleanup verification;
@@ -154,14 +255,49 @@ quarantine, while a durably retired call is **never replayed**.
 
 Retain the existing separate `server.exec.enabled` and Workspace
 `exec.enabled` opt-ins, Workspace selection, command allowlist, and
-`dry_run=true` default. Expose sanitized `exec_policy` fields:
-`available`, `quarantined`, `quarantine_reason_code` and
-`durability_state`, without leaking local paths/PIDs or sensitive
-command arguments. `run_command` rejects quarantined attempts with a
-stable `exec_quarantined` or `exec_state_unavailable` code.
-The API may remain discoverable for an operator to diagnose the denial,
-but must never spawn while blocked. Other capabilities retain their
-independent policies.
+`dry_run=true` default. **P3-02 — precise status contract:** report
+the same sanitized `exec_policy` snapshot from `/info` and `/health`:
+
+- `adapter_exposed` means the REST/MCP route/tool was configured and
+  registered for at least one eligible Workspace; it is **not** an
+  assertion of safe runnable status and may remain `true` during
+  quarantine to expose a consistent denial.
+- `available=true` requires effective instance + Workspace permission,
+  healthy/private durable state and ownership lock, **no quarantine**,
+  and a live permitted cleanup qualification (the private disposable
+  test grant or a future independently approved full-tree mechanism).
+  It represents **safe eligibility**, not an empty concurrency slot;
+  slot exhaustion still reports `busy`. `available=false` whenever
+  quarantined, uninitialized/unavailable, permission-disabled or missing
+  the required proof mechanism, even if `adapter_exposed=true`.
+- `quarantined=true` means Exec admission has latched closed on
+  `UNKNOWN`, corrupt/foreign records or lost state trust; it cannot
+  be cleared remotely. `durability_state` is exactly one of
+  `disabled | healthy | quarantined | unavailable`. `unavailable`
+  covers unreadable/unwritable state or missing exclusive ownership;
+  both `quarantined` and `unavailable` cause `available=false`.
+  In an unavailable case admission is latched closed as well, even
+  where a quarantine marker itself cannot be persisted.
+- `quarantine_reason_code` is `null` for healthy/disabled, otherwise
+  one stable sanitized code such as `cleanup_unknown`,
+  `corrupt_record`, `owner_lock_unavailable` or
+  `state_io_unavailable`. No PID, argv, environment, root or state
+  path appears in status. `completion_capability` is exactly
+  `none | test_original_group_only | full_tree_qualified`, with
+  `full_tree_qualified` forbidden to R1; do not confuse it with
+  the user-requested execution policy.
+
+Error precedence for requests: missing global/Workspace permission ->
+`exec_disabled` (HTTP 403); durable `UNKNOWN` / corrupt recovered
+state -> `exec_quarantined` (HTTP 503); unavailable storage/owner lock ->
+`exec_state_unavailable` (HTTP 503); both opt-ins but no qualifying
+cleanup mechanism -> `exec_cleanup_proof_required` (HTTP 503);
+healthy but all Worker slots occupied -> `busy` (HTTP 409).
+Use identical stable codes in MCP `isError=true` structured responses,
+with no lost-response replay. Even a `dry_run` cannot report readiness
+while quarantined or state-unavailable. No REST/MCP input can create
+the internal §2.1 acceptance grant. File/Git policy and their
+readiness indicators remain independent.
 
 There is **no REST/MCP reset/unquarantine endpoint**. Recovery is an
 explicit, separately approved offline operator procedure performed
@@ -196,6 +332,41 @@ F. Disposable macOS ARM64 negative fixtures: original-group child,
    workspace, uncontrolled external signal, or private Tunnel in D0.
 G. Both GitHub CI and macOS runs pin the same Head+Git Tree and verify the
    full Manifest. Original Job logs, not developer summaries, are evidence.
+H. **P2-01 default DENY:** normal Gateway with global and Workspace Exec
+   enabled, but no internal grant/full-tree mechanism, cannot start a
+   new non-preview apply (`exec_cleanup_proof_required`, zero `Popen`).
+   Fault-inject a preexisting normal `RUNNING` attempt with leader
+   reaped and only original group absent: it MUST NOT `RETIRED`;
+   record `UNKNOWN`, globally quarantine, and refuse another apply
+   after restart (`exec_quarantined`). Adding config, env var, CLI
+   flag, REST/MCP `test_mode` or synthetic metadata cannot change this.
+I. **P2-01 positive test:** the internal trusted harness creates a
+   private temporary root/state, pins identities, restricts loopback,
+   injects one correctly bound nonserializable test grant, and enables
+   both normal Exec permissions. Leader reap + original-group absence,
+   no observed detached child and healthy state permit `RETIRED`
+   with `cleanup_scope=original_group_only` and
+   `full_descendant_tree_clean=not_proven`; a subsequent healthy test
+   request can run. Alter the Workspace identity, state FD, service,
+   bound process, listener, grant lifetime or attempt identity: all
+   mismatch cases DENY, never silently RETIRE. A restart loses the
+   grant; importing an old test-only `RETIRED` into a normal state
+   root quarantines, never becomes proof of full-tree absence.
+J. **P2-01 no exception to quarantine:** even with a valid test grant,
+   a positively observed detached child, leader/group uncertainty,
+   state write fault or preexisting `UNKNOWN` must quarantine globally.
+   Test qualification must not clear an existing quarantine; test-only
+   `RETIRED` can never mean full-tree cleanup or production PASS.
+K. **P3-01 quota:** test retired-only bounded reclamation, no deletion
+   of unresolved markers, quota exhausted with no retired record
+   (`exec_state_unavailable` / zero spawn), fsync/unlink failure,
+   torn temp entry after simulated crash, and exact 4096-record/16 MiB
+   boundary. No test reset or eviction of `UNKNOWN` may pass.
+L. **P3-02 reporting:** exercise `/info`, `/health`, REST and MCP in
+   disabled, healthy-but-no-proof, internal-test-qualified, quarantined,
+   state-unavailable and busy-slot cases. Assert exposed-tool state
+   can remain true while `available=false`, sanitized consistent
+   fields, stable errors/HTTP codes, and no request-origin qualification.
 
 ## 8. Staged implementation and hard stops
 

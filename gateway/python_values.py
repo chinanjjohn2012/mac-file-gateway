@@ -481,10 +481,15 @@ def classify_python(
                     # incomplete quoted RHS. Ordinary name-only dynamic
                     # references still classify as none.
                     clue = _lexical_field_cue(fragment)
+                    # A failed AST recovery supplies a statement-level cue,
+                    # not an exact physical line. Preserve the entire bounded
+                    # tokenizer span: marking only start_line can expose a
+                    # literal on a later line through read/search/diff/edit.
                     if clue == "hard":
-                        line_hard(start_line)
+                        for source_line in range(start_line, end_line + 1):
+                            line_hard(source_line)
                     elif clue == "heuristic":
-                        heuristic.add(start_line)
+                        heuristic.update(range(start_line, end_line + 1))
                     # If no lexical cue can safely relate a string token
                     # to a named credential field, fail the whole scan rather
                     # than silently accepting uninspected secret material.

@@ -5,6 +5,14 @@
 **Baseline at design start:** Base `d3373649b968f23c85b3ee09d8e984eefecea5c3`; PR Head `64e43f72d597001054e4d1dbecc0e62a3d9452cc`.
 **Scope:** exact canonical suffix `.py` or `.pyi` only. Do not treat this document as implemented behavior.
 
+> **Scoped subsequent amendment (separate Draft PR #61, not an edit to the earlier V3 CODE PASS):**
+> [Path Text Visibility V1](PATH_TEXT_VISIBILITY_V1_DESIGN.md) removes
+> source-content redaction based *only* on ordinary absolute pathname text,
+> including private/Workspace/Home paths. File authorization and actual
+> credential URI/token/private-key Hard rules remain intact. That amendment
+> intentionally changes non-Python behavior **only** for pathname matches.
+> It requires its own independent Design and Code reviews before release.
+
 ## 1. Product contract / problem
 
 The gateway protects **credential material actually present in source bytes**, not names of variables that could contain credentials at runtime. A Python assignment to a variable named `token`, `password`, `secret`, or `api_key` must NOT be classified as sensitive solely because of that name or because its right-hand side is a function call or reference.

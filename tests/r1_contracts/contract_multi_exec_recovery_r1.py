@@ -103,8 +103,8 @@ def _must_deny(func, code, red):
         result = func()
     except GatewayError as exc:
         if exc.code != code:
-            pytest.fail("R1_RED_" + red + ": required " + code
-                        + ", received " + exc.code, pytrace=False)
+            raise AssertionError("R1_TEST_INFRA_WRONG_DENIAL_CODE: expected "
+                                 + code + ", received " + exc.code)
     else:
         pytest.fail("R1_RED_" + red + ": unauthorized result " + repr(result),
                     pytrace=False)
@@ -131,16 +131,20 @@ def test_normal_two_grants_do_not_authorize_apply(disposable, monkeypatch):
 def test_normal_rest_apply_is_503_before_runner(disposable, monkeypatch):
     svc = disposable.service()
     calls = disposable.fake_runner(svc, monkeypatch)
-    with TestClient(create_multi_app(svc, enable_mcp=False)) as client:
+    with TestClient(create_multi_app(svc, enable_mcp=False),
+                    base_url="http://127.0.0.1:8765") as client:
         response = client.post("/run", json={
             "workspace": "a", "cwd": "src", "argv": ["python", "ok.py"],
             "dry_run": False,
         })
+        if response.status_code == 200:
+            pytest.fail("R1_RED_REST_PROOF_GATE: normal apply was accepted",
+                        pytrace=False)
         if (response.status_code != 503 or
                 response.json().get("error") != "exec_cleanup_proof_required"):
-            pytest.fail("R1_RED_REST_PROOF_GATE: "
-                        + str(response.status_code) + " "
-                        + response.text[:160], pytrace=False)
+            raise AssertionError("R1_TEST_INFRA_UNEXPECTED_HTTP: "
+                                 + str(response.status_code) + " "
+                                 + response.text[:160])
     assert not calls, "R1_RED_REST_PROOF_GATE: execution reached runner"
 
 
@@ -157,8 +161,7 @@ def test_normal_mcp_apply_rejects_cleanup_proof(disposable, monkeypatch):
         response = asyncio.run(mcp.call_tool("run_command", arguments))
     except ToolError as exc:
         if "exec_cleanup_proof_required" not in str(exc):
-            pytest.fail("R1_RED_MCP_PROOF_GATE: wrong tool error " + str(exc),
-                        pytrace=False)
+            raise AssertionError("R1_TEST_INFRA_WRONG_MCP_ERROR: " + str(exc))
     else:
         pytest.fail("R1_RED_MCP_PROOF_GATE: returned " + repr(response)[:180],
                     pytrace=False)
@@ -194,7 +197,8 @@ def test_config_test_only_grant_is_not_a_public_option(disposable):
 
 def test_rest_test_grant_request_field_is_rejected(disposable):
     svc = disposable.service()
-    with TestClient(create_multi_app(svc, enable_mcp=False)) as client:
+    with TestClient(create_multi_app(svc, enable_mcp=False),
+                    base_url="http://127.0.0.1:8765") as client:
         response = client.post("/run", json={
             "workspace": "a", "cwd": "src", "argv": ["python", "ok.py"],
             "test_only_grant": True, "dry_run": False,
@@ -213,7 +217,8 @@ def test_info_false_available_when_proof_missing(disposable):
 
 def test_info_health_same_exec_policy(disposable):
     svc = disposable.service()
-    with TestClient(create_multi_app(svc, enable_mcp=False)) as client:
+    with TestClient(create_multi_app(svc, enable_mcp=False),
+                    base_url="http://127.0.0.1:8765") as client:
         info = client.get("/info").json()
         health = client.get("/health").json()
     if "exec_policy" not in health or health["exec_policy"] != info["exec_policy"]:
@@ -457,6 +462,7 @@ def test_unrelated_git_authority_not_inferred(disposable):
 
 def test_no_remote_unquarantine_route(disposable):
     svc = disposable.service()
-    with TestClient(create_multi_app(svc, enable_mcp=False)) as client:
+    with TestClient(create_multi_app(svc, enable_mcp=False),
+                    base_url="http://127.0.0.1:8765") as client:
         for route in ("/exec/reset", "/exec/unquarantine"):
             assert client.post(route, json={}).status_code == 404

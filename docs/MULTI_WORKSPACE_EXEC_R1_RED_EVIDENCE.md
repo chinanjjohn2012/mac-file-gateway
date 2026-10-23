@@ -33,7 +33,9 @@ Do not rewrite existing pytest tests or weaken the baseline assertions.
 `tools/verify_multi_exec_recovery_r1_red.py` uses JUnit case names,
 failure markers and exact test-group counts, rejects even one
 unrecognized failure, and also requires known currently existing
-deny-policy guardrails to continue **PASS**. The checker must be
+deny-policy guardrails to continue **PASS**. REST probes MUST use a
+127.0.0.1 loopback Host; a boundary-generated HTTP 421 or an unrelated
+wrong error code is test-infrastructure failure, never an accepted RED. The checker must be
 removed/replaced for R2 implementation verification; it is not a
 production feature flag or a general CI tolerance for failing tests.
 

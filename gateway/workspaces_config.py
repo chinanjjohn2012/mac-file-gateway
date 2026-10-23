@@ -28,6 +28,8 @@ class WorkspaceSettings:
     write_paths: tuple[str, ...]
     backup_retention_days: int
     git_allowed_commands: tuple[str, ...] = ()
+    sensitive_content_audit_paths: tuple[str, ...] = ()
+    sensitive_content_audit_until: str | None = None
 
 
 @dataclass(frozen=True)
@@ -116,7 +118,7 @@ def parse_workspace_config(config: dict[str, Any]) -> GatewaySettings:
             _relative(value, "hidden_paths")
             if not value.split("/")[-1].startswith("."):
                 raise PrivateFileError("Hidden paths must specify a hidden directory.")
-        write = _keys(item.get("write", {}), {"enabled", "paths", "backup_retention_days"}, "write")
+        write = _keys(item.get("write", {}), {"enabled", "paths", "backup_retention_days", "sensitive_content"}, "write")
         allow_write = _bool_field(write, "enabled", False)
         write_paths = _bounded_tuple(write.get("paths", []), "write.paths")
         if allow_write and not write_paths:
@@ -128,6 +130,21 @@ def parse_workspace_config(config: dict[str, Any]) -> GatewaySettings:
         retention = write.get("backup_retention_days", 15)
         if type(retention) is not int or not 1 <= retention <= 3650:
             raise PrivateFileError("Invalid backup retention days.")
+        sensitive = _keys(write.get("sensitive_content", {}), {"mode", "paths", "expires_at"}, "write.sensitive_content")
+        mode = sensitive.get("mode", "enforce")
+        if type(mode) is not str or mode not in {"enforce", "audit"}:
+            raise PrivateFileError("Invalid sensitive content write mode.")
+        audit_paths = _bounded_tuple(sensitive.get("paths", []), "sensitive_content.paths")
+        for audit_path in audit_paths:
+            _relative(audit_path, "sensitive_content.paths")
+            if audit_path == ".":
+                raise PrivateFileError("Sensitive audit requires explicit subtree.")
+        audit_until = sensitive.get("expires_at")
+        if mode == "audit":
+            if not allow_write or not audit_paths or type(audit_until) is not str:
+                raise PrivateFileError("Sensitive audit requires writable scope, paths and expiry.")
+        elif audit_paths or audit_until is not None:
+            raise PrivateFileError("Sensitive audit paths/expiry require mode=audit.")
         for option in ("exec", "local_skills"):
             access = _keys(item.get(option, {}), {"enabled"}, option)
             if _bool_field(access, "enabled", False):
@@ -140,7 +157,7 @@ def parse_workspace_config(config: dict[str, Any]) -> GatewaySettings:
         if commands and not git_enabled:
             raise PrivateFileError("Git command grants require server.git.enabled=true.")
         result.append(WorkspaceSettings(name, root, excludes, hidden, allow_write,
-                                        write_paths, retention, commands))
+                                        write_paths, retention, commands, audit_paths, audit_until))
     return GatewaySettings(port, tuple(result), git_enabled)
 
 

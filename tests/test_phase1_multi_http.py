@@ -72,7 +72,7 @@ def test_multi_rest_l0_rejects_before_writes(multi_service):
 
 def test_multi_diff_and_source_protection(multi_service):
     service, a, b = multi_service
-    source = 'visible=hello\npassword=alpha\nedit=ready\n'
+    source = 'visible=hello\npassword="alpha"\nedit=ready\n'
     (a/'hello.py').write_text(source)
     with TestClient(create_multi_app(service, enable_mcp=False), base_url='http://127.0.0.1:8765') as client:
         read = client.get('/read',params={'workspace':'a','path':'hello.py'}).json()
@@ -90,7 +90,7 @@ def test_multi_diff_and_source_protection(multi_service):
 
 def test_multi_search_does_not_match_hidden_content(multi_service):
     service, a, b = multi_service
-    (a/'hello.py').write_text('visible\npassword=alpha\n')
+    (a/'hello.py').write_text('visible\npassword="alpha"\n')
     with TestClient(create_multi_app(service, enable_mcp=False), base_url='http://127.0.0.1:8765') as client:
         assert client.get('/search',params={'workspace':'a','q':'alpha'}).json()['matches']==[]
         assert client.get('/search',params={'workspace':'a','q':'visible'}).json()['matches']

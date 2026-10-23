@@ -57,7 +57,7 @@ def replace(client, transport, **args):
 @pytest.mark.parametrize('secret', ['alpha', 'beta'])
 def test_visible_newline_removal_cannot_expose_hidden_source(surface, transport, dry_run, newline, bom, kind, secret):
     client, paths, service = surface
-    hidden = f'password={secret}' if kind == 'credential' else str(paths['b'] / f'{secret}.py')
+    hidden = f'password="{secret}"' if kind == 'credential' else str(paths['b'] / f'{secret}.py')
     source = (bom + 'x' + newline + hidden + newline).encode('utf-8')
     target = paths['a'] / 'sample.py'
     target.write_bytes(source)
@@ -78,7 +78,7 @@ def test_visible_newline_removal_cannot_expose_hidden_source(surface, transport,
 @pytest.mark.parametrize('bom', ['', '\ufeff'])
 def test_safe_neighbor_edit_preserves_hidden_bytes_and_raw_hash(surface, transport, newline, bom):
     client, paths, service = surface
-    source = (bom + 'x' + newline + 'password=alpha' + newline + 'tail' + newline).encode()
+    source = (bom + 'x' + newline + 'password="alpha"' + newline + 'tail' + newline).encode()
     target = paths['a'] / 'sample.py'
     target.write_bytes(source)
     args = dict(old_text='x' + newline, new_text='xy' + newline,
@@ -90,7 +90,7 @@ def test_safe_neighbor_edit_preserves_hidden_bytes_and_raw_hash(surface, transpo
     rejected, applied = replace(client, transport, **args, dry_run=False)
     assert not rejected
     assert 'alpha' not in json.dumps(applied)
-    expected = (bom + 'xy' + newline + 'password=alpha' + newline + 'tail' + newline).encode()
+    expected = (bom + 'xy' + newline + 'password="alpha"' + newline + 'tail' + newline).encode()
     assert target.read_bytes() == expected
     read = client.get('/read', params={'workspace': 'a', 'path': 'sample.py'}).json()
     assert read['file_sha256'] == hashlib.sha256(expected).hexdigest()

@@ -12,7 +12,7 @@ from typing import Any, TYPE_CHECKING
 
 from .core import FileSnapshot, GatewayError, _integer, _parts, _redact, _sensitive_line_flags
 from . import write_storage as storage
-from .visibility import SensitiveContentPolicy
+from .visibility import SensitiveContentPolicy, source_lines
 
 if TYPE_CHECKING:
     from .core import Gateway
@@ -28,8 +28,8 @@ def _preview(old: bytes, new: bytes, path: str, *, policy: SensitiveContentPolic
     if len(old) + len(new) > 524_288:
         return "[Diff omitted: input exceeds the preview budget.]", True
     policy = policy or SensitiveContentPolicy()
-    a = policy.redacted_diff_lines(old.decode("utf-8"))
-    b = policy.redacted_diff_lines(new.decode("utf-8"))
+    a = policy.redacted_diff_lines(old.decode("utf-8"), path)
+    b = policy.redacted_diff_lines(new.decode("utf-8"), path)
     if len(a) + len(b) > 2_000:
         return "[Diff omitted: too many lines for the preview budget.]", True
     pieces: list[str] = []
@@ -61,6 +61,7 @@ class FileWriter:
         return {"enabled": self.gateway.allow_write,
                 "paths": ["/".join(p) or "." for p in self.paths] or ["."],
                 "dry_run_default": True, "source_hash_required_for_updates": True,
+                "sensitive_content": self.gateway.sensitive_audit.status(),
                 "max_file_bytes": self.gateway.limits.max_file_bytes,
                 "backup_directory": storage.BACKUP_DIR,
                 "max_backup_files": storage.BACKUP_COUNT_LIMIT,
@@ -102,6 +103,44 @@ class FileWriter:
         if reject_sensitive and self.gateway._visibility.is_sensitive(text):
             raise GatewayError("sensitive_content", "Credential-like content is not accepted by this gateway's write policy.")
         return raw
+
+    def _reject_candidate(self, canonical: str, raw: bytes, previous: bytes | None = None) -> bool:
+        """Return whether temporary audit was required for an allowed candidate."""
+        from collections import Counter
+        source = () if previous is None else self.gateway._visibility.classify(canonical, previous)[1]
+        candidate = self.gateway._visibility.classify(canonical, raw)[1]
+        if any(kind == "scan_unavailable" for _, kind in (*source, *candidate)):
+            raise GatewayError(
+                "sensitive_content",
+                "Python source could not be completely scanned; no write was permitted.",
+                details={"rule_id": "SCAN_UNAVAILABLE", "severity": "scan_unavailable"},
+            )
+        # For replacement, preserve existing unchanged hidden lines separately.
+        # New heuristic findings can be accepted only within an active scoped audit.
+        if previous is None:
+            introduced = [kind for _, kind in candidate]
+        else:
+            # Lines may move after an edit; compare exact hidden line text with
+            # classification severity, never compare only a count of findings.
+            source_text = source_lines(previous.decode('utf-8-sig'), canonical)
+            candidate_text = source_lines(raw.decode('utf-8-sig'), canonical)
+            old = Counter((source_text[n - 1], kind) for n, kind in source)
+            new = Counter((candidate_text[n - 1], kind) for n, kind in candidate)
+            introduced = list((new - old).elements())
+            introduced = [kind for _, kind in introduced]
+        if not introduced:
+            return False
+        if "hard" in introduced:
+            first = next((n for n, kind in candidate if kind == "hard"), 0)
+            raise GatewayError("sensitive_content",
+                "Credential-like content is not accepted by this gateway's write policy.",
+                details={"rule_id": "CREDENTIAL_HARD", "line": first, "severity": "hard"})
+        if not self.gateway.sensitive_audit.allows(canonical):
+            first = next((n for n, kind in candidate if kind == "heuristic"), 0)
+            raise GatewayError("sensitive_content",
+                "Credential-like content is not accepted by this gateway's write policy.",
+                details={"rule_id": "CREDENTIAL_ASSIGNMENT", "line": first, "severity": "heuristic"})
+        return True
 
     @staticmethod
     def _visible_match_spans(source_text: str, old_text: str) -> list[tuple[int, int]]:
@@ -165,10 +204,10 @@ class FileWriter:
             _integer(expected_count, "expected_count", 1, 100)
             if not isinstance(old_text, str) or not old_text:
                 raise GatewayError("invalid_argument", "old_text must be a nonempty exact string.")
-            self._content(old_text)
-            self._content(new_text)
+            self._content(old_text, reject_sensitive=False)
+            self._content(new_text, reject_sensitive=False)
         else:
-            self._content(content)
+            self._content(content, reject_sensitive=False)
         canonical = "/".join(parts)
         with self._lock, self.gateway._directory(parts[:-1]) as parent:
             context = nullcontext(None) if dry_run else storage.write_lock(self.gateway._root_fd)
@@ -180,7 +219,14 @@ class FileWriter:
                     previous = b""
                 else:
                     snapshot = self.gateway._snapshot_at(parent, parts[-1])
-                    source_has_sensitive = self.gateway._visibility.is_sensitive(snapshot.text)
+                    source_classification = self.gateway._visibility.classify(canonical, snapshot.raw)
+                    if any(kind == "scan_unavailable" for _, kind in source_classification[1]):
+                        raise GatewayError(
+                            "sensitive_content",
+                            "Source cannot be completely scanned; no change was permitted.",
+                            details={"rule_id": "SCAN_UNAVAILABLE", "severity": "scan_unavailable"},
+                        )
+                    source_has_sensitive = any(source_classification[0])
                     if operation == "write" and source_has_sensitive:
                         raise GatewayError("sensitive_content", "This source contains redacted data and cannot be whole-file overwritten through the gateway.")
                     if not snapshot.metadata.st_mode & 0o222:
@@ -191,19 +237,19 @@ class FileWriter:
                 if operation == "replace":
                     # Unlike displayed text, this preserves BOM, CRLF, and final newlines.
                     source_text = previous.decode("utf-8")
-                    visible_matches = self.gateway._visibility.visible_matches(source_text, old_text)
+                    visible_matches = self.gateway._visibility.visible_matches(source_text, old_text, canonical)
                     replacements = len(visible_matches)
                     if replacements != expected_count:
                         raise GatewayError("match_count", "Exact-match count differs from expected_count in visible source text; no change was applied.")
                     updated_text = self._replace_spans(source_text, visible_matches, new_text)
                     if not self.gateway._visibility.preserves_hidden_lines(
-                            source_text, updated_text, visible_matches, new_text):
+                            source_text, updated_text, visible_matches, new_text, canonical):
                         raise GatewayError("sensitive_content", "Edits may not expose or merge protected source lines.")
-                    if self.gateway._visibility.new_sensitive_content(source_text, updated_text):
-                        raise GatewayError("sensitive_content", "Edits may not introduce protected content.")
                     raw = self._content(updated_text, reject_sensitive=False)
+                    audit_needed = self._reject_candidate(canonical, raw, previous)
                 else:
-                    raw = self._content(content)
+                    raw = self._content(content, reject_sensitive=False)
+                    audit_needed = self._reject_candidate(canonical, raw)
                 changed = snapshot is None or raw != previous
                 diff, truncated = _preview(previous, raw, canonical, policy=self.gateway._visibility)
                 result = {"operation": operation, "path": canonical, "dry_run": dry_run,
@@ -211,17 +257,22 @@ class FileWriter:
                           "old_sha256": snapshot.sha256 if snapshot else None,
                           "new_sha256": _digest(raw), "size_bytes": len(raw),
                           "diff": diff, "diff_truncated": truncated, "backup_path": None,
-                          "warnings": [], "content_trust": "untrusted_file_data"}
+                          "warnings": (["Temporary heuristic write audit active; inspect content locally."] if audit_needed else []),
+                          "content_trust": "untrusted_file_data"}
                 if replacements is not None:
                     result["replacements"] = replacements
                 if dry_run or not changed:
                     return result
+                if audit_needed and not self.gateway.sensitive_audit.allows(canonical):
+                    raise GatewayError('sensitive_content', 'Temporary sensitive audit authorization expired.')
                 if snapshot is not None:
                     assert state is not None
                     result["backup_path"] = storage.save_backup(state, canonical, snapshot.raw, snapshot.sha256,
                                                                  retention_days=self.gateway.backup_retention_days)
 
                 def verify() -> None:
+                    if audit_needed and not self.gateway.sensitive_audit.allows(canonical):
+                        raise GatewayError('sensitive_content', 'Temporary sensitive audit authorization expired before install.')
                     if snapshot is None:
                         self._absent(parent, parts[-1])
                         return
@@ -234,6 +285,6 @@ class FileWriter:
                         raise GatewayError("conflict", "Destination changed before commit; read it again.")
 
                 mode = stat.S_IMODE(snapshot.metadata.st_mode) if snapshot else 0o600
-                result["warnings"] = storage.install_file(parent, parts[-1], raw, mode, verify, create=snapshot is None)
+                result["warnings"] += storage.install_file(parent, parts[-1], raw, mode, verify, create=snapshot is None)
                 result["applied"] = True
                 return result

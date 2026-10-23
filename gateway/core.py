@@ -203,7 +203,9 @@ class Gateway:
                  exec_runners: tuple[str, ...] = (),
                  protected_content_paths: tuple[str, ...] = (),
                  allow_git: bool = False, git_allowed_commands: tuple[str, ...] = (),
-                 git_state_dir: str | Path | None = None):
+                 git_state_dir: str | Path | None = None,
+                 sensitive_content_audit_paths: tuple[str, ...] = (),
+                 sensitive_content_audit_until: str | None = None):
         if type(allow_write) is not bool:
             raise GatewayError("invalid_argument", "allow_write must be a boolean.")
         if type(backup_retention_days) is not int or not 1 <= backup_retention_days <= 3650:
@@ -229,6 +231,13 @@ class Gateway:
         self._git_adapter_exposed = False
         self.backup_retention_days = backup_retention_days
         self.allow_write = allow_write
+        from .sensitive_audit import SensitiveAudit
+        if (sensitive_content_audit_paths or sensitive_content_audit_until) and not allow_write:
+            raise GatewayError("invalid_argument", "Sensitive audit requires enabled writes.")
+        self.sensitive_audit = SensitiveAudit(
+            paths=sensitive_content_audit_paths, expires_at=sensitive_content_audit_until,
+            write_paths=write_paths,
+        )
         self.allow_exec = allow_exec
         self.limits = limits or Limits()
         from .visibility import SensitiveContentPolicy
@@ -453,10 +462,14 @@ class Gateway:
         with self._directory(parts[:-1]) as parent:
             return self._snapshot_at(parent, parts[-1])
 
-    def _text(self, parts: tuple[str, ...]) -> tuple[list[str], int, int]:
+    def _text(self, parts: tuple[str, ...]) -> tuple[list[str], int, int, list[bool]]:
         snapshot = self._snapshot(parts)
-        lines, redacted = self._visibility.redact_lines(snapshot.text)
-        return lines, redacted, len(snapshot.raw), self._visibility.sensitive_flags(snapshot.text)
+        canonical = '/'.join(parts)
+        flags, findings = self._visibility.classify(canonical, snapshot.raw)
+        if any(kind == "scan_unavailable" for _, kind in findings):
+            raise GatewayError("scan_unavailable", "Source could not be completely scanned.")
+        lines, redacted = self._visibility.redact_lines(snapshot.text, canonical)
+        return lines, redacted, len(snapshot.raw), flags
 
     def create_directory(self, path: str, parents: bool = False, exist_ok: bool = True,
                          dry_run: bool = True) -> dict[str, Any]:
@@ -545,7 +558,7 @@ class Gateway:
         _integer(start_line, "start_line", 1, 10_000_000)
         _integer(max_lines, "max_lines", 1, self.limits.max_read_lines)
         snapshot = self._snapshot(parts)
-        lines, redacted = self._visibility.redact_lines(snapshot.text)
+        lines, redacted = self._visibility.redact_lines(snapshot.text, '/'.join(parts))
         size = len(snapshot.raw)
         selected: list[str] = []
         output_chars = 0
@@ -628,8 +641,10 @@ class Gateway:
             scan.files += 1
             try:
                 lines, _, byte_count, hidden_flags = self._text(tuple(entry["path"].split("/")))
-            except GatewayError:
+            except GatewayError as exc:
                 scan.skipped += 1
+                if exc.code == "scan_unavailable":
+                    scan.reasons.add("scan_unavailable")
                 continue
             scan.bytes_read += byte_count
             for number, line in enumerate(lines, 1):

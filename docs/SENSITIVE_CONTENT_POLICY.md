@@ -1,7 +1,9 @@
 # Sensitive Content Policy — V3 implementation candidate
 
-**Status:** PR #52 Draft; implementation under CI and independent **CODE**
-review. Not merged or deployed. The approved V3 **design** is
+**Status:** PR #52 V3 independently CODE PASS at pinned Head but remains Draft,
+unmerged and undeployed. Path Text Visibility V1 is proposed independently in
+Draft PR #61; this document describes that candidate behavior, not a
+claim of production deployment. The approved V3 **design** is
 [SENSITIVE_CONTENT_CLASSIFICATION_V3_DESIGN.md](SENSITIVE_CONTENT_CLASSIFICATION_V3_DESIGN.md),
 independent Standards/Spec DESIGN PASS at Head
 `4791b32158a94c725f2e20997668388bdc951a6b`.
@@ -49,6 +51,25 @@ heuristic and cannot be allowed by Audit.
 For JSON, YAML, other non-Python files, and extensionless source, existing
 V2/legacy content rules are retained. This PR does not change them, and
 an independent read/seek/REST/MCP regression covers parity.
+
+## 1.1 Ordinary pathname text — V1 amendment
+
+See [Path Text Visibility V1 design](PATH_TEXT_VISIBILITY_V1_DESIGN.md).
+A plain path appearing in permitted source content is not secret evidence.
+Absolute paths, private/Home/config roots, other Workspace roots, digit-leading
+components, and references to protected filenames (`.env`, `.ssh`, keys) are
+visible/searchable/writable as **text** unless the same line independently
+contains an actual credential value, recognized token/signature,
+authenticated URI or private-key content.
+
+This removes only the previous `protected absolute path` **content-match**
+rule in Python and non-Python formats. It does **not** grant access to the
+path target. Existing root confinement, hidden-file denial, Workspace
+authorization, write scopes and symlink safeguards remain unchanged.
+Untokenizable Python retains `scan_unavailable` fail-closed behavior; a raw
+unquoted malformed path expression is not automatically valid Python.
+Construction-time `protected_content_paths`/`protected_paths` arguments remain
+accepted but cannot silently reinstate text-only path redaction.
 
 ## 2. Scanner-integrity fallback
 

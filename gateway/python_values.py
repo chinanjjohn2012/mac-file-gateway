@@ -303,6 +303,10 @@ def classify_python(
     """
     from .core import CREDENTIAL_URI, PRIVATE_KEY_BEGIN, PRIVATE_KEY_END, TOKEN_VALUE
 
+    # Keep the optional legacy parameter for caller compatibility, but a
+    # pathname match alone is never credential evidence in V1.
+    del protected_expr
+
     try:
         text = raw.decode("utf-8-sig")
     except (UnicodeDecodeError, UnicodeError):
@@ -336,8 +340,7 @@ def classify_python(
     for number, line in enumerate(lines, 1):
         if PRIVATE_KEY_BEGIN.search(line):
             inside_pem = True
-        if (inside_pem or TOKEN_VALUE.search(line) or CREDENTIAL_URI.search(line)
-                or (protected_expr is not None and protected_expr.search(line))):
+        if inside_pem or TOKEN_VALUE.search(line) or CREDENTIAL_URI.search(line):
             line_hard(number)
         if inside_pem and PRIVATE_KEY_END.search(line):
             inside_pem = False

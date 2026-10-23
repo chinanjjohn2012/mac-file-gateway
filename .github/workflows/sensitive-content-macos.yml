@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - release/ms1
+      - fix/sensitive-content-false-positive
     paths:
       - ".github/workflows/sensitive-content-macos.yml"
       - "gateway/**"
@@ -18,7 +19,7 @@ permissions:
 
 jobs:
   macos-verify:
-    if: github.event.pull_request.number == 52 && github.event.pull_request.head.repo.full_name == github.repository
+    if: (github.event.pull_request.number == 52 || github.event.pull_request.number == 61) && github.event.pull_request.head.repo.full_name == github.repository
     name: Native macOS verify --require-mcp
     runs-on: macos-15
     timeout-minutes: 20

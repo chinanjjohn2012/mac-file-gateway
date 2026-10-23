@@ -241,6 +241,9 @@ class Gateway:
         self.allow_exec = allow_exec
         self.limits = limits or Limits()
         from .visibility import SensitiveContentPolicy
+        # Retain protected_content_paths in the public constructor for
+        # compatibility; pathname *text* no longer triggers redaction.
+        # The root/hidden-file permission checks below remain authoritative.
         self._visibility = SensitiveContentPolicy(protected_content_paths)
         self.excludes = tuple(x.casefold() for x in excludes)
         if isinstance(allow_hidden_paths, (str, bytes)):

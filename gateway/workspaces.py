@@ -137,12 +137,9 @@ class WorkspaceService:
                 except Exception:
                     pin.close()
                     raise
-            # Every Workspace uses a single server-side list of sensitive
-            # roots for file read, search, write and diff classification.
-            private_paths = tuple(w.root for w in settings.workspaces) + (
-                str(config_dir), str(Path(config_dir) / 'gateway.json'),
-                str(Path.home()), str(Path.home() / '.local' / 'share' / 'mac-file-gateway'),
-            )
+            # Workspace and private config paths are authorization boundaries,
+            # not secret-looking strings. Keep strict root admission while no
+            # longer injecting these paths into source content classification.
             # Construct after *all* roots were checked. Validate actual
             # Gateway root FD identity after its own path-resolution cycle.
             for item, pin in zip(settings.workspaces, pinned_roots):
@@ -152,7 +149,6 @@ class WorkspaceService:
                     backup_retention_days=item.backup_retention_days,
                     sensitive_content_audit_paths=item.sensitive_content_audit_paths,
                     sensitive_content_audit_until=item.sensitive_content_audit_until,
-                    protected_content_paths=private_paths,
                     allow_exec=False, exec_paths=(), exec_runners=(),
                 )
                 if (os.fstat(gateway._root_fd).st_dev, os.fstat(gateway._root_fd).st_ino) != pin.ancestor_ids[-1]:

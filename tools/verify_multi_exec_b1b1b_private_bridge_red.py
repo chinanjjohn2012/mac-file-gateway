@@ -75,12 +75,16 @@ GREEN = {
     "test_b1b1b_guard_owner_lock_release_with_live_fd_is_detected",
     "test_b1b1b_guard_dynamic_dispatcher_and_metadata_route_are_rejected",
     "test_b1b1b_guard_closure_forwarding_private_asgi_is_rejected",
+    "test_b1b1b_guard_route_app_header_forwarding_is_detected",
+    "test_b1b1b_guard_mutated_middleware_and_exception_handlers_rejected",
+    "test_b1b1b_guard_mcp_structured_error_precedence_selfcheck",
+    "test_b1b1b_guard_fake_mcp_sdk_handler_origin_rejected",
     "test_b1b1b_guard_body_sourced_parser_proxy_bypass_is_not_denial",
     "test_b1b1b_guard_historical_real_subprocess_tests_are_present",
     "test_b1b1b_guard_normal_product_has_no_private_bridge_factory_import",
     "test_b1b1b_guard_existing_test_grant_not_serializable_or_reusable",
 }
-assert len(RED) == 24 and len(GREEN) == 14
+assert len(RED) == 24 and len(GREEN) == 18
 EXPECTED = set(RED) | GREEN
 
 
@@ -134,7 +138,7 @@ def main():
                     green += 1
             else:
                 issues.append(name + ": unexpected test")
-        if run.returncode != 1 or red != 24 or green != 14:
+        if run.returncode != 1 or red != 24 or green != 18:
             issues.append("wrong pytest status/counts: " +
                           repr((run.returncode, red, green)))
         if issues:
@@ -142,7 +146,7 @@ def main():
                 print("B1B1B_EXPECTED_RED_FAIL: " + issue, flush=True)
             return 1
         print("B1B1B_PRIVATE_BRIDGE_EXPECTED_RED=24")
-        print("B1B1B_EXISTING_GUARDS_GREEN=14")
+        print("B1B1B_EXISTING_GUARDS_GREEN=18")
         print("B1B1B_CONTRACT_STAGE=RED_NOT_IMPLEMENTED")
         print("B1B1B_NO_HOST_SPAWN_OR_SIGNAL=TRUE")
         print("B1B1B_HISTORICAL_REAL_EXEC_TESTS=UNCHANGED")

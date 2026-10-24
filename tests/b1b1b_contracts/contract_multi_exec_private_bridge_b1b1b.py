@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import functools
 import fcntl
 import importlib
 import importlib.util
@@ -26,8 +27,11 @@ import urllib.request
 import pytest
 from starlette.testclient import TestClient
 from starlette.applications import Starlette
+from starlette.exceptions import HTTPException, WebSocketException
+from starlette.middleware.errors import ServerErrorMiddleware
+from starlette.middleware.exceptions import ExceptionMiddleware
 from starlette.responses import JSONResponse
-from starlette.routing import Mount, Route
+from starlette.routing import Mount, Route, Router, request_response
 
 from gateway.core import GatewayError
 from gateway._exec_test_transport import create_private_bound_transport
@@ -206,15 +210,119 @@ def _public_app_graph_contains(root, target):
     return False
 
 
-def _public_network_route_allowlisted(public, trusted):
-    """Reject arbitrary ASGI proxy/dispatchers; audit the exact public shell.
+def _stock_starlette_route_handler(route):
+    """The actual executed Route.app must be the stock Starlette endpoint wrapper.
 
-    This is a *closed construction* rule, not path guessing. The ordinary
-    public Gateway network chain must be exactly Boundary ->
-    StrictPostAdmission -> built-in Starlette, with only the reviewed
-    HTTP REST route shapes and official MCP SDK mount. No unknown wrapper,
-    dynamic mapping, catch-all, injected route, custom callable endpoint,
-    or alternate client-selected trusted ASGI route can qualify.
+    Starlette Route.handle calls self.app, not self.endpoint. Check code
+    identity, defaults, and the bound closure, not merely the endpoint
+    name/path/methods (which remain unchanged in malicious proxies).
+    """
+    if type(route) is not Route or not inspect.isfunction(route.app):
+        return False
+    expected = request_response(route.endpoint)
+    candidate = route.app
+    if (candidate.__code__ is not expected.__code__
+            or candidate.__defaults__ != expected.__defaults__
+            or candidate.__kwdefaults__ != expected.__kwdefaults__):
+        return False
+    cells = candidate.__closure__ or ()
+    expected_cells = expected.__closure__ or ()
+    if len(cells) != len(expected_cells):
+        return False
+    for actual, canonical in zip(cells, expected_cells):
+        try:
+            a, b = actual.cell_contents, canonical.cell_contents
+        except ValueError:
+            return False
+        if a is b:
+            continue
+        if (isinstance(a, functools.partial)
+                and isinstance(b, functools.partial)
+                and a.func is b.func
+                and a.args == b.args and a.keywords == b.keywords):
+            continue
+        return False
+    return True
+
+
+def _stock_starlette_dispatch(core):
+    """Only the stock public middleware/handler/router execution chain.
+
+    An unchanged routes list is NOT proof: Starlette calls middleware_stack
+    first, then router.middleware_stack, then Route.app and exception handlers.
+    """
+    if type(core) is not Starlette or type(core.router) is not Router:
+        return False
+    if core.debug is not False:
+        return False
+    if type(core.user_middleware) is not list or core.user_middleware:
+        return False
+    if type(core.exception_handlers) is not dict or core.exception_handlers:
+        return False
+    router = core.router
+    default = getattr(router, "default", None)
+    dispatch = getattr(router, "middleware_stack", None)
+    if (not inspect.ismethod(default) or default.__self__ is not router
+            or default.__func__ is not Router.not_found
+            or not inspect.ismethod(dispatch) or dispatch.__self__ is not router
+            or dispatch.__func__ is not Router.app):
+        return False
+    outer = core.middleware_stack
+    if type(outer) is not ServerErrorMiddleware:
+        return False
+    inner = outer.app
+    if (type(inner) is not ExceptionMiddleware or inner.app is not router
+            or outer.handler is not None or outer.debug is not False
+            or inner.debug is not False or inner._status_handlers != {}
+            or set(inner._exception_handlers) != {
+                HTTPException, WebSocketException}):
+        return False
+    for exc, fn in ((HTTPException, ExceptionMiddleware.http_exception),
+                    (WebSocketException, ExceptionMiddleware.websocket_exception)):
+        h = inner._exception_handlers[exc]
+        if not inspect.ismethod(h) or h.__self__ is not inner or h.__func__ is not fn:
+            return False
+    return True
+
+
+def _same_mcp_sdk_handler(actual, canonical):
+    """SDK route provenance by original executable function/type identity.
+
+    A fake __module__ string beginning with mcp. or starlette. is not
+    sufficient; the reference comes from a separately built official SDK app.
+    """
+    if type(actual) is not type(canonical):
+        return False
+    if type(actual) is Route:
+        a, b = actual.endpoint, canonical.endpoint
+        if inspect.ismethod(a):
+            if (not inspect.ismethod(b) or a.__func__ is not b.__func__
+                    or type(a.__self__) is not type(b.__self__)):
+                return False
+        elif inspect.isfunction(a):
+            if (not inspect.isfunction(b) or a.__code__ is not b.__code__
+                    or a.__module__ != b.__module__):
+                return False
+        elif type(a) is not type(b):
+            return False
+        return _stock_starlette_route_handler(actual)
+    if type(actual) is Mount:
+        if actual.app is not actual._base_app:
+            return False
+        a, b = actual.app, canonical.app
+        if type(a) is not type(b) or type(a).__call__ is not type(b).__call__:
+            return False
+        return True
+    return False
+
+
+def _public_network_route_allowlisted(public, trusted, *,
+                                      service=None, port=None):
+    """Fail closed on unknown HTTP/MCP routing or callable execution chains.
+
+    A trusted in-process app cannot be selected by body/header/Host/path.
+    The exact public Starlette shell, Router, real route.app callables,
+    middleware_stack, exception handlers and SDK-origin /mcp are audited.
     """
     if type(public) is not Boundary:
         return False
@@ -222,15 +330,24 @@ def _public_network_route_allowlisted(public, trusted):
     if type(admission) is not StrictPostAdmission:
         return False
     app = admission.app
-    if type(app) is not Starlette:
+    if not _stock_starlette_dispatch(app):
         return False
     if _public_app_graph_contains(public, trusted):
+        return False
+    if not isinstance(service, WorkspaceService) or type(port) is not int:
+        return False
+    # Independent stock reference: actual SDK source/type code, not
+    # a mutable __module__ string or user-provided app/scope parameter.
+    canonical = create_multi_app(
+        service, enable_mcp=True, port=port).app.app
+    sdk_route = {r.path: r for r in canonical.router.routes}.get("/mcp")
+    if sdk_route is None:
         return False
     expected_get = {
         "/health", "/info", "/workspaces", *_GET_ROUTES.keys()}
     expected_post = set(_POST_ROUTES)
     expected = expected_get | expected_post | {"/mcp"}
-    routes = getattr(getattr(app, "router", None), "routes", ())
+    routes = getattr(app.router, "routes", ())
     if type(routes) is not list:
         return False
     seen = set()
@@ -242,11 +359,7 @@ def _public_network_route_allowlisted(public, trusted):
             return False
         seen.add(path)
         if path == "/mcp":
-            # SDK-owned route only: reject a custom proxy even on /mcp.
-            endpoint = route.app if type(route) is Mount else route.endpoint
-            origin = getattr(endpoint, "__module__",
-                             type(endpoint).__module__)
-            if not origin.startswith(("mcp.", "starlette.")):
+            if not _same_mcp_sdk_handler(route, sdk_route):
                 return False
             continue
         if type(route) is not Route:
@@ -263,7 +376,8 @@ def _public_network_route_allowlisted(public, trusted):
                 or getattr(endpoint, "__module__", None) != "gateway.http_multi"
                 or code.co_filename != create_multi_app.__code__.co_filename
                 or code.co_qualname
-                != "create_multi_app.<locals>." + name):
+                != "create_multi_app.<locals>." + name
+                or not _stock_starlette_route_handler(route)):
             return False
     return seen == expected
 
@@ -277,8 +391,13 @@ def _mcp_rejects_client_proof(status, body):
     if status != 200 or type(body) is not dict:
         return False
     result = body.get("result")
-    return (type(result) is dict and result.get("isError") is True
-            and "invalid_argument" in json.dumps(result, sort_keys=True))
+    if type(result) is not dict or result.get("isError") is not True:
+        return False
+    structured = result.get("structuredContent")
+    return (type(structured) is dict
+            and structured.get("error") == "invalid_argument"
+            and structured.get("executed") is not True
+            and result.get("executed") is not True)
 
 
 def _assert_bridge_resources_pinned(env):
@@ -516,7 +635,8 @@ def test_b1b1b_trusted_inprocess_asgi_preview_is_not_network_auth():
         trusted = env.trusted_asgi_app
         _require(trusted is not None and
                  _public_network_route_allowlisted(
-                     env.listener._server.config.app, trusted),
+                     env.listener._server.config.app, trusted,
+                     service=env.service, port=env.port),
                  "TRUSTED_ASGI_PREVIEW",
                  {"trusted_present": trusted is not None,
                   "trusted_in_public_routing": (
@@ -543,7 +663,8 @@ def test_b1b1b_trusted_inprocess_route_canary_is_not_network_reachable(
         trusted = env.trusted_asgi_app
         _require(trusted is not None and
                  _public_network_route_allowlisted(
-                     env.listener._server.config.app, trusted),
+                     env.listener._server.config.app, trusted,
+                     service=env.service, port=env.port),
                  "BRIDGE_TRUSTED_ROUTE_CANARY",
                  {"trusted_in_public_routing": True})
         router = getattr(trusted, "router", None)
@@ -588,7 +709,8 @@ def test_b1b1b_trusted_inprocess_route_canary_is_not_network_reachable(
                      {"network_path": path, "status": status,
                       "events": witness.events, "runner": len(runner)})
         _require(_public_network_route_allowlisted(
-                     env.listener._server.config.app, trusted),
+                     env.listener._server.config.app, trusted,
+                     service=env.service, port=env.port),
                  "BRIDGE_TRUSTED_ROUTE_CANARY",
                  {"public_network_topology_unsafe": True})
 
@@ -673,7 +795,8 @@ def test_b1b1b_guard_real_listener_loopback_preview_without_execution():
         assert env.listener._proves_live()
         assert env.listener._socket.getsockname() == ("127.0.0.1", env.port)
         assert _public_network_route_allowlisted(
-            env.listener._server.config.app, Starlette()), (
+            env.listener._server.config.app, Starlette(),
+            service=env.service, port=env.port), (
             "B1B1B_KNOWN_PUBLIC_ROUTE_SHAPE_REJECTED")
         status, data = _wire(env.port, "/run", {
             "workspace": "a", "cwd": "src", "argv": ["python", "hello.py"]})
@@ -868,7 +991,8 @@ def test_b1b1b_guard_dynamic_dispatcher_and_metadata_route_are_rejected():
     # A valid public shell also must fail if injected with a catch-all route.
     with create_private_bound_transport() as env:
         shell = env.listener._server.config.app
-        assert _public_network_route_allowlisted(shell, trusted)
+        assert _public_network_route_allowlisted(
+            shell, trusted, service=env.service, port=env.port)
         core = shell.app.app
         async def proxy(request):
             return JSONResponse({"leaked": True})
@@ -876,10 +1000,12 @@ def test_b1b1b_guard_dynamic_dispatcher_and_metadata_route_are_rejected():
                       methods=["POST"])
         core.router.routes.append(route)
         try:
-            assert not _public_network_route_allowlisted(shell, trusted)
+            assert not _public_network_route_allowlisted(
+            shell, trusted, service=env.service, port=env.port)
         finally:
             core.router.routes.remove(route)
-        assert _public_network_route_allowlisted(shell, trusted)
+        assert _public_network_route_allowlisted(
+            shell, trusted, service=env.service, port=env.port)
 
 
 def test_b1b1b_guard_closure_forwarding_private_asgi_is_rejected():
@@ -931,8 +1057,158 @@ def test_b1b1b_guard_body_sourced_parser_proxy_bypass_is_not_denial():
         400, {"error": "invalid_argument"})
     assert _mcp_rejects_client_proof(
         200, {"result": {"isError": True,
+                         "structuredContent": {"error": "invalid_argument"},
                          "content": [{"type": "text",
                                       "text": "invalid_argument: forbidden"}]}})
+
+
+def test_b1b1b_guard_route_app_header_forwarding_is_detected():
+    """Real bound loopback: same endpoint/path/methods, altered Route.app."""
+    with create_private_bound_transport() as env:
+        public = env.listener._server.config.app
+        core = public.app.app
+        trusted = Starlette()
+        async def private(request):
+            return JSONResponse({"private": True})
+        trusted.router.add_route("/run", private, methods=["POST"])
+        route = next(r for r in core.router.routes if r.path == "/run")
+        assert _public_network_route_allowlisted(
+            public, trusted, service=env.service, port=env.port)
+        original, endpoint = route.app, route.endpoint
+        async def attacker(scope, receive, send):
+            headers = dict(scope["headers"])
+            if headers.get(b"x-bridge-route") == b"internal":
+                return await trusted(scope, receive, send)
+            return await original(scope, receive, send)
+        route.app = attacker
+        try:
+            assert route.endpoint is endpoint
+            assert route.path == "/run" and route.methods == {"POST"}
+            assert not _public_network_route_allowlisted(
+                public, trusted, service=env.service, port=env.port)
+            status, data = _wire(
+                env.port, "/run", APPLY, {"x-bridge-route": "internal"})
+            assert status == 200 and data == {"private": True}
+        finally:
+            route.app = original
+        assert _public_network_route_allowlisted(
+            public, trusted, service=env.service, port=env.port)
+
+
+def test_b1b1b_guard_mutated_middleware_and_exception_handlers_rejected():
+    """Unchanged route list never makes a conditional proxy safe."""
+    with create_private_bound_transport() as env:
+        public = env.listener._server.config.app
+        core = public.app.app
+        trusted = Starlette()
+        assert _public_network_route_allowlisted(
+            public, trusted, service=env.service, port=env.port)
+        stack = core.middleware_stack
+        async def injected(scope, receive, send):
+            if (scope["type"] == "http"
+                    and dict(scope["headers"]).get(b"x-bridge-route")
+                    == b"internal"):
+                return await JSONResponse({"private": True})(
+                    scope, receive, send)
+            return await stack(scope, receive, send)
+        core.middleware_stack = injected
+        try:
+            assert not _public_network_route_allowlisted(
+                public, trusted, service=env.service, port=env.port)
+            status, data = _wire(
+                env.port, "/health", headers={"x-bridge-route": "internal"})
+            assert status == 200 and data == {"private": True}
+        finally:
+            core.middleware_stack = stack
+        assert _public_network_route_allowlisted(
+            public, trusted, service=env.service, port=env.port)
+        async def handler(request, exc):
+            return JSONResponse({"private": True})
+        core.exception_handlers[404] = handler
+        try:
+            assert not _public_network_route_allowlisted(
+                public, trusted, service=env.service, port=env.port)
+        finally:
+            del core.exception_handlers[404]
+        assert _public_network_route_allowlisted(
+            public, trusted, service=env.service, port=env.port)
+        # User-middleware definitions also redirect before routes are tried.
+        class Forward:
+            def __init__(self, app):
+                self.app = app
+            async def __call__(self, scope, receive, send):
+                await self.app(scope, receive, send)
+        from starlette.middleware import Middleware
+        core.user_middleware.append(Middleware(Forward))
+        try:
+            assert not _public_network_route_allowlisted(
+                public, trusted, service=env.service, port=env.port)
+        finally:
+            core.user_middleware.clear()
+        assert _public_network_route_allowlisted(
+            public, trusted, service=env.service, port=env.port)
+    # A real Starlette 404 exception handler can turn an unlisted private
+    # path into an HTTP 200 despite an unmodified standard router.
+    with TestClient(Starlette(exception_handlers={404: handler})) as client:
+        response = client.get("/unlisted-private")
+        assert response.status_code == 200
+        assert response.json() == {"private": True}
+
+
+def test_b1b1b_guard_mcp_structured_error_precedence_selfcheck():
+    """Free-text invalid_argument never substitutes for structured error."""
+    wrong = {"result": {
+        "isError": True,
+        "structuredContent": {"error": "exec_cleanup_proof_required"},
+        "content": [{"type": "text",
+                     "text": "Request contained invalid_argument field"}]}}
+    assert not _mcp_rejects_client_proof(200, wrong)
+    assert not _mcp_rejects_client_proof(
+        200, {"result": {"isError": True, "content": [
+            {"type": "text", "text": "invalid_argument"}]}})
+    assert not _mcp_rejects_client_proof(
+        200, {"result": {"isError": False, "structuredContent": {
+            "error": "invalid_argument"}}})
+    assert not _mcp_rejects_client_proof(
+        200, {"result": {"isError": True, "structuredContent": {
+            "error": "invalid_argument", "executed": True}}})
+    assert _mcp_rejects_client_proof(
+        200, {"result": {"isError": True, "structuredContent": {
+            "error": "invalid_argument"}, "content": [
+            {"type": "text", "text": "rejected"}]}})
+
+
+def test_b1b1b_guard_fake_mcp_sdk_handler_origin_rejected():
+    """A forged SDK __module__ string is not actual SDK handler provenance."""
+    with create_private_bound_transport() as env:
+        public = env.listener._server.config.app
+        trusted = Starlette()
+        assert _public_network_route_allowlisted(
+            public, trusted, service=env.service, port=env.port)
+        mcp_route = next(r for r in public.app.app.router.routes
+                         if r.path == "/mcp")
+        if type(mcp_route) is Route:
+            original = mcp_route.endpoint
+            async def proxy(req):
+                return JSONResponse({"private": True})
+            proxy.__module__ = "mcp.server.mcpserver"
+            mcp_route.endpoint = proxy
+            try:
+                assert not _public_network_route_allowlisted(
+                    public, trusted, service=env.service, port=env.port)
+            finally:
+                mcp_route.endpoint = original
+        else:
+            assert type(mcp_route) is Mount
+            original = mcp_route.app
+            mcp_route.app = trusted
+            try:
+                assert not _public_network_route_allowlisted(
+                    public, trusted, service=env.service, port=env.port)
+            finally:
+                mcp_route.app = original
+        assert _public_network_route_allowlisted(
+            public, trusted, service=env.service, port=env.port)
 
 
 def test_b1b1b_guard_historical_real_subprocess_tests_are_present():

@@ -83,7 +83,7 @@ complete detached-descendant cleanup.
   invalid_argument, zero Runner, zero physical PREPARED mutation and
   unchanged public exec policy. Plain and forged-header cases remain.
   Existing product/bridge absence intentionally fails these.
-- **14 required GREEN**: real bound Listener still previews with no
+- **18 required GREEN**: real bound Listener still previews with no
   subprocess or durable attempt; foreign Listener cannot borrow grant;
   both invalid client proof body fields denied; immutable inventory
   of historical real subprocess, REST/MCP, slots and cancel/close tests;
@@ -102,8 +102,8 @@ complete detached-descendant cleanup.
   demonstrates the old graph detector's false GREEN and MUST fail the
   strict public route allowlist; a synthetic body-controlled REST/MCP
   parser bypass cannot be reported as an authorization denial.
-- **Strict verifier** checks exact 38 expanded NodeIDs once, no skipped
-  or unexpected failures, exact twenty-four absent-feature markers and fourteen
+- **Strict verifier** checks exact 42 expanded NodeIDs once, no skipped
+  or unexpected failures, exact twenty-four absent-feature markers and eighteen
   genuinely passing guards, pytest exit=1. It emits
   B1B1B_CONTRACT_STAGE=RED_NOT_IMPLEMENTED only for a matching RED.
 
@@ -176,6 +176,57 @@ contracts protect these four distinct P2 cases, preserve the prior
 developer-side test-only repair, NOT a fresh independent PASS,
 Bridge implementation, kernel-level route audit, or full descendant
 cleanup proof.
+
+## Later fixed-Head Standards RED contract P2 repairs
+
+At Head `10e05196890ef51e9ed731823515a04482dc6669`,
+[Standards FAIL #5637359508](https://github.com/chinanjjohn2012/mac-file-gateway/pull/68#pullrequestreview-5637359508)
+identified two possible false-GREEN paths: a public Starlette app with
+`user_middleware`, `exception_handlers` or a cached
+`middleware_stack` redirecting to trusted in-process ASGI despite
+unchanged routes; plus MCP proof rejection inferred from free-text
+`invalid_argument` instead of the structured error code. Independently,
+[Standards FAIL #5637393379](https://github.com/chinanjjohn2012/mac-file-gateway/pull/68#pullrequestreview-5637393379)
+identified that the actual `Route.app` callable can be substituted
+while `Route.endpoint/path/methods` remain identical.
+
+R0's public network audit is now a **closed execution-chain check**:
+it verifies the actual `Boundary -> StrictPostAdmission -> Starlette`
+composition, stock Router default and middleware callables, the
+built `ServerErrorMiddleware -> ExceptionMiddleware -> Router`
+chain, empty custom user/exception handlers, default HTTP/WebSocket
+exception semantics, and actual `Route.app` wrapper's code and
+closure-bound endpoint identity. Even a valid route table fails when
+the actual dispatch path is changed. Its official SDK `/mcp` handler
+is checked against an independent standard
+`create_multi_app(service,enable_mcp=True,port=port)` instance
+by executable code/source identity, not a spoofable
+`__module__` string. Any foreign dispatcher, proxy, injected
+middleware/handler or unknown handler fails closed. Newly required
+GREEN selfchecks temporarily mutate only a disposable
+loopback test fixture, prove client-selectable `Route.app` and
+cached middleware can return a synthetic private-canary HTTP 200
+on otherwise allowed paths, then restore the original stock public
+listener. Custom 404 exceptions and forged SDK source are also
+rejected. No real new host process/signal or user Gateway/Tunnel
+is involved.
+
+MCP forged arguments must be refused with HTTP 200 JSON-RPC
+`result.isError=true` **AND**
+`result.structuredContent.error="invalid_argument"`;
+a textual message containing `invalid_argument` with
+structured error `exec_cleanup_proof_required`, absent structured
+content, isError=false or executed=true cannot satisfy the oracle.
+A dedicated deterministic GREEN mutation selfcheck freezes this
+error-priority requirement; all 8 Bridge-own REST/MCP bad-field RED
+cases, physical no-PREPARED observer and zero-Runner requirements
+remain intact.
+
+With these four new GREEN selfchecks, the strict R0 classifier
+requires **24 exact expected RED and 18 mandatory GREEN across
+42 NodeIDs**. This is a test-only, no-host-spawn RED contract,
+not a Bridge R1/Worker implementation, a kernel ASGI audit or
+permission to enable production Exec.
 
 ## Required next gate
 

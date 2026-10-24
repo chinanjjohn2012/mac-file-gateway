@@ -25,6 +25,7 @@ import urllib.error
 import urllib.request
 
 import pytest
+from mcp.server.streamable_http_manager import StreamableHTTPASGIApp
 from starlette.testclient import TestClient
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException, WebSocketException
@@ -303,8 +304,15 @@ def _same_mcp_sdk_handler(actual, canonical):
             if (not inspect.isfunction(b) or a.__code__ is not b.__code__
                     or a.__module__ != b.__module__):
                 return False
-        elif type(a) is not type(b):
+        elif (type(a) is not StreamableHTTPASGIApp
+              or type(a) is not type(b)):
             return False
+        if type(a) is StreamableHTTPASGIApp:
+            # Official SDK 2.3.0 uses a *callable instance* as the Route
+            # endpoint; Starlette binds that exact object as Route.app.
+            # Requiring a function closure here would reject valid MCP.
+            return (actual.app is a and canonical.app is b
+                    and type(a).__call__ is StreamableHTTPASGIApp.__call__)
         return _stock_starlette_route_handler(actual)
     if type(actual) is Mount:
         if actual.app is not actual._base_app:
@@ -801,26 +809,6 @@ def test_b1b1b_guard_real_listener_loopback_preview_without_execution():
         real_mcp = next(r for r in core.router.routes if r.path == "/mcp")
         stock_mcp = next(r for r in reference.router.routes
                          if r.path == "/mcp")
-        print("B1B1B_AUDIT_FACETS",
-              "stock_dispatch=", _stock_starlette_dispatch(core),
-              "mcp_valid=", _same_mcp_sdk_handler(real_mcp, stock_mcp),
-              "bad_rest=", [
-                  r.path for r in core.router.routes
-                  if type(r) is Route and r.path != "/mcp"
-                  and not _stock_starlette_route_handler(r)],
-              "mcp_real=", (
-                  type(real_mcp).__name__,
-                  type(real_mcp.app).__name__,
-                  getattr(real_mcp.endpoint, "__module__", None),
-                  getattr(getattr(real_mcp.endpoint, "__code__", None),
-                          "co_qualname", None)),
-              "mcp_reference=", (
-                  type(stock_mcp).__name__,
-                  type(stock_mcp.app).__name__,
-                  getattr(stock_mcp.endpoint, "__module__", None),
-                  getattr(getattr(stock_mcp.endpoint, "__code__", None),
-                          "co_qualname", None)),
-              flush=True)
         assert _public_network_route_allowlisted(
             public, Starlette(), service=env.service, port=env.port), (
             "B1B1B_KNOWN_PUBLIC_ROUTE_SHAPE_REJECTED", {

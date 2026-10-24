@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import fcntl
 import importlib
 import importlib.util
 import inspect
@@ -17,6 +18,7 @@ import pickle
 import signal
 import subprocess
 import threading
+import httpx
 from types import ModuleType, SimpleNamespace
 import urllib.error
 import urllib.request
@@ -25,11 +27,14 @@ import pytest
 from starlette.testclient import TestClient
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
-from starlette.routing import Mount
+from starlette.routing import Mount, Route
 
 from gateway.core import GatewayError
 from gateway._exec_test_transport import create_private_bound_transport
-from gateway.http_multi import create_multi_app
+from gateway._exec_test_grant import _owner_lock_proven
+from gateway.http import Boundary
+from gateway.http_multi import create_multi_app, _GET_ROUTES, _POST_ROUTES
+from gateway.multi_admission import StrictPostAdmission
 from gateway.multi_cli import run_multi
 from gateway.workspaces import WorkspaceService
 
@@ -201,14 +206,97 @@ def _public_app_graph_contains(root, target):
     return False
 
 
+def _public_network_route_allowlisted(public, trusted):
+    """Reject arbitrary ASGI proxy/dispatchers; audit the exact public shell.
+
+    This is a *closed construction* rule, not path guessing. The ordinary
+    public Gateway network chain must be exactly Boundary ->
+    StrictPostAdmission -> built-in Starlette, with only the reviewed
+    HTTP REST route shapes and official MCP SDK mount. No unknown wrapper,
+    dynamic mapping, catch-all, injected route, custom callable endpoint,
+    or alternate client-selected trusted ASGI route can qualify.
+    """
+    if type(public) is not Boundary:
+        return False
+    admission = public.app
+    if type(admission) is not StrictPostAdmission:
+        return False
+    app = admission.app
+    if type(app) is not Starlette:
+        return False
+    if _public_app_graph_contains(public, trusted):
+        return False
+    expected_get = {
+        "/health", "/info", "/workspaces", *_GET_ROUTES.keys()}
+    expected_post = set(_POST_ROUTES)
+    expected = expected_get | expected_post | {"/mcp"}
+    routes = getattr(getattr(app, "router", None), "routes", ())
+    if type(routes) is not list:
+        return False
+    seen = set()
+    for route in routes:
+        if type(route) not in (Route, Mount):
+            return False
+        path = route.path
+        if type(path) is not str or path not in expected or path in seen:
+            return False
+        seen.add(path)
+        if path == "/mcp":
+            # SDK-owned route only: reject a custom proxy even on /mcp.
+            endpoint = route.app if type(route) is Mount else route.endpoint
+            origin = getattr(endpoint, "__module__",
+                             type(endpoint).__module__)
+            if not origin.startswith(("mcp.", "starlette.")):
+                return False
+            continue
+        if type(route) is not Route:
+            return False
+        expected_methods = (
+            {"GET", "HEAD"} if path in expected_get else {"POST"})
+        if route.methods != expected_methods:
+            return False
+        endpoint = route.endpoint
+        code = getattr(endpoint, "__code__", None)
+        name = ("read_endpoint" if path in expected_get
+                else "write_endpoint")
+        if (code is None
+                or getattr(endpoint, "__module__", None) != "gateway.http_multi"
+                or code.co_filename != create_multi_app.__code__.co_filename
+                or code.co_qualname
+                != "create_multi_app.<locals>." + name):
+            return False
+    return seen == expected
+
+
+def _rest_rejects_client_proof(status, body):
+    return (status == 400 and type(body) is dict
+            and body.get("error") == "invalid_argument")
+
+
+def _mcp_rejects_client_proof(status, body):
+    if status != 200 or type(body) is not dict:
+        return False
+    result = body.get("result")
+    return (type(result) is dict and result.get("isError") is True
+            and "invalid_argument" in json.dumps(result, sort_keys=True))
+
+
 def _assert_bridge_resources_pinned(env):
+    """Physical FDs AND owner-lock EXCLUSIVE lease must survive failed join.
+
+    A still-open owner.lock FD with flock(LOCK_UN) is NOT ownership.
+    Reuse the reviewed B1-A independent second-OFD competition witness.
+    """
     service, store = env.service, env.service._exec_state
     assert store is not None
-    assert not service._closing and not service._closed
+    assert not service._closed
     assert store.durability_state == "healthy"
     os.fstat(store._fd)
     os.fstat(store._lock_fd)
     os.fstat(service.get("a").pinned_root.fd)
+    assert _owner_lock_proven(
+        store._fd, store._lock_fd, env.grant._lock_stat), (
+        "B1B1B_OWNER_LOCK_EXCLUSIVE_LEASE_LOST")
 
 
 def _held_real_preview(env, monkeypatch):
@@ -427,7 +515,7 @@ def test_b1b1b_trusted_inprocess_asgi_preview_is_not_network_auth():
     with _bridge("TRUSTED_ASGI_PREVIEW") as env:
         trusted = env.trusted_asgi_app
         _require(trusted is not None and
-                 not _public_app_graph_contains(
+                 _public_network_route_allowlisted(
                      env.listener._server.config.app, trusted),
                  "TRUSTED_ASGI_PREVIEW",
                  {"trusted_present": trusted is not None,
@@ -454,7 +542,7 @@ def test_b1b1b_trusted_inprocess_route_canary_is_not_network_reachable(
     with _bridge("BRIDGE_TRUSTED_ROUTE_CANARY") as env:
         trusted = env.trusted_asgi_app
         _require(trusted is not None and
-                 not _public_app_graph_contains(
+                 _public_network_route_allowlisted(
                      env.listener._server.config.app, trusted),
                  "BRIDGE_TRUSTED_ROUTE_CANARY",
                  {"trusted_in_public_routing": True})
@@ -499,10 +587,10 @@ def test_b1b1b_trusted_inprocess_route_canary_is_not_network_reachable(
                      "BRIDGE_TRUSTED_ROUTE_CANARY",
                      {"network_path": path, "status": status,
                       "events": witness.events, "runner": len(runner)})
-        _require(not _public_app_graph_contains(
+        _require(_public_network_route_allowlisted(
                      env.listener._server.config.app, trusted),
                  "BRIDGE_TRUSTED_ROUTE_CANARY",
-                 {"graph_mount_detected": True})
+                 {"public_network_topology_unsafe": True})
 
 
 def test_b1b1b_bridge_close_revokes_one_way():
@@ -584,6 +672,9 @@ def test_b1b1b_guard_real_listener_loopback_preview_without_execution():
         before = _records(env)
         assert env.listener._proves_live()
         assert env.listener._socket.getsockname() == ("127.0.0.1", env.port)
+        assert _public_network_route_allowlisted(
+            env.listener._server.config.app, Starlette()), (
+            "B1B1B_KNOWN_PUBLIC_ROUTE_SHAPE_REJECTED")
         status, data = _wire(env.port, "/run", {
             "workspace": "a", "cwd": "src", "argv": ["python", "hello.py"]})
         assert status == 200 and data["dry_run"] is True
@@ -666,6 +757,182 @@ def test_b1b1b_guard_network_mount_or_wrapper_graph_is_detectable():
     assert _public_app_graph_contains(trusted, trusted)
     assert _public_app_graph_contains(Wrapped(nested), trusted)
     assert not _public_app_graph_contains(Starlette(), trusted)
+
+
+@pytest.mark.parametrize("field", [
+    "test_mode", "group_only_test_grant", "_trusted_bound_listener",
+    "_internal_exec_grant",
+])
+def test_b1b1b_bridge_rest_body_cannot_mint_private_scope(
+        monkeypatch, field):
+    """NEW bridge's REAL TCP REST: no client body can select test authority."""
+    with _bridge("BRIDGE_BODY_REST_DENY") as env:
+        calls = _runner_spy(env, monkeypatch)
+        scene, witness, snapshot, no_intent = _physical_oracle(env)
+        policy = env.service.info()["exec_policy"]
+        with monkeypatch.context() as patch:
+            witness.install(patch)
+            before = snapshot(scene)
+            status, body = _wire(env.port, "/run", {
+                **APPLY, field: {"token": "forged"} if field.startswith("_")
+                else True})
+            clean = no_intent(scene, witness, before, calls)
+        _require(_rest_rejects_client_proof(status, body) and clean
+                 and env.service.info()["exec_policy"] == policy,
+                 "BRIDGE_BODY_REST_DENY",
+                 {"field": field, "status": status,
+                  "body": repr(body)[:130],
+                  "calls": len(calls), "events": witness.events})
+
+
+@pytest.mark.parametrize("field", [
+    "test_mode", "group_only_test_grant", "_trusted_bound_listener",
+    "_internal_exec_grant",
+])
+def test_b1b1b_bridge_mcp_arguments_cannot_mint_private_scope(
+        monkeypatch, field):
+    """NEW bridge's official MCP SDK wire: private proof in arguments DENY."""
+    with _bridge("BRIDGE_BODY_MCP_DENY") as env:
+        calls = _runner_spy(env, monkeypatch)
+        scene, witness, snapshot, no_intent = _physical_oracle(env)
+        policy = env.service.info()["exec_policy"]
+        with monkeypatch.context() as patch:
+            witness.install(patch)
+            before = snapshot(scene)
+            status, init = _wire(env.port, "/mcp", {
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25",
+                           "capabilities": {},
+                           "clientInfo": {"name": "body-spoof",
+                                          "version": "1"}}})
+            assert status == 200 and "result" in init
+            _wire(env.port, "/mcp", {
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"})
+            status, body = _wire(env.port, "/mcp", {
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "run_command",
+                           "arguments": {**APPLY, field: {
+                               "token": "forged"} if field.startswith("_")
+                               else True}}})
+            clean = no_intent(scene, witness, before, calls)
+        _require(_mcp_rejects_client_proof(status, body) and clean
+                 and env.service.info()["exec_policy"] == policy,
+                 "BRIDGE_BODY_MCP_DENY",
+                 {"field": field, "status": status,
+                  "body": repr(body)[:150],
+                  "calls": len(calls), "events": witness.events})
+
+
+def test_b1b1b_guard_owner_lock_release_with_live_fd_is_detected():
+    """Mutation: original FD stays statable after LOCK_UN; second owner wins."""
+    with create_private_bound_transport() as env:
+        store = env.service._exec_state
+        fd = store._lock_fd
+        competitor = -1
+        _assert_bridge_resources_pinned(env)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        try:
+            assert os.fstat(fd).st_nlink == 1  # open FD alone is insufficient
+            competitor = os.open(
+                "owner.lock", os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=store._fd)
+            fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with pytest.raises(AssertionError,
+                               match="B1B1B_OWNER_LOCK_EXCLUSIVE_LEASE_LOST"):
+                _assert_bridge_resources_pinned(env)
+        finally:
+            if competitor >= 0:
+                fcntl.flock(competitor, fcntl.LOCK_UN)
+                os.close(competitor)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _assert_bridge_resources_pinned(env)
+        assert env.grant.qualifies_transport(
+            env.service, "a", transport=env.listener)
+
+
+def test_b1b1b_guard_dynamic_dispatcher_and_metadata_route_are_rejected():
+    """Mutation: a private target in arbitrary dispatch mapping is not safe."""
+    trusted = Starlette()
+    class Dispatcher:
+        def __init__(self):
+            self.dispatch = {"/nonstandard-private/run": trusted}
+            self.metadata = {"x-gateway-test-mode": "private"}
+        def resolve(self, path, headers):
+            return self.dispatch.get(path) if headers.get(
+                "x-gateway-test-mode") == "private" else None
+    bad = Dispatcher()
+    assert not _public_app_graph_contains(bad, trusted)
+    assert bad.resolve("/nonstandard-private/run", bad.metadata) is trusted
+    assert not _public_network_route_allowlisted(bad, trusted)
+    # A valid public shell also must fail if injected with a catch-all route.
+    with create_private_bound_transport() as env:
+        shell = env.listener._server.config.app
+        assert _public_network_route_allowlisted(shell, trusted)
+        core = shell.app.app
+        async def proxy(request):
+            return JSONResponse({"leaked": True})
+        route = Route("/nonstandard-private/{path:path}", proxy,
+                      methods=["POST"])
+        core.router.routes.append(route)
+        try:
+            assert not _public_network_route_allowlisted(shell, trusted)
+        finally:
+            core.router.routes.remove(route)
+        assert _public_network_route_allowlisted(shell, trusted)
+
+
+def test_b1b1b_guard_closure_forwarding_private_asgi_is_rejected():
+    """Real Starlette/hxx transport: unknown closure path reaches trusted.
+
+    The previous app identity check and four guessed path probes missed it.
+    A closed-route structural audit must reject it regardless of canary name.
+    """
+    trusted = Starlette()
+    canary = "/__b1b1b_private_canary_8fc3bd__"
+    async def trusted_only(request):
+        return JSONResponse({"b1b1b": "TRUSTED_ONLY"})
+    trusted.router.add_route(canary, trusted_only, methods=["GET"])
+    async def proxy(request):
+        target = "/" + request.path_params["path"]
+        async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=trusted),
+                base_url="http://private.local") as client:
+            result = await client.get(target)
+        return JSONResponse(result.json(), status_code=result.status_code)
+    public = Starlette(routes=[
+        Route("/unlisted/{path:path}", proxy, methods=["GET"])])
+    assert not _public_app_graph_contains(public, trusted)
+    with TestClient(public) as client:
+        leaked = client.get("/unlisted" + canary)
+    assert leaked.status_code == 200
+    assert leaked.json() == {"b1b1b": "TRUSTED_ONLY"}
+    assert not _public_network_route_allowlisted(public, trusted)
+
+
+def test_b1b1b_guard_body_sourced_parser_proxy_bypass_is_not_denial():
+    """Synthetic unsafe REST/MCP proxy must fail the shared denial oracles."""
+    async def unsafe(request):
+        payload = await request.json()
+        allowed = bool(payload.get("test_mode"))
+        return JSONResponse({
+            "executed": allowed, "error": None if allowed else "invalid_argument"
+        }, status_code=200 if allowed else 400)
+    with TestClient(Starlette(routes=[
+            Route("/run", unsafe, methods=["POST"])])) as client:
+        leaked = client.post("/run", json={**APPLY, "test_mode": True})
+    assert leaked.status_code == 200 and leaked.json()["executed"] is True
+    assert not _rest_rejects_client_proof(
+        leaked.status_code, leaked.json())
+    forged_mcp = {"result": {"isError": False,
+                             "structuredContent": {"executed": True}}}
+    assert not _mcp_rejects_client_proof(200, forged_mcp)
+    assert _rest_rejects_client_proof(
+        400, {"error": "invalid_argument"})
+    assert _mcp_rejects_client_proof(
+        200, {"result": {"isError": True,
+                         "content": [{"type": "text",
+                                      "text": "invalid_argument: forbidden"}]}})
 
 
 def test_b1b1b_guard_historical_real_subprocess_tests_are_present():

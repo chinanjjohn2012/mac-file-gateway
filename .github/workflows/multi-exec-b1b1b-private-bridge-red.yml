@@ -81,5 +81,5 @@ jobs:
         run: python -m pytest -q
       - name: Prior B1-B1-A 11 RED and 31 GREEN frozen
         run: python tools/verify_multi_exec_b1b1_default_deny_red.py
-      - name: New private bridge 16 expected RED and 10 GREEN
+      - name: New private bridge 24 expected RED and 14 GREEN
         run: python tools/verify_multi_exec_b1b1b_private_bridge_red.py

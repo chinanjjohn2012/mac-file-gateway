@@ -35,6 +35,22 @@ RED = {
         "BRIDGE_WIRE_MCP_DENY",
     "test_b1b1b_bridge_real_wire_mcp_nonpreview_denied[forged]":
         "BRIDGE_WIRE_MCP_DENY",
+    "test_b1b1b_bridge_rest_body_cannot_mint_private_scope[test_mode]":
+        "BRIDGE_BODY_REST_DENY",
+    "test_b1b1b_bridge_rest_body_cannot_mint_private_scope[group_only_test_grant]":
+        "BRIDGE_BODY_REST_DENY",
+    "test_b1b1b_bridge_rest_body_cannot_mint_private_scope[_trusted_bound_listener]":
+        "BRIDGE_BODY_REST_DENY",
+    "test_b1b1b_bridge_rest_body_cannot_mint_private_scope[_internal_exec_grant]":
+        "BRIDGE_BODY_REST_DENY",
+    "test_b1b1b_bridge_mcp_arguments_cannot_mint_private_scope[test_mode]":
+        "BRIDGE_BODY_MCP_DENY",
+    "test_b1b1b_bridge_mcp_arguments_cannot_mint_private_scope[group_only_test_grant]":
+        "BRIDGE_BODY_MCP_DENY",
+    "test_b1b1b_bridge_mcp_arguments_cannot_mint_private_scope[_trusted_bound_listener]":
+        "BRIDGE_BODY_MCP_DENY",
+    "test_b1b1b_bridge_mcp_arguments_cannot_mint_private_scope[_internal_exec_grant]":
+        "BRIDGE_BODY_MCP_DENY",
     "test_b1b1b_bridge_foreign_instance_never_borrows_grant":
         "BRIDGE_FOREIGN_INSTANCE",
     "test_b1b1b_trusted_inprocess_asgi_preview_is_not_network_auth":
@@ -56,11 +72,15 @@ GREEN = {
     "test_b1b1b_guard_nested_import_or_initialization_error_is_not_expected_red",
     "test_b1b1b_guard_factory_signature_rejects_optional_untrusted_scope",
     "test_b1b1b_guard_network_mount_or_wrapper_graph_is_detectable",
+    "test_b1b1b_guard_owner_lock_release_with_live_fd_is_detected",
+    "test_b1b1b_guard_dynamic_dispatcher_and_metadata_route_are_rejected",
+    "test_b1b1b_guard_closure_forwarding_private_asgi_is_rejected",
+    "test_b1b1b_guard_body_sourced_parser_proxy_bypass_is_not_denial",
     "test_b1b1b_guard_historical_real_subprocess_tests_are_present",
     "test_b1b1b_guard_normal_product_has_no_private_bridge_factory_import",
     "test_b1b1b_guard_existing_test_grant_not_serializable_or_reusable",
 }
-assert len(RED) == 16 and len(GREEN) == 10
+assert len(RED) == 24 and len(GREEN) == 14
 EXPECTED = set(RED) | GREEN
 
 
@@ -114,15 +134,15 @@ def main():
                     green += 1
             else:
                 issues.append(name + ": unexpected test")
-        if run.returncode != 1 or red != 16 or green != 10:
+        if run.returncode != 1 or red != 24 or green != 14:
             issues.append("wrong pytest status/counts: " +
                           repr((run.returncode, red, green)))
         if issues:
             for issue in issues:
                 print("B1B1B_EXPECTED_RED_FAIL: " + issue, flush=True)
             return 1
-        print("B1B1B_PRIVATE_BRIDGE_EXPECTED_RED=16")
-        print("B1B1B_EXISTING_GUARDS_GREEN=10")
+        print("B1B1B_PRIVATE_BRIDGE_EXPECTED_RED=24")
+        print("B1B1B_EXISTING_GUARDS_GREEN=14")
         print("B1B1B_CONTRACT_STAGE=RED_NOT_IMPLEMENTED")
         print("B1B1B_NO_HOST_SPAWN_OR_SIGNAL=TRUE")
         print("B1B1B_HISTORICAL_REAL_EXEC_TESTS=UNCHANGED")

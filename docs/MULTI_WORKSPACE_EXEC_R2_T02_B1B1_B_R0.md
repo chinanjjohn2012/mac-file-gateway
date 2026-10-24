@@ -60,7 +60,7 @@ complete detached-descendant cleanup.
 
 ## Exact R0 RED / GREEN classification
 
-- **16 expected RED**, each with an exact B1B1B_RED_ marker:
+- **24 expected RED**, each with an exact B1B1B_RED_ marker:
   ordinary direct nonpreview on the existing bound test fixture must
   deny before Runner; unauthorized raw TCP REST and real SDK MCP
   apply must deny both with NO metadata and with forged headers;
@@ -74,9 +74,16 @@ complete detached-descendant cleanup.
   from any network route/mount/wrapper; close must revoke one-way;
   live in-flight REST preview plus injected join exception or
   no-op join must keep the owner.lock, state and Workspace FDs pinned
-  for a bounded retried close.
+  **and the original exclusive flock proven by a second independent FD
+  challenge** for a bounded retried close.
+  **NEW Bridge** real REST and SDK MCP each have four adversarial
+  request-body / arguments variants: `test_mode`,
+  `group_only_test_grant`, `_trusted_bound_listener`, and
+  `_internal_exec_grant`. Every variant must reject with stable
+  invalid_argument, zero Runner, zero physical PREPARED mutation and
+  unchanged public exec policy. Plain and forged-header cases remain.
   Existing product/bridge absence intentionally fails these.
-- **10 required GREEN**: real bound Listener still previews with no
+- **14 required GREEN**: real bound Listener still previews with no
   subprocess or durable attempt; foreign Listener cannot borrow grant;
   both invalid client proof body fields denied; immutable inventory
   of historical real subprocess, REST/MCP, slots and cancel/close tests;
@@ -86,8 +93,17 @@ complete detached-descendant cleanup.
   errors are never converted into expected missing-bridge markers,
   parameterized factory signatures cannot pass, and a simulated
   nested ASGI mount through a wrapper is actually detected.
-- **Strict verifier** checks exact 26 expanded NodeIDs once, no skipped
-  or unexpected failures, exact sixteen absent-feature markers and ten
+  NEW physical mutation selfchecks: releasing LOCK_EX while leaving the
+  owner.lock FD open lets a competing FD take the lock, and MUST fail
+  the pinned-ownership assertion; a custom dispatcher with a dynamic
+  `dispatch` dict and metadata-selected private route MUST be rejected
+  regardless of fixed canary paths; a real Starlette closure forwarding
+  an unknown /unlisted/ path to trusted ASGI via httpx.ASGITransport
+  demonstrates the old graph detector's false GREEN and MUST fail the
+  strict public route allowlist; a synthetic body-controlled REST/MCP
+  parser bypass cannot be reported as an authorization denial.
+- **Strict verifier** checks exact 38 expanded NodeIDs once, no skipped
+  or unexpected failures, exact twenty-four absent-feature markers and fourteen
   genuinely passing guards, pytest exit=1. It emits
   B1B1B_CONTRACT_STAGE=RED_NOT_IMPLEMENTED only for a matching RED.
 
@@ -101,14 +117,28 @@ prevents an optional root/Workspace/credential path from being accepted.
 
 The new Bridge's *own* real REST and MCP wires are exercised with both
 normal requests and forged headers. Trusted ASGI network isolation
-requires a recursive wrapper/mount graph check plus a test-only
-GET route canary injected into the trusted app, observed locally via
-TestClient and denied over actual bound TCP on direct/nested paths.
+requires BOTH the fixed, closed network ASGI construction
+(`Boundary -> StrictPostAdmission -> Starlette`, official SDK /mcp,
+only the exact `gateway.http_multi` REST route endpoints/paths/methods,
+no unknown dynamic dispatchers, Proxy, custom route, catch-all or
+arbitrary `application` wrappers), a recursive graph check, AND a
+test-only GET route canary injected into the trusted app, observed
+locally via TestClient and denied over actual bound TCP.
+A known-good B1-B0 live listener must satisfy the allowlist; a synthetic
+custom dispatcher and a real Starlette closure-forwarding proxy are
+rejected by independent tests. Sampling a handful of guessed paths
+alone is not a security proof.
 The real in-flight TCP close-fault tests inject only join
 exception or no-op join; they do not fake thread liveness. Before retry,
 they require permanently revoked grants, closed listening socket,
-still-open pinned owner-lock/state/Workspace FDs and no premature
-service close, even while the actual preview Worker is active.
+still-open pinned owner-lock/state/Workspace FDs AND independent
+second-OFD `flock(LOCK_EX|LOCK_NB)` challenge showing owner exclusivity
+with the original physical lock inode. A deterministic mutation test
+drops the original flock but leaves its FD statable, proves another FD
+can obtain exclusivity and requires the oracle to fail.
+No premature service close is permitted while the actual preview Worker
+is active. Neither FD liveness nor an invalidated grant alone is lock
+ownership.
 
 The no-intent refusals reuse the identical frozen B1-B1-A physical
 observer, not a final-snapshot-only test: a transient PREPARED write
@@ -117,7 +147,7 @@ not accepted as a clean denial. The new bridge must never mount its
 in-process trusted ASGI app directly on the public bound Listener.
 
 This R0 contract deliberately has no new actual Worker or child
-process authority. When the new factory is absent, the six new
+process authority. When the new factory is absent, the added
 factory-dependent RED cases (and old factory-dependent cases) fail
 with an exact missing-module marker; the GREEN fault-injection
 selfchecks ensure an unrelated nested import/init error cannot masquerade
@@ -129,6 +159,23 @@ real product pytest, frozen B1-B1-A strict RED classifier, and this
 new expected RED classifier. It does not spawn any *new* process
 from R0 contracts. Existing full product regressions still perform
 their preexisting true disposable subprocess acceptance.
+
+## Independent Standards + Spec P2 corrections (current R0)
+
+On Head `3b3415f555ad26ae20d4b10fb1ab8e82ede84488`,
+[Standards FAIL #5637260572](https://github.com/chinanjjohn2012/mac-file-gateway/pull/68#pullrequestreview-5637260572)
+identified a possible falsely GREEN close assertion when flock was
+released while owner.lock FD stayed open, and an uninspected dynamic
+ASGI dispatch mapping. Independently,
+[Spec FAIL #5637266276](https://github.com/chinanjjohn2012/mac-file-gateway/pull/68#pullrequestreview-5637266276)
+identified the missing Bridge-own REST/MCP **body and arguments**
+forgery matrix and unknown ASGI closure forwarding paths. The added
+contracts protect these four distinct P2 cases, preserve the prior
+16 exact RED and 10 GREEN witnesses, and extend the classifier to
+24 expected RED plus 14 mandatory GREEN on 38 NodeIDs. This is
+developer-side test-only repair, NOT a fresh independent PASS,
+Bridge implementation, kernel-level route audit, or full descendant
+cleanup proof.
 
 ## Required next gate
 

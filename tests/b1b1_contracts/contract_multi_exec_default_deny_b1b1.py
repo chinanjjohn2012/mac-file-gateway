@@ -221,10 +221,41 @@ def _runner_spy(svc, monkeypatch):
 
 
 def _records(scene):
+    """Snapshot ALL physical state directory entries without following links.
+
+    Include non-regular entries, inode/link metadata and ordinary file bytes;
+    absence of a newly created symlink/unknown entry must never be inferred
+    from a regular-file-only listing. Read regular files through NOFOLLOW FDs.
+    """
     if not scene.state.is_dir():
         return {}
-    return {p.name: p.read_bytes()
-            for p in scene.state.iterdir() if p.is_file() and not p.is_symlink()}
+    root_fd = os.open(scene.state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        result = {}
+        for name in os.listdir(root_fd):
+            st = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            identity = (st.st_mode, st.st_dev, st.st_ino,
+                        st.st_nlink, st.st_size)
+            if not stat.S_ISREG(st.st_mode):
+                result[name] = ("nonregular", identity)
+                continue
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
+            try:
+                opened = os.fstat(fd)
+                if (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino):
+                    raise AssertionError("B1B1_STATE_SNAPSHOT_IDENTITY_CHANGED")
+                chunks = []
+                while True:
+                    part = os.read(fd, 65536)
+                    if not part:
+                        break
+                    chunks.append(part)
+                result[name] = ("regular", identity, b"".join(chunks))
+            finally:
+                os.close(fd)
+        return result
+    finally:
+        os.close(root_fd)
 
 
 class _IntentWitness:
@@ -279,21 +310,26 @@ class _IntentWitness:
                 or name.startswith("temp-") and name.endswith(".tmp"))
 
     def _matches(self, path, dir_fd=None):
-        """Track the physical parent inode, also for aliases and moved roots.
+        """Check actual parent dev/ino, also for nested dir_fd paths.
 
-        Missing or ambiguous identity for an attempted state record is
-        untrustworthy, never positive evidence of zero physical intent.
+        The supplied dir_fd may be the config PARENT, not the state root:
+        'exec-state/r-X.json' must compare stat('exec-state',dir_fd=fd),
+        NOT fstat(fd). A directory symlink alias resolves to the same inode.
+        Do not follow a symlink in the final record filename.
         """
         if not self._attempt(path):
             return False
         try:
             value = os.fsdecode(os.fspath(path))
+            parent = os.path.dirname(value)
             if dir_fd is not None and not os.path.isabs(value):
-                # The original directory FD is still valid if its name moves.
-                return self._same_root(os.fstat(dir_fd))
-            parent = os.path.dirname(os.path.realpath(value))
-            return self._same_root(os.stat(parent))
+                parent_stat = (os.fstat(dir_fd) if not parent
+                               else os.stat(parent, dir_fd=dir_fd))
+            else:
+                parent_stat = os.stat(os.path.realpath(parent or "."))
+            return self._same_root(parent_stat)
         except (OSError, ValueError, TypeError):
+            # Ambiguous/unstatable attempted record is not a clean refusal.
             self.events.append("attempt_parent_identity_unavailable")
             return True
 
@@ -304,6 +340,8 @@ class _IntentWitness:
         real_io_open = io.open
         real_builtin_open = builtins.open
         real_remove = os.remove
+        real_link = os.link
+        real_symlink = os.symlink
         real_replace = os.replace
         real_rename = os.rename
         real_unlink = os.unlink
@@ -335,6 +373,9 @@ class _IntentWitness:
             if (witness._root_entry(src, kwargs.get("src_dir_fd"))
                     or witness._root_entry(dst, kwargs.get("dst_dir_fd"))):
                 witness.events.append("root_replace")
+            # Moving a record OUT also mutates the pinned state directory.
+            if witness._matches(src, kwargs.get("src_dir_fd")):
+                witness.events.append("replace_src")
             if witness._matches(dst, kwargs.get("dst_dir_fd")):
                 witness.events.append("replace")
             return real_replace(src, dst, *args, **kwargs)
@@ -342,9 +383,21 @@ class _IntentWitness:
             if (witness._root_entry(src, kwargs.get("src_dir_fd"))
                     or witness._root_entry(dst, kwargs.get("dst_dir_fd"))):
                 witness.events.append("root_rename")
+            if witness._matches(src, kwargs.get("src_dir_fd")):
+                witness.events.append("rename_src")
             if witness._matches(dst, kwargs.get("dst_dir_fd")):
                 witness.events.append("rename")
             return real_rename(src, dst, *args, **kwargs)
+        def link(src, dst, *args, **kwargs):
+            if witness._matches(src, kwargs.get("src_dir_fd")):
+                witness.events.append("link_src")
+            if witness._matches(dst, kwargs.get("dst_dir_fd")):
+                witness.events.append("link_dst")
+            return real_link(src, dst, *args, **kwargs)
+        def symlink(target, link_name, *args, **kwargs):
+            if witness._matches(link_name, kwargs.get("dir_fd")):
+                witness.events.append("symlink")
+            return real_symlink(target, link_name, *args, **kwargs)
         def unlink(path, *args, **kwargs):
             if witness._matches(path, kwargs.get("dir_fd")):
                 witness.events.append("unlink")
@@ -363,6 +416,8 @@ class _IntentWitness:
                       file_open(real_builtin_open, "builtins_open_write"))
         patch.setattr(os, "replace", replace)
         patch.setattr(os, "rename", rename)
+        patch.setattr(os, "link", link)
+        patch.setattr(os, "symlink", symlink)
         patch.setattr(os, "unlink", unlink)
         patch.setattr(os, "remove", remove)
 
@@ -902,6 +957,103 @@ def test_b1b1_guard_root_rename_roundtrip_alone_is_not_zero_intent(
         assert _records(scene) == before
     assert not clean
     assert witness.events.count("root_rename") >= 2, witness.events
+
+
+@pytest.mark.parametrize("prefix", ["exec-state", "state-alias"])
+def test_b1b1_guard_nested_config_fd_record_write_delete(
+        scene, monkeypatch, prefix):
+    """Relative multi-component paths via parent dir_fd target same root."""
+    svc = scene.service()
+    store = svc._exec_state
+    assert store is not None and store.durability_state == "healthy"
+    if prefix == "state-alias":
+        (scene.config / prefix).symlink_to(scene.state,
+                                           target_is_directory=True)
+    relative = prefix + "/r-" + "a" * 32 + ".json"
+    config_fd = os.open(scene.config, os.O_RDONLY | os.O_DIRECTORY)
+    witness = _IntentWitness(scene.state)
+    try:
+        with monkeypatch.context() as patch:
+            witness.install(patch)
+            before = _records(scene)
+            assert witness._same_root(os.stat(prefix, dir_fd=config_fd))
+            fd = os.open(relative, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                         0o600, dir_fd=config_fd)
+            try:
+                os.write(fd, b'{"state":"PREPARED"}')
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.unlink(relative, dir_fd=config_fd)
+            os.fsync(store._fd)
+            after = _records(scene)
+            clean = _never_started(scene, witness, before, [])
+        assert after == before and not (scene.state / relative.split("/")[-1]).exists()
+        assert not clean
+        assert "open_write" in witness.events, witness.events
+        assert "unlink" in witness.events, witness.events
+    finally:
+        os.close(config_fd)
+
+
+@pytest.mark.parametrize("method", ["rename", "replace"])
+def test_b1b1_guard_hardlinked_prepared_moved_out(
+        scene, monkeypatch, method):
+    """Durable hardlink into state, then move record OUT: source must count."""
+    svc = scene.service()
+    store = svc._exec_state
+    assert store is not None and store.durability_state == "healthy"
+    external = scene.config / ("external-prepared-" + method + ".json")
+    external.write_bytes(b'{"state":"PREPARED"}')
+    record = scene.state / ("r-" + "b" * 32 + ".json")
+    archived = scene.config / ("archived-" + method + ".json")
+    witness = _IntentWitness(scene.state)
+    with monkeypatch.context() as patch:
+        witness.install(patch)
+        before = _records(scene)
+        os.link(external, record)
+        assert record.stat().st_nlink == 2
+        os.fsync(store._fd)
+        getattr(os, method)(record, archived)
+        os.fsync(store._fd)
+        after = _records(scene)
+        clean = _never_started(scene, witness, before, [])
+    assert before == after and not record.exists() and archived.exists()
+    assert not clean
+    assert "link_dst" in witness.events, witness.events
+    assert method + "_src" in witness.events, witness.events
+
+
+@pytest.mark.parametrize("address", ["absolute", "pinned_fd"])
+def test_b1b1_guard_illegal_symlink_record_visible_in_snapshot(
+        scene, monkeypatch, address):
+    """A symlink record is never invisible to the physical state snapshot."""
+    svc = scene.service()
+    store = svc._exec_state
+    assert store is not None and store.durability_state == "healthy"
+    external = scene.config / "external-symlink-PREPARED.json"
+    external.write_bytes(b'{"state":"PREPARED"}')
+    record = scene.state / ("r-" + "c" * 32 + ".json")
+    witness = _IntentWitness(scene.state)
+    try:
+        with monkeypatch.context() as patch:
+            witness.install(patch)
+            before = _records(scene)
+            if address == "absolute":
+                os.symlink(external, record)
+            else:
+                os.symlink(external, record.name, dir_fd=store._fd)
+            os.fsync(store._fd)
+            after = _records(scene)
+            clean = _never_started(scene, witness, before, [])
+        assert record.is_symlink()
+        assert record.name not in before
+        assert after[record.name][0] == "nonregular"
+        assert after != before and not clean
+        assert "symlink" in witness.events, witness.events
+    finally:
+        if record.is_symlink():
+            record.unlink()
 
 
 def test_b1b1_guard_host_interceptor_is_type_preserving(monkeypatch):

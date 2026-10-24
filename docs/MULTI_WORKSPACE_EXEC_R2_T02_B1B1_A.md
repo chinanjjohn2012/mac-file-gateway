@@ -40,7 +40,7 @@ witness; it is not standalone Worker execution authorization.
 
 New non-default-collected test module
 \`tests/b1b1_contracts/contract_multi_exec_default_deny_b1b1.py\`
-contains 36 exact parameter-expanded cases, protected by a
+contains 42 exact parameter-expanded cases, protected by a
 **fixture-lifetime** Python-level no-host-Popen/fork/signal guard.
 Its independent _IntentWitness records ExecStateStore.prepare,
 _atomic_write, physical attempt/temp write-open through os.open,
@@ -60,7 +60,7 @@ cases and **two MCP synthetic-header metadata** cases. Every failure
 must include its specified \`B1B1_RED_*\` marker from an actual failed
 assertion, not unrelated exceptions, skips or setup/collection errors.
 
-**Required GREEN witnesses (25 exact NodeIDs):** ordinary dry-run
+**Required GREEN witnesses (31 exact NodeIDs):** ordinary dry-run
 preview with zero physical attempt intent, global-off \`exec_disabled\`
 precedence, independent File read, **seven** unknown REST client
 proof fields including explicit \`test_mode\`, **five** actual SDK MCP
@@ -79,7 +79,7 @@ child or process-group signal.
 
 \`tools/verify_multi_exec_b1b1_default_deny_red.py\` runs the isolated
 suite, parses original JUnit for every expected NodeID and marker,
-requires exactly 11 RED + 25 GREEN, rejects any skipped, setup/collection
+requires exactly 11 RED + 31 GREEN, rejects any skipped, setup/collection
 failure or unexpected NodeID, and prints
 \`B1B1_CONTRACT_STAGE=RED_NOT_IMPLEMENTED\` **only on a matching RED**.
 The separate GitHub Action checks an exact Head + complete tracked
@@ -134,7 +134,7 @@ but identified three overlapping false-GREEN oracle gaps in the
    Ordinary dry_run's prior GREEN guard now also demands zero
    physical state mutations.
 
-The verifier now enforces **11 RED / 25 GREEN** exact expanded
+The verifier now enforces **11 RED / 31 GREEN** exact expanded
 NodeIDs. Product/runtime and historical real subprocess/test blobs
 are unchanged. No implementation GREEN, no Worker grant admission,
 no change to production Exec and no R3/R4 acceptance is claimed.
@@ -181,10 +181,43 @@ Three new disposable fsynced negative oracle tests cover
 symlink Path.open/os.remove, moved-root FD os.open/os.unlink and
 rename/restore without a record write.
 
-Verifier now requires **11 expected RED + 25 GREEN** fixed NodeIDs.
+Verifier now requires **11 expected RED + 31 GREEN** fixed NodeIDs.
 This is not an OS filesystem audit or complete descendant cleanup
 proof. The new SHA requires its own original Linux CI and separately
 independent Standards + Spec reviews before B1-B1-B can start.
+
+## Follow-up joint Standards/Spec P2 — nested dir_fd and directory entries
+
+On fixed Head `db79c42d25360e2d355b1f6e781bde302c6bb890`,
+independent Standards and Spec reviews both found a new test-oracle P2,
+with distinct physical false-GREEN counterexamples. Standards found that
+a multi-component relative path `exec-state/r-*.json` opened using the
+parent config directory FD incorrectly compared that FD instead of the
+actual state-directory parent inode. Spec found that unobserved
+`os.link`/`os.symlink`, and `rename`/`replace` moving a state record
+OUT, combined with regular-files-only snapshots, could falsely report
+zero intent despite physical PREPARED entries.
+
+The revised witness evaluates the actual parent directory inode,
+including nested relative `dir_fd` paths and symlink aliases. It
+monitors `os.link` and `os.symlink` destinations and both source and
+destination of record rename/replace. Snapshot capture lists ALL
+directory entries through a directory FD with no-follow lstat
+metadata; ordinary records are read using `O_NOFOLLOW` FDs and
+identity checks. It records nonregular entries and link counts without
+following or exposing external symlink contents. Additional GREEN
+physical selfchecks perform two config-fd nested write+fsync+unlink
+paths, two hardlink+fsync+move-out paths, and two persistent
+symbolic-link state-entry variants. Each requires both the relevant
+event(s) and a correct physical snapshot, not just a final byte match.
+All work stays inside disposable fixture files with no Host child or
+OS group signal.
+
+The strict verifier now expects **11 missing-product RED + 31 GREEN**.
+This is a developer-side fix, not a new-sha independent PASS, not an OS
+filesystem audit, and not proof of descendant cleanup. B1-B1-B stays
+BLOCKED until independent Standards AND Spec reviews both pass the
+same new immutable Head/Tree with original CI evidence.
 
 ## Next, but NOT implemented here
 

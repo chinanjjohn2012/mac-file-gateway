@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
 import subprocess
 
 import pytest
@@ -236,6 +237,38 @@ class _IntentWitness:
     def __init__(self, root: Path):
         self.root = os.path.abspath(os.fspath(root))
         self.events = []
+        # Pin physical root identity, not a mutable pathname string.
+        pinned = os.stat(self.root, follow_symlinks=False)
+        if not stat.S_ISDIR(pinned.st_mode):
+            raise AssertionError("B1B1_STATE_ROOT_NOT_DIRECTORY")
+        self.root_identity = (pinned.st_dev, pinned.st_ino)
+
+    def _same_root(self, st):
+        return (st.st_dev, st.st_ino) == self.root_identity
+
+    def _root_is_pinned(self):
+        try:
+            return self._same_root(os.stat(self.root, follow_symlinks=False))
+        except (OSError, ValueError, TypeError):
+            return False
+
+    def _root_entry(self, path, dir_fd=None):
+        """Detect a rename/replace of the root directory entry itself."""
+        if not isinstance(path, (str, bytes, os.PathLike)):
+            return False
+        try:
+            value = os.fsdecode(os.fspath(path))
+            if os.path.isabs(value) or dir_fd is None:
+                absolute = os.path.abspath(value)
+                if absolute == self.root:
+                    return True  # catches restoration after an intermediate move
+                actual = os.stat(absolute, follow_symlinks=False)
+            else:
+                actual = os.stat(value, dir_fd=dir_fd,
+                                 follow_symlinks=False)
+            return self._same_root(actual)
+        except (OSError, ValueError, TypeError):
+            return False
 
     @staticmethod
     def _attempt(path):
@@ -246,19 +279,23 @@ class _IntentWitness:
                 or name.startswith("temp-") and name.endswith(".tmp"))
 
     def _matches(self, path, dir_fd=None):
+        """Track the physical parent inode, also for aliases and moved roots.
+
+        Missing or ambiguous identity for an attempted state record is
+        untrustworthy, never positive evidence of zero physical intent.
+        """
         if not self._attempt(path):
             return False
         try:
             value = os.fsdecode(os.fspath(path))
-            if os.path.isabs(value):
-                return os.path.dirname(os.path.abspath(value)) == self.root
-            if dir_fd is None:
-                return os.path.dirname(os.path.abspath(value)) == self.root
-            st = os.stat(self.root, follow_symlinks=False)
-            pinned = os.fstat(dir_fd)
-            return (st.st_dev, st.st_ino) == (pinned.st_dev, pinned.st_ino)
+            if dir_fd is not None and not os.path.isabs(value):
+                # The original directory FD is still valid if its name moves.
+                return self._same_root(os.fstat(dir_fd))
+            parent = os.path.dirname(os.path.realpath(value))
+            return self._same_root(os.stat(parent))
         except (OSError, ValueError, TypeError):
-            return False
+            self.events.append("attempt_parent_identity_unavailable")
+            return True
 
     def install(self, patch):
         real_prepare = ExecStateStore.prepare
@@ -295,10 +332,16 @@ class _IntentWitness:
                 return real(path, mode, *args, **kwargs)
             return watched
         def replace(src, dst, *args, **kwargs):
+            if (witness._root_entry(src, kwargs.get("src_dir_fd"))
+                    or witness._root_entry(dst, kwargs.get("dst_dir_fd"))):
+                witness.events.append("root_replace")
             if witness._matches(dst, kwargs.get("dst_dir_fd")):
                 witness.events.append("replace")
             return real_replace(src, dst, *args, **kwargs)
         def rename(src, dst, *args, **kwargs):
+            if (witness._root_entry(src, kwargs.get("src_dir_fd"))
+                    or witness._root_entry(dst, kwargs.get("dst_dir_fd"))):
+                witness.events.append("root_rename")
             if witness._matches(dst, kwargs.get("dst_dir_fd")):
                 witness.events.append("rename")
             return real_rename(src, dst, *args, **kwargs)
@@ -325,7 +368,8 @@ class _IntentWitness:
 
 
 def _never_started(scene, witness, before, calls):
-    return not calls and not witness.events and _records(scene) == before
+    return (not calls and not witness.events and witness._root_is_pinned()
+            and _records(scene) == before)
 
 
 def test_b1b1_normal_direct_apply_denies_before_any_intent(scene, monkeypatch):
@@ -773,6 +817,91 @@ def test_b1b1_guard_python_file_io_detects_transient_prepared(
                             if write_api == "builtins.open" else "io_open_write")
     assert expected_write_event in witness.events, (write_api, witness.events)
     assert "remove" in witness.events, (write_api, witness.events)
+
+
+def test_b1b1_guard_physical_alias_intent_cannot_look_clean(
+        scene, monkeypatch):
+    """Write+remove by symlink alias into the SAME physical state directory."""
+    svc = scene.service()
+    store = svc._exec_state
+    assert store is not None and store.durability_state == "healthy"
+    alias = scene.config / "exec-state-alias"
+    alias.symlink_to(scene.state, target_is_directory=True)
+    assert (alias.stat().st_dev, alias.stat().st_ino) == (
+        scene.state.stat().st_dev, scene.state.stat().st_ino)
+    record = alias / ("r-" + "8" * 32 + ".json")
+    witness = _IntentWitness(scene.state)
+    with monkeypatch.context() as patch:
+        witness.install(patch)
+        before = _records(scene)
+        with record.open("wb") as stream:
+            stream.write(b'{"state":"PREPARED"}')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.remove(record)
+        os.fsync(store._fd)
+        after = _records(scene)
+        clean = _never_started(scene, witness, before, [])
+    assert after == before and not record.exists()
+    assert not clean
+    assert "io_open_write" in witness.events, witness.events
+    assert "remove" in witness.events, witness.events
+
+
+def test_b1b1_guard_moved_root_pinned_fd_intent_cannot_look_clean(
+        scene, monkeypatch):
+    """Retained FD still points to pinned root after its pathname moves."""
+    svc = scene.service()
+    store = svc._exec_state
+    assert store is not None and store.durability_state == "healthy"
+    moved = scene.config / "moved-state-dir"
+    name = "r-" + "9" * 32 + ".json"
+    witness = _IntentWitness(scene.state)
+    with monkeypatch.context() as patch:
+        witness.install(patch)
+        before = _records(scene)
+        os.rename(scene.state, moved)
+        try:
+            assert not witness._root_is_pinned()
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                         0o600, dir_fd=store._fd)
+            try:
+                os.write(fd, b'{"state":"PREPARED"}')
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.unlink(name, dir_fd=store._fd)
+            os.fsync(store._fd)
+        finally:
+            os.rename(moved, scene.state)
+        after = _records(scene)
+        clean = _never_started(scene, witness, before, [])
+    assert after == before and not (scene.state / name).exists()
+    assert not clean
+    assert "root_rename" in witness.events, witness.events
+    assert "open_write" in witness.events, witness.events
+    assert "unlink" in witness.events, witness.events
+
+
+def test_b1b1_guard_root_rename_roundtrip_alone_is_not_zero_intent(
+        scene, monkeypatch):
+    """Restoring the same snapshot cannot erase a physical root move."""
+    svc = scene.service()
+    assert svc._exec_state is not None
+    moved = scene.config / "moved-state-no-record"
+    witness = _IntentWitness(scene.state)
+    with monkeypatch.context() as patch:
+        witness.install(patch)
+        before = _records(scene)
+        os.rename(scene.state, moved)
+        try:
+            assert not witness._root_is_pinned()
+        finally:
+            os.rename(moved, scene.state)
+        clean = _never_started(scene, witness, before, [])
+        assert _records(scene) == before
+    assert not clean
+    assert witness.events.count("root_rename") >= 2, witness.events
 
 
 def test_b1b1_guard_host_interceptor_is_type_preserving(monkeypatch):

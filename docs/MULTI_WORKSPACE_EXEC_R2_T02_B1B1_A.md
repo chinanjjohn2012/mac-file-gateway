@@ -40,7 +40,7 @@ witness; it is not standalone Worker execution authorization.
 
 New non-default-collected test module
 \`tests/b1b1_contracts/contract_multi_exec_default_deny_b1b1.py\`
-contains 33 exact parameter-expanded cases, protected by a
+contains 36 exact parameter-expanded cases, protected by a
 **fixture-lifetime** Python-level no-host-Popen/fork/signal guard.
 Its independent _IntentWitness records ExecStateStore.prepare,
 _atomic_write, physical attempt/temp write-open through os.open,
@@ -60,7 +60,7 @@ cases and **two MCP synthetic-header metadata** cases. Every failure
 must include its specified \`B1B1_RED_*\` marker from an actual failed
 assertion, not unrelated exceptions, skips or setup/collection errors.
 
-**Required GREEN witnesses (22 exact NodeIDs):** ordinary dry-run
+**Required GREEN witnesses (25 exact NodeIDs):** ordinary dry-run
 preview with zero physical attempt intent, global-off \`exec_disabled\`
 precedence, independent File read, **seven** unknown REST client
 proof fields including explicit \`test_mode\`, **five** actual SDK MCP
@@ -79,7 +79,7 @@ child or process-group signal.
 
 \`tools/verify_multi_exec_b1b1_default_deny_red.py\` runs the isolated
 suite, parses original JUnit for every expected NodeID and marker,
-requires exactly 11 RED + 22 GREEN, rejects any skipped, setup/collection
+requires exactly 11 RED + 25 GREEN, rejects any skipped, setup/collection
 failure or unexpected NodeID, and prints
 \`B1B1_CONTRACT_STAGE=RED_NOT_IMPLEMENTED\` **only on a matching RED**.
 The separate GitHub Action checks an exact Head + complete tracked
@@ -134,7 +134,7 @@ but identified three overlapping false-GREEN oracle gaps in the
    Ordinary dry_run's prior GREEN guard now also demands zero
    physical state mutations.
 
-The verifier now enforces **11 RED / 22 GREEN** exact expanded
+The verifier now enforces **11 RED / 25 GREEN** exact expanded
 NodeIDs. Product/runtime and historical real subprocess/test blobs
 are unchanged. No implementation GREEN, no Worker grant admission,
 no change to production Exec and no R3/R4 acceptance is claimed.
@@ -159,9 +159,32 @@ GREEN cases create actual test-owned PREPARED records with fsync and
 os.remove, and require BOTH a write event and a remove event even when
 the on-disk snapshot returns to its prior bytes. No host subprocess or
 process-group signal is used. The strict verifier pins **11 expected RED /
-22 GREEN guards**, and product/Worker/test-grant code remains unchanged.
+25 GREEN guards**, and product/Worker/test-grant code remains unchanged.
 This is a developer-side fix, NOT an independent Spec or Standards PASS
 for the new SHA; B1-B1-B remains blocked until both SHA-bound reviews.
+
+## Follow-up Standards P2 — physical state-root aliases and moved FD
+
+Prior fixed Head `3d6e840299ff94439c23bb828974c75a37035441`
+received independent Spec PASS but independent Standards FAIL:
+a state-directory symlink alias or a temporarily moved root with a
+retained dir_fd could hide physical PREPARED write/delete events.
+
+This test-only repair pins the state root's `(st_dev, st_ino)`,
+compares physical parent identity for symlink/realpath paths, and
+checks `fstat(dir_fd)` for relative operations even if the original
+root path disappears. An unavailable attempt-parent identity is not
+treated as proof of zero physical intent. Root rename/replace
+events are observed separately and the zero-intent predicate
+requires original pinned-root identity at the end of each request.
+Three new disposable fsynced negative oracle tests cover
+symlink Path.open/os.remove, moved-root FD os.open/os.unlink and
+rename/restore without a record write.
+
+Verifier now requires **11 expected RED + 25 GREEN** fixed NodeIDs.
+This is not an OS filesystem audit or complete descendant cleanup
+proof. The new SHA requires its own original Linux CI and separately
+independent Standards + Spec reviews before B1-B1-B can start.
 
 ## Next, but NOT implemented here
 

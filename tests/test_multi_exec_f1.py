@@ -170,6 +170,13 @@ def test_f1_same_service_real_git_and_file_write_survive_exec_quarantine(mixed):
     svc, a, b, config = mixed
     assert svc.any_exec and svc.any_git and svc.any_write
     assert _error_code(svc) == "exec_cleanup_proof_required"
+    # The same live service that will run Git must also reject the
+    # production REST apply route, not just a separate test fixture.
+    with TestClient(create_multi_app(svc, enable_mcp=False),
+                    base_url="http://127.0.0.1:8765") as client:
+        rest = client.post("/run", json=_APPLY)
+        assert rest.status_code == 503
+        assert rest.json()["error"] == "exec_cleanup_proof_required"
     first = svc.invoke_git("a", "status", dry_run=False)
     assert first["exit_code"] == 0 and first["execute_started"] is True
     write = svc.invoke("a", "create_file", "src/f1-legal.txt",
@@ -197,6 +204,11 @@ def test_f1_same_service_real_git_and_file_write_survive_exec_quarantine(mixed):
     assert _error_code(svc) == "exec_quarantined"
     assert svc.info()["exec_policy"]["durability_state"] == "quarantined"
     assert svc.info()["exec_policy"]["quarantined"] is True
+    with TestClient(create_multi_app(svc, enable_mcp=False),
+                    base_url="http://127.0.0.1:8765") as client:
+        quarantined_rest = client.post("/run", json=_APPLY)
+        assert quarantined_rest.status_code == 503
+        assert quarantined_rest.json()["error"] == "exec_quarantined"
     second = svc.invoke_git("a", "status", dry_run=False)
     assert second["exit_code"] == 0 and second["execute_started"] is True
     assert svc.invoke("a", "create_file", "src/f1-quarantined.txt",

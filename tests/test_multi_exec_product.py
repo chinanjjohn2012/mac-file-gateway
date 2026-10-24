@@ -338,6 +338,7 @@ def test_cli_reports_actual_exec_state(setup, tmp_path, monkeypatch, capsys):
         output = capsys.readouterr().err
         if enabled:
             assert "Controlled Exec API registered" in output
+            assert "preview only; apply requires cleanup proof" in output
             assert "Controlled Exec disabled" not in output
         else:
             assert "Controlled Exec disabled by policy" in output

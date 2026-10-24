@@ -5,7 +5,7 @@ review REQUIRED before implementation. No merge, deployment, production
 Exec activation or privileged host experiments are authorized.
 
 **Proposed authority:** `docs/MULTI_WORKSPACE_EXEC_RECOVERY_D0_DESIGN.md`
-`0 production-first amendment` in this same review snapshot. Until accepted,
+`§0 production-first amendment` in this same review snapshot. Until accepted,
 earlier D0 and fixed-Head PR #67/#68 remain valid at their respective
 reviewed scope. This plan supersedes neither their tests nor B/C verdicts
 merely by being published.
@@ -67,7 +67,7 @@ not claim that an unchanged CodeRunner can clean detached children.
 
 1. Open a **documentation-only Draft PR** based on fixed PR #67
    (NOT on bloated PR #68 test contract) with this plan, the D0
-   `0 amendment and updated tracked Manifest.
+   `§0` amendment and updated tracked Manifest.
 2. Obtain independent **Standards** and **Spec** design reviews
    on that PR's exact Head/Base/Git Tree, with disclosed original
    CI availability and differences from old D0. Both reviewers
@@ -80,7 +80,7 @@ not claim that an unchanged CodeRunner can clean detached children.
    reviewed PR #68 disposition (supersede/close/rework)
    separately; do not erase prior Review history. Closing
    or merging is NOT authorized by this plan alone.
-4. No F1 implementation may claim current D0 `0 is
+4. No F1 implementation may claim current D0 §0 is
    approved until both role conclusions and safety
    authority are independently validated.
 
@@ -124,11 +124,44 @@ sanitized; `/info` and `/health` must agree.
 | Both Exec opt-ins but no proof; zero Popen/PREPARED | Direct Worker plus actual REST/MCP calls, focused physical write-open/rename/unlink observer and Runner spy, correct error on each route | Runner may be spy/mocked; ingress/parsing and at least one state-write witness must be real |
 | Disabled/unhealthy/quarantined/error precedence | Direct state/permission negative plus adapter mapping; no Worker admission | Fault-state transitions can be mocked; actual state-root trust stays physically verified |
 | Valid preview/invalid arguments/client proof spoof | Legal preview, path/argv/types; representative malicious fields/headers; no real child | Runner execution mocked; real SDK/REST parsing smoke retained |
-| File read/write and Git independence | Authorized File read and grant-limited write; Git dry-run or separately allowed Git operation | Mock where adequate, but preserve at least necessary real source-specific grant evidence |
+| File read/write and Git independence | **Mandatory mixed-instance positive:** both Exec opt-ins enabled with no cleanup proof, denied Exec apply, then real authorized Git `dry_run=false` (`status` or `add`) in the **same** disposable WorkspaceService plus authorized File Write apply; repeat real Git apply with Exec UNKNOWN/quarantined; deny unauthorized Git/File Write | Git actual apply and physical File Write must not be mocked; preserve real Git-specific process spawning and independent grants |
 | Worker cancellation, timeout, slots, close/drain | Deterministic fake Worker/clock/state machine, no lost-response replay | Yes, for deny-only and abstract transitions; do not claim child cleanup |
 | Existing private state owner lock, unsafe path/restart | Existing real private-FS/owner-lock safety checks, quarantine on unresolved records | No for FD/inode/lock truth; mock remaining orchestration |
 | SDK ToolManager/Tool.run monkeypatch variants | Only if review shows ordinary untrusted client can actually cause a Worker proof-gate bypass under defined trust boundary | Not required merely to maintain a theoretical Python mutation count |
 | Real full-tree process cleanup | NOT part of F1; no positive production execution | Never sufficient alone; future F3 requires native evidence |
+
+**P2-01 required same-instance executable counterexample (F1):**
+Use a strictly disposable Workspace/repository with one actual
+`WorkspaceService`. Enable both global and Workspace Exec opt-ins,
+healthy private Exec state but no approved descendant cleanup proof,
+plus separate Git `status` or `add` and File Write grants.
+
+1. On that **same** service, verify direct and at least one genuine
+   REST/official SDK MCP Exec `dry_run=false` path yields stable
+   `exec_cleanup_proof_required` with zero Exec Runner/Popen and zero
+   transient/permanent PREPARED writes; preserve existing direct,
+   REST and MCP negative coverage and physical intent observation.
+2. Without reconfiguring the instance, invoke an independently
+   authorized Git `dry_run=false` (`status` or `add`) against the
+   disposable repository. Require a **real Git subprocess** and
+   a successful valid Git result, not a dry-run or simulated
+   `GitProcessRunner`; perform an allowed File Write apply too.
+   Check an unauthorized Git command and unauthorized File Write
+   remain denied under their own policy.
+3. In a second disposable controlled state on that same service,
+   inject persisted Exec UNKNOWN/quarantine (never reset it or
+   remove an unresolved record), confirm Exec remains fail-closed,
+   and repeat a real authorized Git `dry_run=false` successfully.
+   The Exec proof-denial/quarantine implementation must not add a
+   process-wide Popen interceptor, bypass Git's separate admission,
+   or transfer Exec permissions into Git/File grants.
+
+Only Git's pre-existing independently authorized process is spawned;
+these tests do **not** authorize a real Exec command or unmanaged OS
+process-group signal. Preserve old Git-only smokes as adjacent
+regression, but they are insufficient on their own for this mixed
+configuration. This is a risk-based mandatory case, not an arbitrary
+minimum test count.
 
 Historical `tests/test_multi_exec_product.py` real-child tests will
 not remain mandatory in their old form merely to satisfy a count:
@@ -145,7 +178,9 @@ faked GREEN is permitted just to avoid a failing suite.
 F1 is complete only if the normal Multi-Workspace product
 safely denies unqualified actual Exec before Runner/PREPARED
 through all public adapters, valid preview and independent
-File/Git paths pass, no material open P0/P1/P2 remains,
+File/Git paths pass **including the same-instance real authorized
+Git apply under missing-proof and UNKNOWN/quarantined Exec**, no
+material open P0/P1/P2 remains,
 the applicable CI and original fixed-SHA logs have been
 verified and both independent B/C code reviews pass the
 approved F1 contract. Historical test totals are **not**
@@ -172,6 +207,10 @@ deploy and enable real Exec is still required.
 
 - Never use ordinary REST/MCP, config, CLI or environment
   data to mint internal cleanup qualification.
+- Never implement Exec default DENY with a global subprocess/Popen
+  interceptor; Git's separately authorized real subprocess path
+  must still work in the same instance under Exec missing-proof
+  and Exec UNKNOWN/quarantine.
 - Do not signal unknown or reused PID/PGID after crash;
   never automatically unquarantine, remove unresolved
   records, or retry non-idempotent Exec after lost response.

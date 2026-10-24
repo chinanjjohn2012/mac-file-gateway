@@ -43,20 +43,32 @@ without starting a child or writing Exec attempt intent. The
 unavailable and disabled cases keep the stricter existing error
 priority. File Read/Write and Git permissions, including the
 separately authorized Git subprocess path, remain independent.
+A mandatory mixed-capability F1 acceptance must exercise authorized
+Git `dry_run=false` using a real Git subprocess in a disposable
+repository **on the same WorkspaceService instance** whose Exec
+opt-ins are enabled but full-descendant cleanup proof is missing.
+It must also keep authorized File Write working, preserve refusal of
+unauthorized Git/File Write, and repeat real Git apply with Exec in
+UNKNOWN/quarantine. No Exec-denial mechanism may install a global
+Popen prohibition or silently revoke independent Git permissions.
 
 ### 0.2 Explicit amendment to historical D0 scopes
 
-For the **immediate deny-only phase only**, this `0 supersedes the
-historic positive-disposable-test *development prerequisite* found
-in `2.1 (group-only positive factory), `4 (post-gate positive
-launch sequence), `5 (group-only RETIRED evidence), `7 I/J
-(positive private-grant fixtures), and `8 (mandatory R1
-positive Bridge sequence). Those clauses are retained below for
-historical provenance and for consideration in a **future**
-separately approved real-execution design, not as gates that must
-be implemented or green merely to ship safe default-DENY.
-The ordinary default-DENY security requirement and every
-existing fail-closed/quarantine property remain mandatory.
+For the **immediate deny-only phase only**, this §0 defers only the
+*positive real-execution development prerequisites* of historical
+§2.1 (group-only positive factory), §4 (post-gate positive launch),
+§5 (group-only RETIRED evidence), §7 I/J (positive private-grant
+fixtures), and §8 (mandatory R1 positive Bridge sequence). These
+positive paths remain historical evidence and can be reconsidered
+only in a separately reviewed future real-execution phase; they
+are neither F1 acceptance gates nor permission to launch Exec.
+
+**Every negative fail-closed obligation remains mandatory in F1.**
+In particular, historical §7J still prohibits using any grant to
+clear existing UNKNOWN and requires quarantine on uncertain cleanup.
+Private owner-lock/state trust, no retry or auto-unquarantine, and
+no Runner/PREPARED before proof are not deferred. A legacy test grant
+or a Mock must never become production execution qualification.
 This is **not** a permission to use a mock/legacy grant as
 production execution qualification.
 
@@ -82,6 +94,12 @@ Use real private-FS/owner-lock evidence where filesystem
 identity and durability are security claims, and a small
 number of disposable real REST/MCP requests to prove the
 network path reaches the same Worker gate.
+At least one real authorized Git apply (`dry_run=false`, for example
+`status` or `add`) in a disposable repository is also compulsory
+with both Exec opt-ins enabled and no cleanup proof in the **same**
+service instance, including a separate UNKNOWN/quarantined Exec
+scenario. A Git-only fixture, Git dry-run, or a mocked Popen does
+not establish this cross-capability legal-success property.
 
 Use deterministic Mock/fakes for fault, cancelled waiter,
 slot/lease, timeout and state-machine transition behavior
@@ -107,7 +125,7 @@ optimize for the total number of tests.
 ### 0.4 Future positive Exec remains a separate safety gate
 
 No production real Exec becomes permitted as a result
-of approving `0. If positive real command execution is
+of approving §0. If positive real command execution is
 later requested, its independent contract MUST provide
 durable fsynced PREPARED-before-Popen, safe ownership,
 complete descendant cleanup rather than leader/group-only
@@ -133,6 +151,16 @@ Head while it is reviewed; do not silently rewrite its tests
 or assign it a PASS. Do not merge, release, deploy, enable
 production Exec, restart the user Gateway/Tunnel or relax
 quarantine/cleanup permissions.
+
+**Applicability by phase:** F1 must prove no-proof default DENY,
+unchanged disabled/quarantined/unavailable precedence, private-FS
+and owner-lock reality, real REST/MCP admission, legal preview,
+File Write and same-instance real Git apply. Historical §7J
+negative UNKNOWN/quarantine invariants continue to apply in F1.
+Historical positive child/group-only RETIRED/Private Bridge cases,
+and native macOS full-descendant cleanup evidence, are not F1
+positive-execution prerequisites; future F3 requires a separate
+approved contract and real OS evidence before any Exec apply.
 
 
 ## 1. Observed gaps and safety targets

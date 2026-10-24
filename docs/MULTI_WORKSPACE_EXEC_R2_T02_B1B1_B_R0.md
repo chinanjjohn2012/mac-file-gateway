@@ -83,7 +83,7 @@ complete detached-descendant cleanup.
   invalid_argument, zero Runner, zero physical PREPARED mutation and
   unchanged public exec policy. Plain and forged-header cases remain.
   Existing product/bridge absence intentionally fails these.
-- **18 required GREEN**: real bound Listener still previews with no
+- **21 required GREEN**: real bound Listener still previews with no
   subprocess or durable attempt; foreign Listener cannot borrow grant;
   both invalid client proof body fields denied; immutable inventory
   of historical real subprocess, REST/MCP, slots and cancel/close tests;
@@ -102,8 +102,8 @@ complete detached-descendant cleanup.
   demonstrates the old graph detector's false GREEN and MUST fail the
   strict public route allowlist; a synthetic body-controlled REST/MCP
   parser bypass cannot be reported as an authorization denial.
-- **Strict verifier** checks exact 42 expanded NodeIDs once, no skipped
-  or unexpected failures, exact twenty-four absent-feature markers and eighteen
+- **Strict verifier** checks exact 45 expanded NodeIDs once, no skipped
+  or unexpected failures, exact twenty-four absent-feature markers and twenty-one
   genuinely passing guards, pytest exit=1. It emits
   B1B1B_CONTRACT_STAGE=RED_NOT_IMPLEMENTED only for a matching RED.
 
@@ -227,6 +227,67 @@ requires **24 exact expected RED and 18 mandatory GREEN across
 42 NodeIDs**. This is a test-only, no-host-spawn RED contract,
 not a Bridge R1/Worker implementation, a kernel ASGI audit or
 permission to enable production Exec.
+
+## Fixed Head 0e67fd8 additional Standards counterexample closure
+
+The exact independent reviews on Head
+`0e67fd8e094321e8139d8d55d9040eaec55c5512` both rejected
+the R0 contract:
+[Standards #5637555516](https://github.com/chinanjjohn2012/mac-file-gateway/pull/68#pullrequestreview-5637555516)
+found `Route.handle` instance override and clone
+`types.FunctionType` with unchanged `__code__` and closure but
+different `__globals__`;
+[Standards #5637555679](https://github.com/chinanjjohn2012/mac-file-gateway/pull/68#pullrequestreview-5637555679)
+independently found that an authentic SDK `StreamableHTTPASGIApp`
+type can hold a foreign `session_manager`, proxy `asgi_app` or
+wrong underlying MCP server. These are **test acceptance-oracle
+false-GREEN paths**, not evidence of an existing private Bridge or
+current production Exec leakage.
+
+R0 now requires stock `Route.handle` to remain the class method
+without instance override; each REST `Route.app` needs the real
+`starlette.routing.request_response` function's code **and original
+module globals identity**, along with its original closure and
+endpoint. New mandatory GREEN fault injections modify ONLY an
+isolated disposable, real loopback listener's handler, then clone
+its function with `FunctionType(original.__code__,
+changed_globals, ..., original.__closure__)`: each forged handler
+serves a synthetic private `HTTP 200` if a previously untested
+Header is sent over the **actual TCP wire**, while the existing
+Route path, endpoint and HTTP method remain unchanged. Both must
+make the structural predicate false; restoring the handler must
+restore genuine normal Listener acceptance.
+
+For official pinned MCP SDK 2.3.0, the callable
+`StreamableHTTPASGIApp.__call__` is NOT sufficient proof of
+public service identity: it delegates to
+`StreamableHTTPSessionManager.asgi_app`, which itself wraps the
+session manager's `_handle_request` using a stock
+`RequestBodyLimitMiddleware`. R0 now follows that chain,
+requires original types, correctly owned bound callback and
+identical manager transport-security/size/stateless settings to
+a separately built normal public MCP app. It verifies the
+underlying low-level MCP server's `tools/call` callback is
+bound to the exact `StrictWorkspaceMCP` instance, whose
+`_lowlevel_server` is that manager's underlying server.
+Registered tool function codes/globals/critical service
+closure captures must match the reviewed `build_multi_mcp`
+source and **exact current WorkspaceService**; a foreign
+service/manager/proxy cannot qualify by presenting a genuine
+SDK class name or `__call__`. A required mutation GREEN
+test replaces a real public MCP handler's manager with a
+test-only proxy, proves an extra Header can reach a private
+MCP canary over actual loopback TCP, and checks that such a
+proxy, a replaced ASGI delegate, or a foreign low-level Server
+is rejected by the new oracle. No real subprocess is launched
+by these R0 tests.
+
+The strict classifier adds precisely 3 required GREEN tests,
+so R0 expects **24 RED and 21 GREEN (45 exact NodeIDs)**.
+All 24 missing-feature cases remain RED until separately
+authorized staged private Bridge implementation; this review
+stage does not enable Worker/default-DENY, descendant cleanup
+or production Exec.
 
 ## Required next gate
 

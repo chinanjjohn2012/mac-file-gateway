@@ -19,13 +19,16 @@ import pickle
 import signal
 import subprocess
 import threading
+from types import FunctionType
 import httpx
 from types import ModuleType, SimpleNamespace
 import urllib.error
 import urllib.request
 
 import pytest
-from mcp.server.streamable_http_manager import StreamableHTTPASGIApp
+from mcp.server.streamable_http_manager import (StreamableHTTPASGIApp,
+                                                StreamableHTTPSessionManager)
+from mcp.server.transport_security import RequestBodyLimitMiddleware
 from starlette.testclient import TestClient
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException, WebSocketException
@@ -39,6 +42,7 @@ from gateway._exec_test_transport import create_private_bound_transport
 from gateway._exec_test_grant import _owner_lock_proven
 from gateway.http import Boundary
 from gateway.http_multi import create_multi_app, _GET_ROUTES, _POST_ROUTES
+from gateway.mcp_multi import StrictWorkspaceMCP
 from gateway.multi_admission import StrictPostAdmission
 from gateway.multi_cli import run_multi
 from gateway.workspaces import WorkspaceService
@@ -218,11 +222,14 @@ def _stock_starlette_route_handler(route):
     identity, defaults, and the bound closure, not merely the endpoint
     name/path/methods (which remain unchanged in malicious proxies).
     """
-    if type(route) is not Route or not inspect.isfunction(route.app):
+    if (type(route) is not Route or not inspect.isfunction(route.app)
+            or "handle" in vars(route)
+            or route.handle.__func__ is not Route.handle):
         return False
     expected = request_response(route.endpoint)
     candidate = route.app
     if (candidate.__code__ is not expected.__code__
+            or candidate.__globals__ is not expected.__globals__
             or candidate.__defaults__ != expected.__defaults__
             or candidate.__kwdefaults__ != expected.__kwdefaults__):
         return False
@@ -286,7 +293,96 @@ def _stock_starlette_dispatch(core):
     return True
 
 
-def _same_mcp_sdk_handler(actual, canonical):
+def _mcp_manager_provenance(endpoint, canonical_endpoint, service):
+    """Audit the actual wire dispatch behind SDK's official callable object.
+
+    StreamableHTTPASGIApp.__call__ delegates to session_manager.asgi_app.
+    A normal SDK class with an arbitrary manager, ASGI proxy, low-level
+    Server, or tool callback is NOT a verified public service endpoint.
+    """
+    if (type(endpoint) is not StreamableHTTPASGIApp
+            or type(canonical_endpoint) is not StreamableHTTPASGIApp):
+        return False
+    manager = endpoint.session_manager
+    reference = canonical_endpoint.session_manager
+    if (type(manager) is not StreamableHTTPSessionManager
+            or type(reference) is not StreamableHTTPSessionManager
+            or "_handle_request" in vars(manager)):
+        return False
+    wire = manager.asgi_app
+    ref_wire = reference.asgi_app
+    if (type(wire) is not RequestBodyLimitMiddleware
+            or type(ref_wire) is not RequestBodyLimitMiddleware
+            or wire.max_body_size != ref_wire.max_body_size):
+        return False
+    callback = wire.app
+    if (not inspect.ismethod(callback)
+            or callback.__self__ is not manager
+            or callback.__func__ is not StreamableHTTPSessionManager._handle_request):
+        return False
+    for field in ("json_response", "stateless", "max_request_body_size",
+                  "max_sessions", "retry_interval", "event_store",
+                  "session_idle_timeout"):
+        if getattr(manager, field) != getattr(reference, field):
+            return False
+    security = manager.security_settings
+    ref_security = reference.security_settings
+    if (security is None or ref_security is None
+            or type(security) is not type(ref_security)
+            or security.model_dump() != ref_security.model_dump()):
+        return False
+    lowlevel = manager.app
+    ref_lowlevel = reference.app
+    if (type(lowlevel) is not type(ref_lowlevel)
+            or getattr(lowlevel, "_session_manager", None) is not manager):
+        return False
+    # The MCP tool execution callback is a bound method on the actual
+    # StrictWorkspaceMCP whose low-level Server must be THIS manager.app.
+    entry = getattr(lowlevel, "_request_handlers", {}).get("tools/call")
+    ref_entry = getattr(ref_lowlevel, "_request_handlers", {}).get("tools/call")
+    if entry is None or ref_entry is None:
+        return False
+    callback = entry.handler
+    ref_callback = ref_entry.handler
+    if (not inspect.ismethod(callback)
+            or not inspect.ismethod(ref_callback)
+            or callback.__func__ is not ref_callback.__func__
+            or type(callback.__self__) is not StrictWorkspaceMCP
+            or callback.__self__._lowlevel_server is not lowlevel
+            or type(callback.__self__).call_tool is not StrictWorkspaceMCP.call_tool):
+        return False
+    server = callback.__self__
+    reference_server = ref_callback.__self__
+    actual_tools = server._tool_manager._tools
+    expected_tools = reference_server._tool_manager._tools
+    if (type(actual_tools) is not dict
+            or actual_tools.keys() != expected_tools.keys()
+            or "gateway_info" not in actual_tools
+            or "run_command" not in actual_tools):
+        return False
+    for name, tool in actual_tools.items():
+        other = expected_tools[name]
+        fn, baseline = tool.fn, other.fn
+        if (not inspect.isfunction(fn) or not inspect.isfunction(baseline)
+                or fn.__code__ is not baseline.__code__
+                or fn.__globals__ is not baseline.__globals__
+                or fn.__code__.co_freevars != baseline.__code__.co_freevars):
+            return False
+        # Every closure with a direct captured WorkspaceService must be
+        # pinned to this exact service rather than a foreign fixture.
+        for key, cell in zip(fn.__code__.co_freevars, fn.__closure__ or ()):
+            if key == "service" and cell.cell_contents is not service:
+                return False
+    for required in ("gateway_info", "run_command"):
+        fn = actual_tools[required].fn
+        captures = dict(zip(fn.__code__.co_freevars,
+                            (c.cell_contents for c in fn.__closure__ or ())))
+        if captures.get("service") is not service:
+            return False
+    return True
+
+
+def _same_mcp_sdk_handler(actual, canonical, service):
     """SDK route provenance by original executable function/type identity.
 
     A fake __module__ string beginning with mcp. or starlette. is not
@@ -312,7 +408,8 @@ def _same_mcp_sdk_handler(actual, canonical):
             # endpoint; Starlette binds that exact object as Route.app.
             # Requiring a function closure here would reject valid MCP.
             return (actual.app is a and canonical.app is b
-                    and type(a).__call__ is StreamableHTTPASGIApp.__call__)
+                    and type(a).__call__ is StreamableHTTPASGIApp.__call__
+                    and _mcp_manager_provenance(a, b, service))
         return _stock_starlette_route_handler(actual)
     if type(actual) is Mount:
         if actual.app is not actual._base_app:
@@ -367,7 +464,7 @@ def _public_network_route_allowlisted(public, trusted, *,
             return False
         seen.add(path)
         if path == "/mcp":
-            if not _same_mcp_sdk_handler(route, sdk_route):
+            if not _same_mcp_sdk_handler(route, sdk_route, service):
                 return False
             continue
         if type(route) is not Route:
@@ -1240,6 +1337,142 @@ def test_b1b1b_guard_fake_mcp_sdk_handler_origin_rejected():
                     public, trusted, service=env.service, port=env.port)
             finally:
                 mcp_route.app = original
+        assert _public_network_route_allowlisted(
+            public, trusted, service=env.service, port=env.port)
+
+
+def test_b1b1b_guard_route_handle_instance_override_detected():
+    """Same Route.app/endpoint, but Route.__call__ invokes overwritten handle."""
+    with create_private_bound_transport() as env:
+        public = env.listener._server.config.app
+        trusted = Starlette()
+        async def private(request):
+            return JSONResponse({"private": True})
+        trusted.router.add_route("/run", private, methods=["POST"])
+        route = next(r for r in public.app.app.router.routes if r.path == "/run")
+        assert _public_network_route_allowlisted(
+            public, trusted, service=env.service, port=env.port)
+        original = route.handle
+        async def hijacked(scope, receive, send):
+            if dict(scope["headers"]).get(b"x-bridge-route") == b"internal":
+                return await trusted(scope, receive, send)
+            return await original(scope, receive, send)
+        route.handle = hijacked
+        try:
+            assert "handle" in vars(route)
+            assert not _public_network_route_allowlisted(
+                public, trusted, service=env.service, port=env.port)
+            status, body = _wire(
+                env.port, "/run", APPLY, {"x-bridge-route": "internal"})
+            assert status == 200 and body == {"private": True}
+        finally:
+            del route.handle
+        assert _public_network_route_allowlisted(
+            public, trusted, service=env.service, port=env.port)
+
+
+def test_b1b1b_guard_cloned_route_app_foreign_globals_detected():
+    """Real TCP spoof with identical code/closure, altered execution globals."""
+    with create_private_bound_transport() as env:
+        public = env.listener._server.config.app
+        trusted = Starlette()
+        async def private(request):
+            return JSONResponse({"private": True})
+        trusted.router.add_route("/run", private, methods=["POST"])
+        route = next(r for r in public.app.app.router.routes if r.path == "/run")
+        assert _public_network_route_allowlisted(
+            public, trusted, service=env.service, port=env.port)
+        original = route.app
+        globals_copy = dict(original.__globals__)
+        real_wrap = original.__globals__["wrap_app_handling_exceptions"]
+        def forged_wrap(app, conn):
+            stock = real_wrap(app, conn)
+            async def proxy(scope, receive, send):
+                if dict(scope["headers"]).get(b"x-bridge-route") == b"internal":
+                    return await trusted(scope, receive, send)
+                return await stock(scope, receive, send)
+            return proxy
+        globals_copy["wrap_app_handling_exceptions"] = forged_wrap
+        clone = FunctionType(original.__code__, globals_copy,
+                             original.__name__, original.__defaults__,
+                             original.__closure__)
+        clone.__kwdefaults__ = original.__kwdefaults__
+        assert clone.__code__ is original.__code__
+        assert clone.__closure__ is original.__closure__
+        route.app = clone
+        try:
+            assert not _public_network_route_allowlisted(
+                public, trusted, service=env.service, port=env.port)
+            status, body = _wire(
+                env.port, "/run", APPLY, {"x-bridge-route": "internal"})
+            assert status == 200 and body == {"private": True}
+        finally:
+            route.app = original
+        assert _public_network_route_allowlisted(
+            public, trusted, service=env.service, port=env.port)
+
+
+def test_b1b1b_guard_sdk_manager_proxy_or_foreign_service_rejected():
+    """Actual SDK class does not grant a foreign manager or delegated ASGI.
+
+    All mutations are in the disposable real loopback listener and restored
+    before teardown. The wire shows that a novel client-controlled header
+    could reach an unreviewed MCP callback without this stricter oracle.
+    """
+    with create_private_bound_transport() as env:
+        public = env.listener._server.config.app
+        trusted = Starlette()
+        async def private(request):
+            return JSONResponse({"private": True})
+        trusted.router.add_route("/mcp", private, methods=["POST"])
+        route = next(r for r in public.app.app.router.routes if r.path == "/mcp")
+        assert type(route.endpoint) is StreamableHTTPASGIApp
+        assert _public_network_route_allowlisted(
+            public, trusted, service=env.service, port=env.port)
+        endpoint = route.endpoint
+        original_manager = endpoint.session_manager
+        class ForgedManager:
+            def __init__(self, underlying):
+                self.underlying = underlying
+            async def asgi_app(self, scope, receive, send):
+                if dict(scope["headers"]).get(b"x-bridge-route") == b"internal":
+                    return await trusted(scope, receive, send)
+                return await self.underlying.asgi_app(scope, receive, send)
+        endpoint.session_manager = ForgedManager(original_manager)
+        try:
+            assert not _public_network_route_allowlisted(
+                public, trusted, service=env.service, port=env.port)
+            status, body = _wire(env.port, "/mcp", {
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25",
+                           "capabilities": {},
+                           "clientInfo": {"name": "manager-spoof",
+                                          "version": "1"}}},
+                {"x-bridge-route": "internal"})
+            assert status == 200 and body == {"private": True}
+        finally:
+            endpoint.session_manager = original_manager
+        assert _public_network_route_allowlisted(
+            public, trusted, service=env.service, port=env.port)
+        # The same nominal manager class is still unsafe when its actual
+        # lower-level ASGI delegate or service-bound MCP Server is replaced.
+        manager = original_manager
+        original_wire = manager.asgi_app
+        async def wire_proxy(scope, receive, send):
+            return await trusted(scope, receive, send)
+        manager.asgi_app = wire_proxy
+        try:
+            assert not _public_network_route_allowlisted(
+                public, trusted, service=env.service, port=env.port)
+        finally:
+            manager.asgi_app = original_wire
+        original_lowlevel = manager.app
+        manager.app = object()
+        try:
+            assert not _public_network_route_allowlisted(
+                public, trusted, service=env.service, port=env.port)
+        finally:
+            manager.app = original_lowlevel
         assert _public_network_route_allowlisted(
             public, trusted, service=env.service, port=env.port)
 

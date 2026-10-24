@@ -801,6 +801,26 @@ def test_b1b1b_guard_real_listener_loopback_preview_without_execution():
         real_mcp = next(r for r in core.router.routes if r.path == "/mcp")
         stock_mcp = next(r for r in reference.router.routes
                          if r.path == "/mcp")
+        print("B1B1B_AUDIT_FACETS",
+              "stock_dispatch=", _stock_starlette_dispatch(core),
+              "mcp_valid=", _same_mcp_sdk_handler(real_mcp, stock_mcp),
+              "bad_rest=", [
+                  r.path for r in core.router.routes
+                  if type(r) is Route and r.path != "/mcp"
+                  and not _stock_starlette_route_handler(r)],
+              "mcp_real=", (
+                  type(real_mcp).__name__,
+                  type(real_mcp.app).__name__,
+                  getattr(real_mcp.endpoint, "__module__", None),
+                  getattr(getattr(real_mcp.endpoint, "__code__", None),
+                          "co_qualname", None)),
+              "mcp_reference=", (
+                  type(stock_mcp).__name__,
+                  type(stock_mcp.app).__name__,
+                  getattr(stock_mcp.endpoint, "__module__", None),
+                  getattr(getattr(stock_mcp.endpoint, "__code__", None),
+                          "co_qualname", None)),
+              flush=True)
         assert _public_network_route_allowlisted(
             public, Starlette(), service=env.service, port=env.port), (
             "B1B1B_KNOWN_PUBLIC_ROUTE_SHAPE_REJECTED", {

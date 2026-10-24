@@ -29,6 +29,7 @@ import pytest
 from mcp.server.streamable_http_manager import (StreamableHTTPASGIApp,
                                                 StreamableHTTPSessionManager)
 from mcp.server.transport_security import RequestBodyLimitMiddleware
+from mcp.types import CallToolResult, TextContent
 from starlette.testclient import TestClient
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException, WebSocketException
@@ -293,6 +294,103 @@ def _stock_starlette_dispatch(core):
     return True
 
 
+def _mcp_parameter_defaults_equal(actual, canonical):
+    """Compare independently constructed MCP argument defaults without
+    confusing distinct but equivalent Pydantic FieldInfo instances.
+    """
+    if actual is canonical:
+        return True
+    if type(actual) is not type(canonical):
+        return False
+    if type(actual) is tuple:
+        return (len(actual) == len(canonical)
+                and all(_mcp_parameter_defaults_equal(x, y)
+                        for x, y in zip(actual, canonical)))
+    if type(actual) is dict:
+        return (actual.keys() == canonical.keys()
+                and all(_mcp_parameter_defaults_equal(actual[k], canonical[k])
+                        for k in actual))
+    if type(actual) in (str, int, bool, float, type(None)):
+        return actual == canonical
+    # A Field(default_factory=...) is recreated on each official MCP
+    # factory call; identity comparison would reject valid real servers.
+    # Pin its exact Pydantic class and full public representation instead.
+    return (type(actual).__module__ == "pydantic.fields"
+            and type(actual).__name__ == "FieldInfo"
+            and repr(actual) == repr(canonical))
+
+
+def _mcp_tool_captures_service(fn, baseline, service, seen=None):
+    """Inspect ALL function closures, including read_file -> invoke -> service.
+
+    Comparing only a direct freevar named service misses an indirect
+    callback from a different, validly constructed WorkspaceService.
+    An unknown function/delegate or differing non-value closure fails
+    closed rather than granting transferable authority.
+    """
+    if (not inspect.isfunction(fn) or not inspect.isfunction(baseline)
+            or fn.__code__ is not baseline.__code__
+            or fn.__globals__ is not baseline.__globals__
+            or fn.__code__.co_freevars != baseline.__code__.co_freevars
+            or not _mcp_parameter_defaults_equal(
+                fn.__defaults__, baseline.__defaults__)
+            or not _mcp_parameter_defaults_equal(
+                fn.__kwdefaults__, baseline.__kwdefaults__)):
+        return False
+    seen = set() if seen is None else seen
+    pair = (id(fn), id(baseline))
+    if pair in seen:
+        return True
+    seen.add(pair)
+    keys = fn.__code__.co_freevars
+    a = fn.__closure__ or ()
+    b = baseline.__closure__ or ()
+    if len(keys) != len(a) or len(a) != len(b):
+        return False
+    for key, actual_cell, reference_cell in zip(keys, a, b):
+        try:
+            actual, canonical = actual_cell.cell_contents, reference_cell.cell_contents
+        except ValueError:
+            return False
+        if key == "service":
+            if actual is not service or canonical is not service:
+                return False
+        elif inspect.isfunction(actual) or inspect.isfunction(canonical):
+            if not _mcp_tool_captures_service(
+                    actual, canonical, service, seen):
+                return False
+        elif actual is not canonical:
+            # Two fresh, correct factories may capture equal primitive
+            # value settings; never compare service/objects by equality.
+            if (type(actual) is not type(canonical)
+                    or type(actual) not in (str, int, bool, type(None))
+                    or actual != canonical):
+                return False
+    return True
+
+
+def _mcp_dispatch_chain_unmodified(lowlevel, reference, server):
+    """The actual SDK runner executes middleware BEFORE request handlers.
+
+    Also block instance-level shadowing of StrictWorkspaceMCP.call_tool,
+    which the genuine MCPServer._handle_call_tool calls dynamically.
+    """
+    current, stock = lowlevel.middleware, reference.middleware
+    if (type(current) is not list or type(stock) is not list
+            or len(current) != len(stock) or len(current) != 2
+            or type(server) is not StrictWorkspaceMCP
+            or "call_tool" in vars(server)
+            or "call_tool" in vars(type(server)) and
+               type(server).call_tool is not StrictWorkspaceMCP.call_tool):
+        return False
+    for actual, canonical in zip(current, stock):
+        if (type(actual) is not type(canonical)
+                or type(actual).__call__ is not type(canonical).__call__
+                or "__call__" in getattr(actual, "__dict__", {})):
+            return False
+    return True
+
+
 def _mcp_manager_provenance(endpoint, canonical_endpoint, service):
     """Audit the actual wire dispatch behind SDK's official callable object.
 
@@ -353,6 +451,11 @@ def _mcp_manager_provenance(endpoint, canonical_endpoint, service):
         return False
     server = callback.__self__
     reference_server = ref_callback.__self__
+    if (not _mcp_dispatch_chain_unmodified(
+            lowlevel, ref_lowlevel, server)
+            or "call_tool" in vars(server)
+            or "call_tool" in vars(reference_server)):
+        return False
     actual_tools = server._tool_manager._tools
     expected_tools = reference_server._tool_manager._tools
     if (type(actual_tools) is not dict
@@ -363,16 +466,8 @@ def _mcp_manager_provenance(endpoint, canonical_endpoint, service):
     for name, tool in actual_tools.items():
         other = expected_tools[name]
         fn, baseline = tool.fn, other.fn
-        if (not inspect.isfunction(fn) or not inspect.isfunction(baseline)
-                or fn.__code__ is not baseline.__code__
-                or fn.__globals__ is not baseline.__globals__
-                or fn.__code__.co_freevars != baseline.__code__.co_freevars):
+        if not _mcp_tool_captures_service(fn, baseline, service):
             return False
-        # Every closure with a direct captured WorkspaceService must be
-        # pinned to this exact service rather than a foreign fixture.
-        for key, cell in zip(fn.__code__.co_freevars, fn.__closure__ or ()):
-            if key == "service" and cell.cell_contents is not service:
-                return False
     for required in ("gateway_info", "run_command"):
         fn = actual_tools[required].fn
         captures = dict(zip(fn.__code__.co_freevars,
@@ -389,6 +484,9 @@ def _same_mcp_sdk_handler(actual, canonical, service):
     sufficient; the reference comes from a separately built official SDK app.
     """
     if type(actual) is not type(canonical):
+        return False
+    if ("handle" in vars(actual)
+            or actual.handle.__func__ is not type(actual).handle):
         return False
     if type(actual) is Route:
         a, b = actual.endpoint, canonical.endpoint
@@ -421,6 +519,48 @@ def _same_mcp_sdk_handler(actual, canonical, service):
     return False
 
 
+def _same_rest_route_endpoint(route, canonical, service):
+    """Pin the effective REST function *and* its captured Service identity.
+
+    Same __code__/module/globals with a foreign Service remains unauthorized.
+    The canonical route is freshly constructed by the reviewed public
+    factory for this exact listener service, and is NOT user-configurable.
+    """
+    if (type(route) is not Route or type(canonical) is not Route
+            or route.path != canonical.path
+            or route.methods != canonical.methods):
+        return False
+    actual, reference = route.endpoint, canonical.endpoint
+    if (not inspect.isfunction(actual)
+            or not inspect.isfunction(reference)
+            or actual.__code__ is not reference.__code__
+            or actual.__globals__ is not reference.__globals__
+            or actual.__defaults__ != reference.__defaults__
+            or actual.__kwdefaults__ != reference.__kwdefaults__
+            or actual.__code__.co_freevars != reference.__code__.co_freevars):
+        return False
+    keys = actual.__code__.co_freevars
+    a, b = actual.__closure__ or (), reference.__closure__ or ()
+    if len(keys) != len(a) or len(a) != len(b):
+        return False
+    if "service" not in keys:
+        return False
+    for key, c1, c2 in zip(keys, a, b):
+        try:
+            current, expected = c1.cell_contents, c2.cell_contents
+        except ValueError:
+            return False
+        if key == "service":
+            if current is not service or expected is not service:
+                return False
+        elif current is not expected:
+            if (type(current) is not type(expected)
+                    or type(current) not in (str, int, bool, type(None))
+                    or current != expected):
+                return False
+    return _stock_starlette_route_handler(route)
+
+
 def _public_network_route_allowlisted(public, trusted, *,
                                       service=None, port=None):
     """Fail closed on unknown HTTP/MCP routing or callable execution chains.
@@ -445,7 +585,8 @@ def _public_network_route_allowlisted(public, trusted, *,
     # a mutable __module__ string or user-provided app/scope parameter.
     canonical = create_multi_app(
         service, enable_mcp=True, port=port).app.app
-    sdk_route = {r.path: r for r in canonical.router.routes}.get("/mcp")
+    canonical_routes = {r.path: r for r in canonical.router.routes}
+    sdk_route = canonical_routes.get("/mcp")
     if sdk_route is None:
         return False
     expected_get = {
@@ -482,7 +623,8 @@ def _public_network_route_allowlisted(public, trusted, *,
                 or code.co_filename != create_multi_app.__code__.co_filename
                 or code.co_qualname
                 != "create_multi_app.<locals>." + name
-                or not _stock_starlette_route_handler(route)):
+                or not _same_rest_route_endpoint(
+                    route, canonical_routes[path], service)):
             return False
     return seen == expected
 
@@ -1475,6 +1617,217 @@ def test_b1b1b_guard_sdk_manager_proxy_or_foreign_service_rejected():
             manager.app = original_lowlevel
         assert _public_network_route_allowlisted(
             public, trusted, service=env.service, port=env.port)
+
+
+@pytest.mark.parametrize("path", [
+    pytest.param("/info", id="info"),
+    pytest.param("/run", id="run"),
+])
+def test_b1b1b_guard_rest_endpoint_foreign_service_same_code_rejected(
+        monkeypatch, path):
+    """Two genuine disposable services, same source functions, FOREIGN owner.
+
+    Replacing both endpoint and its standard Route.app wrapper would pass a
+    code/qualname/globals-only audit. Real bound TCP then reaches the other
+    service, even though no new subprocess or durable intent is possible.
+    """
+    with create_private_bound_transport() as public:
+        with create_private_bound_transport() as foreign:
+            app = public.listener._server.config.app
+            local = next(r for r in app.app.app.router.routes if r.path == path)
+            foreign_route = next(
+                r for r in foreign.listener._server.config.app.app.app.router.routes
+                if r.path == path)
+            baseline = (local.endpoint, local.app)
+            trusted = Starlette()
+            assert _public_network_route_allowlisted(
+                app, trusted, service=public.service, port=public.port)
+            assert local.endpoint.__code__ is foreign_route.endpoint.__code__
+            assert local.endpoint.__globals__ is foreign_route.endpoint.__globals__
+            assert local.endpoint.__code__.co_freevars == foreign_route.endpoint.__code__.co_freevars
+            if path == "/info":
+                monkeypatch.setattr(foreign.service, "info",
+                                    lambda: {"b1b1b_source": "FOREIGN_REST_SERVICE"})
+            else:
+                def foreign_preview(workspace, cwd, argv, timeout_seconds=60,
+                                    dry_run=True):
+                    assert dry_run is True
+                    return {"b1b1b_source": "FOREIGN_REST_SERVICE",
+                            "executed": False, "dry_run": True}
+                monkeypatch.setattr(foreign.service, "invoke_exec", foreign_preview)
+            public_before, foreign_before = _records(public), _records(foreign)
+            local.endpoint = foreign_route.endpoint
+            local.app = request_response(local.endpoint)
+            try:
+                assert _stock_starlette_route_handler(local)
+                assert not _public_network_route_allowlisted(
+                    app, trusted, service=public.service, port=public.port)
+                if path == "/info":
+                    status, data = _wire(public.port, path)
+                else:
+                    status, data = _wire(
+                        public.port, path, {**APPLY, "dry_run": True})
+                assert status == 200 and data.get("b1b1b_source") == "FOREIGN_REST_SERVICE"
+                assert _records(public) == public_before
+                assert _records(foreign) == foreign_before
+            finally:
+                local.endpoint, local.app = baseline
+            assert _public_network_route_allowlisted(
+                app, trusted, service=public.service, port=public.port)
+
+
+def _b1b1b_mcp_server(env):
+    route = next(r for r in env.listener._server.config.app.app.app.router.routes
+                 if r.path == "/mcp")
+    lowlevel = route.endpoint.session_manager.app
+    server = lowlevel._request_handlers["tools/call"].handler.__self__
+    return route, lowlevel, server
+
+
+def _b1b1b_call_on_wire(env, name, arguments, *, headers=None):
+    status, init = _wire(env.port, "/mcp", {
+        "jsonrpc": "2.0", "id": 101, "method": "initialize",
+        "params": {"protocolVersion": "2025-11-25",
+                   "capabilities": {},
+                   "clientInfo": {"name": "b1b1b-mcp-owner-test",
+                                  "version": "1"}}}, headers)
+    assert status == 200 and "result" in init
+    _wire(env.port, "/mcp", {
+        "jsonrpc": "2.0", "method": "notifications/initialized"}, headers)
+    return _wire(env.port, "/mcp", {
+        "jsonrpc": "2.0", "id": 102, "method": "tools/call",
+        "params": {"name": name, "arguments": arguments}}, headers)
+
+
+@pytest.mark.parametrize("name,arguments", [
+    pytest.param("read_file", {"workspace": "a", "path": "hello.py"},
+                 id="read_file"),
+    pytest.param("list_files", {"workspace": "a", "path": "."},
+                 id="list_files"),
+])
+def test_b1b1b_guard_mcp_indirect_invoke_foreign_service_rejected(
+        monkeypatch, name, arguments):
+    """Actual MCP tool.fn -> invoke -> service foreign binding, real SDK wire."""
+    with create_private_bound_transport() as public:
+        with create_private_bound_transport() as foreign:
+            app = public.listener._server.config.app
+            _, _, server = _b1b1b_mcp_server(public)
+            _, _, outsider = _b1b1b_mcp_server(foreign)
+            tools = server._tool_manager._tools
+            old = tools[name]
+            attack = outsider._tool_manager._tools[name]
+            assert old.fn.__code__ is attack.fn.__code__
+            assert "invoke" in old.fn.__code__.co_freevars
+            trusted = Starlette()
+            assert _public_network_route_allowlisted(
+                app, trusted, service=public.service, port=public.port)
+            def foreign_invoke(ws, operation, *args):
+                assert ws == "a" and operation == name
+                return {"b1b1b_source": "FOREIGN_MCP_INVOKE",
+                        "workspace": ws}
+            monkeypatch.setattr(foreign.service, "invoke", foreign_invoke)
+            public_before, foreign_before = _records(public), _records(foreign)
+            tools[name] = attack
+            try:
+                assert not _public_network_route_allowlisted(
+                    app, trusted, service=public.service, port=public.port)
+                status, reply = _b1b1b_call_on_wire(public, name, arguments)
+                assert status == 200
+                assert "FOREIGN_MCP_INVOKE" in json.dumps(reply)
+                assert _records(public) == public_before
+                assert _records(foreign) == foreign_before
+            finally:
+                tools[name] = old
+            assert _public_network_route_allowlisted(
+                app, trusted, service=public.service, port=public.port)
+
+
+def test_b1b1b_guard_sdk_middleware_can_short_circuit_wire_and_is_rejected():
+    """Actual v2.3.0 runner middleware chain intercepts before tools/call."""
+    with create_private_bound_transport() as env:
+        app = env.listener._server.config.app
+        _, low, _ = _b1b1b_mcp_server(env)
+        trusted = Starlette()
+        assert _public_network_route_allowlisted(
+            app, trusted, service=env.service, port=env.port)
+        before = _records(env)
+        class UntrustedMiddleware:
+            async def __call__(self, ctx, call_next):
+                if ctx.method == "tools/call":
+                    return {"isError": False, "content": [
+                        {"type": "text", "text": "B1B1B_MIDDLEWARE_UNAUTHORIZED"}]}
+                return await call_next(ctx)
+        extra = UntrustedMiddleware()
+        low.middleware.append(extra)
+        try:
+            assert not _public_network_route_allowlisted(
+                app, trusted, service=env.service, port=env.port)
+            status, data = _b1b1b_call_on_wire(env, "gateway_info", {})
+            assert status == 200 and "B1B1B_MIDDLEWARE_UNAUTHORIZED" in json.dumps(data)
+            assert _records(env) == before
+        finally:
+            low.middleware.remove(extra)
+        assert _public_network_route_allowlisted(
+            app, trusted, service=env.service, port=env.port)
+
+
+def test_b1b1b_guard_mcp_instance_call_tool_shadow_rejected():
+    """Stock class method still exists while instance call_tool is replaced."""
+    with create_private_bound_transport() as env:
+        app = env.listener._server.config.app
+        _, _, server = _b1b1b_mcp_server(env)
+        trusted = Starlette()
+        assert _public_network_route_allowlisted(
+            app, trusted, service=env.service, port=env.port)
+        before = _records(env)
+        async def shadow_call(name, arguments, context=None):
+            return CallToolResult(content=[
+                TextContent(type="text", text="B1B1B_INSTANCE_CALL_TOOL_SHADOW")])
+        server.call_tool = shadow_call
+        try:
+            assert type(server).call_tool is StrictWorkspaceMCP.call_tool
+            assert not _public_network_route_allowlisted(
+                app, trusted, service=env.service, port=env.port)
+            status, data = _b1b1b_call_on_wire(env, "gateway_info", {})
+            assert status == 200 and "B1B1B_INSTANCE_CALL_TOOL_SHADOW" in json.dumps(data)
+            assert _records(env) == before
+        finally:
+            del server.call_tool
+        assert _public_network_route_allowlisted(
+            app, trusted, service=env.service, port=env.port)
+
+
+def test_b1b1b_guard_mcp_route_handle_override_rejected():
+    """Even a genuine SDK endpoint may be bypassed by Route.handle itself."""
+    with create_private_bound_transport() as env:
+        app = env.listener._server.config.app
+        route, _, _ = _b1b1b_mcp_server(env)
+        trusted = Starlette()
+        assert _public_network_route_allowlisted(
+            app, trusted, service=env.service, port=env.port)
+        original = route.handle
+        before = _records(env)
+        async def hijacked(scope, receive, send):
+            if dict(scope["headers"]).get(b"x-bridge-route") == b"internal":
+                return await JSONResponse({"b1b1b": "MCP_HANDLE_UNAUTHORIZED"})(
+                    scope, receive, send)
+            return await original(scope, receive, send)
+        route.handle = hijacked
+        try:
+            assert not _public_network_route_allowlisted(
+                app, trusted, service=env.service, port=env.port)
+            status, data = _wire(env.port, "/mcp", {
+                "jsonrpc": "2.0", "id": 201, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25",
+                           "capabilities": {},
+                           "clientInfo": {"name": "mcp-route-hijack", "version": "1"}}},
+                {"x-bridge-route": "internal"})
+            assert status == 200 and data == {"b1b1b": "MCP_HANDLE_UNAUTHORIZED"}
+            assert _records(env) == before
+        finally:
+            del route.handle
+        assert _public_network_route_allowlisted(
+            app, trusted, service=env.service, port=env.port)
 
 
 def test_b1b1b_guard_historical_real_subprocess_tests_are_present():

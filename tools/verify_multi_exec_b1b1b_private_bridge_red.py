@@ -82,12 +82,19 @@ GREEN = {
     "test_b1b1b_guard_route_handle_instance_override_detected",
     "test_b1b1b_guard_cloned_route_app_foreign_globals_detected",
     "test_b1b1b_guard_sdk_manager_proxy_or_foreign_service_rejected",
+    "test_b1b1b_guard_rest_endpoint_foreign_service_same_code_rejected[info]",
+    "test_b1b1b_guard_rest_endpoint_foreign_service_same_code_rejected[run]",
+    "test_b1b1b_guard_mcp_indirect_invoke_foreign_service_rejected[read_file]",
+    "test_b1b1b_guard_mcp_indirect_invoke_foreign_service_rejected[list_files]",
+    "test_b1b1b_guard_sdk_middleware_can_short_circuit_wire_and_is_rejected",
+    "test_b1b1b_guard_mcp_instance_call_tool_shadow_rejected",
+    "test_b1b1b_guard_mcp_route_handle_override_rejected",
     "test_b1b1b_guard_body_sourced_parser_proxy_bypass_is_not_denial",
     "test_b1b1b_guard_historical_real_subprocess_tests_are_present",
     "test_b1b1b_guard_normal_product_has_no_private_bridge_factory_import",
     "test_b1b1b_guard_existing_test_grant_not_serializable_or_reusable",
 }
-assert len(RED) == 24 and len(GREEN) == 21
+assert len(RED) == 24 and len(GREEN) == 28
 EXPECTED = set(RED) | GREEN
 
 
@@ -141,7 +148,7 @@ def main():
                     green += 1
             else:
                 issues.append(name + ": unexpected test")
-        if run.returncode != 1 or red != 24 or green != 21:
+        if run.returncode != 1 or red != 24 or green != 28:
             issues.append("wrong pytest status/counts: " +
                           repr((run.returncode, red, green)))
         if issues:
@@ -149,7 +156,7 @@ def main():
                 print("B1B1B_EXPECTED_RED_FAIL: " + issue, flush=True)
             return 1
         print("B1B1B_PRIVATE_BRIDGE_EXPECTED_RED=24")
-        print("B1B1B_EXISTING_GUARDS_GREEN=21")
+        print("B1B1B_EXISTING_GUARDS_GREEN=28")
         print("B1B1B_CONTRACT_STAGE=RED_NOT_IMPLEMENTED")
         print("B1B1B_NO_HOST_SPAWN_OR_SIGNAL=TRUE")
         print("B1B1B_HISTORICAL_REAL_EXEC_TESTS=UNCHANGED")

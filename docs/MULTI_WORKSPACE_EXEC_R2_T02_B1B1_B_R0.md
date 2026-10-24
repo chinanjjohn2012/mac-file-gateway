@@ -289,6 +289,74 @@ authorized staged private Bridge implementation; this review
 stage does not enable Worker/default-DENY, descendant cleanup
 or production Exec.
 
+## Fixed Head 8eeef32c independent Standards P2 targeted repairs
+
+On [Standards Review #5637928341](https://github.com/chinanjjohn2012/mac-file-gateway/pull/68#pullrequestreview-5637928341),
+[Standards Review #5637930788](https://github.com/chinanjjohn2012/mac-file-gateway/pull/68#pullrequestreview-5637930788),
+and [later re-review #5638211273](https://github.com/chinanjjohn2012/mac-file-gateway/pull/68#pullrequestreview-5638211273),
+all bound to original Head \`8eeef32c921f8ab85635795340344540b5731bb9\`,
+the still-unresolved RED-oracle P2 concern was **exact Service
+provenance**, even with correct route syntax/callable source:
+
+- REST path/method/stock \`Route.app\` and legitimate
+  \`read_endpoint/write_endpoint.__code__\` do not by themselves prove
+  the endpoint's *captured WorkspaceService* equals the current
+  listener's exact owned Service. R0 now independently constructs the
+  canonical REST routes using the actual listener Service and checks
+  every function's \`__code__\`, \`__globals__\`, defaults, full critical
+  closure captures, and the exact \`service is listener.service\`
+  identity. Two mandatory GREEN independent real-loopback tests
+  replace both GET \`/info\` and preview-only POST \`/run\` with an
+  equivalent endpoint from a **second disposable real listener**,
+  re-wrap through official Starlette \`request_response\`, demonstrate
+  the caller receives a synthetic foreign-Service marker, require
+  the provenance checker to fail closed, restore original handlers and
+  verify both state directories unchanged. They do not launch or
+  manipulate any host child.
+- MCP tool functions \`read_file/list_files/search_files\` call a
+  nested \`invoke\` closure which captures the WorkspaceService on the
+  next level. Direct name-based \`service\` checks on tool.fn miss this.
+  R0 now recursively verifies all actual Tool.fn function closures
+  against a separately built factory reference, including
+  \`tool.fn -> invoke -> service\`, asserting that every encountered
+  WorkspaceService is exactly the current listener Service; unknown
+  nested callables/objects fail closed. Two new mandatory GREEN tests
+  transplant the foreign listener's *real* \`read_file\` or
+  \`list_files\` Tool.fn into the public tool manager while keeping
+  \`gateway_info/run_command\` normal; real SDK TCP \`tools/call\`
+  returns a harmless synthetic FOREIGN marker, and the checker must
+  reject before the original state/runner can change.
+- The SDK 2.3.0 **ServerRunner executes \`lowlevel.middleware\`
+  before \`_request_handlers["tools/call"]\`**. Exactly the stock
+  two ordered middleware instances are required; a third injected
+  short-circuiting middleware is rejected. A real loopback MCP wire
+  test injects such middleware, returns a synthetic invalid success
+  from \`tools/call\`, proves the checker fails closed, then restores
+  the stock list. The low-level server's \`tools/call\` handler identity
+  and owning StrictWorkspaceMCP remains pinned.
+- An instance-level \`StrictWorkspaceMCP.call_tool\` override can
+  intercept the genuine low-level handler without changing the class
+  method. The checker now rejects that instance override. A real SDK
+  TCP tools/call mutation demonstrates synthetic unauthorized content,
+  restores the instance and rechecks normal provenance.
+- The actual SDK \`/mcp\` \`Route.handle\` also has a separate mutable
+  instance override seam even when StreamableHTTPASGIApp,
+  manager, Tool.fn and \`Route.app\` remain official. One new real
+  bound TCP mutation shows a header-selected private result, requires
+  false qualification, and restores the class-bound stock method.
+
+This is a **test-only R0 RED contract repair**, not permission to
+launch subprocesses, not proof that a future private Bridge exists,
+and not a full-tree cleanup/production admission pass. All seven new
+GREEN counterexamples use disposable real loopback listeners,
+synthetic canary output and Python NO-SPAWN guard. The previous 24
+expected RED cases, all 21 existing GREEN guards, frozen B1-B1-A
+11 RED / 31 GREEN and original full 1468+ product tests remain
+unchanged. The strict R0 classifier now requires **24 expected RED
+and 28 mandatory GREEN across exactly 52 expanded NodeIDs**.
+Fresh Standards AND Spec reviews must be independent on this new
+fixed Head and original SHA-bound CI before any R1 implementation.
+
 ## Required next gate
 
 After original CI success, independently review Standards and Spec

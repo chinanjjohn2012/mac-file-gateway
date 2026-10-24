@@ -20,6 +20,7 @@ import signal
 import subprocess
 import threading
 from types import FunctionType
+from typing import Annotated, get_args, get_origin
 import httpx
 from types import ModuleType, SimpleNamespace
 import urllib.error
@@ -405,6 +406,17 @@ def _same_generated_sdk_output_model(actual, baseline):
     """
     if actual is baseline or actual == baseline:
         return True
+    # MCP 2.3.0 returns separately created Annotated[dict[str, Any],
+    # Field(title=...)] for the same dict-returning tool. The two new
+    # FieldInfo objects compare unequal by identity; require exact
+    # origin/annotation and SDK FieldInfo content rather than 'is'.
+    if get_origin(actual) is Annotated:
+        if get_origin(baseline) is not Annotated:
+            return False
+        a, b = get_args(actual), get_args(baseline)
+        return (len(a) == len(b) and len(a) >= 2 and a[0] == b[0]
+                and all(_mcp_parameter_defaults_equal(x, y)
+                        for x, y in zip(a[1:], b[1:])))
     if not inspect.isclass(actual) or not inspect.isclass(baseline):
         return False
     if (actual.__base__ is not baseline.__base__
@@ -1144,65 +1156,6 @@ def test_b1b1b_guard_real_listener_loopback_preview_without_execution():
         real_mcp = next(r for r in core.router.routes if r.path == "/mcp")
         stock_mcp = next(r for r in reference.router.routes
                          if r.path == "/mcp")
-        if not _public_network_route_allowlisted(
-                public, Starlette(), service=env.service, port=env.port):
-            real_low = real_mcp.endpoint.session_manager.app
-            stock_low = stock_mcp.endpoint.session_manager.app
-            real_server = real_low._request_handlers["tools/call"].handler.__self__
-            stock_server = stock_low._request_handlers["tools/call"].handler.__self__
-            real_manager, expected_manager = (
-                real_server._tool_manager, stock_server._tool_manager)
-            facets = []
-            for name, tool in real_manager._tools.items():
-                other = expected_manager._tools[name]
-                meta, baseline = tool.fn_metadata, other.fn_metadata
-                facets.append((
-                    name,
-                    _stock_sdk_bound(tool, Tool, "run", _SDK_TOOL_RUN),
-                    tool.model_dump(exclude={"fn", "fn_metadata"})
-                      == other.model_dump(exclude={"fn", "fn_metadata"}),
-                    meta.output_schema == baseline.output_schema,
-                    meta.output_model == baseline.output_model,
-                    meta.wrap_output == baseline.wrap_output,
-                    meta.arg_model.__base__ is baseline.arg_model.__base__,
-                    meta.arg_model.model_json_schema()
-                      == baseline.arg_model.model_json_schema(),
-                    all(_stock_sdk_bound(meta, FuncMetadata, method, fn)
-                        for method, fn in (
-                            ("validate_arguments", _SDK_META_VALIDATE),
-                            ("pre_parse_json", _SDK_META_PREPARSE),
-                            ("call_fn", _SDK_META_CALL),
-                            ("convert_result", _SDK_META_CONVERT))),
-                    _mcp_tool_captures_service(tool.fn, other.fn,
-                                               env.service),
-                ))
-            print("B1B1B_SDK_STOCK_FACETS",
-                  "lowlevel_ok=", _mcp_dispatch_chain_unmodified(
-                      real_low, stock_low, real_server),
-                  "manager_get=", _stock_sdk_bound(
-                      real_manager, ToolManager, "get_tool",
-                      _SDK_MANAGER_GET_TOOL),
-                  "manager_call=", _stock_sdk_bound(
-                      real_manager, ToolManager, "call_tool",
-                      _SDK_MANAGER_CALL_TOOL),
-                  "mcp_handler=", _same_mcp_sdk_handler(
-                      real_mcp, stock_mcp, env.service),
-                  "per_tool_fields=", facets, flush=True)
-            bad = [(item[0], [i for i, passed in enumerate(item[1:], 1)
-                              if not passed]) for item in facets
-                   if not all(item[1:])]
-            raise AssertionError(
-                "B1B1B_STOCK_MCP_DIAGNOSTIC: " + repr({
-                    "bad_tools": bad,
-                    "lowlevel_ok": _mcp_dispatch_chain_unmodified(
-                        real_low, stock_low, real_server),
-                    "manager_get": _stock_sdk_bound(
-                        real_manager, ToolManager, "get_tool",
-                        _SDK_MANAGER_GET_TOOL),
-                    "manager_call": _stock_sdk_bound(
-                        real_manager, ToolManager, "call_tool",
-                        _SDK_MANAGER_CALL_TOOL),
-                }))
         assert _public_network_route_allowlisted(
             public, Starlette(), service=env.service, port=env.port), (
             "B1B1B_KNOWN_PUBLIC_ROUTE_SHAPE_REJECTED", {

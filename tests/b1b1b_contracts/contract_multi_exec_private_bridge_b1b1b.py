@@ -30,6 +30,10 @@ from mcp.server.streamable_http_manager import (StreamableHTTPASGIApp,
                                                 StreamableHTTPSessionManager)
 from mcp.server.transport_security import RequestBodyLimitMiddleware
 from mcp.types import CallToolResult, TextContent
+from mcp.server.lowlevel.server import Server as LowLevelServer, HandlerEntry
+from mcp.server.mcpserver.tools.tool_manager import ToolManager
+from mcp.server.mcpserver.tools.base import Tool
+from mcp.server.mcpserver.utilities.func_metadata import FuncMetadata
 from starlette.testclient import TestClient
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException, WebSocketException
@@ -369,6 +373,87 @@ def _mcp_tool_captures_service(fn, baseline, service, seen=None):
     return True
 
 
+# SDK v2.3.0 executable-callable identities frozen at contract import time,
+# before constructing any public or foreign disposable acceptance instance.
+_SDK_LOWLEVEL_REQUEST_HANDLER = LowLevelServer.get_request_handler
+_SDK_MANAGER_GET_TOOL = ToolManager.get_tool
+_SDK_MANAGER_CALL_TOOL = ToolManager.call_tool
+_SDK_TOOL_RUN = Tool.run
+_SDK_META_VALIDATE = FuncMetadata.validate_arguments
+_SDK_META_PREPARSE = FuncMetadata.pre_parse_json
+_SDK_META_CALL = FuncMetadata.call_fn
+_SDK_META_CONVERT = FuncMetadata.convert_result
+
+
+def _stock_sdk_bound(obj, cls, method, original):
+    """Exact class + no instance override + original executable function."""
+    if type(obj) is not cls or method in vars(obj):
+        return False
+    actual = getattr(obj, method, None)
+    return (inspect.ismethod(actual) and actual.__self__ is obj
+            and actual.__func__ is original
+            and getattr(cls, method) is original)
+
+
+def _tool_dispatch_provenance(manager, stock, service):
+    """Follow the actual MCP 2.3.0 ToolManager -> Tool.run -> fn_metadata.
+
+    Correct registration Tool.fn alone cannot prove which function executes:
+    get_tool/call_tool, Tool.run, metadata.call_fn and Pydantic argument
+    interpretation are all active execution/authorization routing seams.
+    """
+    if (not _stock_sdk_bound(manager, ToolManager, "get_tool",
+                             _SDK_MANAGER_GET_TOOL)
+            or not _stock_sdk_bound(manager, ToolManager, "call_tool",
+                                    _SDK_MANAGER_CALL_TOOL)
+            or type(stock) is not ToolManager
+            or "get_tool" in vars(stock) or "call_tool" in vars(stock)):
+        return False
+    tools = manager._tools
+    reference = stock._tools
+    if (type(tools) is not dict or type(reference) is not dict
+            or tools.keys() != reference.keys()
+            or "gateway_info" not in tools or "run_command" not in tools):
+        return False
+    for name, tool in tools.items():
+        expected = reference[name]
+        if (not _stock_sdk_bound(tool, Tool, "run", _SDK_TOOL_RUN)
+                or type(expected) is not Tool
+                or tool.name != name or expected.name != name
+                or tool.model_dump(exclude={"fn", "fn_metadata"})
+                   != expected.model_dump(exclude={"fn", "fn_metadata"})):
+            return False
+        meta, canonical = tool.fn_metadata, expected.fn_metadata
+        if type(meta) is not FuncMetadata or type(canonical) is not FuncMetadata:
+            return False
+        for method, original in (
+            ("validate_arguments", _SDK_META_VALIDATE),
+            ("pre_parse_json", _SDK_META_PREPARSE),
+            ("call_fn", _SDK_META_CALL),
+            ("convert_result", _SDK_META_CONVERT),
+        ):
+            if not _stock_sdk_bound(meta, FuncMetadata, method, original):
+                return False
+        if (meta.output_schema != canonical.output_schema
+                or meta.output_model != canonical.output_model
+                or meta.wrap_output != canonical.wrap_output
+                or meta.arg_model.__base__ is not canonical.arg_model.__base__
+                or meta.arg_model.model_json_schema()
+                   != canonical.arg_model.model_json_schema()
+                or set(meta.arg_model.model_fields)
+                   != set(canonical.arg_model.model_fields)):
+            return False
+        if not _mcp_tool_captures_service(tool.fn, expected.fn, service):
+            return False
+    for required in ("gateway_info", "run_command"):
+        fn = tools[required].fn
+        captures = dict(zip(fn.__code__.co_freevars,
+                            (c.cell_contents for c in fn.__closure__ or ())))
+        if captures.get("service") is not service:
+            return False
+    return True
+
+
 def _mcp_dispatch_chain_unmodified(lowlevel, reference, server):
     """The actual SDK runner executes middleware BEFORE request handlers.
 
@@ -376,7 +461,12 @@ def _mcp_dispatch_chain_unmodified(lowlevel, reference, server):
     which the genuine MCPServer._handle_call_tool calls dynamically.
     """
     current, stock = lowlevel.middleware, reference.middleware
-    if (type(current) is not list or type(stock) is not list
+    if (not _stock_sdk_bound(
+            lowlevel, LowLevelServer, "get_request_handler",
+            _SDK_LOWLEVEL_REQUEST_HANDLER)
+            or type(reference) is not LowLevelServer
+            or "get_request_handler" in vars(reference)
+            or type(current) is not list or type(stock) is not list
             or len(current) != len(stock) or len(current) != 2
             or type(server) is not StrictWorkspaceMCP
             or "call_tool" in vars(server)
@@ -456,25 +546,8 @@ def _mcp_manager_provenance(endpoint, canonical_endpoint, service):
             or "call_tool" in vars(server)
             or "call_tool" in vars(reference_server)):
         return False
-    actual_tools = server._tool_manager._tools
-    expected_tools = reference_server._tool_manager._tools
-    if (type(actual_tools) is not dict
-            or actual_tools.keys() != expected_tools.keys()
-            or "gateway_info" not in actual_tools
-            or "run_command" not in actual_tools):
-        return False
-    for name, tool in actual_tools.items():
-        other = expected_tools[name]
-        fn, baseline = tool.fn, other.fn
-        if not _mcp_tool_captures_service(fn, baseline, service):
-            return False
-    for required in ("gateway_info", "run_command"):
-        fn = actual_tools[required].fn
-        captures = dict(zip(fn.__code__.co_freevars,
-                            (c.cell_contents for c in fn.__closure__ or ())))
-        if captures.get("service") is not service:
-            return False
-    return True
+    return _tool_dispatch_provenance(
+        server._tool_manager, reference_server._tool_manager, service)
 
 
 def _same_mcp_sdk_handler(actual, canonical, service):
@@ -1826,6 +1899,178 @@ def test_b1b1b_guard_mcp_route_handle_override_rejected():
             assert _records(env) == before
         finally:
             del route.handle
+        assert _public_network_route_allowlisted(
+            app, trusted, service=env.service, port=env.port)
+
+
+@pytest.mark.parametrize("method", ["get_tool", "call_tool"])
+def test_b1b1b_guard_sdk_manager_effective_foreign_dispatch_rejected(
+        monkeypatch, method):
+    """Real MCP TCP: unchanged _tools/Tool.fn but bound manager method foreign.
+
+    A legitimate public tool table is NOT evidence of which tool executes:
+    both official ToolManager.call_tool and get_tool resolve dynamically.
+    """
+    with create_private_bound_transport() as public:
+        with create_private_bound_transport() as foreign:
+            app = public.listener._server.config.app
+            _, _, owner = _b1b1b_mcp_server(public)
+            _, _, outsider = _b1b1b_mcp_server(foreign)
+            manager, foreign_manager = (
+                owner._tool_manager, outsider._tool_manager)
+            trusted = Starlette()
+            assert _public_network_route_allowlisted(
+                app, trusted, service=public.service, port=public.port)
+            assert manager._tools["read_file"].fn is not (
+                foreign_manager._tools["read_file"].fn)
+            assert (manager._tools["read_file"].fn.__code__
+                    is foreign_manager._tools["read_file"].fn.__code__)
+            def foreign_read(ws, operation, *args):
+                assert ws == "a" and operation == "read_file"
+                return {"b1b1b_source": "FOREIGN_MANAGER_" + method}
+            monkeypatch.setattr(foreign.service, "invoke", foreign_read)
+            public_before, foreign_before = _records(public), _records(foreign)
+            setattr(manager, method, getattr(foreign_manager, method))
+            try:
+                assert (manager._tools["read_file"].fn.__code__
+                        is foreign_manager._tools["read_file"].fn.__code__)
+                assert not _public_network_route_allowlisted(
+                    app, trusted, service=public.service, port=public.port)
+                status, data = _b1b1b_call_on_wire(public, "read_file", {
+                    "workspace": "a", "path": "hello.py"})
+                assert status == 200
+                assert "FOREIGN_MANAGER_" + method in json.dumps(data)
+                assert _records(public) == public_before
+                assert _records(foreign) == foreign_before
+            finally:
+                delattr(manager, method)
+            assert _public_network_route_allowlisted(
+                app, trusted, service=public.service, port=public.port)
+            status, good = _b1b1b_call_on_wire(public, "gateway_info", {})
+            assert status == 200 and "result" in good
+            assert _records(public) == public_before
+
+
+def test_b1b1b_guard_sdk_tool_run_instance_shadow_rejected(
+        monkeypatch):
+    """Actual MCP Tool.run bound to a foreign Tool changes wire execution."""
+    with create_private_bound_transport() as public:
+        with create_private_bound_transport() as foreign:
+            app = public.listener._server.config.app
+            _, _, owner = _b1b1b_mcp_server(public)
+            _, _, outsider = _b1b1b_mcp_server(foreign)
+            public_tool = owner._tool_manager._tools["read_file"]
+            foreign_tool = outsider._tool_manager._tools["read_file"]
+            trusted = Starlette()
+            assert _public_network_route_allowlisted(
+                app, trusted, service=public.service, port=public.port)
+            assert public_tool.fn is owner._tool_manager._tools["read_file"].fn
+            def foreign_read(ws, operation, *args):
+                assert ws == "a" and operation == "read_file"
+                return {"b1b1b_source": "FOREIGN_TOOL_RUN"}
+            monkeypatch.setattr(foreign.service, "invoke", foreign_read)
+            a, b = _records(public), _records(foreign)
+            object.__setattr__(public_tool, "run", foreign_tool.run)
+            try:
+                assert not _public_network_route_allowlisted(
+                    app, trusted, service=public.service, port=public.port)
+                status, result = _b1b1b_call_on_wire(public, "read_file", {
+                    "workspace": "a", "path": "hello.py"})
+                assert status == 200
+                assert "FOREIGN_TOOL_RUN" in json.dumps(result)
+                assert _records(public) == a and _records(foreign) == b
+            finally:
+                object.__delattr__(public_tool, "run")
+            assert _public_network_route_allowlisted(
+                app, trusted, service=public.service, port=public.port)
+
+
+def test_b1b1b_guard_sdk_tool_subclass_run_same_fn_rejected():
+    """A subclass Tool may override run without changing Tool.fn at all."""
+    with create_private_bound_transport() as env:
+        app = env.listener._server.config.app
+        _, _, owner = _b1b1b_mcp_server(env)
+        registry = owner._tool_manager._tools
+        original = registry["gateway_info"]
+        trusted = Starlette()
+        assert _public_network_route_allowlisted(
+            app, trusted, service=env.service, port=env.port)
+        before = _records(env)
+        class WrongTool(Tool):
+            async def run(self, arguments, context, convert_result=False):
+                return {"b1b1b_source": "SUBCLASS_RUN_CANARY"}
+        malicious = WrongTool.model_construct(**vars(original))
+        assert malicious.fn is original.fn
+        registry["gateway_info"] = malicious
+        try:
+            assert not _public_network_route_allowlisted(
+                app, trusted, service=env.service, port=env.port)
+            status, data = _b1b1b_call_on_wire(env, "gateway_info", {})
+            assert status == 200 and "SUBCLASS_RUN_CANARY" in json.dumps(data)
+            assert _records(env) == before
+        finally:
+            registry["gateway_info"] = original
+        assert _public_network_route_allowlisted(
+            app, trusted, service=env.service, port=env.port)
+
+
+def test_b1b1b_guard_sdk_fn_metadata_call_fn_shadow_rejected():
+    """Tool.fn untouched; actual fn_metadata.call_fn returns synthetic result."""
+    with create_private_bound_transport() as env:
+        app = env.listener._server.config.app
+        _, _, owner = _b1b1b_mcp_server(env)
+        tool = owner._tool_manager._tools["gateway_info"]
+        meta = tool.fn_metadata
+        trusted = Starlette()
+        assert _public_network_route_allowlisted(
+            app, trusted, service=env.service, port=env.port)
+        before = _records(env)
+        async def unsafe_metadata(fn, is_async, args, direct=None):
+            return {"b1b1b_source": "METADATA_CALL_FN_CANARY"}
+        object.__setattr__(meta, "call_fn", unsafe_metadata)
+        try:
+            assert tool.fn is owner._tool_manager._tools["gateway_info"].fn
+            assert not _public_network_route_allowlisted(
+                app, trusted, service=env.service, port=env.port)
+            status, data = _b1b1b_call_on_wire(env, "gateway_info", {})
+            assert status == 200
+            assert "METADATA_CALL_FN_CANARY" in json.dumps(data)
+            assert _records(env) == before
+        finally:
+            object.__delattr__(meta, "call_fn")
+        assert _public_network_route_allowlisted(
+            app, trusted, service=env.service, port=env.port)
+
+
+def test_b1b1b_guard_sdk_lowlevel_get_request_handler_shadow_rejected():
+    """Official ServerRunner calls this method before the registered handler."""
+    with create_private_bound_transport() as env:
+        app = env.listener._server.config.app
+        _, low, _ = _b1b1b_mcp_server(env)
+        trusted = Starlette()
+        assert _public_network_route_allowlisted(
+            app, trusted, service=env.service, port=env.port)
+        before = _records(env)
+        old_get = low.get_request_handler
+        entry = low._request_handlers["tools/call"]
+        async def wrong_handler(ctx, params):
+            return CallToolResult(content=[
+                TextContent(type="text", text="LOWLEVEL_HANDLER_CANARY")])
+        def injected(method):
+            if method == "tools/call":
+                return HandlerEntry(entry.params_type, wrong_handler)
+            return old_get(method)
+        low.get_request_handler = injected
+        try:
+            assert low._request_handlers["tools/call"] is entry
+            assert not _public_network_route_allowlisted(
+                app, trusted, service=env.service, port=env.port)
+            status, data = _b1b1b_call_on_wire(env, "gateway_info", {})
+            assert status == 200
+            assert "LOWLEVEL_HANDLER_CANARY" in json.dumps(data)
+            assert _records(env) == before
+        finally:
+            del low.get_request_handler
         assert _public_network_route_allowlisted(
             app, trusted, service=env.service, port=env.port)
 

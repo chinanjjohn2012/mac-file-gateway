@@ -83,7 +83,7 @@ complete detached-descendant cleanup.
   invalid_argument, zero Runner, zero physical PREPARED mutation and
   unchanged public exec policy. Plain and forged-header cases remain.
   Existing product/bridge absence intentionally fails these.
-- **21 required GREEN**: real bound Listener still previews with no
+- **34 required GREEN (current authoritative count)**: real bound Listener still previews with no
   subprocess or durable attempt; foreign Listener cannot borrow grant;
   both invalid client proof body fields denied; immutable inventory
   of historical real subprocess, REST/MCP, slots and cancel/close tests;
@@ -102,9 +102,9 @@ complete detached-descendant cleanup.
   demonstrates the old graph detector's false GREEN and MUST fail the
   strict public route allowlist; a synthetic body-controlled REST/MCP
   parser bypass cannot be reported as an authorization denial.
-- **Strict verifier** checks exact 45 expanded NodeIDs once, no skipped
-  or unexpected failures, exact twenty-four absent-feature markers and twenty-one
-  genuinely passing guards, pytest exit=1. It emits
+- **Strict verifier (current)** checks exactly 58 expanded NodeIDs, no skipped
+  or unexpected failures, 24 exact expected absent-feature RED markers and
+  34 independently passing GREEN guards, pytest exit=1. It emits
   B1B1B_CONTRACT_STAGE=RED_NOT_IMPLEMENTED only for a matching RED.
 
 Only the exact missing `gateway._exec_test_bridge` module or absent
@@ -227,6 +227,11 @@ requires **24 exact expected RED and 18 mandatory GREEN across
 42 NodeIDs**. This is a test-only, no-host-spawn RED contract,
 not a Bridge R1/Worker implementation, a kernel ASGI audit or
 permission to enable production Exec.
+
+**Historical checkpoint note:** the figures 18/42, 21/45 and 28/52
+below are versioned results of previous failed/fixed Head snapshots, NOT
+the currently binding acceptance totals. The current R0 count is in
+the main classification section above and the latest SHA-bound appendix.
 
 ## Fixed Head 0e67fd8 additional Standards counterexample closure
 
@@ -356,6 +361,68 @@ unchanged. The strict R0 classifier now requires **24 expected RED
 and 28 mandatory GREEN across exactly 52 expanded NodeIDs**.
 Fresh Standards AND Spec reviews must be independent on this new
 fixed Head and original SHA-bound CI before any R1 implementation.
+
+## Fixed Head bc9363ac independent B/C P2 — effective SDK tool dispatch
+
+The complete independent [Standards r001 FAIL #5639230903](https://github.com/chinanjjohn2012/mac-file-gateway/pull/68#pullrequestreview-5639230903)
+and [Spec r001 FAIL #5639298146](https://github.com/chinanjjohn2012/mac-file-gateway/pull/68#pullrequestreview-5639298146)
+both identified a new P2 false-GREEN hazard on frozen parent Head
+`bc9363acffdc5cf8a20d36be78e448776a23e18f`. Prior R0
+audited MCP tool registration and nested Service captures, but
+did not audit the actual SDK 2.3.0
+`lowlevel.Server.get_request_handler -> MCPServer.call_tool ->
+ToolManager.call_tool -> ToolManager.get_tool -> Tool.run ->
+FuncMetadata.validate_arguments/call_fn` dynamic call chain.
+A correctly registered Tool.fn does **not** prove that a foreign
+Tool, subclass, metadata delegate or overwritten dispatch method
+cannot execute on the public wire. These are test-oracle and
+future-implementation risks, NOT an assertion of a current network
+remote-code exploit, and the private Bridge does not yet exist.
+
+The R0 test-only implementation pins actual SDK class types, the
+original **bound method/function identity** and absence of instance
+shadowing for lowlevel `get_request_handler`, ToolManager
+`get_tool/call_tool`, each effective `Tool.run`, and
+`FuncMetadata.validate_arguments/pre_parse_json/call_fn/convert_result`.
+It compares every registered Tool's non-function metadata to a
+separately constructed official MCP instance for the **same exact
+Listener WorkspaceService**, including argument-schema parity.
+It retains the prior recursive `Tool.fn -> invoke -> service`
+identity rule. Unknown custom Tool subclasses or delegates
+fail closed. This introspection is a local future-test construction
+oracle; it does not claim to be a kernel/OS boundary against arbitrary
+host process modification.
+
+**Six new mandatory GREEN NodeIDs** construct temporary mutations in
+fresh private loopback Listener fixtures and use **real SDK TCP
+initialize + tools/call** to demonstrate that a malicious override
+would be reachable while original registration remains valid:
+two independently borrowed foreign ToolManager bound methods
+(`get_tool` and `call_tool`), a foreign Tool.run bound method,
+a Pydantic Tool subclass overriding `run` with the same Tool.fn,
+a metadata `call_fn` override, and a lowlevel
+`get_request_handler` override. Every mutation must (i) preserve
+public registered Tool.fn, (ii) visibly return a harmless synthetic
+unauthorized/FOREIGN marker over actual MCP wire, (iii) make the
+**full** `_public_network_route_allowlisted` oracle reject,
+(iv) keep fixture state records and original Runner unchanged,
+and (v) restore original executable methods and requalify the
+known-good public Listener. The test fixture's autouse no-host-action
+guard forbids real subprocess/group signal calls. No authenticated
+client can mint private acceptance, and this is NOT positive
+durable process execution evidence.
+
+The original **24 expected RED** and 28 previously mandatory GREEN
+NodeIDs are unchanged; with the six newly required counterexamples,
+the **current binding R0 verifier requires exactly 24 expected RED
+plus 34 mandatory GREEN = 58 expanded NodeIDs**. This stage remains
+`RED_NOT_IMPLEMENTED`: previous B1-B1-A 11 RED/31 GREEN,
+existing 1468+ real product tests, manifest integrity, authorized
+File/Git and live preview regressions must continue unchanged.
+The prior listener Uvicorn shutdown stderr is tracked separately
+as non-blocking P3, not suppressed or claimed as clean teardown.
+Full descendant cleanup, R1 Bridge/Worker and macOS/Tunnel
+integration are NOT in this gate.
 
 ## Required next gate
 

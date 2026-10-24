@@ -89,12 +89,18 @@ GREEN = {
     "test_b1b1b_guard_sdk_middleware_can_short_circuit_wire_and_is_rejected",
     "test_b1b1b_guard_mcp_instance_call_tool_shadow_rejected",
     "test_b1b1b_guard_mcp_route_handle_override_rejected",
+    "test_b1b1b_guard_sdk_manager_effective_foreign_dispatch_rejected[get_tool]",
+    "test_b1b1b_guard_sdk_manager_effective_foreign_dispatch_rejected[call_tool]",
+    "test_b1b1b_guard_sdk_tool_run_instance_shadow_rejected",
+    "test_b1b1b_guard_sdk_tool_subclass_run_same_fn_rejected",
+    "test_b1b1b_guard_sdk_fn_metadata_call_fn_shadow_rejected",
+    "test_b1b1b_guard_sdk_lowlevel_get_request_handler_shadow_rejected",
     "test_b1b1b_guard_body_sourced_parser_proxy_bypass_is_not_denial",
     "test_b1b1b_guard_historical_real_subprocess_tests_are_present",
     "test_b1b1b_guard_normal_product_has_no_private_bridge_factory_import",
     "test_b1b1b_guard_existing_test_grant_not_serializable_or_reusable",
 }
-assert len(RED) == 24 and len(GREEN) == 28
+assert len(RED) == 24 and len(GREEN) == 34
 EXPECTED = set(RED) | GREEN
 
 
@@ -148,7 +154,7 @@ def main():
                     green += 1
             else:
                 issues.append(name + ": unexpected test")
-        if run.returncode != 1 or red != 24 or green != 28:
+        if run.returncode != 1 or red != 24 or green != 34:
             issues.append("wrong pytest status/counts: " +
                           repr((run.returncode, red, green)))
         if issues:
@@ -156,7 +162,7 @@ def main():
                 print("B1B1B_EXPECTED_RED_FAIL: " + issue, flush=True)
             return 1
         print("B1B1B_PRIVATE_BRIDGE_EXPECTED_RED=24")
-        print("B1B1B_EXISTING_GUARDS_GREEN=28")
+        print("B1B1B_EXISTING_GUARDS_GREEN=34")
         print("B1B1B_CONTRACT_STAGE=RED_NOT_IMPLEMENTED")
         print("B1B1B_NO_HOST_SPAWN_OR_SIGNAL=TRUE")
         print("B1B1B_HISTORICAL_REAL_EXEC_TESTS=UNCHANGED")

@@ -60,11 +60,13 @@ complete detached-descendant cleanup.
 
 ## Exact R0 RED / GREEN classification
 
-- **6 expected RED**, each with an exact B1B1B_RED_ marker:
+- **10 expected RED**, each with an exact B1B1B_RED_ marker:
   ordinary direct nonpreview on the existing bound test fixture must
   deny before Runner; unauthorized raw TCP REST and real SDK MCP
-  apply with forged metadata must deny; the new bridge factory must
-  create instance-bound actual loopback proof; its separate trusted
+  apply must deny both with NO metadata and with forged headers;
+  the new bridge factory must create instance-bound actual loopback
+  proof; the new bridge's own wire must deny raw client nonpreview;
+  a foreign bridge instance cannot borrow its grant; its separate
   in-process ASGI preview must work; close must revoke one-way.
   Existing product/bridge absence intentionally fails these.
 - **7 required GREEN**: real bound Listener still previews with no
@@ -73,10 +75,16 @@ complete detached-descendant cleanup.
   of historical real subprocess, REST/MCP, slots and cancel/close tests;
   ordinary product startup does not import bridge; existing private
   grant remains nonserializable and lifetime-revoked.
-- **Strict verifier** checks exact 13 expanded NodeIDs once, no skipped
-  or unexpected failures, exact six absent-feature markers and seven
+- **Strict verifier** checks exact 17 expanded NodeIDs once, no skipped
+  or unexpected failures, exact ten absent-feature markers and seven
   genuinely passing guards, pytest exit=1. It emits
   B1B1B_CONTRACT_STAGE=RED_NOT_IMPLEMENTED only for a matching RED.
+
+The no-intent refusals reuse the identical frozen B1-B1-A physical
+observer, not a final-snapshot-only test: a transient PREPARED write
+and delete, record entry/link mutation or moved directory is therefore
+not accepted as a clean denial. The new bridge must never mount its
+in-process trusted ASGI app directly on the public bound Listener.
 
 CI checks full tracked SHA-256 Manifest, reviewed parent ancestry,
 source integrity, unchanged historical product/reviewed blobs, full

@@ -17,12 +17,20 @@ SUITE = Path("tests/b1b1b_contracts/contract_multi_exec_private_bridge_b1b1b.py"
 RED = {
     "test_b1b1b_private_direct_untrusted_apply_denied_before_runner":
         "PRIVATE_DIRECT_DENY",
-    "test_b1b1b_private_wire_rest_apply_requires_nonclient_proof":
+    "test_b1b1b_private_wire_rest_apply_requires_nonclient_proof[plain]":
         "PRIVATE_WIRE_REST_DENY",
-    "test_b1b1b_private_wire_mcp_apply_requires_nonclient_proof":
+    "test_b1b1b_private_wire_rest_apply_requires_nonclient_proof[forged]":
+        "PRIVATE_WIRE_REST_DENY",
+    "test_b1b1b_private_wire_mcp_apply_requires_nonclient_proof[plain]":
+        "PRIVATE_WIRE_MCP_DENY",
+    "test_b1b1b_private_wire_mcp_apply_requires_nonclient_proof[forged]":
         "PRIVATE_WIRE_MCP_DENY",
     "test_b1b1b_trusted_bridge_factory_is_live_and_instance_bound":
         "TRUSTED_BRIDGE_FACTORY",
+    "test_b1b1b_bridge_wire_apply_denies_every_untrusted_client":
+        "BRIDGE_WIRE_DENY",
+    "test_b1b1b_bridge_foreign_instance_never_borrows_grant":
+        "BRIDGE_FOREIGN_INSTANCE",
     "test_b1b1b_trusted_inprocess_asgi_preview_is_not_network_auth":
         "TRUSTED_ASGI_PREVIEW",
     "test_b1b1b_bridge_close_revokes_one_way":
@@ -37,7 +45,7 @@ GREEN = {
     "test_b1b1b_guard_normal_product_has_no_private_bridge_factory_import",
     "test_b1b1b_guard_existing_test_grant_not_serializable_or_reusable",
 }
-assert len(RED) == 6 and len(GREEN) == 7
+assert len(RED) == 10 and len(GREEN) == 7
 EXPECTED = set(RED) | GREEN
 
 
@@ -91,14 +99,14 @@ def main():
                     green += 1
             else:
                 issues.append(name + ": unexpected test")
-        if run.returncode != 1 or red != 6 or green != 7:
+        if run.returncode != 1 or red != 10 or green != 7:
             issues.append("wrong pytest status/counts: " +
                           repr((run.returncode, red, green)))
         if issues:
             for issue in issues:
                 print("B1B1B_EXPECTED_RED_FAIL: " + issue, flush=True)
             return 1
-        print("B1B1B_PRIVATE_BRIDGE_EXPECTED_RED=6")
+        print("B1B1B_PRIVATE_BRIDGE_EXPECTED_RED=10")
         print("B1B1B_EXISTING_GUARDS_GREEN=7")
         print("B1B1B_CONTRACT_STAGE=RED_NOT_IMPLEMENTED")
         print("B1B1B_NO_HOST_SPAWN_OR_SIGNAL=TRUE")

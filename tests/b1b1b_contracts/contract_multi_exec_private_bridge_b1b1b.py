@@ -8,12 +8,14 @@ from __future__ import annotations
 import ast
 import copy
 import importlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import pickle
 import signal
 import subprocess
+from types import SimpleNamespace
 import urllib.error
 import urllib.request
 
@@ -91,6 +93,24 @@ def _records(env):
         for p in env.fixture.state_path.iterdir()))
 
 
+def _physical_oracle(env):
+    """Reuse exactly the fixed, separately reviewed B1-B1-A physical witness.
+
+    The original source, SHA and 31 GREEN oracle selfchecks are frozen by CI.
+    New bridge tests must not fall back to a snapshot-only no-intent claim.
+    """
+    fixed = (Path(__file__).resolve().parents[1] / "b1b1_contracts"
+             / "contract_multi_exec_default_deny_b1b1.py")
+    spec = importlib.util.spec_from_file_location(
+        "_b1b1a_reviewed_oracle", fixed)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    scene = SimpleNamespace(state=env.fixture.state_path)
+    return scene, module._IntentWitness(scene.state), (
+        module._records), module._never_started
+
+
 def _runner_spy(env, monkeypatch):
     calls = []
 
@@ -122,58 +142,78 @@ def _bridge(marker):
 def test_b1b1b_private_direct_untrusted_apply_denied_before_runner(monkeypatch):
     with create_private_bound_transport() as env:
         calls = _runner_spy(env, monkeypatch)
-        before = _records(env)
-        try:
-            env.service.invoke_exec(
-                "a", "src", ["python", "hello.py"], dry_run=False)
-            code = "returned"
-        except GatewayError as exc:
-            code = exc.code
-        _require(code == "exec_cleanup_proof_required" and not calls
-                 and _records(env) == before, "PRIVATE_DIRECT_DENY",
-                 {"code": code, "calls": len(calls),
-                  "unchanged": _records(env) == before})
+        scene, witness, snapshot, no_intent = _physical_oracle(env)
+        with monkeypatch.context() as patch:
+            witness.install(patch)
+            before = snapshot(scene)
+            try:
+                env.service.invoke_exec(
+                    "a", "src", ["python", "hello.py"], dry_run=False)
+                code = "returned"
+            except GatewayError as exc:
+                code = exc.code
+            clean = no_intent(scene, witness, before, calls)
+        _require(code == "exec_cleanup_proof_required" and clean,
+                 "PRIVATE_DIRECT_DENY",
+                 {"code": code, "runner_calls": len(calls),
+                  "physical_events": witness.events})
 
 
-def test_b1b1b_private_wire_rest_apply_requires_nonclient_proof(monkeypatch):
+@pytest.mark.parametrize("metadata", ["plain", "forged"])
+def test_b1b1b_private_wire_rest_apply_requires_nonclient_proof(
+        monkeypatch, metadata):
     with create_private_bound_transport() as env:
         calls = _runner_spy(env, monkeypatch)
-        before = _records(env)
-        status, data = _wire(env.port, "/run", APPLY,
-                             {"x-gateway-test-mode": "true"})
+        scene, witness, snapshot, no_intent = _physical_oracle(env)
+        headers = ({"x-gateway-test-mode": "true"}
+                   if metadata == "forged" else {})
+        with monkeypatch.context() as patch:
+            witness.install(patch)
+            before = snapshot(scene)
+            status, data = _wire(env.port, "/run", APPLY, headers)
+            clean = no_intent(scene, witness, before, calls)
         _require(status == 503
                  and data == {"error": "exec_cleanup_proof_required"}
-                 and not calls and _records(env) == before,
-                 "PRIVATE_WIRE_REST_DENY",
-                 {"status": status, "body": repr(data)[:130],
-                  "calls": len(calls)})
+                 and clean, "PRIVATE_WIRE_REST_DENY",
+                 {"metadata": metadata, "status": status,
+                  "response": repr(data)[:130],
+                  "calls": len(calls), "events": witness.events})
 
 
-def test_b1b1b_private_wire_mcp_apply_requires_nonclient_proof(monkeypatch):
+@pytest.mark.parametrize("metadata", ["plain", "forged"])
+def test_b1b1b_private_wire_mcp_apply_requires_nonclient_proof(
+        monkeypatch, metadata):
     with create_private_bound_transport() as env:
         calls = _runner_spy(env, monkeypatch)
-        before = _records(env)
-        headers = {"x-internal-group-retirement-grant": "true"}
-        status, init = _wire(env.port, "/mcp", {
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {"protocolVersion": "2025-11-25",
-                       "capabilities": {},
-                       "clientInfo": {"name": "b1b1b-red", "version": "1"}}},
-            headers)
-        assert status == 200 and "result" in init
-        _wire(env.port, "/mcp", {
-            "jsonrpc": "2.0", "method": "notifications/initialized"}, headers)
-        status, data = _wire(env.port, "/mcp", {
-            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": {"name": "run_command", "arguments": APPLY}}, headers)
+        scene, witness, snapshot, no_intent = _physical_oracle(env)
+        headers = ({"x-internal-group-retirement-grant": "true"}
+                   if metadata == "forged" else {})
+        with monkeypatch.context() as patch:
+            witness.install(patch)
+            before = snapshot(scene)
+            status, init = _wire(env.port, "/mcp", {
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25",
+                           "capabilities": {},
+                           "clientInfo": {"name": "b1b1b-red",
+                                          "version": "1"}}}, headers)
+            assert status == 200 and "result" in init
+            _wire(env.port, "/mcp", {
+                "jsonrpc": "2.0", "method": "notifications/initialized"},
+                headers)
+            status, data = _wire(env.port, "/mcp", {
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "run_command", "arguments": APPLY}},
+                headers)
+            clean = no_intent(scene, witness, before, calls)
         result = data.get("result", {}) if isinstance(data, dict) else {}
         _require(status == 200 and result.get("isError") is True
                  and (result.get("structuredContent") or {}).get("error")
-                 == "exec_cleanup_proof_required"
-                 and not calls and _records(env) == before,
+                 == "exec_cleanup_proof_required" and clean,
                  "PRIVATE_WIRE_MCP_DENY",
-                 {"status": status, "result": repr(result)[:160],
-                  "calls": len(calls)})
+                 {"metadata": metadata, "status": status,
+                  "result": repr(result)[:160], "calls": len(calls),
+                  "events": witness.events})
 
 
 def test_b1b1b_trusted_bridge_factory_is_live_and_instance_bound():
@@ -187,9 +227,43 @@ def test_b1b1b_trusted_bridge_factory_is_live_and_instance_bound():
                  {"allowed": allowed, "denied": denied})
 
 
+def test_b1b1b_bridge_wire_apply_denies_every_untrusted_client(monkeypatch):
+    """A new bridge itself must not mount its trusted ASGI on raw TCP."""
+    with _bridge("BRIDGE_WIRE_DENY") as env:
+        calls = _runner_spy(env, monkeypatch)
+        scene, witness, snapshot, no_intent = _physical_oracle(env)
+        for headers in ({}, {"x-gateway-test-mode": "true"}):
+            with monkeypatch.context() as patch:
+                witness.install(patch)
+                before = snapshot(scene)
+                status, body = _wire(env.port, "/run", APPLY, headers)
+                clean = no_intent(scene, witness, before, calls)
+            _require(status == 503
+                     and body == {"error": "exec_cleanup_proof_required"}
+                     and clean, "BRIDGE_WIRE_DENY",
+                     {"headers": tuple(headers), "status": status,
+                      "calls": len(calls), "events": witness.events})
+
+
+def test_b1b1b_bridge_foreign_instance_never_borrows_grant():
+    with _bridge("BRIDGE_FOREIGN_INSTANCE") as owner:
+        with _bridge("BRIDGE_FOREIGN_INSTANCE") as other:
+            assert owner.grant.qualifies_transport(
+                owner.service, "a", transport=owner.listener)
+            wrong_service = owner.grant.qualifies_transport(
+                other.service, "a", transport=owner.listener)
+            wrong_listener = owner.grant.qualifies_transport(
+                owner.service, "a", transport=other.listener)
+            _require(not wrong_service and not wrong_listener,
+                     "BRIDGE_FOREIGN_INSTANCE",
+                     {"wrong_service": wrong_service,
+                      "wrong_listener": wrong_listener})
+
+
 def test_b1b1b_trusted_inprocess_asgi_preview_is_not_network_auth():
     with _bridge("TRUSTED_ASGI_PREVIEW") as env:
         assert env.trusted_asgi_app is not None
+        assert env.listener._server.config.app is not env.trusted_asgi_app
         with TestClient(env.trusted_asgi_app,
                         base_url="http://127.0.0.1:8765") as client:
             response = client.post("/run", json={**APPLY, "dry_run": True})

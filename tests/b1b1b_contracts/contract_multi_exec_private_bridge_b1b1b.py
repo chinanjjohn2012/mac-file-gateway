@@ -395,6 +395,28 @@ def _stock_sdk_bound(obj, cls, method, original):
             and getattr(cls, method) is original)
 
 
+def _same_generated_sdk_output_model(actual, baseline):
+    """Official factory may mint distinct Pydantic output class identities.
+
+    Never use Python class != as an authorization test for separately built
+    SDK tool factories. Their canonical wire schema, parent, name and module
+    must match; a different effective output-conversion delegate is still
+    rejected by the pinned FuncMetadata.convert_result method check.
+    """
+    if actual is baseline or actual == baseline:
+        return True
+    if not inspect.isclass(actual) or not inspect.isclass(baseline):
+        return False
+    if (actual.__base__ is not baseline.__base__
+            or actual.__name__ != baseline.__name__
+            or actual.__module__ != baseline.__module__):
+        return False
+    schema_a = getattr(actual, "model_json_schema", None)
+    schema_b = getattr(baseline, "model_json_schema", None)
+    return (callable(schema_a) and callable(schema_b)
+            and schema_a() == schema_b())
+
+
 def _tool_dispatch_provenance(manager, stock, service):
     """Follow the actual MCP 2.3.0 ToolManager -> Tool.run -> fn_metadata.
 
@@ -435,7 +457,8 @@ def _tool_dispatch_provenance(manager, stock, service):
             if not _stock_sdk_bound(meta, FuncMetadata, method, original):
                 return False
         if (meta.output_schema != canonical.output_schema
-                or meta.output_model != canonical.output_model
+                or not _same_generated_sdk_output_model(
+                    meta.output_model, canonical.output_model)
                 or meta.wrap_output != canonical.wrap_output
                 or meta.arg_model.__base__ is not canonical.arg_model.__base__
                 or meta.arg_model.model_json_schema()
@@ -1165,6 +1188,21 @@ def test_b1b1b_guard_real_listener_loopback_preview_without_execution():
                   "mcp_handler=", _same_mcp_sdk_handler(
                       real_mcp, stock_mcp, env.service),
                   "per_tool_fields=", facets, flush=True)
+            bad = [(item[0], [i for i, passed in enumerate(item[1:], 1)
+                              if not passed]) for item in facets
+                   if not all(item[1:])]
+            raise AssertionError(
+                "B1B1B_STOCK_MCP_DIAGNOSTIC: " + repr({
+                    "bad_tools": bad,
+                    "lowlevel_ok": _mcp_dispatch_chain_unmodified(
+                        real_low, stock_low, real_server),
+                    "manager_get": _stock_sdk_bound(
+                        real_manager, ToolManager, "get_tool",
+                        _SDK_MANAGER_GET_TOOL),
+                    "manager_call": _stock_sdk_bound(
+                        real_manager, ToolManager, "call_tool",
+                        _SDK_MANAGER_CALL_TOOL),
+                }))
         assert _public_network_route_allowlisted(
             public, Starlette(), service=env.service, port=env.port), (
             "B1B1B_KNOWN_PUBLIC_ROUTE_SHAPE_REJECTED", {

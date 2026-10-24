@@ -1,7 +1,9 @@
-"""Multi-Workspace Exec candidate: opt-in grants and disposable Worker acceptance.
+"""Production-first F1 deny-only Multi-Workspace Exec regression.
 
-Only temporary test directories, never Candidate C or native group-signal
-research. Exec scope controls cwd/script selection, NOT OS sandbox rights.
+Previously runnable real Exec subprocess cases remain inspectable verbatim at
+Git HEAD 4110fac4edf2027703f4ce830a4d46718de4804d. The approved F0
+traceability matrix maps historic positive-child requirements to future F3
+native acceptance, not to silent skips or claimed F1 cleanup proof.
 """
 from __future__ import annotations
 
@@ -99,35 +101,36 @@ def test_global_off_defaults_to_no_exec(setup):
         svc.close()
 
 
-def test_exec_preview_and_real_execution_are_workspace_scoped(setup):
+
+def test_exec_preview_and_proof_deny_are_workspace_scoped(setup, monkeypatch):
     svc = _service(setup)
     try:
         assert svc.any_exec
-        assert svc.info()["exec_policy"]["enabled"]
+        policy = svc.info()["exec_policy"]
+        assert policy["enabled"] and policy["available"] is False
+        assert policy["completion_capability"] == "none"
         assert svc.list_workspaces()["workspaces"][0]["exec"] is True
         assert svc.list_workspaces()["workspaces"][1]["exec"] is False
         preview = svc.invoke_exec("a", "src", ["python", "hello.py"])
         assert preview["dry_run"] is True and preview["executed"] is False
         assert preview["workspace"] == "a" and preview["runner"] == "direct"
-        actual = svc.invoke_exec("a", "src", ["python", "hello.py"], dry_run=False)
-        assert actual["executed"] is True
-        assert actual["exit_code"] == 0 and actual["timed_out"] is False
-        assert "from-workspace-a" in actual["stdout"]
-        assert "from-workspace-b" not in actual["stdout"]
+        calls = []
+        monkeypatch.setattr(svc.get("a").gateway, "run_command",
+                            lambda *args, **kwargs: calls.append((args, kwargs)))
+        with pytest.raises(GatewayError) as exc:
+            svc.invoke_exec("a", "src", ["python", "hello.py"], dry_run=False)
+        assert exc.value.code == "exec_cleanup_proof_required"
+        assert calls == []
         with pytest.raises(GatewayError) as exc:
             svc.invoke_exec("b", "src", ["python", "hello.py"], dry_run=False)
         assert exc.value.code == "exec_disabled"
         with pytest.raises(GatewayError) as exc:
-            svc.invoke_exec("a", ".", ["python", "src/hello.py"], dry_run=False)
-        assert exc.value.code == "exec_scope"
-        with pytest.raises(GatewayError) as exc:
-            svc.invoke_exec("a", "src", ["python", "-c", "print(1)"], dry_run=False)
-        assert exc.value.code == "command_not_allowed"
+            svc.invoke_exec("a", "src", ["python", "hello.py"], dry_run="false")
+        assert exc.value.code == "invalid_argument"
         with pytest.raises(GatewayError):
             svc.invoke("a", "run_command", "src", ["python", "hello.py"])
     finally:
         svc.close()
-
 
 def test_rest_explicit_routing_and_types(setup):
     svc = _service(setup)
@@ -149,8 +152,9 @@ def test_rest_explicit_routing_and_types(setup):
                 bad = client.post("/run", json={**base,**value})
                 assert bad.status_code == 400, (value, bad.text)
             actual = client.post("/run", json={**base,"dry_run":False})
-            assert actual.status_code == 200, actual.text
-            assert "from-workspace-a" in actual.json()["stdout"]
+            assert actual.status_code == 503, actual.text
+            assert actual.json()["error"] == "exec_cleanup_proof_required"
+            assert not (setup[0] / "src" / "started").exists()
     finally:
         svc.close()
 
@@ -171,7 +175,7 @@ def test_worker_lease_blocks_same_workspace_and_close_waits(setup, monkeypatch):
     monkeypatch.setattr(gateway, "run_command", blocked)
     def worker():
         try:
-            svc.invoke_exec("a", "src", ["python", "hello.py"], dry_run=False)
+            svc.invoke_exec("a", "src", ["python", "hello.py"], dry_run=True)
         except Exception as exc:
             errors.append(exc)
     running = threading.Thread(target=worker, daemon=True)
@@ -179,8 +183,11 @@ def test_worker_lease_blocks_same_workspace_and_close_waits(setup, monkeypatch):
     try:
         assert entered.wait(3)
         with pytest.raises(GatewayError) as exc:
-            svc.invoke_exec("a", "src", ["python", "hello.py"], dry_run=False)
+            svc.invoke_exec("a", "src", ["python", "hello.py"], dry_run=True)
         assert exc.value.code == "busy"
+        with pytest.raises(GatewayError) as exc:
+            svc.invoke_exec("a", "src", ["python", "hello.py"], dry_run=False)
+        assert exc.value.code == "exec_cleanup_proof_required"
         closer = threading.Thread(target=lambda: (svc.close(), closed.set()), daemon=True)
         closer.start()
         assert not closed.wait(0.12), "Service closed the root while Exec Worker held a lease"
@@ -222,8 +229,8 @@ def test_mcp_registry_and_grants(setup):
             assert denied.get("isError") is True
             done = rpc(client,"tools/call",{"name":"run_command","arguments":{
                 **base, "dry_run":False}})["result"]
-            assert done["structuredContent"]["exit_code"] == 0
-            assert "from-workspace-a" in done["structuredContent"]["stdout"]
+            assert done.get("isError") is True
+            assert done["structuredContent"]["error"] == "exec_cleanup_proof_required"
     finally:
         svc.close()
 
@@ -267,7 +274,7 @@ def test_global_four_slots_reject_fifth_until_one_releases(tmp_path, monkeypatch
     def worker(name):
         try:
             result = svc.invoke_exec(name, "src", ["python", "hello.py"],
-                                     dry_run=False)
+                                     dry_run=True)
             assert result["workspace"] == name
         except BaseException as exc:
             errors.append(exc)
@@ -288,6 +295,9 @@ def test_global_four_slots_reject_fifth_until_one_releases(tmp_path, monkeypatch
         with pytest.raises(GatewayError) as exc:
             svc.invoke_exec("e", "src", ["python", "hello.py"])
         assert exc.value.code == "busy"
+        with pytest.raises(GatewayError) as exc:
+            svc.invoke_exec("e", "src", ["python", "hello.py"], dry_run=False)
+        assert exc.value.code == "exec_cleanup_proof_required"
         assert not any(finished[name].is_set() for name in "abcd")
         release["a"].set()
         assert finished["a"].wait(4), "one slot did not return"
@@ -336,35 +346,36 @@ def test_cli_reports_actual_exec_state(setup, tmp_path, monkeypatch, capsys):
     assert len(actual_run) == 2
 
 
-def test_asgi_rest_disconnect_keeps_real_worker_until_exit(setup):
-    """A REST ASGI disconnect plus cancelled waiter does not free a live process.
 
-    This uses the actual Boundary/StrictPostAdmission/Starlette REST path and
-    a *real disposable Python child*, not a real TCP/Tunnel disconnect.
+def test_asgi_rest_disconnect_keeps_sync_preview_worker_until_exit(setup, monkeypatch):
+    """F1 deterministic cancellation/drain regression; NO real Exec child.
+
+    The frozen F3 positive-child evidence belongs to the earlier source SHA.
+    The real Starlette/ASGI waiter may be cancelled while its synchronous
+    preview Worker still leases the Workspace root.
     """
     import asyncio
     import json
-    import time
 
-    a, b, _config, _runtime = setup
-    src = a / "src"
-    (src / "hold.py").write_text(
-        "from pathlib import Path\n"
-        "import time\n"
-        "Path('started').write_text('started')\n"
-        "end = time.monotonic() + 8\n"
-        "while not Path('release').exists():\n"
-        "    if time.monotonic() > end:\n"
-        "        raise RuntimeError('no test release')\n"
-        "    time.sleep(0.01)\n"
-        "Path('finished').write_text('finished')\n"
-    )
     svc = _service(setup)
     app = create_multi_app(svc, enable_mcp=False)
-    started, release_file, finished = (src / "started", src / "release",
-                                       src / "finished")
-    closed = threading.Event()
+    entered, release, finished, closed = (threading.Event(), threading.Event(),
+                                          threading.Event(), threading.Event())
     errors = []
+    gateway = svc.get("a").gateway
+    real = gateway.run_command
+
+    def blocked(cwd, argv, timeout_seconds=60, dry_run=True):
+        assert dry_run is True
+        entered.set()
+        try:
+            if not release.wait(8):
+                raise AssertionError("preview Worker was not released")
+            return real(cwd, argv, timeout_seconds, True)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(gateway, "run_command", blocked)
 
     def close():
         try:
@@ -375,22 +386,17 @@ def test_asgi_rest_disconnect_keeps_real_worker_until_exit(setup):
             closed.set()
 
     async def scenario():
-        request_data = json.dumps({
-            "workspace": "a", "cwd": "src", "argv": ["python", "hold.py"],
-            "timeout_seconds": 15, "dry_run": False,
-        }).encode("utf-8")
+        body = json.dumps({"workspace": "a", "cwd": "src",
+                           "argv": ["python", "hello.py"],
+                           "dry_run": True}).encode()
         incoming = asyncio.Queue()
-        await incoming.put({"type": "http.request", "body": request_data,
+        await incoming.put({"type": "http.request", "body": body,
                             "more_body": False})
-
         async def receive():
             return await incoming.get()
-
         responses = []
-
         async def send(message):
             responses.append(message)
-
         scope = {
             "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
             "scheme": "http", "method": "POST", "path": "/run",
@@ -402,37 +408,29 @@ def test_asgi_rest_disconnect_keeps_real_worker_until_exit(setup):
         request = asyncio.create_task(app(scope, receive, send))
         closer = None
         try:
-            deadline = time.monotonic() + 6
-            while not started.exists() and time.monotonic() < deadline:
-                await asyncio.sleep(0.01)
-            assert started.exists(), "actual disposable child never started"
-            assert not finished.exists()
-            # The client transport supplies the disconnect, and its async
-            # waiter is cancelled before the *synchronous* subprocess exits.
+            assert await asyncio.to_thread(entered.wait, 4)
             await incoming.put({"type": "http.disconnect"})
             request.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(request, 2)
-            assert not finished.exists()
+            assert not finished.is_set()
             with pytest.raises(GatewayError) as exc:
-                svc.invoke_exec("a", "src", ["python", "hello.py"])
+                svc.invoke_exec("a", "src", ["python", "hello.py"], dry_run=True)
             assert exc.value.code == "busy"
+            with pytest.raises(GatewayError) as exc:
+                svc.invoke_exec("a", "src", ["python", "hello.py"], dry_run=False)
+            assert exc.value.code == "exec_cleanup_proof_required"
             assert svc.invoke("b", "list_files", ".")["workspace"] == "b"
             closer = threading.Thread(target=close, daemon=True)
             closer.start()
-            assert not await asyncio.to_thread(closed.wait, 0.15), (
-                "root FD was released while disconnected request still owned a child"
-            )
-            assert not finished.exists()
-            release_file.touch()
+            assert not await asyncio.to_thread(closed.wait, 0.15)
+            release.set()
             assert await asyncio.to_thread(closed.wait, 5)
-            assert finished.read_text() == "finished"
-            assert not errors, errors
-            assert not any(m.get("type") == "http.response.start" for m in responses), (
-                "cancelled waiter unexpectedly returned a successful response"
-            )
+            assert finished.is_set() and not errors
+            assert not any(m.get("type") == "http.response.start"
+                           for m in responses)
         finally:
-            release_file.touch()
+            release.set()
             if not request.done():
                 request.cancel()
                 await asyncio.gather(request, return_exceptions=True)
@@ -442,10 +440,9 @@ def test_asgi_rest_disconnect_keeps_real_worker_until_exit(setup):
     try:
         asyncio.run(scenario())
     finally:
-        release_file.touch()
+        release.set()
         svc.close()
     assert closed.is_set() and not errors
-
 
 def test_cancelled_mcp_tool_waiter_does_not_release_sync_worker(setup, monkeypatch):
     """Real SDK tool dispatch, cancelled request waiter, still-owned Worker.
@@ -479,7 +476,7 @@ def test_cancelled_mcp_tool_waiter_does_not_release_sync_worker(setup, monkeypat
     async def scenario():
         request = asyncio.create_task(mcp.call_tool("run_command", {
             "workspace": "a", "cwd": "src", "argv": ["python", "hello.py"],
-            "dry_run": False,
+            "dry_run": True,
         }))
         try:
             assert await asyncio.to_thread(entered.wait, 4)
@@ -490,6 +487,9 @@ def test_cancelled_mcp_tool_waiter_does_not_release_sync_worker(setup, monkeypat
             with pytest.raises(GatewayError) as exc:
                 svc.invoke_exec("a", "src", ["python", "hello.py"])
             assert exc.value.code == "busy"
+            with pytest.raises(GatewayError) as exc:
+                svc.invoke_exec("a", "src", ["python", "hello.py"], dry_run=False)
+            assert exc.value.code == "exec_cleanup_proof_required"
         finally:
             release.set()
             assert await asyncio.to_thread(finished.wait, 5)

@@ -6,7 +6,7 @@ from typing import Annotated, Any, Callable
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import Field, StrictBool
 from starlette.concurrency import run_in_threadpool
 
@@ -67,9 +67,10 @@ def build_multi_mcp(service: WorkspaceService, *, port: int = 8765) -> MCPServer
         ) -> dict[str, Any]:
             """Run an allowlisted command only in an explicitly enabled Workspace.
 
-            Opt-in execution runs project code with the Gateway OS user's
-            privileges; it is not a filesystem sandbox. No automatic retries
-            after disconnection; synchronous Worker retains the service lease.
+            F1 allows only validated preview. Apply without independently
+            approved whole-descendant cleanup proof is denied before any
+            Exec Runner or PREPARED intent. No automatic retries or local
+            privilege escalation. Git has separate admission.
             """
             try:
                 return await run_in_threadpool(
@@ -77,6 +78,16 @@ def build_multi_mcp(service: WorkspaceService, *, port: int = 8765) -> MCPServer
                     timeout_seconds, dry_run,
                 )
             except GatewayError as exc:
+                if exc.code == "exec_cleanup_proof_required":
+                    # MCP SDK 2.x preserves explicit CallToolResult values.
+                    # Both the error flag and machine-readable code must
+                    # survive the official SDK tools/call dispatch.
+                    return CallToolResult(
+                        content=[TextContent(type="text",
+                                             text=f"{exc.code}: {exc}")],
+                        structured_content={"error": exc.code},
+                        is_error=True,
+                    )
                 raise ToolError(f"{exc.code}: {exc}") from None
 
     if service.any_git:

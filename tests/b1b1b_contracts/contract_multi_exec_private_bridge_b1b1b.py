@@ -794,10 +794,35 @@ def test_b1b1b_guard_real_listener_loopback_preview_without_execution():
         before = _records(env)
         assert env.listener._proves_live()
         assert env.listener._socket.getsockname() == ("127.0.0.1", env.port)
+        public = env.listener._server.config.app
+        core = public.app.app
+        reference = create_multi_app(
+            env.service, enable_mcp=True, port=env.port).app.app
+        real_mcp = next(r for r in core.router.routes if r.path == "/mcp")
+        stock_mcp = next(r for r in reference.router.routes
+                         if r.path == "/mcp")
         assert _public_network_route_allowlisted(
-            env.listener._server.config.app, Starlette(),
-            service=env.service, port=env.port), (
-            "B1B1B_KNOWN_PUBLIC_ROUTE_SHAPE_REJECTED")
+            public, Starlette(), service=env.service, port=env.port), (
+            "B1B1B_KNOWN_PUBLIC_ROUTE_SHAPE_REJECTED", {
+                "stock_dispatch": _stock_starlette_dispatch(core),
+                "user_middleware": repr(core.user_middleware),
+                "exception_handlers": repr(core.exception_handlers),
+                "stack": repr(type(core.middleware_stack)),
+                "middle": repr(type(getattr(
+                    core.middleware_stack, "app", None))),
+                "inner": repr(type(getattr(getattr(
+                    core.middleware_stack, "app", None), "app", None))),
+                "routes": [(r.path, type(r).__name__,
+                            _stock_starlette_route_handler(r)
+                            if type(r) is Route else None)
+                           for r in core.router.routes],
+                "mcp_origin": repr((
+                    type(real_mcp), type(real_mcp.app),
+                    getattr(real_mcp.endpoint, "__module__", None),
+                    getattr(stock_mcp.endpoint, "__module__", None))),
+                "mcp_source": _same_mcp_sdk_handler(
+                    real_mcp, stock_mcp),
+            })
         status, data = _wire(env.port, "/run", {
             "workspace": "a", "cwd": "src", "argv": ["python", "hello.py"]})
         assert status == 200 and data["dry_run"] is True

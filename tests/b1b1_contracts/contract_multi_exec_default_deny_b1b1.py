@@ -475,12 +475,15 @@ def test_b1b1_guard_client_fields_cannot_select_private_proof(
         scene, monkeypatch, bad_field):
     svc = scene.service()
     calls = _runner_spy(svc, monkeypatch)
+    # Adapter registration is a legitimate status change. Baseline AFTER
+    # create_multi_app, before sending untrusted client proof input.
+    app = create_multi_app(svc, enable_mcp=False)
     policy_before = svc.info()["exec_policy"]
     witness = _IntentWitness(scene.state)
     with monkeypatch.context() as patch:
         witness.install(patch)
         before = _records(scene)
-        with TestClient(create_multi_app(svc, enable_mcp=False),
+        with TestClient(app,
                         base_url="http://127.0.0.1:8765") as client:
             response = client.post("/run", json={**APPLY, bad_field: True})
         clean = _never_started(scene, witness, before, calls)
@@ -566,12 +569,15 @@ def test_b1b1_guard_mcp_arguments_cannot_mint_private_proof(
     pytest.importorskip("mcp")
     svc = scene.service()
     calls = _runner_spy(svc, monkeypatch)
+    # Adapter registration is a legitimate status change. Baseline AFTER
+    # create_multi_app, before sending untrusted client proof input.
+    app = create_multi_app(svc)
     policy_before = svc.info()["exec_policy"]
     witness = _IntentWitness(scene.state)
     with monkeypatch.context() as patch:
         witness.install(patch)
         before = _records(scene)
-        with TestClient(create_multi_app(svc),
+        with TestClient(app,
                         base_url="http://127.0.0.1:8765") as client:
             init = client.post("/mcp", headers=RPC_HEADERS, json={
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -602,12 +608,15 @@ def test_b1b1_rest_header_cannot_mint_cleanup_proof(
     """Synthetic request metadata must not override ordinary default DENY."""
     svc = scene.service()
     calls = _runner_spy(svc, monkeypatch)
+    # Adapter registration is a legitimate status change. Baseline AFTER
+    # create_multi_app, before sending untrusted client proof input.
+    app = create_multi_app(svc, enable_mcp=False)
     policy_before = svc.info()["exec_policy"]
     witness = _IntentWitness(scene.state)
     with monkeypatch.context() as patch:
         witness.install(patch)
         before = _records(scene)
-        with TestClient(create_multi_app(svc, enable_mcp=False),
+        with TestClient(app,
                         base_url="http://127.0.0.1:8765") as client:
             response = client.post("/run", json=APPLY,
                                    headers={header: "true"})
@@ -629,13 +638,16 @@ def test_b1b1_mcp_header_cannot_mint_cleanup_proof(
     pytest.importorskip("mcp")
     svc = scene.service()
     calls = _runner_spy(svc, monkeypatch)
+    # Adapter registration is a legitimate status change. Baseline AFTER
+    # create_multi_app, before sending untrusted client proof input.
+    app = create_multi_app(svc)
     policy_before = svc.info()["exec_policy"]
     witness = _IntentWitness(scene.state)
     with monkeypatch.context() as patch:
         witness.install(patch)
         before = _records(scene)
         headers = {**RPC_HEADERS, header: "true"}
-        with TestClient(create_multi_app(svc),
+        with TestClient(app,
                         base_url="http://127.0.0.1:8765") as client:
             init = client.post("/mcp", headers=headers, json={
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",

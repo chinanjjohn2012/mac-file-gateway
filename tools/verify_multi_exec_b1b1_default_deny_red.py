@@ -25,6 +25,10 @@ RED = {
     "test_b1b1_missing_proof_precedes_worker_busy_slot": "PROOF_BEFORE_BUSY",
     "test_b1b1_env_cannot_mint_cleanup_proof[GATEWAY_EXEC_TEST_GRANT]": "ENV_BYPASS",
     "test_b1b1_env_cannot_mint_cleanup_proof[GATEWAY_R1_TEST_ONLY]": "ENV_BYPASS",
+    "test_b1b1_rest_header_cannot_mint_cleanup_proof[x-gateway-test-mode]": "REST_HEADER_BYPASS",
+    "test_b1b1_rest_header_cannot_mint_cleanup_proof[x-internal-group-retirement-grant]": "REST_HEADER_BYPASS",
+    "test_b1b1_mcp_header_cannot_mint_cleanup_proof[x-gateway-test-mode]": "MCP_HEADER_BYPASS",
+    "test_b1b1_mcp_header_cannot_mint_cleanup_proof[x-internal-group-retirement-grant]": "MCP_HEADER_BYPASS",
 }
 GREEN = {
     "test_b1b1_guard_ordinary_preview_remains_allowed",
@@ -33,10 +37,21 @@ GREEN = {
     "test_b1b1_guard_client_fields_cannot_select_private_proof[test_grant]",
     "test_b1b1_guard_client_fields_cannot_select_private_proof[listener_host]",
     "test_b1b1_guard_client_fields_cannot_select_private_proof[full_descendant_tree_clean]",
+    "test_b1b1_guard_client_fields_cannot_select_private_proof[test_mode]",
+    "test_b1b1_guard_client_fields_cannot_select_private_proof[group_only_test_grant]",
+    "test_b1b1_guard_client_fields_cannot_select_private_proof[_trusted_bound_listener]",
+    "test_b1b1_guard_client_fields_cannot_select_private_proof[transport]",
+    "test_b1b1_guard_mcp_arguments_cannot_mint_private_proof[test_mode]",
+    "test_b1b1_guard_mcp_arguments_cannot_mint_private_proof[test_grant]",
+    "test_b1b1_guard_mcp_arguments_cannot_mint_private_proof[group_only_test_grant]",
+    "test_b1b1_guard_mcp_arguments_cannot_mint_private_proof[_trusted_bound_listener]",
+    "test_b1b1_guard_mcp_arguments_cannot_mint_private_proof[listener_host]",
+    "test_b1b1_guard_status_policy_oracle_rejects_private_metadata",
+    "test_b1b1_guard_busy_intent_witness_detects_transient_write_delete",
     "test_b1b1_guard_transient_intent_witness_rejects_write_then_delete",
     "test_b1b1_guard_host_interceptor_is_type_preserving",
 }
-assert len(RED) == 7 and len(GREEN) == 8
+assert len(RED) == 11 and len(GREEN) == 19
 EXPECTED = set(RED) | GREEN
 
 
@@ -93,14 +108,14 @@ def main() -> int:
         if run.returncode != 1:
             problems.append("Expected pytest exit 1 from missing product behavior; got " +
                             str(run.returncode))
-        if red != 7 or green != 8:
+        if red != len(RED) or green != len(GREEN):
             problems.append("RED/GREEN mismatch: " + repr((red, green)))
         if problems:
             for problem in problems:
                 print("B1B1_EXPECTED_RED_FAIL: " + problem, flush=True)
             return 1
-        print("B1B1_DEFAULT_DENY_EXPECTED_RED=7")
-        print("B1B1_EXISTING_GUARDS_GREEN=8")
+        print("B1B1_DEFAULT_DENY_EXPECTED_RED=11")
+        print("B1B1_EXISTING_GUARDS_GREEN=19")
         print("B1B1_CONTRACT_STAGE=RED_NOT_IMPLEMENTED")
         print("B1B1_NO_HOST_SPAWN_OR_SIGNAL=TRUE")
         print("B1B1_EXISTING_REAL_EXEC_PRODUCT_TESTS=UNCHANGED")

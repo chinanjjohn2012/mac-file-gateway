@@ -138,6 +138,66 @@ def _require(predicate, marker, data):
                     pytrace=False)
 
 
+
+# D0 §6 permits ONLY this small, stable, public exec_policy surface.
+# No PID, argv, environment, root/state path, internal test-grant object,
+# or arbitrary user/diagnostic payload may be nested in an extra field.
+_PUBLIC_POLICY_WARNING = (
+    "Exec runs project code with the Gateway OS user's privileges; "
+    "path scopes are not an OS sandbox."
+)
+_PUBLIC_POLICY_KEYS = frozenset({
+    "enabled", "available", "adapter_exposed", "durability_state",
+    "quarantined", "quarantine_reason_code", "completion_capability",
+    "max_concurrent_per_workspace", "max_concurrent_total",
+    "dry_run_default", "warning",
+})
+_PUBLIC_DURABILITY = {"disabled", "healthy", "quarantined", "unavailable"}
+_PUBLIC_CAPABILITY = {"none", "test_original_group_only", "full_tree_qualified"}
+_PUBLIC_REASON = {
+    None, "cleanup_unknown", "corrupt_record", "owner_lock_unavailable",
+    "state_io_unavailable",
+}
+
+
+def _public_policy_is_sanitized(policy):
+    """Strict schema, types and enums: not a two-substring blacklist."""
+    if type(policy) is not dict or set(policy) != _PUBLIC_POLICY_KEYS:
+        return False
+    if any(type(policy[k]) is not bool for k in (
+            "enabled", "available", "adapter_exposed", "quarantined",
+            "dry_run_default")):
+        return False
+    if any(type(policy[k]) is not int for k in (
+            "max_concurrent_per_workspace", "max_concurrent_total")):
+        return False
+    if (policy["max_concurrent_per_workspace"] != 1
+            or policy["max_concurrent_total"] != 4
+            or policy["dry_run_default"] is not True
+            or type(policy["warning"]) is not str
+            or policy["warning"] != _PUBLIC_POLICY_WARNING):
+        return False
+    if (type(policy["durability_state"]) is not str
+            or policy["durability_state"] not in _PUBLIC_DURABILITY):
+        return False
+    if (type(policy["completion_capability"]) is not str
+            or policy["completion_capability"] not in _PUBLIC_CAPABILITY):
+        return False
+    reason = policy["quarantine_reason_code"]
+    if reason is not None and type(reason) is not str:
+        return False
+    if reason not in _PUBLIC_REASON:
+        return False
+    state = policy["durability_state"]
+    if state in ("healthy", "disabled") and reason is not None:
+        return False
+    if state == "healthy" and policy["quarantined"] is not False:
+        return False
+    if state in ("quarantined", "unavailable") and policy["available"] is not False:
+        return False
+    return True
+
+
 def _run(svc, *, dry_run=False):
     try:
         value = svc.invoke_exec("a", "src", ["python", "probe.py"],
@@ -319,31 +379,42 @@ def test_b1b1_info_health_report_same_unavailable_proof_policy(scene):
     policy = info.json().get("exec_policy", {})
     health_policy = health.json().get("exec_policy")
     _require(info.status_code == 200 and health.status_code == 200 and
-             policy == health_policy and type(policy) is dict and
+             policy == health_policy and
+             _public_policy_is_sanitized(policy) and
              policy.get("enabled") is True and
              policy.get("adapter_exposed") is True and
              policy.get("available") is False and
              policy.get("quarantined") is False and
              policy.get("durability_state") == "healthy" and
              policy.get("quarantine_reason_code") is None and
-             policy.get("completion_capability") == "none" and
-             "owner.lock" not in json.dumps(policy) and
-             "exec-state" not in json.dumps(policy),
+             policy.get("completion_capability") == "none",
              "POLICY_PARITY",
-             {"info": repr(policy)[:200], "health": repr(health_policy)[:180]})
+             # Do not echo sensitive raw values into the CI log when a
+             # broken product adds an untrusted status field.
+             {"info_status": info.status_code, "health_status": health.status_code,
+              "same": policy == health_policy, "sanitized": _public_policy_is_sanitized(policy),
+              "available": policy.get("available"),
+              "completion_capability": policy.get("completion_capability")})
 
 
 def test_b1b1_missing_proof_precedes_worker_busy_slot(scene, monkeypatch):
     svc = scene.service()
     calls = _runner_spy(svc, monkeypatch)
+    witness = _IntentWitness(scene.state)
     svc._exec_active.add("a")  # held slot, test-owned and released below
     try:
-        code, value = _run(svc)
+        with monkeypatch.context() as patch:
+            witness.install(patch)
+            before = _records(scene)
+            code, value = _run(svc)
+            clean = _never_started(scene, witness, before, calls)
     finally:
         svc._exec_active.discard("a")
     _require(code == "exec_cleanup_proof_required" and
-             value is None and not calls, "PROOF_BEFORE_BUSY",
-             {"code": code, "calls": len(calls)})
+             value is None and clean, "PROOF_BEFORE_BUSY",
+             {"code": code, "calls": len(calls),
+              "intent_events": witness.events,
+              "unchanged": _records(scene) == before})
 
 
 @pytest.mark.parametrize("flag", ["GATEWAY_EXEC_TEST_GRANT", "GATEWAY_R1_TEST_ONLY"])
@@ -363,13 +434,19 @@ def test_b1b1_env_cannot_mint_cleanup_proof(scene, monkeypatch, flag):
               "intent_events": witness.events})
 
 
-def test_b1b1_guard_ordinary_preview_remains_allowed(scene):
+def test_b1b1_guard_ordinary_preview_remains_allowed(scene, monkeypatch):
     svc = scene.service()
-    code, result = _run(svc, dry_run=True)
+    witness = _IntentWitness(scene.state)
+    with monkeypatch.context() as patch:
+        witness.install(patch)
+        before = _records(scene)
+        code, result = _run(svc, dry_run=True)
+        clean = _never_started(scene, witness, before, [])
     assert code == "returned"
     assert result["dry_run"] is True and result["executed"] is False
     assert result["workspace"] == "a"
     assert result["runner"] == "direct"
+    assert clean, witness.events
 
 
 def test_b1b1_guard_global_off_precedes_proof(tmp_path):
@@ -389,17 +466,199 @@ def test_b1b1_guard_file_read_independent_of_missing_exec_proof(scene):
     assert data["path"] == "public.txt"
 
 
-@pytest.mark.parametrize("bad_field", ["test_grant", "listener_host",
-                                     "full_descendant_tree_clean"])
+@pytest.mark.parametrize("bad_field", [
+    "test_grant", "listener_host", "full_descendant_tree_clean",
+    "test_mode", "group_only_test_grant", "_trusted_bound_listener",
+    "transport",
+])
 def test_b1b1_guard_client_fields_cannot_select_private_proof(
         scene, monkeypatch, bad_field):
     svc = scene.service()
     calls = _runner_spy(svc, monkeypatch)
-    with TestClient(create_multi_app(svc, enable_mcp=False),
-                    base_url="http://127.0.0.1:8765") as client:
-        response = client.post("/run", json={**APPLY, bad_field: True})
+    policy_before = svc.info()["exec_policy"]
+    witness = _IntentWitness(scene.state)
+    with monkeypatch.context() as patch:
+        witness.install(patch)
+        before = _records(scene)
+        with TestClient(create_multi_app(svc, enable_mcp=False),
+                        base_url="http://127.0.0.1:8765") as client:
+            response = client.post("/run", json={**APPLY, bad_field: True})
+        clean = _never_started(scene, witness, before, calls)
     assert response.status_code == 400
-    assert calls == []
+    assert response.json().get("error") == "invalid_argument"
+    assert clean, (bad_field, witness.events, len(calls))
+    assert svc.info()["exec_policy"] == policy_before
+
+
+
+def test_b1b1_guard_status_policy_oracle_rejects_private_metadata(scene):
+    """Positive public schema plus hostile false-GREEN variants of D0 §6."""
+    ordinary = {
+        "enabled": True,
+        "available": False,
+        "adapter_exposed": True,
+        "durability_state": "healthy",
+        "quarantined": False,
+        "quarantine_reason_code": None,
+        "completion_capability": "none",
+        "max_concurrent_per_workspace": 1,
+        "max_concurrent_total": 4,
+        "dry_run_default": True,
+        "warning": _PUBLIC_POLICY_WARNING,
+    }
+    assert _public_policy_is_sanitized(ordinary)
+    mutations = [
+        {"pid": os.getpid()},
+        {"argv": ["python", "probe.py", "--token=SYNTHETIC_ONLY"]},
+        {"environment": {"SYNTHETIC_API_TOKEN": "synthetic-never-real"}},
+        {"workspace_root": str(scene.a)},
+        {"state_path": str(scene.state)},
+        {"owner_lock_path": str(scene.state / "owner.lock")},
+        {"TestOnlyGroupRetirementGrant": True},
+        {"metadata": {"test_mode": True, "host": "127.0.0.1"}},
+        {"warning": _PUBLIC_POLICY_WARNING + " root=" + str(scene.a)},
+        {"max_concurrent_total": True},  # bool is an int subclass
+        {"completion_capability": ["none"]},
+        {"durability_state": "UNTRUSTED"},
+        {"quarantine_reason_code": "SYNTHETIC_SECRET"},
+    ]
+    for mutation in mutations:
+        assert not _public_policy_is_sanitized({**ordinary, **mutation}), (
+            "Unsafe extra policy data or invalid public field accepted: " +
+            repr(tuple(mutation)))
+    assert not _public_policy_is_sanitized(
+        {k: v for k, v in ordinary.items() if k != "completion_capability"})
+
+
+def test_b1b1_guard_busy_intent_witness_detects_transient_write_delete(
+        scene, monkeypatch):
+    """Physical PREPARED->unlink in a held slot is NOT a clean busy refusal."""
+    svc = scene.service()
+    store = svc._exec_state
+    assert store is not None and store.durability_state == "healthy"
+    svc._exec_active.add("a")
+    try:
+        witness = _IntentWitness(scene.state)
+        with monkeypatch.context() as patch:
+            witness.install(patch)
+            before = _records(scene)
+            st = scene.a.stat()
+            attempt = store.prepare("a", (st.st_dev, st.st_ino))
+            os.unlink("r-" + attempt + ".json", dir_fd=store._fd)
+            os.fsync(store._fd)
+            assert _records(scene) == before
+            assert not _never_started(scene, witness, before, [])
+        assert "prepare" in witness.events
+        assert any(event in witness.events for event in
+                   ("atomic_write", "open_write", "replace"))
+        assert "unlink" in witness.events
+    finally:
+        svc._exec_active.discard("a")
+
+
+@pytest.mark.parametrize("bad_field", [
+    "test_mode", "test_grant", "group_only_test_grant",
+    "_trusted_bound_listener", "listener_host",
+])
+def test_b1b1_guard_mcp_arguments_cannot_mint_private_proof(
+        scene, monkeypatch, bad_field):
+    """Actual SDK MCP tools/call, not just a copied REST validation result."""
+    pytest.importorskip("mcp")
+    svc = scene.service()
+    calls = _runner_spy(svc, monkeypatch)
+    policy_before = svc.info()["exec_policy"]
+    witness = _IntentWitness(scene.state)
+    with monkeypatch.context() as patch:
+        witness.install(patch)
+        before = _records(scene)
+        with TestClient(create_multi_app(svc),
+                        base_url="http://127.0.0.1:8765") as client:
+            init = client.post("/mcp", headers=RPC_HEADERS, json={
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25",
+                           "capabilities": {},
+                           "clientInfo": {"name": "b1b1-spoof", "version": "1"}}})
+            assert init.status_code == 200 and "result" in init.json()
+            client.post("/mcp", headers=RPC_HEADERS, json={
+                "jsonrpc": "2.0", "method": "notifications/initialized"})
+            response = client.post("/mcp", headers=RPC_HEADERS, json={
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "run_command",
+                           "arguments": {**APPLY, bad_field: True}}})
+        clean = _never_started(scene, witness, before, calls)
+    result = response.json().get("result", {}) if response.status_code == 200 else {}
+    assert response.status_code == 200
+    assert result.get("isError") is True, (bad_field, result)
+    assert "invalid_argument" in json.dumps(result), bad_field
+    assert clean, (bad_field, witness.events, len(calls))
+    assert svc.info()["exec_policy"] == policy_before
+
+
+@pytest.mark.parametrize("header", [
+    "x-gateway-test-mode", "x-internal-group-retirement-grant",
+])
+def test_b1b1_rest_header_cannot_mint_cleanup_proof(
+        scene, monkeypatch, header):
+    """Synthetic request metadata must not override ordinary default DENY."""
+    svc = scene.service()
+    calls = _runner_spy(svc, monkeypatch)
+    policy_before = svc.info()["exec_policy"]
+    witness = _IntentWitness(scene.state)
+    with monkeypatch.context() as patch:
+        witness.install(patch)
+        before = _records(scene)
+        with TestClient(create_multi_app(svc, enable_mcp=False),
+                        base_url="http://127.0.0.1:8765") as client:
+            response = client.post("/run", json=APPLY,
+                                   headers={header: "true"})
+        clean = _never_started(scene, witness, before, calls)
+    _require(response.status_code == 503 and
+             response.json() == {"error": "exec_cleanup_proof_required"} and
+             clean and svc.info()["exec_policy"] == policy_before,
+             "REST_HEADER_BYPASS",
+             {"header": header, "status": response.status_code,
+              "runner_calls": len(calls), "intent_events": witness.events})
+
+
+@pytest.mark.parametrize("header", [
+    "x-gateway-test-mode", "x-internal-group-retirement-grant",
+])
+def test_b1b1_mcp_header_cannot_mint_cleanup_proof(
+        scene, monkeypatch, header):
+    """MCP synthetic HTTP metadata is never a grant or cleanup-proof source."""
+    pytest.importorskip("mcp")
+    svc = scene.service()
+    calls = _runner_spy(svc, monkeypatch)
+    policy_before = svc.info()["exec_policy"]
+    witness = _IntentWitness(scene.state)
+    with monkeypatch.context() as patch:
+        witness.install(patch)
+        before = _records(scene)
+        headers = {**RPC_HEADERS, header: "true"}
+        with TestClient(create_multi_app(svc),
+                        base_url="http://127.0.0.1:8765") as client:
+            init = client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25",
+                           "capabilities": {},
+                           "clientInfo": {"name": "b1b1-header", "version": "1"}}})
+            assert init.status_code == 200 and "result" in init.json()
+            client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "method": "notifications/initialized"})
+            response = client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "run_command", "arguments": APPLY}})
+        clean = _never_started(scene, witness, before, calls)
+    result = response.json().get("result", {}) if response.status_code == 200 else {}
+    _require(response.status_code == 200 and
+             result.get("isError") is True and
+             (result.get("structuredContent") or {}).get("error") ==
+             "exec_cleanup_proof_required" and
+             clean and svc.info()["exec_policy"] == policy_before,
+             "MCP_HEADER_BYPASS",
+             {"header": header, "status": response.status_code,
+              "is_error": result.get("isError"),
+              "runner_calls": len(calls), "intent_events": witness.events})
 
 
 def test_b1b1_guard_transient_intent_witness_rejects_write_then_delete(

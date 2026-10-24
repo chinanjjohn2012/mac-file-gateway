@@ -9,18 +9,23 @@ import ast
 import copy
 import importlib
 import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
 import pickle
 import signal
 import subprocess
-from types import SimpleNamespace
+import threading
+from types import ModuleType, SimpleNamespace
 import urllib.error
 import urllib.request
 
 import pytest
 from starlette.testclient import TestClient
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Mount
 
 from gateway.core import GatewayError
 from gateway._exec_test_transport import create_private_bound_transport
@@ -129,14 +134,111 @@ def _require(ok, marker, facts):
                     pytrace=False)
 
 
-def _bridge(marker):
+_BRIDGE_MODULE = "gateway._exec_test_bridge"
+_FACTORY_NAME = "create_private_exec_acceptance_bridge"
+_MISSING = object()
+
+
+def _parameter_free(factory):
+    """No caller root/state/grant/listener or **kwargs, even optional ones."""
     try:
-        module = importlib.import_module("gateway._exec_test_bridge")
-        factory = getattr(module, "create_private_exec_acceptance_bridge")
-    except (ModuleNotFoundError, AttributeError) as exc:
-        _require(False, marker, {"factory": type(exc).__name__})
+        return callable(factory) and not inspect.signature(factory).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _load_factory(marker):
+    try:
+        module = importlib.import_module(_BRIDGE_MODULE)
+    except ModuleNotFoundError as exc:
+        # Never disguise a broken nested dependency as an expected RED.
+        if exc.name != _BRIDGE_MODULE:
+            raise
+        _require(False, marker, {"missing_module": exc.name})
         raise AssertionError("unreachable")
+    # vars avoids module.__getattr__ converting an initialization failure
+    # to an expected missing attribute. Only an actually ABSENT member is RED.
+    factory = vars(module).get(_FACTORY_NAME, _MISSING)
+    if factory is _MISSING:
+        _require(False, marker, {"missing_factory": _FACTORY_NAME})
+        raise AssertionError("unreachable")
+    return factory
+
+
+def _bridge(marker):
+    factory = _load_factory(marker)
+    _require(_parameter_free(factory), marker,
+             {"factory_signature": str(inspect.signature(factory))})
     return factory()
+
+
+def _public_app_graph_contains(root, target):
+    """Detect direct/mounted and common wrapped ASGI routing to trusted app.
+
+    Runtime path canaries and private nonpreview denials are ALSO necessary;
+    object inequality alone is never a proof of network isolation.
+    """
+    queue = [root]
+    visited = set()
+    while queue:
+        current = queue.pop()
+        if current is target:
+            return True
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
+        if isinstance(current, (tuple, list, set)):
+            queue.extend(current)
+            continue
+        for field in ("app", "_app", "application", "router", "routes",
+                      "_routes", "endpoint"):
+            try:
+                next_item = getattr(current, field, None)
+            except (AttributeError, RuntimeError):
+                continue
+            if next_item is not None and next_item is not current:
+                queue.append(next_item)
+    return False
+
+
+def _assert_bridge_resources_pinned(env):
+    service, store = env.service, env.service._exec_state
+    assert store is not None
+    assert not service._closing and not service._closed
+    assert store.durability_state == "healthy"
+    os.fstat(store._fd)
+    os.fstat(store._lock_fd)
+    os.fstat(service.get("a").pinned_root.fd)
+
+
+def _held_real_preview(env, monkeypatch):
+    """Hold an actual loopback TCP request in the real sync preview Worker."""
+    gateway = env.service.get("a").gateway
+    real = gateway.run_command
+    entered, release = threading.Event(), threading.Event()
+    results = []
+    def held(cwd, argv, timeout_seconds=60, dry_run=True):
+        if not dry_run:
+            raise AssertionError("B1B1B_HOLD_PREVIEW_CANNOT_EXECUTE")
+        entered.set()
+        if not release.wait(7):
+            raise AssertionError("B1B1B_HELD_HTTP_NOT_RELEASED")
+        return real(cwd, argv, timeout_seconds, dry_run)
+    monkeypatch.setattr(gateway, "run_command", held)
+    def caller():
+        try:
+            results.append(_wire(env.port, "/run", {
+                **APPLY, "dry_run": True}))
+        except BaseException as exc:
+            results.append(exc)
+    thread = threading.Thread(target=caller, daemon=True)
+    thread.start()
+    if not entered.wait(3):
+        release.set()
+        thread.join(timeout=5)
+        raise AssertionError("B1B1B_REAL_HTTP_PREVIEW_NOT_ENTERED")
+    assert env.listener._thread.is_alive()
+    return release, thread, results
 
 
 def test_b1b1b_private_direct_untrusted_apply_denied_before_runner(monkeypatch):
@@ -216,6 +318,30 @@ def test_b1b1b_private_wire_mcp_apply_requires_nonclient_proof(
                   "events": witness.events})
 
 
+def test_b1b1b_bridge_factory_rejects_caller_selected_scope():
+    """Enforce Python zero-argument signature AND actual argument rejection."""
+    factory = _load_factory("BRIDGE_FACTORY_NO_ARGS")
+    _require(_parameter_free(factory), "BRIDGE_FACTORY_NO_ARGS",
+             {"signature": repr(inspect.signature(factory))})
+    sentinel = object()  # never a real user root, token, or file path
+    unexpected = []
+    for args, kwargs in (
+            ((sentinel,), {}),
+            ((), {"root": sentinel}),
+            ((), {"workspace": "foreign"}),
+            ((), {"state_root": sentinel}),
+            ((), {"grant": sentinel}),
+            ((), {"transport": sentinel}),
+            ((), {"test_mode": True})):
+        try:
+            factory(*args, **kwargs)
+        except TypeError:
+            continue
+        unexpected.append((args, kwargs))
+    _require(not unexpected, "BRIDGE_FACTORY_NO_ARGS",
+             {"accepted_args": repr(unexpected)[:140]})
+
+
 def test_b1b1b_trusted_bridge_factory_is_live_and_instance_bound():
     with _bridge("TRUSTED_BRIDGE_FACTORY") as env:
         allowed = env.grant.qualifies_transport(
@@ -245,6 +371,43 @@ def test_b1b1b_bridge_wire_apply_denies_every_untrusted_client(monkeypatch):
                       "calls": len(calls), "events": witness.events})
 
 
+@pytest.mark.parametrize("metadata", ["plain", "forged"])
+def test_b1b1b_bridge_real_wire_mcp_nonpreview_denied(monkeypatch, metadata):
+    """New bridge's own REAL SDK MCP listener, never only the B1-B0 one."""
+    with _bridge("BRIDGE_WIRE_MCP_DENY") as env:
+        calls = _runner_spy(env, monkeypatch)
+        scene, witness, snapshot, no_intent = _physical_oracle(env)
+        headers = ({"x-internal-group-retirement-grant": "true"}
+                   if metadata == "forged" else {})
+        with monkeypatch.context() as patch:
+            witness.install(patch)
+            before = snapshot(scene)
+            status, init = _wire(env.port, "/mcp", {
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25",
+                           "capabilities": {},
+                           "clientInfo": {"name": "bridge-own-wire",
+                                          "version": "1"}}}, headers)
+            assert status == 200 and "result" in init
+            _wire(env.port, "/mcp", {
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"}, headers)
+            status, result_body = _wire(env.port, "/mcp", {
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "run_command",
+                           "arguments": APPLY}}, headers)
+            clean = no_intent(scene, witness, before, calls)
+        reply = (result_body.get("result", {})
+                 if isinstance(result_body, dict) else {})
+        _require(status == 200 and reply.get("isError") is True
+                 and (reply.get("structuredContent") or {}).get("error")
+                 == "exec_cleanup_proof_required" and clean,
+                 "BRIDGE_WIRE_MCP_DENY",
+                 {"metadata": metadata, "status": status,
+                  "reply": repr(reply)[:160],
+                  "calls": len(calls), "events": witness.events})
+
+
 def test_b1b1b_bridge_foreign_instance_never_borrows_grant():
     with _bridge("BRIDGE_FOREIGN_INSTANCE") as owner:
         with _bridge("BRIDGE_FOREIGN_INSTANCE") as other:
@@ -262,18 +425,84 @@ def test_b1b1b_bridge_foreign_instance_never_borrows_grant():
 
 def test_b1b1b_trusted_inprocess_asgi_preview_is_not_network_auth():
     with _bridge("TRUSTED_ASGI_PREVIEW") as env:
-        assert env.trusted_asgi_app is not None
-        assert env.listener._server.config.app is not env.trusted_asgi_app
-        with TestClient(env.trusted_asgi_app,
+        trusted = env.trusted_asgi_app
+        _require(trusted is not None and
+                 not _public_app_graph_contains(
+                     env.listener._server.config.app, trusted),
+                 "TRUSTED_ASGI_PREVIEW",
+                 {"trusted_present": trusted is not None,
+                  "trusted_in_public_routing": (
+                      _public_app_graph_contains(
+                          env.listener._server.config.app, trusted)
+                      if trusted is not None else None)})
+        with TestClient(trusted,
                         base_url="http://127.0.0.1:8765") as client:
-            response = client.post("/run", json={**APPLY, "dry_run": True})
-        status, wire = _wire(env.port, "/run",
-                             {**APPLY, "dry_run": True})
+            response = client.post("/run", json={
+                **APPLY, "dry_run": True})
+        status, wire = _wire(env.port, "/run", {
+            **APPLY, "dry_run": True})
         _require(response.status_code == 200
                  and response.json().get("executed") is False
                  and status == 200 and wire.get("executed") is False,
                  "TRUSTED_ASGI_PREVIEW",
                  {"internal": response.status_code, "wire": status})
+
+
+def test_b1b1b_trusted_inprocess_route_canary_is_not_network_reachable(
+        monkeypatch):
+    """Dynamic canary observes mounts/wrappers, not just different app IDs."""
+    with _bridge("BRIDGE_TRUSTED_ROUTE_CANARY") as env:
+        trusted = env.trusted_asgi_app
+        _require(trusted is not None and
+                 not _public_app_graph_contains(
+                     env.listener._server.config.app, trusted),
+                 "BRIDGE_TRUSTED_ROUTE_CANARY",
+                 {"trusted_in_public_routing": True})
+        router = getattr(trusted, "router", None)
+        _require(router is not None and
+                 callable(getattr(router, "add_route", None)),
+                 "BRIDGE_TRUSTED_ROUTE_CANARY",
+                 {"trusted_router_missing": router is None})
+        calls = []
+        canary = "/__b1b1b_private_canary_8fc3bd__"
+        async def handle(request):
+            calls.append("private")
+            return JSONResponse({"b1b1b": "TRUSTED_ONLY"})
+        router.add_route(canary, handle, methods=["GET"])
+        with TestClient(trusted,
+                        base_url="http://127.0.0.1:8765") as client:
+            local = client.get(canary)
+        _require(local.status_code == 200
+                 and local.json() == {"b1b1b": "TRUSTED_ONLY"}
+                 and calls == ["private"],
+                 "BRIDGE_TRUSTED_ROUTE_CANARY",
+                 {"local": local.status_code, "calls": calls})
+        calls.clear()
+        for path in (canary, "/internal" + canary,
+                     "/trusted" + canary, "/__test__" + canary):
+            status, data = _wire(env.port, path)
+            _require(status in (404, 405) and not calls,
+                     "BRIDGE_TRUSTED_ROUTE_CANARY",
+                     {"network_path": path, "status": status,
+                      "canary_calls": calls})
+        runner = _runner_spy(env, monkeypatch)
+        scene, witness, snapshot, no_intent = _physical_oracle(env)
+        for path in ("/internal/run", "/trusted/run",
+                     "/__test__/run", "/private/run"):
+            with monkeypatch.context() as patch:
+                witness.install(patch)
+                before = snapshot(scene)
+                status, _ = _wire(env.port, path, APPLY,
+                                  {"x-gateway-test-mode": "true"})
+                clean = no_intent(scene, witness, before, runner)
+            _require(status in (404, 405) and clean and not calls,
+                     "BRIDGE_TRUSTED_ROUTE_CANARY",
+                     {"network_path": path, "status": status,
+                      "events": witness.events, "runner": len(runner)})
+        _require(not _public_app_graph_contains(
+                     env.listener._server.config.app, trusted),
+                 "BRIDGE_TRUSTED_ROUTE_CANARY",
+                 {"graph_mount_detected": True})
 
 
 def test_b1b1b_bridge_close_revokes_one_way():
@@ -287,6 +516,67 @@ def test_b1b1b_bridge_close_revokes_one_way():
                  service, "a", transport=listener)
              and not listener._proves_live(), "BRIDGE_CLOSE_REVOKE",
              {"listener_live": listener._proves_live()})
+
+
+@pytest.mark.parametrize("fault", ["join_exception", "join_returns_alive"])
+def test_b1b1b_bridge_close_preserves_real_inflight_ownership_on_fault(
+        monkeypatch, fault):
+    """Live HTTP Worker, real Uvicorn thread, injected join ONLY (no fake is_alive)."""
+    env = _bridge("BRIDGE_CLOSE_OWNER_RETAIN")
+    release = caller = closer = None
+    close_done = threading.Event()
+    close_errors = []
+    try:
+        grant = env.grant
+        service = env.service
+        assert grant.qualifies_transport(service, "a", transport=env.listener)
+        release, caller, _ = _held_real_preview(env, monkeypatch)
+        assert env.listener._thread.is_alive()
+
+        def join_fault(timeout):
+            assert isinstance(timeout, (int, float)) and 0 < timeout <= 7
+            assert env.listener._thread.is_alive()
+            if fault == "join_exception":
+                raise TimeoutError("B1B1B_INJECTED_JOIN_EXCEPTION")
+            return None  # no-op join while the REAL listener remains live
+
+        def attempt_close():
+            try:
+                env.close()
+            except BaseException as exc:
+                close_errors.append(exc)
+            finally:
+                close_done.set()
+
+        with monkeypatch.context() as patch:
+            patch.setattr(env.listener._thread, "join", join_fault)
+            closer = threading.Thread(target=attempt_close, daemon=True)
+            closer.start()
+            assert close_done.wait(3), (
+                "Bridge attempted to close pinned service under an inflight "
+                "TCP Listener instead of returning bounded close failure")
+            assert len(close_errors) == 1
+            if fault == "join_exception":
+                assert isinstance(close_errors[0], TimeoutError)
+                assert "B1B1B_INJECTED_JOIN_EXCEPTION" in str(close_errors[0])
+            else:
+                assert isinstance(close_errors[0], RuntimeError)
+                assert "did not shut down" in str(close_errors[0])
+            assert env.listener._thread.is_alive()
+            assert env.listener._socket.fileno() == -1
+            assert not grant.qualifies_transport(
+                service, "a", transport=env.listener)
+            _assert_bridge_resources_pinned(env)
+    finally:
+        if release is not None:
+            release.set()
+        if caller is not None:
+            caller.join(timeout=5)
+        if closer is not None:
+            closer.join(timeout=5)
+        env.close()  # bounded retry only after real request/drain completed
+    assert not env.listener._thread.is_alive()
+    assert service._closed
 
 
 def test_b1b1b_guard_real_listener_loopback_preview_without_execution():
@@ -321,6 +611,61 @@ def test_b1b1b_guard_request_fields_cannot_set_internal_proof(
         status, data = _wire(env.port, "/run", {**APPLY, field: True})
         assert status == 400 and data.get("error") == "invalid_argument"
         assert not calls and _records(env) == before
+
+
+def test_b1b1b_guard_nested_import_or_initialization_error_is_not_expected_red(
+        monkeypatch):
+    """A missing *dependency* is NEVER legitimate missing-bridge RED."""
+    for failure in (
+            ModuleNotFoundError(
+                "synthetic missing internal dependency",
+                name="gateway._missing_internal_dependency"),
+            AttributeError("synthetic initializer failure")):
+        with monkeypatch.context() as patch:
+            def fail_import(name):
+                assert name == _BRIDGE_MODULE
+                raise failure
+            patch.setattr(importlib, "import_module", fail_import)
+            with pytest.raises(type(failure)) as info:
+                _bridge("TRUSTED_BRIDGE_FACTORY")
+            assert str(info.value) == str(failure)
+            assert "B1B1B_RED_" not in str(info.value)
+    # A present module that simply lacks its factory is different.
+    module = ModuleType(_BRIDGE_MODULE)
+    with monkeypatch.context() as patch:
+        patch.setattr(importlib, "import_module", lambda n: module)
+        with pytest.raises(BaseException) as failure:
+            _bridge("TRUSTED_BRIDGE_FACTORY")
+        assert "B1B1B_RED_TRUSTED_BRIDGE_FACTORY" in str(failure.value)
+        assert "missing_factory" in str(failure.value)
+
+
+def test_b1b1b_guard_factory_signature_rejects_optional_untrusted_scope():
+    """Synthetic unsafe callable signatures must never qualify."""
+    def safe():
+        return None
+    def optional(*, root_override=None):
+        return None
+    def variadic(*args, **kwargs):
+        return None
+    def positional(root):
+        return None
+    assert _parameter_free(safe)
+    for candidate in (optional, variadic, positional):
+        assert not _parameter_free(candidate)
+
+
+def test_b1b1b_guard_network_mount_or_wrapper_graph_is_detectable():
+    """Mutation selfcheck: known Starlette Mount + outer wrapper is detected."""
+    trusted = Starlette()
+    nested = Starlette(routes=[
+        Mount("/private", app=trusted)])
+    class Wrapped:
+        def __init__(self, app):
+            self.app = app
+    assert _public_app_graph_contains(trusted, trusted)
+    assert _public_app_graph_contains(Wrapped(nested), trusted)
+    assert not _public_app_graph_contains(Starlette(), trusted)
 
 
 def test_b1b1b_guard_historical_real_subprocess_tests_are_present():

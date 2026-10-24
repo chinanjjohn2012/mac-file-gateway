@@ -60,31 +60,68 @@ complete detached-descendant cleanup.
 
 ## Exact R0 RED / GREEN classification
 
-- **10 expected RED**, each with an exact B1B1B_RED_ marker:
+- **16 expected RED**, each with an exact B1B1B_RED_ marker:
   ordinary direct nonpreview on the existing bound test fixture must
   deny before Runner; unauthorized raw TCP REST and real SDK MCP
   apply must deny both with NO metadata and with forged headers;
   the new bridge factory must create instance-bound actual loopback
   proof; the new bridge's own wire must deny raw client nonpreview;
-  a foreign bridge instance cannot borrow its grant; its separate
-  in-process ASGI preview must work; close must revoke one-way.
+  a foreign bridge instance cannot borrow its grant; parameter-free
+  factory must reject all supplied positional/keyword scopes;
+  the new Bridge's own real TCP SDK MCP must deny both plain and
+  forged-header applies; its separate in-process ASGI preview must
+  work; a dynamic trusted-only route canary must not be reachable
+  from any network route/mount/wrapper; close must revoke one-way;
+  live in-flight REST preview plus injected join exception or
+  no-op join must keep the owner.lock, state and Workspace FDs pinned
+  for a bounded retried close.
   Existing product/bridge absence intentionally fails these.
-- **7 required GREEN**: real bound Listener still previews with no
+- **10 required GREEN**: real bound Listener still previews with no
   subprocess or durable attempt; foreign Listener cannot borrow grant;
   both invalid client proof body fields denied; immutable inventory
   of historical real subprocess, REST/MCP, slots and cancel/close tests;
   ordinary product startup does not import bridge; existing private
-  grant remains nonserializable and lifetime-revoked.
-- **Strict verifier** checks exact 17 expanded NodeIDs once, no skipped
-  or unexpected failures, exact ten absent-feature markers and seven
+  grant remains nonserializable and lifetime-revoked. Additionally,
+  synthetic oracle selfchecks prove that nested import/initializer
+  errors are never converted into expected missing-bridge markers,
+  parameterized factory signatures cannot pass, and a simulated
+  nested ASGI mount through a wrapper is actually detected.
+- **Strict verifier** checks exact 26 expanded NodeIDs once, no skipped
+  or unexpected failures, exact sixteen absent-feature markers and ten
   genuinely passing guards, pytest exit=1. It emits
   B1B1B_CONTRACT_STAGE=RED_NOT_IMPLEMENTED only for a matching RED.
+
+Only the exact missing `gateway._exec_test_bridge` module or absent
+`create_private_exec_acceptance_bridge` attribute may be classified
+as expected RED: nested ImportError, module initializer failures and
+factory execution exceptions must produce unexpected pytest errors.
+Factory inspection and harmless dummy arguments enforce an actual
+zero-parameter signature; a synthetic unsafe-signature GREEN selftest
+prevents an optional root/Workspace/credential path from being accepted.
+
+The new Bridge's *own* real REST and MCP wires are exercised with both
+normal requests and forged headers. Trusted ASGI network isolation
+requires a recursive wrapper/mount graph check plus a test-only
+GET route canary injected into the trusted app, observed locally via
+TestClient and denied over actual bound TCP on direct/nested paths.
+The real in-flight TCP close-fault tests inject only join
+exception or no-op join; they do not fake thread liveness. Before retry,
+they require permanently revoked grants, closed listening socket,
+still-open pinned owner-lock/state/Workspace FDs and no premature
+service close, even while the actual preview Worker is active.
 
 The no-intent refusals reuse the identical frozen B1-B1-A physical
 observer, not a final-snapshot-only test: a transient PREPARED write
 and delete, record entry/link mutation or moved directory is therefore
 not accepted as a clean denial. The new bridge must never mount its
 in-process trusted ASGI app directly on the public bound Listener.
+
+This R0 contract deliberately has no new actual Worker or child
+process authority. When the new factory is absent, the six new
+factory-dependent RED cases (and old factory-dependent cases) fail
+with an exact missing-module marker; the GREEN fault-injection
+selfchecks ensure an unrelated nested import/init error cannot masquerade
+as that missing-feature RED.
 
 CI checks full tracked SHA-256 Manifest, reviewed parent ancestry,
 source integrity, unchanged historical product/reviewed blobs, full

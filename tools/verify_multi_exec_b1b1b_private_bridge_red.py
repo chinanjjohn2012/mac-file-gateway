@@ -25,27 +25,42 @@ RED = {
         "PRIVATE_WIRE_MCP_DENY",
     "test_b1b1b_private_wire_mcp_apply_requires_nonclient_proof[forged]":
         "PRIVATE_WIRE_MCP_DENY",
+    "test_b1b1b_bridge_factory_rejects_caller_selected_scope":
+        "BRIDGE_FACTORY_NO_ARGS",
     "test_b1b1b_trusted_bridge_factory_is_live_and_instance_bound":
         "TRUSTED_BRIDGE_FACTORY",
     "test_b1b1b_bridge_wire_apply_denies_every_untrusted_client":
         "BRIDGE_WIRE_DENY",
+    "test_b1b1b_bridge_real_wire_mcp_nonpreview_denied[plain]":
+        "BRIDGE_WIRE_MCP_DENY",
+    "test_b1b1b_bridge_real_wire_mcp_nonpreview_denied[forged]":
+        "BRIDGE_WIRE_MCP_DENY",
     "test_b1b1b_bridge_foreign_instance_never_borrows_grant":
         "BRIDGE_FOREIGN_INSTANCE",
     "test_b1b1b_trusted_inprocess_asgi_preview_is_not_network_auth":
         "TRUSTED_ASGI_PREVIEW",
+    "test_b1b1b_trusted_inprocess_route_canary_is_not_network_reachable":
+        "BRIDGE_TRUSTED_ROUTE_CANARY",
     "test_b1b1b_bridge_close_revokes_one_way":
         "BRIDGE_CLOSE_REVOKE",
+    "test_b1b1b_bridge_close_preserves_real_inflight_ownership_on_fault[join_exception]":
+        "BRIDGE_CLOSE_OWNER_RETAIN",
+    "test_b1b1b_bridge_close_preserves_real_inflight_ownership_on_fault[join_returns_alive]":
+        "BRIDGE_CLOSE_OWNER_RETAIN",
 }
 GREEN = {
     "test_b1b1b_guard_real_listener_loopback_preview_without_execution",
     "test_b1b1b_guard_foreign_listener_cannot_transfer_qualification",
     "test_b1b1b_guard_request_fields_cannot_set_internal_proof[test_mode]",
     "test_b1b1b_guard_request_fields_cannot_set_internal_proof[group_only_test_grant]",
+    "test_b1b1b_guard_nested_import_or_initialization_error_is_not_expected_red",
+    "test_b1b1b_guard_factory_signature_rejects_optional_untrusted_scope",
+    "test_b1b1b_guard_network_mount_or_wrapper_graph_is_detectable",
     "test_b1b1b_guard_historical_real_subprocess_tests_are_present",
     "test_b1b1b_guard_normal_product_has_no_private_bridge_factory_import",
     "test_b1b1b_guard_existing_test_grant_not_serializable_or_reusable",
 }
-assert len(RED) == 10 and len(GREEN) == 7
+assert len(RED) == 16 and len(GREEN) == 10
 EXPECTED = set(RED) | GREEN
 
 
@@ -99,15 +114,15 @@ def main():
                     green += 1
             else:
                 issues.append(name + ": unexpected test")
-        if run.returncode != 1 or red != 10 or green != 7:
+        if run.returncode != 1 or red != 16 or green != 10:
             issues.append("wrong pytest status/counts: " +
                           repr((run.returncode, red, green)))
         if issues:
             for issue in issues:
                 print("B1B1B_EXPECTED_RED_FAIL: " + issue, flush=True)
             return 1
-        print("B1B1B_PRIVATE_BRIDGE_EXPECTED_RED=10")
-        print("B1B1B_EXISTING_GUARDS_GREEN=7")
+        print("B1B1B_PRIVATE_BRIDGE_EXPECTED_RED=16")
+        print("B1B1B_EXISTING_GUARDS_GREEN=10")
         print("B1B1B_CONTRACT_STAGE=RED_NOT_IMPLEMENTED")
         print("B1B1B_NO_HOST_SPAWN_OR_SIGNAL=TRUE")
         print("B1B1B_HISTORICAL_REAL_EXEC_TESTS=UNCHANGED")

@@ -9,6 +9,8 @@ Exec acceptance tests, never rewrite/skip them to make a green report.
 from __future__ import annotations
 
 import asyncio
+import builtins
+import io
 import json
 import os
 from pathlib import Path
@@ -262,6 +264,9 @@ class _IntentWitness:
         real_prepare = ExecStateStore.prepare
         real_atomic = ExecStateStore._atomic_write
         real_open = os.open
+        real_io_open = io.open
+        real_builtin_open = builtins.open
+        real_remove = os.remove
         real_replace = os.replace
         real_rename = os.rename
         real_unlink = os.unlink
@@ -279,6 +284,16 @@ class _IntentWitness:
                     and witness._matches(path, kwargs.get("dir_fd"))):
                 witness.events.append("open_write")
             return real_open(path, flags, *args, **kwargs)
+        def file_open(real, event):
+            def watched(path, mode="r", *args, **kwargs):
+                # pathlib.Path.open/write_bytes use io.open, not os.open.
+                # '+' covers read/write update modes as well as w/a/x.
+                if (isinstance(mode, str)
+                        and any(char in mode for char in ("w", "a", "x", "+"))
+                        and witness._matches(path)):
+                    witness.events.append(event)
+                return real(path, mode, *args, **kwargs)
+            return watched
         def replace(src, dst, *args, **kwargs):
             if witness._matches(dst, kwargs.get("dst_dir_fd")):
                 witness.events.append("replace")
@@ -291,13 +306,22 @@ class _IntentWitness:
             if witness._matches(path, kwargs.get("dir_fd")):
                 witness.events.append("unlink")
             return real_unlink(path, *args, **kwargs)
+        def remove(path, *args, **kwargs):
+            # os.remove is a distinct attribute; patching unlink is not enough.
+            if witness._matches(path, kwargs.get("dir_fd")):
+                witness.events.append("remove")
+            return real_remove(path, *args, **kwargs)
 
         patch.setattr(ExecStateStore, "prepare", prepare)
         patch.setattr(ExecStateStore, "_atomic_write", atomic)
         patch.setattr(os, "open", open_write)
+        patch.setattr(io, "open", file_open(real_io_open, "io_open_write"))
+        patch.setattr(builtins, "open",
+                      file_open(real_builtin_open, "builtins_open_write"))
         patch.setattr(os, "replace", replace)
         patch.setattr(os, "rename", rename)
         patch.setattr(os, "unlink", unlink)
+        patch.setattr(os, "remove", remove)
 
 
 def _never_started(scene, witness, before, calls):
@@ -700,6 +724,55 @@ def test_b1b1_guard_transient_intent_witness_rejects_write_then_delete(
         assert not _never_started(scene, witness, before, [])
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("write_api", [
+    "path.open", "path.write_bytes", "builtins.open",
+])
+def test_b1b1_guard_python_file_io_detects_transient_prepared(
+        scene, monkeypatch, write_api):
+    """Physical PREPARED write, fsync, os.remove, dir-fsync must not look clean.
+
+    Negative oracle for Python IO that bypasses os.open/os.unlink patches:
+    the final state snapshot is unchanged, but BOTH write and remove events
+    must be witnessed. No product Worker or host subprocess is run.
+    """
+    svc = scene.service()  # real owner.lock boot occurs before interception
+    assert svc._exec_state is not None
+    assert svc._exec_state.durability_state == "healthy"
+    record = scene.state / ("r-" + "7" * 32 + ".json")
+    assert not record.exists()
+    witness = _IntentWitness(scene.state)
+    with monkeypatch.context() as patch:
+        witness.install(patch)
+        before = _records(scene)
+        payload = b'{"state":"PREPARED"}'
+        if write_api == "path.write_bytes":
+            assert record.write_bytes(payload) == len(payload)
+            with record.open("rb") as stream:
+                os.fsync(stream.fileno())
+        else:
+            opener = record.open if write_api == "path.open" else (
+                lambda mode: open(record, mode))
+            with opener("wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+        os.remove(record)
+        parent_fd = os.open(scene.state, os.O_RDONLY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+        after = _records(scene)
+        incorrectly_clean = _never_started(scene, witness, before, [])
+    assert after == before
+    assert not record.exists()
+    assert not incorrectly_clean
+    expected_write_event = ("builtins_open_write"
+                            if write_api == "builtins.open" else "io_open_write")
+    assert expected_write_event in witness.events, (write_api, witness.events)
+    assert "remove" in witness.events, (write_api, witness.events)
 
 
 def test_b1b1_guard_host_interceptor_is_type_preserving(monkeypatch):

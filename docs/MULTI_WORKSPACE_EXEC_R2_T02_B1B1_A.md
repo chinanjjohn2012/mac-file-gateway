@@ -40,14 +40,17 @@ witness; it is not standalone Worker execution authorization.
 
 New non-default-collected test module
 \`tests/b1b1_contracts/contract_multi_exec_default_deny_b1b1.py\`
-contains 30 exact parameter-expanded cases, protected by a
+contains 33 exact parameter-expanded cases, protected by a
 **fixture-lifetime** Python-level no-host-Popen/fork/signal guard.
-Its independent \`_IntentWitness\` records \`ExecStateStore.prepare\`,
-\`_atomic_write\`, actual attempt/temp write-open, \`os.replace\`,
-\`os.rename\` and \`os.unlink\` against the pinned physical Exec state
-directory; its positive negative-selfcheck constructs a real, fsynced
-PREPARED then unlinks it. Consequently identical before/after state
-bytes or zero Runner calls alone cannot make a false default DENY GREEN.
+Its independent _IntentWitness records ExecStateStore.prepare,
+_atomic_write, physical attempt/temp write-open through os.open,
+io.open/Path.open/Path.write_bytes and builtins.open, plus os.replace,
+os.rename, os.unlink and os.remove against the pinned Exec state root.
+Negative-oracle selfchecks cover both standard store PREPARED->unlink and
+fsynced Path.open("wb")/Path.write_bytes/builtins.open -> os.remove ->
+directory fsync sequences. Identical before/after bytes or zero Runner
+calls alone cannot make a false default DENY GREEN. Python-level
+interception is not a kernel file audit or descendant-cleanup proof.
 
 **Expected new RED (11 exact NodeIDs):** ordinary direct, real
 Starlette/SDK REST 503, SDK MCP structured error, /info-/health sanitized
@@ -57,7 +60,7 @@ cases and **two MCP synthetic-header metadata** cases. Every failure
 must include its specified \`B1B1_RED_*\` marker from an actual failed
 assertion, not unrelated exceptions, skips or setup/collection errors.
 
-**Required GREEN witnesses (19 exact NodeIDs):** ordinary dry-run
+**Required GREEN witnesses (22 exact NodeIDs):** ordinary dry-run
 preview with zero physical attempt intent, global-off \`exec_disabled\`
 precedence, independent File read, **seven** unknown REST client
 proof fields including explicit \`test_mode\`, **five** actual SDK MCP
@@ -65,7 +68,8 @@ proof fields including explicit \`test_mode\`, **five** actual SDK MCP
 physical PREPARED->unlink mutation detection in both ordinary and
 occupied-slot scenes, a strict public status-policy privacy oracle
 selfcheck covering PID/argv/environment/root/state path/credentials,
-and the type-preserving Popen/killpg prohibition selfcheck.
+three additional physical Python-file-API write/delete oracle
+selfchecks, and the type-preserving Popen/killpg prohibition selfcheck.
 Every rejected REST/MCP spoof must also have **zero** Runner calls,
 \`ExecStateStore.prepare\`, atomic write, write-open,
 rename/replace/unlink or physical state mutation; \`exec_policy\` must
@@ -75,7 +79,7 @@ child or process-group signal.
 
 \`tools/verify_multi_exec_b1b1_default_deny_red.py\` runs the isolated
 suite, parses original JUnit for every expected NodeID and marker,
-requires exactly 11 RED + 19 GREEN, rejects any skipped, setup/collection
+requires exactly 11 RED + 22 GREEN, rejects any skipped, setup/collection
 failure or unexpected NodeID, and prints
 \`B1B1_CONTRACT_STAGE=RED_NOT_IMPLEMENTED\` **only on a matching RED**.
 The separate GitHub Action checks an exact Head + complete tracked
@@ -130,12 +134,34 @@ but identified three overlapping false-GREEN oracle gaps in the
    Ordinary dry_run's prior GREEN guard now also demands zero
    physical state mutations.
 
-The verifier now enforces **11 RED / 19 GREEN** exact expanded
+The verifier now enforces **11 RED / 22 GREEN** exact expanded
 NodeIDs. Product/runtime and historical real subprocess/test blobs
 are unchanged. No implementation GREEN, no Worker grant admission,
 no change to production Exec and no R3/R4 acceptance is claimed.
 The new SHA needs original CI and renewed **independent full
 Standards/Spec RED review** before B1-B1-B can begin.
+
+## Follow-up Spec review P2 — transient Python-file-IO false GREEN
+
+The immutable Head `159c4afaf3183d508ff2b3f929b4c593299666fb`
+received independent
+[Standards PASS #5636445985](https://github.com/chinanjjohn2012/mac-file-gateway/pull/67#pullrequestreview-5636445985)
+and
+[Spec FAIL #5636451189](https://github.com/chinanjjohn2012/mac-file-gateway/pull/67#pullrequestreview-5636451189).
+The latter found that patching os.open/os.unlink alone missed a real
+`Path.open("wb") -> fsync -> os.remove() -> dir fsync` write-delete sequence,
+allowing a false zero-intent result with identical disk snapshots.
+
+The expanded `_IntentWitness` now checks pinned-root attempt/temp writes
+through io.open and builtins.open (including pathlib) and captures
+os.remove separately from os.unlink. Three independent negative-oracle
+GREEN cases create actual test-owned PREPARED records with fsync and
+os.remove, and require BOTH a write event and a remove event even when
+the on-disk snapshot returns to its prior bytes. No host subprocess or
+process-group signal is used. The strict verifier pins **11 expected RED /
+22 GREEN guards**, and product/Worker/test-grant code remains unchanged.
+This is a developer-side fix, NOT an independent Spec or Standards PASS
+for the new SHA; B1-B1-B remains blocked until both SHA-bound reviews.
 
 ## Next, but NOT implemented here
 

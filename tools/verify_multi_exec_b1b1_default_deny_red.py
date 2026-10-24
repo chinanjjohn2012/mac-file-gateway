@@ -49,9 +49,12 @@ GREEN = {
     "test_b1b1_guard_status_policy_oracle_rejects_private_metadata",
     "test_b1b1_guard_busy_intent_witness_detects_transient_write_delete",
     "test_b1b1_guard_transient_intent_witness_rejects_write_then_delete",
+    "test_b1b1_guard_python_file_io_detects_transient_prepared[path.open]",
+    "test_b1b1_guard_python_file_io_detects_transient_prepared[path.write_bytes]",
+    "test_b1b1_guard_python_file_io_detects_transient_prepared[builtins.open]",
     "test_b1b1_guard_host_interceptor_is_type_preserving",
 }
-assert len(RED) == 11 and len(GREEN) == 19
+assert len(RED) == 11 and len(GREEN) == 22
 EXPECTED = set(RED) | GREEN
 
 
@@ -115,7 +118,7 @@ def main() -> int:
                 print("B1B1_EXPECTED_RED_FAIL: " + problem, flush=True)
             return 1
         print("B1B1_DEFAULT_DENY_EXPECTED_RED=11")
-        print("B1B1_EXISTING_GUARDS_GREEN=19")
+        print("B1B1_EXISTING_GUARDS_GREEN=22")
         print("B1B1_CONTRACT_STAGE=RED_NOT_IMPLEMENTED")
         print("B1B1_NO_HOST_SPAWN_OR_SIGNAL=TRUE")
         print("B1B1_EXISTING_REAL_EXEC_PRODUCT_TESTS=UNCHANGED")

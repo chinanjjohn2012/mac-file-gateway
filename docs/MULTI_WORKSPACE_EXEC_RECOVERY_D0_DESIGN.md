@@ -1,12 +1,167 @@
 # Multi-Workspace Exec: durable lifecycle and unknown-cleanup design (D0)
 
-**Status: DRAFT / DESIGN REVIEW REQUIRED / NO IMPLEMENTATION AUTHORITY.**
+**Status: PROPOSED PRODUCTION-FIRST D0 AMENDMENT / INDEPENDENT DESIGN REVIEW REQUIRED / NO IMPLEMENTATION AUTHORITY.**
 **Track: Python product only.** Stacked on the fixed macOS partial-acceptance
 PR #57 Head `bb636febe00099be2d15ca6621c1ee2dd892e6e8`, whose base is
 PR #56 reviewed product Head `e528ddb809df897b4f81802e0ae5f4f95ff5d2c7`.
 The accepted evidence is `PARTIAL_NATIVE_ACCEPTANCE_PASS` only.
 Do not merge, deploy, enable production Exec, restart a user's Gateway,
 load Native C, or restart Candidate C/B03 research under this design.
+
+## 0. Proposed production-first D0 amendment (2026-10-25)
+
+**Status: PROPOSAL ONLY / not yet an approved replacement contract.**
+This proposal follows an explicit product-direction change: finish the
+ordinary Multi-Workspace Gateway's **production fail-closed behavior**
+before pursuing test-specific facilities. The historical D0 sections
+below and frozen PR #67/#68 contracts/CI/independent Reviews remain
+valid evidence on *their own* Head/Base/Tree; no prior FAIL is turned
+into PASS. This new amendment requires independent Standards and
+Spec **design review** on its new Draft-PR snapshot before it
+changes implementation requirements.
+
+### 0.1 Decision and boundary
+
+The immediate product target is an **ordinary deny-only** Gateway.
+Instance `server.exec.enabled=true` plus selected Workspace
+`exec.enabled=true` is permission to request Exec, never cleanup
+proof. With no separately approved full-descendant cleanup proof,
+every `dry_run=false` request MUST reject at the shared synchronous
+`WorkspaceService.invoke_exec` boundary with
+`exec_cleanup_proof_required` (REST 503, MCP structured isError),
+**before Exec Popen/Runner invocation AND before any newly written
+PREPARED record**, including write-then-unlink. Missing proof
+precedes `busy` and cannot be bypassed via client fields, CLI,
+configuration, environment, headers, selected paths or names.
+
+A legal `dry_run=true` request must still perform the existing
+workspace/path/allowlist validation and produce a useful preview
+without starting a child or writing Exec attempt intent. The
+`/info` and `/health` Exec policy remains sanitized and consistent:
+`adapter_exposed` and `enabled` may be true, but
+`available=false`, `completion_capability="none"`. Quarantined,
+unavailable and disabled cases keep the stricter existing error
+priority. File Read/Write and Git permissions, including the
+separately authorized Git subprocess path, remain independent.
+A mandatory mixed-capability F1 acceptance must exercise authorized
+Git `dry_run=false` using a real Git subprocess in a disposable
+repository **on the same WorkspaceService instance** whose Exec
+opt-ins are enabled but full-descendant cleanup proof is missing.
+It must also keep authorized File Write working, preserve refusal of
+unauthorized Git/File Write, and repeat real Git apply with Exec in
+UNKNOWN/quarantine. No Exec-denial mechanism may install a global
+Popen prohibition or silently revoke independent Git permissions.
+
+### 0.2 Explicit amendment to historical D0 scopes
+
+For the **immediate deny-only phase only**, this §0 defers only the
+*positive real-execution development prerequisites* of historical
+§2.1 (group-only positive factory), §4 (post-gate positive launch),
+§5 (group-only RETIRED evidence), §7 I/J (positive private-grant
+fixtures), and §8 (mandatory R1 positive Bridge sequence). These
+positive paths remain historical evidence and can be reconsidered
+only in a separately reviewed future real-execution phase; they
+are neither F1 acceptance gates nor permission to launch Exec.
+
+**Every negative fail-closed obligation remains mandatory in F1.**
+In particular, historical §7J still prohibits using any grant to
+clear existing UNKNOWN and requires quarantine on uncertain cleanup.
+Private owner-lock/state trust, no retry or auto-unquarantine, and
+no Runner/PREPARED before proof are not deferred. A legacy test grant
+or a Mock must never become production execution qualification.
+This is **not** a permission to use a mock/legacy grant as
+production execution qualification.
+
+No new `create_private_exec_acceptance_bridge()` or elaborate
+SDK internal mutable-method audit is a deny-only product
+prerequisite. The existing B1-A/B0 test grants/Listeners remain
+inert, not externally mintable, and must not be wired to a
+normal Worker. Their eventual retention/removal requires
+reviewed dependency analysis. PR #68's frozen 24 expected
+RED / 34 GREEN counts and all existing reviewer conclusions
+remain tied to that old R0 contract; they do not become
+metrics for this revised contract. No test-count quota.
+
+### 0.3 Minimum verification; Mock vs real evidence
+
+Only test material product risks and both legal/illegal
+paths. For the deny-only Worker: check direct service, real
+REST and official MCP ingress; valid preview; error precedence;
+status parity; no real Exec Runner call or newly written
+PREPARED intent (including physical write-then-unlink); no
+client-minted authority; and File/Git independence.
+Use real private-FS/owner-lock evidence where filesystem
+identity and durability are security claims, and a small
+number of disposable real REST/MCP requests to prove the
+network path reaches the same Worker gate.
+At least one real authorized Git apply (`dry_run=false`, for example
+`status` or `add`) in a disposable repository is also compulsory
+with both Exec opt-ins enabled and no cleanup proof in the **same**
+service instance, including a separate UNKNOWN/quarantined Exec
+scenario. A Git-only fixture, Git dry-run, or a mocked Popen does
+not establish this cross-capability legal-success property.
+
+Use deterministic Mock/fakes for fault, cancelled waiter,
+slot/lease, timeout and state-machine transition behavior
+**when no real child needs to run**. Refactor, combine or
+replace obsolete real-subprocess tests only with an explicit
+old/new contract traceability matrix and independent
+review, not by silently deleting a safety property.
+A mocked Runner or synthetic heartbeat is NEVER evidence
+of real OS group/descendant cleanup. Purely hypothetical
+Python object monkeypatches inside a trusted process are
+not automatically network-reachable P2 vulnerabilities;
+require an identified untrusted request/real production
+reachability and actual Worker bypass before making them
+mandatory tests.
+
+The deny-only stage stops once the required safe failure
+and legal preview/File/Git paths pass, there is no
+in-scope P0/P1/P2, the relevant CI and independent B/C
+reviews are complete on one fixed snapshot, and no
+unaccounted integration/security gap remains. Do not
+optimize for the total number of tests.
+
+### 0.4 Future positive Exec remains a separate safety gate
+
+No production real Exec becomes permitted as a result
+of approving §0. If positive real command execution is
+later requested, its independent contract MUST provide
+durable fsynced PREPARED-before-Popen, safe ownership,
+complete descendant cleanup rather than leader/group-only
+observation, UNKNOWN/quarantine and no replay, correct
+timeout/cancel/shutdown/restart lifecycle and identity-safe
+signalling. It needs separate bounded **real native macOS
+ARM64** process-tree evidence and real transport/Tunnel
+integration when applicable; Mock alone is insufficient.
+No Native C/C3 research or host signal experiments are
+authorized by the deny-only roadmap.
+
+### 0.5 Implementation/review gate
+
+The companion document
+`docs/MULTI_WORKSPACE_EXEC_PRODUCTION_FIRST_IMPLEMENTATION_PLAN.md`
+is a **proposed** implementation plan, not implementation
+approval. First review this design and plan independently.
+Only after approval may a separate product Draft PR
+implement the proof gate and **explicitly migrate** obsolete
+tests; it must receive fresh independent code reviews and
+original CI on its own Head/Base/Tree. Freeze PR #68's r002
+Head while it is reviewed; do not silently rewrite its tests
+or assign it a PASS. Do not merge, release, deploy, enable
+production Exec, restart the user Gateway/Tunnel or relax
+quarantine/cleanup permissions.
+
+**Applicability by phase:** F1 must prove no-proof default DENY,
+unchanged disabled/quarantined/unavailable precedence, private-FS
+and owner-lock reality, real REST/MCP admission, legal preview,
+File Write and same-instance real Git apply. Historical §7J
+negative UNKNOWN/quarantine invariants continue to apply in F1.
+Historical positive child/group-only RETIRED/Private Bridge cases,
+and native macOS full-descendant cleanup evidence, are not F1
+positive-execution prerequisites; future F3 requires a separate
+approved contract and real OS evidence before any Exec apply.
+
 
 ## 1. Observed gaps and safety targets
 

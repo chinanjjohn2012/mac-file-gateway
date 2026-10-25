@@ -310,10 +310,22 @@ def _f1_real_tcp_listener(service):
     finally:
         if server is not None:
             server.should_exit = True
-        sock.close()
+        # Uvicorn's own asyncio shutdown must unregister the listening FD
+        # BEFORE it is physically closed; otherwise selector._remove_reader
+        # observes fileno() == -1 and raises despite correct test behavior.
         if worker is not None:
             worker.join(timeout=8)
+            if worker.is_alive():
+                # A failed graceful shutdown cannot keep accepting work.
+                # Revoke socket admission and give the thread a final bound
+                # opportunity to exit before the fixture releases state FDs.
+                sock.close()
+                worker.join(timeout=1)
+            else:
+                sock.close()
             assert not worker.is_alive(), "F1_REAL_TCP_LISTENER_DID_NOT_STOP"
+        else:
+            sock.close()
         assert not errors, "F1_REAL_TCP_LISTENER_FAILED: " + repr(errors)
 
 

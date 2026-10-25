@@ -1,7 +1,7 @@
-"""Phase-1 WorkspaceService: immutable authorized roots and file-only routing.
+"""WorkspaceService: pinned authorized roots and independently gated operations.
 
-No implicit workspace, no execution fallback, no cross-root move, and no
-HTTP/MCP parsing lives in this module. Adapters must call this single service.
+No implicit workspace or cross-root file move; controlled Exec and Git have
+separate synchronous Worker admission, never reflective file dispatch.
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from .git_policy import GIT_V1_COMMANDS
 from .git_cli import GitCLIExecutor
 from .git_repository import GitRepositoryCoordinator
 from .git_state import GitStateStore
+from .exec_state import ExecStateStore
 
 _READ = frozenset({"list_files", "read_file", "search_files"})
 _WRITE = frozenset({"create_directory", "delete_directory", "create_file", "write_file",
@@ -121,6 +122,12 @@ class WorkspaceService:
         self._git_state: GitStateStore | None = None
         self._git_executor: GitCLIExecutor | None = None
         self._git_adapter_exposed = False
+        self._exec_adapter_exposed = False
+        self._exec_active: set[str] = set()
+        # B0: own the private Exec state across the service lifetime.
+        # Healthy no-proof admission is separately gated in B1/C.
+        self._exec_state: ExecStateStore | None = None
+        self._exec_state_issue: str | None = None
         config_root: PinnedDirectory | None = None
         try:
             config_root = open_pinned_directory(config_dir, private_leaf=True)
@@ -149,12 +156,25 @@ class WorkspaceService:
                     backup_retention_days=item.backup_retention_days,
                     sensitive_content_audit_paths=item.sensitive_content_audit_paths,
                     sensitive_content_audit_until=item.sensitive_content_audit_until,
-                    allow_exec=False, exec_paths=(), exec_runners=(),
+                    allow_exec=settings.exec_enabled and item.exec_enabled,
+                    exec_paths=item.exec_paths if settings.exec_enabled and item.exec_enabled else (),
+                    exec_runners=item.exec_runners if settings.exec_enabled and item.exec_enabled else (),
                 )
                 if (os.fstat(gateway._root_fd).st_dev, os.fstat(gateway._root_fd).st_ino) != pin.ancestor_ids[-1]:
                     gateway.close()
                     raise PrivateFileError("Workspace root changed before Gateway initialization.")
                 self._workspaces[item.name] = WorkspaceContext(item.name, item, pin, gateway)
+            # Scan and acquire the private state before REST/MCP can accept
+            # work. State IO/ownership failure must not disable File/Git.
+            if settings.exec_enabled and any(w.exec_enabled for w in settings.workspaces):
+                try:
+                    exec_path = Path(config_dir).resolve(strict=True) / "exec-state"
+                    self._exec_state = ExecStateStore(
+                        exec_path,
+                        workspace_roots=tuple(w.root for w in settings.workspaces),
+                    )
+                except (PrivateFileError, GatewayError, OSError, ValueError):
+                    self._exec_state_issue = "state_io_unavailable"
             if settings.git_enabled:
                 # The private state directory is outside all Workspace roots.
                 # Git-only initialization failure does not break file APIs.
@@ -201,6 +221,8 @@ class WorkspaceService:
                     cleanup.callback(self._inventory.close)
                     if self._git_state is not None:
                         cleanup.callback(self._git_state.close)
+                    if self._exec_state is not None:
+                        cleanup.callback(self._exec_state.close)
                     for ctx in self._workspaces.values():
                         cleanup.callback(ctx.pinned_root.close)
                         cleanup.callback(ctx.gateway.close)
@@ -247,6 +269,53 @@ class WorkspaceService:
             result = getattr(ctx.gateway, operation)(*args, **kwargs)
             return {**result, "workspace": name}
 
+    def require_exec(self, name: str) -> WorkspaceContext:
+        """Require both instance and Workspace execution grants."""
+        ctx = self.get(name)
+        if not self.settings.exec_enabled or not ctx.settings.exec_enabled:
+            raise GatewayError("exec_disabled", "Exec is not enabled for this Workspace.")
+        return ctx
+
+    def invoke_exec(self, name: str, cwd: str, argv: list[str],
+                    timeout_seconds: int = 60, dry_run: bool = True) -> dict[str, Any]:
+        """Keep safe previews, but deny ordinary apply without cleanup proof.
+
+        The effective F1 product has *no* approved full-descendant cleanup
+        qualification. Never start a CommandRunner or write even a transient
+        PREPARED record for dry_run=False. This is a service-side gate shared
+        by direct, REST and SDK MCP calls; it is not a global Popen guard and
+        leaves the separately authorized Git worker fully independent.
+        """
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            # B0 durable/ownership/UNKNOWN denial comes before proof status.
+            if self._exec_state is None:
+                raise GatewayError(
+                    "exec_state_unavailable", "Exec durable state is unavailable.")
+            self._exec_state.require_healthy()
+            if type(dry_run) is not bool:
+                raise GatewayError("invalid_argument", "dry_run must be boolean.")
+            # F1 has NO positive cleanup-proof path. Proof denial wins over
+            # an occupied Worker slot and happens before Runner/PREPARED.
+            # Never use an instance-global subprocess ban: Git may spawn
+            # only via its own separately authorized durable protocol.
+            if not dry_run:
+                raise GatewayError(
+                    "exec_cleanup_proof_required",
+                    "Exec apply is unavailable without independently reviewed full-descendant cleanup proof.")
+            if name in self._exec_active or len(self._exec_active) >= 4:
+                raise GatewayError("busy", "A controlled command already occupies this execution slot.")
+            self._exec_active.add(name)
+            self._active_operations += 1
+        try:
+            return {**ctx.gateway.run_command(cwd, argv, timeout_seconds, dry_run),
+                    "workspace": name}
+        finally:
+            with self._lifecycle:
+                self._exec_active.remove(name)
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
     def require_git(self, name: str, command: str) -> WorkspaceContext:
         """Independent authorization, always repeated in sync Worker."""
         ctx = self.get(name)
@@ -292,6 +361,13 @@ class WorkspaceService:
             )
 
     @property
+    def any_exec(self) -> bool:
+        with self._lifecycle:
+            return self.settings.exec_enabled and any(
+                ctx.settings.exec_enabled for ctx in self._workspaces.values()
+            )
+
+    @property
     def any_write(self) -> bool:
         with self._lifecycle:
             return any(ctx.settings.allow_write for ctx in self._workspaces.values())
@@ -300,7 +376,8 @@ class WorkspaceService:
         with self._lifecycle:
             return {"workspaces": [
                 {"id": ctx.name, "read": True, "write": ctx.settings.allow_write,
-                 "exec": False, "local_skills": False,
+                 "exec": bool(self.settings.exec_enabled and ctx.settings.exec_enabled),
+                  "local_skills": False,
                  "sensitive_content": ctx.gateway.sensitive_audit.status(),
                  "git": {"enabled": bool(self.settings.git_enabled
                                          and ctx.settings.git_allowed_commands),
@@ -310,10 +387,37 @@ class WorkspaceService:
 
     def info(self) -> dict[str, Any]:
         with self._lifecycle:
+            effective = self.any_exec
+            if not effective:
+                durability, reason = "disabled", None
+            elif self._exec_state is None:
+                durability, reason = ("unavailable",
+                                      self._exec_state_issue or "state_io_unavailable")
+            else:
+                durability = self._exec_state.durability_state
+                reason = self._exec_state.quarantine_reason_code
+                if durability == "unavailable" and reason is None:
+                    reason = "state_io_unavailable"
             return {"name": "Mac File Gateway", "version": "2.5.0", "mode": "multi",
                     "workspace_count": len(self._workspaces),
-                    "read_only": not self.any_write, "path_base": ".",
+                    "read_only": not (self.any_write or self.any_git),
+                    "file_read_only": not self.any_write, "path_base": ".",
                     "workspaces": self.list_workspaces()["workspaces"],
+                    "exec_policy": {
+                        "enabled": self.settings.exec_enabled,
+                        # No independently approved full-tree cleanup
+                        # qualification exists in F1, even when healthy.
+                        "available": False,
+                        "completion_capability": "none",
+                        "adapter_exposed": self._exec_adapter_exposed,
+                        "durability_state": durability,
+                        "quarantined": durability == "quarantined",
+                        "quarantine_reason_code": reason,
+                        "max_concurrent_per_workspace": 1,
+                        "max_concurrent_total": 4,
+                        "dry_run_default": True,
+                        "warning": "Exec runs project code with the Gateway OS user's privileges; path scopes are not an OS sandbox.",
+                    },
                     "git_policy": {
                         "enabled": self.settings.git_enabled,
                         "available": bool(self._git_executor is not None

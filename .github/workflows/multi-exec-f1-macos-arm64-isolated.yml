@@ -1,0 +1,117 @@
+name: F1 deny-only macOS 15 ARM64 isolated acceptance
+
+on:
+  pull_request:
+    branches:
+      - feature/multi-exec-f1-production-first-deny-only-20261025
+    paths:
+      - ".github/workflows/multi-exec-f1-macos-arm64-isolated.yml"
+      - "MANIFEST.sha256"
+
+permissions:
+  contents: read
+
+jobs:
+  f1-macos-arm64:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'test/multi-exec-f1-macos-arm64-isolated-20261025'
+    runs-on: macos-15
+    timeout-minutes: 18
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      GATEWAY_NATIVE_C_ALLOWED: "false"
+      C3B03_S3S6_FIRST_C_LOAD_AUTHORIZED: "false"
+      C3B03_S3S6_GROUP_SIGNAL_AUTHORIZED: "false"
+    steps:
+      - name: Checkout exact isolated PR Head without Git write credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Fail closed if not GitHub-hosted macOS 15 ARM64
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ runner.environment }}" = "github-hosted"
+          test "$(uname -s)" = "Darwin"
+          test "$(uname -m)" = "arm64"
+          [[ "$(sw_vers -productVersion)" == 15.* ]]
+          python - <<'PY'
+          import platform
+          import sys
+          assert sys.platform == "darwin", sys.platform
+          assert platform.machine().lower() == "arm64", platform.machine()
+          assert sys.version_info >= (3, 13), sys.version
+          print("F1_ISOLATED_HOST=" + platform.platform())
+          print("F1_ISOLATED_PYTHON=" + sys.version.split()[0])
+          print("F1_REAL_EXEC_APPLY=NOT_AUTHORIZED")
+          print("F1_NATIVE_C_AND_GROUP_SIGNAL=FORBIDDEN")
+          PY
+
+      - name: Prove frozen PR70 product code and complete tracked Manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          test -z "$(git status --porcelain)"
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          import subprocess
+          base = "9feb7d8eb71dc6f4ed60b9be2bbc73303a718067"
+          expected = {".github/workflows/multi-exec-f1-macos-arm64-isolated.yml",
+                      "MANIFEST.sha256"}
+          delta = set(subprocess.check_output(
+              ["git", "diff", "--name-only", base, "HEAD"], text=True
+          ).splitlines())
+          assert delta == expected, (delta, expected)
+          rows = Path("MANIFEST.sha256").read_text(encoding="ascii").splitlines()
+          names = []
+          for row in rows:
+              digest, rel = row.split("  ", 1)
+              assert rel.startswith("./") and len(digest) == 64, rel
+              names.append(rel)
+              assert hashlib.sha256(Path(rel).read_bytes()).hexdigest() == digest, rel
+          assert names == sorted(set(names)), "Manifest duplicates or order"
+          tracked = {item.decode("utf-8") for item in subprocess.check_output(
+              ["git", "ls-files", "-z"]).split(b"\0") if item}
+          tracked.remove("MANIFEST.sha256")
+          assert set(names) == {"./" + item for item in tracked}, "Manifest incomplete"
+          print("F1_MACOS_FIXED_BASE=" + base)
+          print("F1_MACOS_FIXED_HEAD=" + subprocess.check_output(
+              ["git", "rev-parse", "HEAD"], text=True).strip())
+          print("F1_MACOS_FIXED_TREE=" + subprocess.check_output(
+              ["git", "rev-parse", "HEAD^{tree}"], text=True).strip())
+          print("F1_MACOS_MANIFEST=PASS")
+          print("F1_PRODUCT_CODE_AND_TESTS=UNCHANGED_FROM_PR70")
+          PY
+
+      - name: Install only the existing product test requirements
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+
+      - name: Real TCP REST and official SDK MCP, deny-only, live Git and File
+        run: python -m pytest -q -p no:cacheprovider tests/test_multi_exec_f1.py
+
+      - name: Preview, Worker, quarantine and private state regression
+        run: >
+          python -m pytest -q -p no:cacheprovider
+          tests/test_multi_exec_product.py
+          tests/test_exec_state_t01.py
+          tests/test_multi_exec_boot_b0.py
+
+      - name: Confirm tracked source unchanged after isolated tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          echo "F1_MACOS_ARM64_DISPOSABLE_ACCEPTANCE_STEPS=PASS"
+          echo "F1_REAL_EXEC_APPLY=NOT_RUN; F3_NATIVE_EXEC_TEST=NOT_RUN"
+          echo "NO_USER_GATEWAY_OR_TUNNEL; NO_DEPLOY; NO_MERGE"

@@ -1,0 +1,151 @@
+name: F1 G05 integrated RC isolated macOS ARM64 deny-only
+
+on:
+  pull_request:
+    branches:
+      - release/ms1
+    paths:
+      - ".github/workflows/multi-exec-f1-g05-rc-macos-arm64.yml"
+      - ".github/workflows/controlled-exec-tests.yml"
+      - "MANIFEST.sha256"
+      - "docs/MULTI_WORKSPACE_EXEC_F1_G05_INTEGRATED_RC.md"
+      - "docs/GITHUB_G05_CI_ADMISSION.md"
+      - "gateway/**"
+      - "tests/**"
+      - "tools/**"
+      - "ci/**"
+
+permissions:
+  contents: read
+
+jobs:
+  f1-g05-rc-deny-only:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'rc/multi-exec-f1-g05-integrated-ms1-20261025' &&
+      github.event.pull_request.base.sha == '2f163eeb83fc2f984354dc6d231a614dca5aa9af'
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONNOUSERSITE: "1"
+      PYTHONPATH: ""
+      GATEWAY_NATIVE_C_ALLOWED: "false"
+      C3B03_S3S6_FIRST_C_LOAD_AUTHORIZED: "false"
+      C3B03_S3S6_GROUP_SIGNAL_AUTHORIZED: "false"
+    steps:
+      - name: Checkout exact review Head without credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: G05 admission before Python setup, dependencies, or project imports
+        shell: bash
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "${{ runner.environment }}" = "github-hosted"
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          [[ "$(sw_vers -productVersion)" == 15.* ]]
+          python3 -I -S tools/g05_ci_admission.py --expected-head "$G05_EXPECTED_HEAD"
+
+      - name: Verify inherited source and permitted integration-only delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor b957267b4680e8aaf7568a1f2b5ab02755d28756 HEAD
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          source = "b957267b4680e8aaf7568a1f2b5ab02755d28756"
+          allowed = {
+              ".github/workflows/multi-exec-f1-g05-rc-macos-arm64.yml",
+              "docs/MULTI_WORKSPACE_EXEC_F1_G05_INTEGRATED_RC.md",
+              "MANIFEST.sha256",
+              ".github/workflows/controlled-exec-tests.yml",
+              "tools/ci_dependency_provenance.py",
+              "tests/test_ci_dependency_provenance.py",
+              "ci/wheel-locks/ubuntu-3.13-x86_64.sha256",
+              "ci/wheel-locks/macos-15-arm64-3.13.sha256",
+          }
+          changed = set(subprocess.check_output(
+              ["git", "diff", "--name-only", source, "HEAD"], text=True
+          ).splitlines())
+          assert changed == allowed, ("Unexpected runtime or test change", changed)
+          forbidden = (
+              "_exec_test_grant", "_exec_test_transport",
+              "create_private_disposable_acceptance",
+              "TestOnlyGroupRetirementGrant", "_TrustedLoopbackListener",
+          )
+          for path in Path("gateway").rglob("*.py"):
+              if path.name in {"_exec_test_grant.py", "_exec_test_transport.py"}:
+                  continue
+              assert all(term not in path.read_text(encoding="utf-8") for term in forbidden), path
+          rev = lambda arg: subprocess.check_output(
+              ["git", "rev-parse", arg], text=True
+          ).strip()
+          print("F1_G05_RC_HEAD=" + rev("HEAD"))
+          print("F1_G05_RC_TREE=" + rev("HEAD^{tree}"))
+          print("F1_G05_SOURCE_HEAD=" + source)
+          print("F1_G05_RUNTIME_AND_OLD_TESTS_UNCHANGED=YES")
+          print("F1_G05_TEST_ONLY_STATIC_SCREEN=PASS_NOT_FULL_PROOF")
+          PY
+
+      - name: Use Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Download all required wheels without compiling source distributions
+        run: >-
+          python -m pip download --disable-pip-version-check
+          --only-binary=:all: -r requirements-dev.txt --dest "$RUNNER_TEMP/f1-g05-wheelhouse"
+      - name: SHA256 record exact CI wheel bytes before installation
+        run: python -I -S tools/ci_dependency_provenance.py wheels --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256
+      - name: Install exclusively from recorded local wheelhouse
+        run: python -m pip install --disable-pip-version-check --no-index --find-links "$RUNNER_TEMP/f1-g05-wheelhouse" --force-reinstall -r requirements-dev.txt
+      - name: Attest only RECORD-listed installed files
+        run: |
+          python -m pip check
+          python -I tools/ci_dependency_provenance.py installed --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256 --installed-record "$RUNNER_TEMP/f1-g05-installed.json"
+      - name: Disposable wheel SHA256 tampering and denial unit tests
+        run: python -m pytest -q -p no:cacheprovider tests/test_ci_dependency_provenance.py
+      - name: G05 legitimate checkout and negative admission fixtures
+        run: python -m pytest -q -p no:cacheprovider tests/test_g05_ci_admission.py
+      - name: Real REST and MCP F1 deny-only with disposable Git and File
+        run: python -m pytest -q -p no:cacheprovider tests/test_multi_exec_f1.py
+      - name: Existing F1 Preview, state, lock, quarantine and boot regression
+        run: >
+          python -m pytest -q -p no:cacheprovider
+          tests/test_multi_exec_product.py
+          tests/test_exec_state_t01.py
+          tests/test_multi_exec_boot_b0.py
+      - name: Require genuine hosted Darwin Data-volume alias for security test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          home = Path.home().resolve()
+          alias = Path("/System/Volumes/Data") / home.relative_to("/")
+          assert home.samefile(alias), "Host does not expose the real Darwin Data-volume alias"
+          print("F1_G05_DARWIN_FIRMLINK_PRECONDITION=PASS")
+          PY
+      - name: Real Darwin firmlink, Workspace identity and path-alias regression
+        run: python -m pytest -q -rs -p no:cacheprovider tests/test_phase1_review_identity.py
+      - name: Recheck locked wheels and RECORD-listed installed files after tests
+        run: python -I tools/ci_dependency_provenance.py verify --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256 --installed-record "$RUNNER_TEMP/f1-g05-installed.json"
+      - name: Check tracked stability and state unsupported scopes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          git diff --cached --exit-code
+          echo "F1_G05_SCOPED_MACOS_TESTS=COMPLETE"
+          echo "F1_G05_REAL_EXEC_APPLY=NOT_RUN; F3_NATIVE_SIGNALS=NOT_RUN"
+          echo "F1_G05_THIRD_PARTY_PROVENANCE=NOT_ATTESTED"
+          echo "F1_G05_USER_MAC_TUNNEL_AND_ROLLBACK=NOT_TESTED"
+          echo "F1_G05_NO_MERGE; NO_DEPLOY"

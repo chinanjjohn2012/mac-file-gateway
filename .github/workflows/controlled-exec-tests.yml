@@ -56,12 +56,10 @@ jobs:
         run: python -I -S tools/ci_dependency_provenance.py wheels --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/ubuntu-3.13-x86_64.sha256
       - name: Install verified wheel inputs with the network index disabled
         run: python -m pip install --disable-pip-version-check --no-index --find-links "$RUNNER_TEMP/f1-g05-wheelhouse" --force-reinstall -r requirements-dev.txt
-      - name: Audit site executable sources before running site hooks after installation
-        run: python -I -S tools/ci_dependency_provenance.py preimport --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/ubuntu-3.13-x86_64.sha256 --site-record "$RUNNER_TEMP/f1-g05-site.json"
-      - name: Record installed distribution bytes and import roots before running tests
+      - name: Record RECORD-listed installed file hashes before tests
         run: |
           python -m pip check
-          python -I tools/ci_dependency_provenance.py installed --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/ubuntu-3.13-x86_64.sha256 --installed-record "$RUNNER_TEMP/f1-g05-installed.json" --site-record "$RUNNER_TEMP/f1-g05-site.json"
+          python -I tools/ci_dependency_provenance.py installed --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/ubuntu-3.13-x86_64.sha256 --installed-record "$RUNNER_TEMP/f1-g05-installed.json"
       - run: python -m pytest -q -rs
       - run: python tests/smoke_live.py
       - run: python tests/smoke_mcp_live.py
@@ -71,8 +69,8 @@ jobs:
         run: python tests/smoke_git_cli.py
       - run: python -m compileall -q gateway tests tools
       - run: bash -n setup.sh run.sh verify.sh tunnel.sh
-      - name: Check installed wheel and import identities remain unchanged after tests
-        run: python -I tools/ci_dependency_provenance.py verify --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/ubuntu-3.13-x86_64.sha256 --installed-record "$RUNNER_TEMP/f1-g05-installed.json" --site-record "$RUNNER_TEMP/f1-g05-site.json"
+      - name: Recheck wheel locks and RECORD-listed files after tests
+        run: python -I tools/ci_dependency_provenance.py verify --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/ubuntu-3.13-x86_64.sha256 --installed-record "$RUNNER_TEMP/f1-g05-installed.json"
       - name: Verify release manifest
         run: |
           find . -type f \

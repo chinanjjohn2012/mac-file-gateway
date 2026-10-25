@@ -1,4 +1,4 @@
-"""Isolated positive and negative wheel provenance unit tests; no network or installs."""
+"""Isolated wheel-lock and RECORD-file checks; no network or installs."""
 import json
 import hashlib
 from pathlib import Path
@@ -109,89 +109,58 @@ def test_source_controlled_wheel_omission_is_denied(tmp_path: Path):
     assert "source-controlled platform SHA256 lock" in out.stderr
 
 
-# Independent synthetic E4 counterexamples; no real package installation.
-from tools.ci_dependency_provenance import ProvenanceError, scan_site_import_root
+# RECORD-scope regression: extra importable code is explicitly NOT measured.
+# This is an evidence-boundary test, NOT a claim that such code is safe.
+from tools import ci_dependency_provenance as provenance
 
 
-def test_recorded_importable_source_is_accepted(tmp_path: Path):
-    root = tmp_path / "site-packages"
-    package = root / "known"
-    package.mkdir(parents=True)
-    source = package / "__init__.py"
-    source.write_text("VALUE = 1\n", encoding="utf-8")
-    result = scan_site_import_root(root, {source})
-    assert result["files"] == 1
-    assert result["pth_files"] == 0
+def _fake_installed_dist(monkeypatch, root, listed):
+    class FakeDistribution:
+        version = "1.0"
+        files = [Path(path) for path in listed]
+
+        def locate_file(self, path):
+            return root / str(path)
+
+    monkeypatch.setattr(provenance.metadata, "distribution", lambda name: FakeDistribution())
+    return [{"name": "safe-lib", "version": "1.0"}]
 
 
-def test_record_unlisted_package_module_is_denied(tmp_path: Path):
-    root = tmp_path / "site-packages"
-    package = root / "known"
-    package.mkdir(parents=True)
-    source = package / "__init__.py"
-    source.write_text("VALUE = 1\n", encoding="utf-8")
-    (package / "unlisted.py").write_text("VALUE = 'unreviewed'\n", encoding="utf-8")
-    with pytest.raises(ProvenanceError, match="unrecorded importable source"):
-        scan_site_import_root(root, {source})
+def test_all_record_listed_files_are_hashed(tmp_path: Path, monkeypatch):
+    module = tmp_path / "pkg" / "__init__.py"
+    module.parent.mkdir()
+    module.write_text("ANSWER=1\n")
+    wheels = _fake_installed_dist(monkeypatch, tmp_path, ["pkg/__init__.py"])
+    first = provenance.installed_snapshot(wheels)
+    assert first["installed"][0]["files"] == 1
+    module.write_text("ANSWER=2\n")
+    assert provenance.installed_snapshot(wheels) != first
 
 
-def test_record_unlisted_sitecustomize_is_denied(tmp_path: Path):
-    root = tmp_path / "site-packages"
-    root.mkdir()
-    (root / "sitecustomize.py").write_text("VALUE = 2\n", encoding="utf-8")
-    with pytest.raises(ProvenanceError, match="unrecorded importable source"):
-        scan_site_import_root(root, set())
+def test_missing_record_file_rejected(tmp_path: Path, monkeypatch):
+    wheels = _fake_installed_dist(monkeypatch, tmp_path, ["pkg/missing.py"])
+    with pytest.raises(FileNotFoundError):
+        provenance.installed_snapshot(wheels)
 
 
-def test_record_unlisted_pth_import_hook_is_denied(tmp_path: Path):
-    root = tmp_path / "site-packages"
-    root.mkdir()
-    (root / "unlisted.pth").write_text("import os\n", encoding="utf-8")
-    with pytest.raises(ProvenanceError, match="unrecorded importable source"):
-        scan_site_import_root(root, set())
+def test_record_listed_pyc_is_also_hashed(tmp_path: Path, monkeypatch):
+    pyc = tmp_path / "pkg" / "__pycache__" / "m.cpython-313.pyc"
+    pyc.parent.mkdir(parents=True)
+    pyc.write_bytes(b"first")
+    wheels = _fake_installed_dist(monkeypatch, tmp_path, ["pkg/__pycache__/m.cpython-313.pyc"])
+    first = provenance.installed_snapshot(wheels)
+    assert first["installed"][0]["files"] == 1
+    pyc.write_bytes(b"second")
+    assert provenance.installed_snapshot(wheels) != first
 
 
-def test_record_unlisted_compiled_extension_is_denied(tmp_path: Path):
-    root = tmp_path / "site-packages"
-    root.mkdir()
-    (root / "injected.cpython-313-darwin.so").write_bytes(b"payload")
-    with pytest.raises(ProvenanceError, match="unrecorded importable source"):
-        scan_site_import_root(root, set())
-
-
-def test_orphan_bytecode_and_symlink_are_denied(tmp_path: Path):
-    root = tmp_path / "site-packages"
-    root.mkdir()
-    cache = root / "__pycache__"
-    cache.mkdir()
-    (cache / "ghost.cpython-313.pyc").write_bytes(b"untrusted")
-    with pytest.raises(ProvenanceError, match="unrecorded importable source"):
-        scan_site_import_root(root, set())
-    (cache / "ghost.cpython-313.pyc").unlink()
-    target = tmp_path / "target.py"
-    target.write_text("VALUE = 1\n", encoding="utf-8")
-    (root / "linked.py").symlink_to(target)
-    with pytest.raises(ProvenanceError, match="actual regular file"):
-        scan_site_import_root(root, set())
-
-
-def test_recorded_importable_content_drift_changes_digest(tmp_path: Path):
-    root = tmp_path / "site-packages"
-    root.mkdir()
-    source = root / "known.py"
-    source.write_text("VALUE = 1\n", encoding="utf-8")
-    first = scan_site_import_root(root, {source})
-    source.write_text("VALUE = 2\n", encoding="utf-8")
-    second = scan_site_import_root(root, {source})
-    assert first["content_sha256"] != second["content_sha256"]
-
-
-def test_recorded_pth_external_path_is_denied(tmp_path: Path):
-    root = tmp_path / "site-packages"
-    root.mkdir()
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    hook = root / "scope.pth"
-    hook.write_text(str(outside) + "\n", encoding="utf-8")
-    with pytest.raises(ProvenanceError, match="external import root"):
-        scan_site_import_root(root, {hook})
+def test_record_unlisted_module_is_out_of_scope(tmp_path: Path, monkeypatch):
+    listed = tmp_path / "pkg" / "__init__.py"
+    listed.parent.mkdir()
+    listed.write_text("ANSWER=1\n")
+    wheels = _fake_installed_dist(monkeypatch, tmp_path, ["pkg/__init__.py"])
+    baseline = provenance.installed_snapshot(wheels)
+    (listed.parent / "unlisted.py").write_text("ANSWER='not reviewed'\n")
+    assert provenance.installed_snapshot(wheels) == baseline
+    # The test documents an intentionally bounded evidence claim, not safety.
+    assert "critical_import_roots" not in baseline

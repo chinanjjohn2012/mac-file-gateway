@@ -63,6 +63,9 @@ jobs:
               ".github/workflows/multi-exec-f1-g05-rc-macos-arm64.yml",
               "docs/MULTI_WORKSPACE_EXEC_F1_G05_INTEGRATED_RC.md",
               "MANIFEST.sha256",
+              ".github/workflows/controlled-exec-tests.yml",
+              "tools/ci_dependency_provenance.py",
+              "tests/test_ci_dependency_provenance.py",
           }
           changed = set(subprocess.check_output(
               ["git", "diff", "--name-only", source, "HEAD"], text=True
@@ -91,8 +94,18 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      - name: Install bounded existing test requirements
-        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: Download all required wheels without compiling source distributions
+        run: python -m pip download --disable-pip-version-check --only-binary=:all: -r requirements-dev.txt --dest "$RUNNER_TEMP/f1-g05-wheelhouse"
+      - name: SHA256 record exact CI wheel bytes before installation
+        run: python -I -S tools/ci_dependency_provenance.py wheels --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json"
+      - name: Install exclusively from recorded local wheelhouse
+        run: python -m pip install --disable-pip-version-check --no-index --find-links "$RUNNER_TEMP/f1-g05-wheelhouse" --force-reinstall -r requirements-dev.txt
+      - name: Attest installed distribution code and critical import roots
+        run: |
+          python -m pip check
+          python -I tools/ci_dependency_provenance.py installed --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --installed-record "$RUNNER_TEMP/f1-g05-installed.json"
+      - name: Disposable wheel SHA256 tampering and denial unit tests
+        run: python -m pytest -q -p no:cacheprovider tests/test_ci_dependency_provenance.py
       - name: G05 legitimate checkout and negative admission fixtures
         run: python -m pytest -q -p no:cacheprovider tests/test_g05_ci_admission.py
       - name: Real REST and MCP F1 deny-only with disposable Git and File
@@ -103,6 +116,8 @@ jobs:
           tests/test_multi_exec_product.py
           tests/test_exec_state_t01.py
           tests/test_multi_exec_boot_b0.py
+      - name: Recheck wheelhouse and installed code file identity after tests
+        run: python -I tools/ci_dependency_provenance.py verify --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --installed-record "$RUNNER_TEMP/f1-g05-installed.json"
       - name: Check tracked stability and state unsupported scopes
         shell: bash
         run: |

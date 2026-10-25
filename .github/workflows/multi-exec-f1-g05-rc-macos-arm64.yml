@@ -28,6 +28,8 @@ jobs:
     timeout-minutes: 20
     env:
       PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONNOUSERSITE: "1"
+      PYTHONPATH: ""
       GATEWAY_NATIVE_C_ALLOWED: "false"
       C3B03_S3S6_FIRST_C_LOAD_AUTHORIZED: "false"
       C3B03_S3S6_GROUP_SIGNAL_AUTHORIZED: "false"
@@ -105,10 +107,12 @@ jobs:
         run: python -I -S tools/ci_dependency_provenance.py wheels --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256
       - name: Install exclusively from recorded local wheelhouse
         run: python -m pip install --disable-pip-version-check --no-index --find-links "$RUNNER_TEMP/f1-g05-wheelhouse" --force-reinstall -r requirements-dev.txt
+      - name: Audit site executable sources before activating site hooks after install
+        run: python -I -S tools/ci_dependency_provenance.py preimport --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256 --site-record "$RUNNER_TEMP/f1-g05-site.json"
       - name: Attest installed distribution code and critical import roots
         run: |
           python -m pip check
-          python -I tools/ci_dependency_provenance.py installed --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256 --installed-record "$RUNNER_TEMP/f1-g05-installed.json"
+          python -I tools/ci_dependency_provenance.py installed --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256 --installed-record "$RUNNER_TEMP/f1-g05-installed.json" --site-record "$RUNNER_TEMP/f1-g05-site.json"
       - name: Disposable wheel SHA256 tampering and denial unit tests
         run: python -m pytest -q -p no:cacheprovider tests/test_ci_dependency_provenance.py
       - name: G05 legitimate checkout and negative admission fixtures
@@ -121,8 +125,21 @@ jobs:
           tests/test_multi_exec_product.py
           tests/test_exec_state_t01.py
           tests/test_multi_exec_boot_b0.py
+      - name: Require genuine hosted Darwin Data-volume alias for security test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          home = Path.home().resolve()
+          alias = Path("/System/Volumes/Data") / home.relative_to("/")
+          assert home.samefile(alias), "Host does not expose the real Darwin Data-volume alias"
+          print("F1_G05_DARWIN_FIRMLINK_PRECONDITION=PASS")
+          PY
+      - name: Real Darwin firmlink, Workspace identity and path-alias regression
+        run: python -m pytest -q -rs -p no:cacheprovider tests/test_phase1_review_identity.py
       - name: Recheck wheelhouse and installed code file identity after tests
-        run: python -I tools/ci_dependency_provenance.py verify --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256 --installed-record "$RUNNER_TEMP/f1-g05-installed.json"
+        run: python -I tools/ci_dependency_provenance.py verify --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256 --installed-record "$RUNNER_TEMP/f1-g05-installed.json" --site-record "$RUNNER_TEMP/f1-g05-site.json"
       - name: Check tracked stability and state unsupported scopes
         shell: bash
         run: |

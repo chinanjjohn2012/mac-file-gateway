@@ -107,3 +107,91 @@ def test_source_controlled_wheel_omission_is_denied(tmp_path: Path):
     out = run("wheels", wheel.parent, record)
     assert out.returncode == 2
     assert "source-controlled platform SHA256 lock" in out.stderr
+
+
+# Independent synthetic E4 counterexamples; no real package installation.
+from tools.ci_dependency_provenance import ProvenanceError, scan_site_import_root
+
+
+def test_recorded_importable_source_is_accepted(tmp_path: Path):
+    root = tmp_path / "site-packages"
+    package = root / "known"
+    package.mkdir(parents=True)
+    source = package / "__init__.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    result = scan_site_import_root(root, {source})
+    assert result["files"] == 1
+    assert result["pth_files"] == 0
+
+
+def test_record_unlisted_package_module_is_denied(tmp_path: Path):
+    root = tmp_path / "site-packages"
+    package = root / "known"
+    package.mkdir(parents=True)
+    source = package / "__init__.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    (package / "unlisted.py").write_text("VALUE = 'unreviewed'\n", encoding="utf-8")
+    with pytest.raises(ProvenanceError, match="unrecorded importable source"):
+        scan_site_import_root(root, {source})
+
+
+def test_record_unlisted_sitecustomize_is_denied(tmp_path: Path):
+    root = tmp_path / "site-packages"
+    root.mkdir()
+    (root / "sitecustomize.py").write_text("VALUE = 2\n", encoding="utf-8")
+    with pytest.raises(ProvenanceError, match="unrecorded importable source"):
+        scan_site_import_root(root, set())
+
+
+def test_record_unlisted_pth_import_hook_is_denied(tmp_path: Path):
+    root = tmp_path / "site-packages"
+    root.mkdir()
+    (root / "unlisted.pth").write_text("import os\n", encoding="utf-8")
+    with pytest.raises(ProvenanceError, match="unrecorded importable source"):
+        scan_site_import_root(root, set())
+
+
+def test_record_unlisted_compiled_extension_is_denied(tmp_path: Path):
+    root = tmp_path / "site-packages"
+    root.mkdir()
+    (root / "injected.cpython-313-darwin.so").write_bytes(b"payload")
+    with pytest.raises(ProvenanceError, match="unrecorded importable source"):
+        scan_site_import_root(root, set())
+
+
+def test_orphan_bytecode_and_symlink_are_denied(tmp_path: Path):
+    root = tmp_path / "site-packages"
+    root.mkdir()
+    cache = root / "__pycache__"
+    cache.mkdir()
+    (cache / "ghost.cpython-313.pyc").write_bytes(b"untrusted")
+    with pytest.raises(ProvenanceError, match="unrecorded importable source"):
+        scan_site_import_root(root, set())
+    (cache / "ghost.cpython-313.pyc").unlink()
+    target = tmp_path / "target.py"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    (root / "linked.py").symlink_to(target)
+    with pytest.raises(ProvenanceError, match="actual regular file"):
+        scan_site_import_root(root, set())
+
+
+def test_recorded_importable_content_drift_changes_digest(tmp_path: Path):
+    root = tmp_path / "site-packages"
+    root.mkdir()
+    source = root / "known.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    first = scan_site_import_root(root, {source})
+    source.write_text("VALUE = 2\n", encoding="utf-8")
+    second = scan_site_import_root(root, {source})
+    assert first["content_sha256"] != second["content_sha256"]
+
+
+def test_recorded_pth_external_path_is_denied(tmp_path: Path):
+    root = tmp_path / "site-packages"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    hook = root / "scope.pth"
+    hook.write_text(str(outside) + "\n", encoding="utf-8")
+    with pytest.raises(ProvenanceError, match="external import root"):
+        scan_site_import_root(root, {hook})

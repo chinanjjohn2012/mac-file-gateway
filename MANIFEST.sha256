@@ -1,5 +1,6 @@
 859299b39f3817c9928b5cacd834de8518d75c8ab1ee383c9b59a716e9330cd1  ./.github/workflows/controlled-exec-tests.yml
 0a159690690057881521d984609616e2a3092d5ed7de15f5bfe569129b148e4e  ./.github/workflows/multi-exec-b1b1-default-deny-red.yml
+deb25674f304104b8e41cf70e1431c1b7bdc18943f4e1aedf7610f95171f6d7c  ./.github/workflows/multi-exec-f1-macos-arm64-isolated.yml
 93a05fb6b9560073be015aae929d192781084e148887aba1ef31a3711df5cfc2  ./.github/workflows/multi-exec-macos-lifecycle.yml
 a1706a650e6f2804a1fd99187d85bae93267ca0e04744805ab7c6c28a44cd08f  ./.github/workflows/multi-exec-r1-red.yml
 cbf50c5750fc83b69cbcd4e43ed116eefda12a1ef91c45f0d5706dd5df25a15a  ./.github/workflows/multi-exec-r2-t02-admission-red.yml

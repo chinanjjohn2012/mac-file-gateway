@@ -156,6 +156,8 @@ def _error(exc: GatewayError) -> JSONResponse:
               "not_empty": 409, "cross_device": 409, "move_unavailable": 501,
               "exec_disabled": 403, "exec_scope": 403, "command_not_allowed": 403,
               "runner_unavailable": 503, "exec_failed": 500,
+              "exec_cleanup_proof_required": 503,
+              "exec_quarantined": 503, "exec_state_unavailable": 503,
               "git_disabled": 403, "git_command_not_allowed": 403,
               "git_path_blocked": 403,
               "git_repository_quarantined": 409, "git_busy": 409,

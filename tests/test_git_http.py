@@ -116,7 +116,10 @@ def test_multi_git_rest_requires_workspace_and_enforces_exact_allowlist(tmp_path
             assert result["exit_code"] == 0
             assert result["workspace"] == "a"
             assert result["cleanup_status"] == "complete"
-            assert svc.info()["read_only"] is True
+            assert svc.info()["read_only"] is False
+            assert svc.info()["file_read_only"] is True
+            assert client.get("/health").json()["read_only"] is False
+            assert client.get("/health").json()["file_read_only"] is True
             assert client.get("/info").json()["git_policy"]["adapter_exposed"] is True
     finally:
         svc.close()

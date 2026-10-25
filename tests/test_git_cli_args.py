@@ -121,7 +121,8 @@ def test_multi_check_reports_git_grants_with_no_public_adapter(tmp_path, monkeyp
     assert info["git_policy"]["available"] is True
     assert info["git_policy"]["adapter_exposed"] is False
     assert info["workspaces"][0]["git"]["allowed_commands"] == ["status", "pull"]
-    assert info["read_only"] is True
+    assert info["read_only"] is False  # Pull grant can mutate parent repository.
+    assert info["file_read_only"] is True  # File Write remains independently off.
     assert str(a) not in json.dumps(info)
     assert str(config_dir) not in json.dumps(info)
 

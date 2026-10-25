@@ -31,7 +31,7 @@ R01 固定 HEAD、工作树状态和 Manifest，且特别要求**对未提交代
 
 **G04 — 真实 CI 代码同一性。** 读取原始 Workflow Run、Job 和日志，记录触发事件、被检出 Commit、Tree、OS/架构、运行命令、退出码、PASS/FAIL/SKIP。若 PR Job 使用 GitHub 合成 Merge Commit，必须核对其两个真实 Parent（Base、Head）以及 Merge Tree 与受审 Head Tree 一致；仅 Run 关联 Head SHA 而不能证明实际检出代码时不得无条件复用。
 
-**G05 — 隔离工作树。** 在真正运行测试的 GitHub 托管或受控一次性环境中，核验检出前的跟踪文件无差异、非预期未跟踪/忽略源码不能参与行为、构建/测试使用的生成源码和依赖可追踪。该“干净工作树”仅属于 CI 隔离工作区，不属于开发者本机。测试之后产生的预期制品须与代码身份核验分开记录。
+**G05 — 隔离工作树。** 在真正运行测试的 GitHub 托管或受控一次性环境中，**checkout 完成后、任何构建/测试/导入执行前**，核对实际检出的 HEAD/Tree 和跟踪文件无差异，并记录工作树状态（如 `git status --porcelain --untracked-files=all`）。同时枚举可能参与导入、脚本执行或构建的**未跟踪及 ignored 文件**（可结合 `git ls-files --others --exclude-standard`、`git ls-files --others --ignored --exclude-standard` 以及实际 import/build 搜索路径），对已批准的生成物/依赖另行核验固定来源与内容哈希；**仅执行 `git diff --exit-code` 不足以证明 G05**。任何未经固定/批准的未跟踪或 ignored 可执行源码、同名模块的 import shadow、生成或下载的未固定运行源码一旦可能进入实际执行路径，立即标记 `R01_GATE: INCOMPLETE`，不能宣称远端快照完整性 PASS；例如 ignored `gateway/helper.py` 在 CI 导入路径中遮蔽受审同名模块即为拒绝反例。测试执行后的预期制品须与测试前的源码身份核验分开记录。该“干净工作树”只属于 CI 隔离工作区，不属于开发者本机。
 
 **G06 — 运行环境与安全门禁。** 测试需要的架构/SDK/权限/隔离边界必须由原始日志直接证明；未授权的真实平台、Native C、进程组实验不得为了取得 R01/R10 PASS 而执行。Mock、Linux、macOS、真实 HTTP/Tunnel/生产依次明确区分。
 
@@ -47,6 +47,8 @@ R01 固定 HEAD、工作树状态和 Manifest，且特别要求**对未提交代
 `DEVELOPER_LOCAL_WORKTREE: NOT_OBSERVED | DIRECTLY_VERIFIED`  
 `EXTERNAL_SOURCE_OR_ARTIFACT_GAPS: NONE | <逐项列举>`  
 `R01_GATE: PASS_REMOTE_COMMITTED_ONLY | INCOMPLETE | NOT_APPLICABLE`
+
+**G04 / `CI_CHECKOUT_TREE_VERIFIED` 取值约束：** 涉及可执行代码、配置/构建/依赖/测试行为变化或依靠 CI 证明安全合同的 GitHub PR，G04 的原始 CI、实际 checkout Tree 与 Head/合成 Merge 同一性是**强制门禁**；缺失、Tree 不符或检查失败必须填写 `NO`，对应 `R01_GATE: INCOMPLETE`，**不得填写 `NOT_APPLICABLE_WITH_REASON` 绕过**。只有用户事先明确批准、确无 CI 适用性的非可执行任务类型（例如仅有解释性文档），且已独立核验完整 Git Tree/Blob/Manifest、记录批准依据与不适用原因时，才允许对 G04 的 CI 子项使用 `NOT_APPLICABLE_WITH_REASON`；这不自动等于 R01 PASS，更不免除 G01–G03、G05–G08 与 R10。已有 CI 的纯文档 PR 仍须直接验证其真实 checkout 证据；不得为了取得 PASS 主动跳过现有必需检查。
 
 ## 4. R10 原样保留：角色级 PASS 仍不等于总体放行
 

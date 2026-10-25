@@ -44,7 +44,9 @@ jobs:
           python-version: "3.13"
           cache: pip
       - name: Resolve all binary wheel dependencies into a disposable isolated directory
-        run: python -m pip download --disable-pip-version-check --only-binary=:all: -r requirements-dev.txt --dest "$RUNNER_TEMP/f1-g05-wheelhouse"
+        run: >-
+          python -m pip download --disable-pip-version-check
+          --only-binary=:all: -r requirements-dev.txt --dest "$RUNNER_TEMP/f1-g05-wheelhouse"
       - name: Record source wheel SHA256 before installation
         run: python -I -S tools/ci_dependency_provenance.py wheels --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json"
       - name: Install verified wheel inputs with the network index disabled

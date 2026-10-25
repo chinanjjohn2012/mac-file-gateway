@@ -95,7 +95,9 @@ jobs:
         with:
           python-version: "3.13"
       - name: Download all required wheels without compiling source distributions
-        run: python -m pip download --disable-pip-version-check --only-binary=:all: -r requirements-dev.txt --dest "$RUNNER_TEMP/f1-g05-wheelhouse"
+        run: >-
+          python -m pip download --disable-pip-version-check
+          --only-binary=:all: -r requirements-dev.txt --dest "$RUNNER_TEMP/f1-g05-wheelhouse"
       - name: SHA256 record exact CI wheel bytes before installation
         run: python -I -S tools/ci_dependency_provenance.py wheels --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json"
       - name: Install exclusively from recorded local wheelhouse

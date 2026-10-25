@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.machinery
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -64,7 +65,9 @@ def run_gate(root: Path, expected_head: str | None = None, extra_env: dict[str, 
     for name in (
         "PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONSTARTUP",
         "PYTHONPYCACHEPREFIX", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
     ):
         env.pop(name, None)
     env.update(extra_env or {})
@@ -179,3 +182,86 @@ def test_committed_symlink_is_not_treated_as_manifest_regular_file(checkout: Pat
     run_git(checkout, "commit", "-q", "-m", "tracked symlink")
     assert run_git(checkout, "status", "--porcelain").stdout == ""
     assert_denied(run_gate(checkout), "not a regular file")
+
+
+# PR #74 r001 Standards P2-01 real Git RED->GREEN cases: Git porcelain and
+# mutable Manifest self-consistency are NOT sufficient HEAD provenance.
+def _coordinated_worktree_tamper(root: Path) -> None:
+    source = root / "gateway" / "feature.py"
+    source.write_text("FEATURE = 'unreviewed'\n", encoding="utf-8")
+    manifest = root / "MANIFEST.sha256"
+    rows = manifest.read_text(encoding="ascii").splitlines()
+    rows = [
+        hashlib.sha256(source.read_bytes()).hexdigest() + "  ./gateway/feature.py"
+        if row.endswith("  ./gateway/feature.py") else row
+        for row in rows
+    ]
+    manifest.write_text("\n".join(rows) + "\n", encoding="ascii")
+    assert run_git(root, "rev-parse", "HEAD:gateway/feature.py").stdout.strip() != run_git(
+        root, "hash-object", "--no-filters", "gateway/feature.py"
+    ).stdout.strip()
+    assert run_git(root, "rev-parse", "HEAD:MANIFEST.sha256").stdout.strip() != run_git(
+        root, "hash-object", "--no-filters", "MANIFEST.sha256"
+    ).stdout.strip()
+
+
+def test_assume_unchanged_forged_source_and_manifest_fail_closed(checkout: Path) -> None:
+    run_git(checkout, "update-index", "--assume-unchanged", "gateway/feature.py", "MANIFEST.sha256")
+    _coordinated_worktree_tamper(checkout)
+    assert run_git(checkout, "status", "--porcelain=v1").stdout == ""
+    assert "h gateway/feature.py" in run_git(checkout, "ls-files", "-v").stdout
+    assert_denied(run_gate(checkout), "index flags")
+
+
+def test_skip_worktree_forged_source_and_manifest_fail_closed(checkout: Path) -> None:
+    run_git(checkout, "update-index", "--skip-worktree", "gateway/feature.py", "MANIFEST.sha256")
+    _coordinated_worktree_tamper(checkout)
+    assert run_git(checkout, "status", "--porcelain=v1").stdout == ""
+    assert "S gateway/feature.py" in run_git(checkout, "ls-files", "-v").stdout
+    assert_denied(run_gate(checkout), "index flags")
+
+
+def test_core_filemode_false_hides_executable_drift_but_gate_denies(checkout: Path) -> None:
+    run_git(checkout, "config", "core.filemode", "false")
+    source = checkout / "gateway" / "feature.py"
+    source.chmod(source.stat().st_mode | 0o111)
+    assert run_git(checkout, "status", "--porcelain=v1").stdout == ""
+    assert_denied(run_gate(checkout), "core.filemode")
+
+
+def _real_gate_module():
+    # Run the actual gate module in the local process WITHOUT executing its
+    # CLI or any unreviewed Gateway/runtime module.
+    spec = importlib.util.spec_from_file_location("g05_gate_under_test", SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_native_head_tree_detects_manifest_byte_drift_directly(checkout: Path) -> None:
+    gate = _real_gate_module()
+    manifest = checkout / "MANIFEST.sha256"
+    manifest.write_text(manifest.read_text().replace("a", "b", 1))
+    with pytest.raises(gate.AdmissionError, match="HEAD Tree blob content mismatch: MANIFEST.sha256"):
+        gate.verify_head_tree(checkout, set(run_git(checkout, "ls-files").stdout.splitlines()))
+
+
+def test_native_head_tree_detects_exec_bit_drift_directly(checkout: Path) -> None:
+    gate = _real_gate_module()
+    run_git(checkout, "config", "core.filemode", "false")
+    source = checkout / "gateway" / "feature.py"
+    source.chmod(source.stat().st_mode | 0o111)
+    with pytest.raises(gate.AdmissionError, match="HEAD Tree executable mode mismatch: gateway/feature.py"):
+        gate.verify_head_tree(checkout, set(run_git(checkout, "ls-files").stdout.splitlines()))
+
+
+def test_legitimate_committed_executable_mode_still_passes(checkout: Path) -> None:
+    script = checkout / "gateway" / "feature.py"
+    script.chmod(script.stat().st_mode | 0o111)
+    run_git(checkout, "add", "gateway/feature.py")
+    run_git(checkout, "commit", "-q", "-m", "allow source executable mode in HEAD")
+    assert run_git(checkout, "ls-tree", "HEAD", "gateway/feature.py").stdout.startswith("100755 blob")
+    result = run_gate(checkout)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "G05_HEAD_BLOB_AND_EXEC_MODE=PASS" in result.stdout

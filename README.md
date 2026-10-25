@@ -123,7 +123,7 @@ Mac File Gateway 按启动参数决定暴露哪些工具，不会默认打开全
 
 Local Skill Bridge 与 `--allow-exec` 是两套独立能力。启用 Local Skill Bridge **不需要**启用 `run_command`。
 
-如果同时启用读取、写入、受控命令和 Local Skill Bridge，最多会暴露 **19 个 MCP 工具**；2.5.0 源码获得独立 Git 授权后，Legacy 最多 **20 个**。Multi 仍不提供普通 `run_command` 和 Local Skill Bridge。
+如果同时启用读取、写入、受控命令和 Local Skill Bridge，Legacy 最多暴露 **19 个 MCP 工具**；2.5.0 源码获得独立 Git 授权后，Legacy 最多 **20 个**。**F1 整栈 Draft 候选**的 Multi 模式可在全局及 Workspace 双开关授权下暴露 `run_command` 的受限 `dry_run=true` 预览；即使双开关均开启，`dry_run=false` 仍因缺少独立完整后代清理证明而被拒绝（`exec_cleanup_proof_required`），不会启动 Exec 子进程。Multi 不提供 Local Skill Bridge；F1 尚未发布或部署。
 
 #### Git CLI V1：额外 1 个（2.5.0、默认关闭）
 
@@ -349,7 +349,7 @@ curl --noproxy '*' -fsS http://127.0.0.1:8765/health
 }
 ```
 
-这里的 `read_only` **只表示 File API 文件写入是否启用**，不表示 Git 必定只读。2.5.0 源码中启用 `run_git` 后，即使 `read_only=true`，获授权的 `add`、`commit`、`pull` 等仍可按原生 Git 语义修改文件或仓库。
+这里的 `read_only` **只表示上述 Legacy 示例所公开的写入能力状态**，不能当作 File/Git/Exec 的统一安全准入。2.5.0 Legacy 的 File API `read_only` 不禁止独立授权的 Git 操作；F1 **Multi** 的顶层 `read_only` 为没有 File Write 或独立 Git 执行能力时才为 `true`，不把只允许预览的 Exec 视为可执行写能力。Multi 的 `file_read_only` 仅对应 File Write；`exec_policy.available=false` 且 `completion_capability="none"` 表示真实 Exec Apply 仍不允许，不能由 `read_only` 推断任何 Git/Exec 额外权限。各状态仍以实际授权策略校验为准。
 
 也可以直接检查当前 Gateway 配置：
 
@@ -850,7 +850,7 @@ bash run.sh --config "$HOME/.config/mac-file-gateway/gateway.json"
 
 In Multi mode, `list_workspaces` enumerates **IDs only**, and every file tool requires an explicit `workspace` argument. REST `GET /workspaces` lists the same IDs; REST GET file methods use `workspace` in the query, and POST mutations require it in the JSON body. There is no implicit default or cross-workspace move/rename. Per-root permissions, backups and locks are independent. A writable Workspace cannot modify a read-only Workspace through file tools.
 
-**Multi restriction:** Multi mode retains the original file APIs and does **not** expose general `run_command` or Local Skill Bridge. Separately authorized Git CLI V1 is a distinct reviewed capability: `server.git.enabled=true` AND a nonempty per-Workspace `git.allowed_commands` list are required before `run_git` / `POST /git/run` can execute. The default sample grants neither. Multi stdio remains unsupported. Existing Legacy root/HTTP/stdio remain available; never mix `--config` with Legacy root/write/exec/Git flags. See the Chinese Git CLI V1 section above for the exact API contract.
+**Multi F1 draft candidate (not released):** Multi retains the original File APIs and does **not** expose Local Skill Bridge. The opt-in `run_command` REST/MCP adapter is registered only with global `server.exec.enabled=true` and an explicitly enabled Workspace Exec scope. It supports bounded, validated `dry_run=true` preview; **all ordinary `dry_run=false` Exec Apply is denied** before any Exec Runner/Popen or transient PREPARED record (`exec_cleanup_proof_required`, REST HTTP 503, structured MCP error). Its status reports `exec_policy.available=false` and `completion_capability="none"`, even with both Exec opt-ins enabled. This is not an OS sandbox or permission to enable real execution. Separately authorized Git CLI V1 is independent: `server.git.enabled=true` AND a nonempty per-Workspace `git.allowed_commands` list are required for `run_git` / `POST /git/run`; permitted Git subprocess Apply and File Write still work even when Exec is denied or quarantined. The default sample grants none. Multi stdio remains unsupported. Existing Legacy root/HTTP/stdio remain available; never mix `--config` with Legacy root/write/exec/Git flags. No merge, release or production activation is authorized by this draft. See the Chinese Git CLI V1 section above for its exact contract.
 
 The Multi HTTP listener validates every POST before invoking REST or the MCP SDK. Only one JSON media type (optionally `charset=UTF-8`) is accepted; duplicate JSON keys, unknown tool arguments, excessive decoded data and unsupported multi-mode methods fail closed. This mode assumes a trusted local OS environment: Workspace boundaries are remote API capability routing, not OS-level multi-tenant sandboxing. Other local accounts with write access to configuration, runtime code, or source files can change Gateway behavior; that risk is outside the Phase 1 threat model.
 

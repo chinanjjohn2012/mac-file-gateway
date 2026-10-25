@@ -1,14 +1,8 @@
-# Multi-Workspace Exec — Production-First Implementation Plan (proposal)
+# Multi-Workspace Exec — Production-First Implementation Plan (F0 accepted for F1 deny-only)
 
-**Status:** DRAFT DESIGN/PLAN ONLY; independent Standards and Spec design
-review REQUIRED before implementation. No merge, deployment, production
-Exec activation or privileged host experiments are authorized.
+**Current stage (limited):** F0 §0 design has independent B/C r002 `TARGETED_REVIEW_PASS` at PR #69 Head `4110fac4edf2027703f4ce830a4d46718de4804d`. F1 product source PR #70 has B/C r002 `ROLE_FULL_SCOPE_PASS` at Head `9feb7d8eb71dc6f4ed60b9be2bbc73303a718067`; F1 GitHub-hosted macOS ARM64 acceptance PR #71 has B/C r001 `TARGETED_REVIEW_PASS` at Head `f11721765c3f64e3ab18c425fb9b642dc40f6ec7`. All remain Draft/unmerged; this status statement does not transfer those decisions to the integrated RC or authorize merge, deployment, positive Exec or privileged host experiments.
 
-**Proposed authority:** `docs/MULTI_WORKSPACE_EXEC_RECOVERY_D0_DESIGN.md`
-`§0 production-first amendment` in this same review snapshot. Until accepted,
-earlier D0 and fixed-Head PR #67/#68 remain valid at their respective
-reviewed scope. This plan supersedes neither their tests nor B/C verdicts
-merely by being published.
+**Scoped authority:** `docs/MULTI_WORKSPACE_EXEC_RECOVERY_D0_DESIGN.md` §0 production-first amendment, independently reviewed at the original PR #69 fixed snapshot for F1 deny-only. Earlier D0 and PR #67/#68 remain valid at their respective fixed historical contract scope; PR #68 is not in this mainline RC. This plan does not supersede historic tests, unmerge any prior approvals, or authorize new positive Exec work.
 
 **Basis:** PR #67 fixed Head
 `c58269c798b62775f8621d69fa037d614c8861da`, Git Tree
@@ -48,7 +42,7 @@ commands in production. Existing B1-A/B0 private fixture modules
 are left inert; any cleanup/removal requires separately reviewed
 dependency impact.
 
-## 2. Direct source inventory (baseline facts, NOT implementation)
+## 2. Direct source inventory (historical pre-F1 baseline, NOT current implementation)
 
 | Location | Observed current behavior | Required F1 change |
 | --- | --- | --- |

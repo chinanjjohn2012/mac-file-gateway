@@ -1,6 +1,6 @@
 # Multi-Workspace Exec: durable lifecycle and unknown-cleanup design (D0)
 
-**Status: PROPOSED PRODUCTION-FIRST D0 AMENDMENT / INDEPENDENT DESIGN REVIEW REQUIRED / NO IMPLEMENTATION AUTHORITY.**
+**F1-specific design status:** The production-first §0 amendment received independent Standards and Spec `TARGETED_REVIEW_PASS` on PR #69, Head `4110fac4edf2027703f4ce830a4d46718de4804d`, r002. This is scoped F0 design acceptance for **deny-only F1**, not whole-D0 positive Exec clearance, an R10 full-code verdict, merge/deploy permission, or F3 full-descendant cleanup approval. Earlier D0 sections and their original historical review boundaries remain unchanged.
 **Track: Python product only.** Stacked on the fixed macOS partial-acceptance
 PR #57 Head `bb636febe00099be2d15ca6621c1ee2dd892e6e8`, whose base is
 PR #56 reviewed product Head `e528ddb809df897b4f81802e0ae5f4f95ff5d2c7`.
@@ -10,7 +10,7 @@ load Native C, or restart Candidate C/B03 research under this design.
 
 ## 0. Proposed production-first D0 amendment (2026-10-25)
 
-**Status: PROPOSAL ONLY / not yet an approved replacement contract.**
+**F0 §0 review resolution:** The original proposal-only requirement was discharged for the restricted F1 deny-only scope by two independent PR #69 r002 targeted design reviews; all F3 positive-execution and general release gates remain pending. The following text retains the proposal's historical threat-model rationale.
 This proposal follows an explicit product-direction change: finish the
 ordinary Multi-Workspace Gateway's **production fail-closed behavior**
 before pursuing test-specific facilities. The historical D0 sections

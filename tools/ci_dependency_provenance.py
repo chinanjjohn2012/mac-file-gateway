@@ -4,8 +4,8 @@
 The wheel source is resolved after early G05.  Only files from a hashed local
 wheelhouse may be installed.  The post-install and post-test checks bind the
 actual installed package files and critical import roots to that same CI run.
-This is not a signature, index trust proof, complete Python sandbox, or a
-claim that wheel hashes are pinned in source control across separate runs.
+A source-controlled platform lock fixes wheel bytes across runs, but these
+checks do not attest publisher signatures or runner-toolchain provenance.
 """
 from __future__ import annotations
 
@@ -98,6 +98,18 @@ def check_wheels(wheelhouse: Path, wheel_record: Path) -> list[dict[str, str]]:
     return actual
 
 
+def verify_source_lock(wheels: list[dict[str, str]], lock_path: Path) -> None:
+    assert_regular(lock_path, "source-controlled wheel lock")
+    try:
+        actual = lock_path.read_text(encoding="ascii").splitlines()
+    except UnicodeError as exc:
+        raise ProvenanceError("source-controlled wheel lock must be ASCII") from exc
+    expected = [f"{entry['sha256']}  {entry['filename']}" for entry in wheels]
+    if actual != expected:
+        raise ProvenanceError("wheelhouse differs from source-controlled platform SHA256 lock")
+    print("CI_WHEEL_SOURCE_LOCK=PASS count=" + str(len(expected)))
+
+
 def installed_snapshot(wheels: list[dict[str, str]]) -> dict:
     installed = []
     roots = {}
@@ -146,17 +158,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("phase", choices=("wheels", "installed", "verify"))
     parser.add_argument("--wheelhouse", required=True, type=Path)
     parser.add_argument("--wheel-record", required=True, type=Path)
+    parser.add_argument("--source-lock", required=True, type=Path)
     parser.add_argument("--installed-record", type=Path)
     args = parser.parse_args(argv)
     try:
         if args.phase == "wheels":
             wheels = wheel_snapshot(args.wheelhouse)
+            verify_source_lock(wheels, args.source_lock)
             save_json(args.wheel_record, {"schema": 1, "wheels": wheels})
             for entry in wheels:
                 print(f"CI_WHEEL_SHA256={entry['sha256']} name={entry['filename']}")
-            print("CI_WHEELHOUSE=ATTESTED_FOR_THIS_JOB_ONLY; CROSS_RUN_LOCK=NOT_PROVEN")
+            print("CI_WHEELHOUSE=ATTESTED_FOR_THIS_JOB_ONLY; CROSS_RUN_LOCK=SOURCE_SHA256_PINNED")
             return 0
         wheels = check_wheels(args.wheelhouse, args.wheel_record)
+        verify_source_lock(wheels, args.source_lock)
         if args.installed_record is None:
             raise ProvenanceError("--installed-record is required")
         current = installed_snapshot(wheels)
@@ -168,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"CI_DIST_SHA256={entry['content_sha256']} name={entry['name']} version={entry['version']} files={entry['files']}")
         for name, value in sorted(current["critical_import_roots"].items()):
             print(f"CI_IMPORT_ROOT={name} path={value['origin']} sha256={value['origin_sha256']}")
-        print("CI_EXECUTED_DEPENDENCIES=HASHED_THIS_JOB_NOT_SOURCE_LOCKED")
+        print("CI_EXECUTED_DEPENDENCIES=SOURCE_WHEELS_PINNED_AND_INSTALLED_BYTES_ATTESTED")
         print("CI_INSTALLED_DISTRIBUTION_STATE=" + ("RECORDED" if args.phase == "installed" else "UNCHANGED"))
         return 0
     except (ProvenanceError, OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as exc:

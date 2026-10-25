@@ -13,6 +13,7 @@ on:
       - "gateway/**"
       - "tests/**"
       - "tools/**"
+      - "ci/**"
 
 permissions:
   contents: read
@@ -66,6 +67,8 @@ jobs:
               ".github/workflows/controlled-exec-tests.yml",
               "tools/ci_dependency_provenance.py",
               "tests/test_ci_dependency_provenance.py",
+              "ci/wheel-locks/ubuntu-3.13-x86_64.sha256",
+              "ci/wheel-locks/macos-15-arm64-3.13.sha256",
           }
           changed = set(subprocess.check_output(
               ["git", "diff", "--name-only", source, "HEAD"], text=True
@@ -99,13 +102,13 @@ jobs:
           python -m pip download --disable-pip-version-check
           --only-binary=:all: -r requirements-dev.txt --dest "$RUNNER_TEMP/f1-g05-wheelhouse"
       - name: SHA256 record exact CI wheel bytes before installation
-        run: python -I -S tools/ci_dependency_provenance.py wheels --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json"
+        run: python -I -S tools/ci_dependency_provenance.py wheels --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256
       - name: Install exclusively from recorded local wheelhouse
         run: python -m pip install --disable-pip-version-check --no-index --find-links "$RUNNER_TEMP/f1-g05-wheelhouse" --force-reinstall -r requirements-dev.txt
       - name: Attest installed distribution code and critical import roots
         run: |
           python -m pip check
-          python -I tools/ci_dependency_provenance.py installed --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --installed-record "$RUNNER_TEMP/f1-g05-installed.json"
+          python -I tools/ci_dependency_provenance.py installed --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256 --installed-record "$RUNNER_TEMP/f1-g05-installed.json"
       - name: Disposable wheel SHA256 tampering and denial unit tests
         run: python -m pytest -q -p no:cacheprovider tests/test_ci_dependency_provenance.py
       - name: G05 legitimate checkout and negative admission fixtures
@@ -119,7 +122,7 @@ jobs:
           tests/test_exec_state_t01.py
           tests/test_multi_exec_boot_b0.py
       - name: Recheck wheelhouse and installed code file identity after tests
-        run: python -I tools/ci_dependency_provenance.py verify --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --installed-record "$RUNNER_TEMP/f1-g05-installed.json"
+        run: python -I tools/ci_dependency_provenance.py verify --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256 --installed-record "$RUNNER_TEMP/f1-g05-installed.json"
       - name: Check tracked stability and state unsupported scopes
         shell: bash
         run: |

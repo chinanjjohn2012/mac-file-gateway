@@ -76,6 +76,11 @@ def build_mcp(gateway: Gateway, *, port: int = 8765, local_skill_bridge: Any | N
         ) -> dict[str, Any]:
             """Run one Legacy Git V1 command with independent permission grants.
 
+            command="rev-parse" is a read-only HEAD tree SHA query, fixed to
+            git --no-lazy-fetch rev-parse --verify HEAD^{tree}.
+            options/paths must be empty. Missing local objects fail without fetching.
+            Use dry_run=false to obtain the native SHA in stdout.
+
             Authorized Git can modify a parent repository outside this File
             API root, execute native hooks/filters/helpers and contact remotes.
             The default preview is Git-free. Never auto-retry an apply after

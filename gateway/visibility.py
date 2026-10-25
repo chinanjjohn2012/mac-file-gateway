@@ -6,7 +6,64 @@ The policy never replaces or alters committed source bytes.
 from __future__ import annotations
 
 import re
+import textwrap
 from typing import Callable
+
+
+def _markdown_python_classifications(text: str) -> dict[int, str | None]:
+    """Scan closed, explicitly Python-labelled fences within one bounded scan.
+
+    Blank prose and fence lines keep document line numbers intact. Unknown
+    and unclosed fences retain legacy classification, including nested
+    Python-looking fences inside a different code block.
+    """
+    from .python_values import classify_python
+
+    lines = text.splitlines()
+    python_lines = ["\n"] * len(lines)
+    covered: set[int] = set()
+    fence = ""
+    language = ""
+    start = 0
+    for index, line in enumerate(lines):
+        if fence:
+            stripped = line.lstrip(" ")
+            if (len(line) - len(stripped) <= 3
+                    and stripped.startswith(fence)
+                    and not stripped.lstrip(fence[0]).strip(" \t")):
+                if language in {"python", "python3", "py"}:
+                    block = textwrap.dedent("\n".join(lines[start:index]) + "\n")
+                    block_lines = block.splitlines(keepends=True)
+                    if len(block_lines) == index - start:
+                        python_lines[start:index] = block_lines
+                        covered.update(range(start + 1, index + 1))
+                fence = ""
+            continue
+        match = re.fullmatch(r" {0,3}(`{3,}|~{3,})(.*)", line)
+        if match and not (match[1][0] == "`" and "`" in match[2]):
+            fence, language, start = match[1], match[2].strip().casefold(), index + 1
+    if not covered:
+        return {}
+    flags, findings = classify_python("".join(python_lines).encode("utf-8"))
+    if len(flags) != len(lines) or any(kind == "scan_unavailable" for _, kind in findings):
+        return {number: "scan_unavailable" for number in covered}
+    kinds = dict(findings)
+    return {number: kinds.get(number) for number in covered}
+
+
+def _markdown_evidence_reference(line: str, match: re.Match[str]) -> bool:
+    """A compound impact/authorization label naming a document is not a value."""
+    from .core import CREDENTIAL_ASSIGNMENT
+
+    field = line[match.start():match.start("operator")].strip(" \t\"'").casefold()
+    if (field != "authorization" or match["operator"] != ":"
+            or not re.search(r"\b[\w-]+/$", line[:match.start()])):
+        return False
+    value = match["value"].strip()
+    return (re.match(
+        r"(?:\.{1,2}/|/)?[\w.-]+(?:/[\w.-]+)+\.(?:md|mdx|rst|txt|json|jsonl)(?:[.;,]?(?:\s|$))",
+        value, re.IGNORECASE,
+    ) is not None and CREDENTIAL_ASSIGNMENT.search(value) is None)
 
 
 def source_lines(text: str, canonical_path: str = '', *, keepends: bool = False) -> list[str]:
@@ -36,8 +93,15 @@ class SensitiveContentPolicy:
         from .core import CREDENTIAL_ASSIGNMENT, CREDENTIAL_URI, TOKEN_VALUE, PRIVATE_KEY_BEGIN
         text = raw.decode("utf-8-sig")
         flags = self.sensitive_flags(text)
+        markdown = canonical_path.casefold().endswith((".md", ".mdx"))
+        python_lines = _markdown_python_classifications(text) if markdown else {}
         findings: list[tuple[int, str]] = []
         for i, line in enumerate(text.splitlines(), 1):
+            python_kind = python_lines.get(i)
+            if python_kind in {"hard", "scan_unavailable"}:
+                flags[i - 1] = True
+                findings.append((i, python_kind))
+                continue
             if not flags[i - 1]:
                 continue
             match = CREDENTIAL_ASSIGNMENT.search(line)
@@ -69,6 +133,12 @@ class SensitiveContentPolicy:
                 or PRIVATE_KEY_BEGIN.search(line) is not None
                 or literal
             )
+            if not hard and markdown and (
+                (i in python_lines and python_kind is None)
+                or (match is not None and _markdown_evidence_reference(line, match))
+            ):
+                flags[i - 1] = False
+                continue
             findings.append((i, "hard" if hard else "heuristic"))
         return flags, tuple(findings)
 

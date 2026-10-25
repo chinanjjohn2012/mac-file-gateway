@@ -69,6 +69,11 @@ def build_multi_mcp(service: WorkspaceService, *, port: int = 8765) -> MCPServer
         ) -> dict[str, Any]:
             """Run one explicitly authorized Git V1 command in this Workspace.
 
+            command="rev-parse" is a read-only HEAD tree SHA query, fixed to
+            git --no-lazy-fetch rev-parse --verify HEAD^{tree}.
+            options/paths must be empty. Missing local objects fail without fetching.
+            Use dry_run=false to obtain the native SHA in stdout.
+
             Git can modify the entire parent repository and invoke native
             hooks, filters, credential helpers and remotes. Preview is default
             and starts zero Git processes. Apply may be non-idempotent; a

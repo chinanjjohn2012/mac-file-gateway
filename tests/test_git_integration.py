@@ -31,13 +31,13 @@ def git(where: Path, *args: str, code: int = 0) -> str:
     return p.stdout.strip()
 
 
-def fixture(tmp_path: Path, *, grants=None):
+def fixture(tmp_path: Path, *, grants=None, object_format="sha1"):
     repo = tmp_path / "project"
     repo.mkdir()
     a, b = repo / "a", repo / "b"
     a.mkdir()
     b.mkdir()
-    git(repo, "init", "-q")
+    git(repo, "init", "-q", "--object-format=" + object_format)
     git(repo, "config", "user.name", "Git E Fixture")
     git(repo, "config", "user.email", "fixture@example.invalid")
     (a / "one.txt").write_text("one\n")
@@ -75,6 +75,74 @@ def apply(service, workspace, command, *, options=None, paths=None, timeout=30):
     assert result["cleanup_status"] == "complete"
     assert result["repository_checked"] is True
     return result
+
+
+@pytest.mark.parametrize("object_format", ["sha1", "sha256"])
+@pytest.mark.parametrize("detached", [False, True])
+def test_head_tree_is_native_committed_tree_and_preserves_dirty_state(
+    tmp_path, object_format, detached,
+):
+    repo, a, b, control, service = fixture(
+        tmp_path, grants={"a": ["rev-parse"], "b": ["log"]},
+        object_format=object_format,
+    )
+    try:
+        if detached:
+            git(repo, "checkout", "--detach", "-q")
+        # Independent native commit-object evidence, not a gateway-derived hash.
+        expected = git(repo, "cat-file", "-p", "HEAD").splitlines()[0].split()[1]
+        assert expected == git(repo, "rev-parse", "HEAD^{tree}")
+        (a / "one.txt").write_text("staged change\n")
+        git(repo, "add", "a/one.txt")
+        (a / "one.txt").write_text("unstaged change\n")
+        (b / "untracked.txt").write_text("untracked\n")
+        index = (repo / ".git" / "index").read_bytes()
+        before = git(repo, "status", "--porcelain=v1")
+        head = git(repo, "rev-parse", "HEAD")
+        result = apply(service, "a", "rev-parse")
+        assert result["exit_code"] == 0, result["stderr"]
+        assert result["stdout"] == expected + "\n"
+        assert len(expected) == {"sha1": 40, "sha256": 64}[object_format]
+        assert result["effective_argv"] == ["--no-lazy-fetch", "rev-parse", "--verify", "HEAD^{tree}"]
+        assert result["output_truncated"] is False and result["timed_out"] is False
+        assert (repo / ".git" / "index").read_bytes() == index
+        assert git(repo, "status", "--porcelain=v1") == before
+        assert git(repo, "rev-parse", "HEAD") == head
+        assert (a / "one.txt").read_text() == "unstaged change\n"
+        assert (b / "untracked.txt").read_text() == "untracked\n"
+        with pytest.raises(GatewayError) as exc:
+            service.invoke_git("b", "rev-parse", dry_run=False)
+        assert exc.value.code == "git_command_not_allowed"
+        assert list((control / "git-state").iterdir()) == []
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("missing_object", ["tree", "commit"])
+def test_head_tree_missing_promised_object_fails_without_fetch_or_object_writes(
+    tmp_path, missing_object,
+):
+    repo, a, b, control, service = fixture(tmp_path, grants={"a": ["rev-parse"]})
+    try:
+        remote = tmp_path / "origin.git"
+        git(tmp_path, "init", "--bare", "-q", str(remote))
+        git(remote, "config", "uploadpack.allowFilter", "true")
+        git(repo, "remote", "add", "origin", str(remote))
+        git(repo, "push", "-q", "origin", "HEAD:refs/heads/main")
+        oid = git(repo, "rev-parse", "HEAD^{tree}" if missing_object == "tree" else "HEAD")
+        git(repo, "config", "remote.origin.promisor", "true")
+        objects = repo / ".git" / "objects"
+        (objects / oid[:2] / oid[2:]).unlink()
+        before = {p.relative_to(objects): p.read_bytes()
+                  for p in objects.rglob("*") if p.is_file()}
+        result = apply(service, "a", "rev-parse")
+        assert result["exit_code"] != 0, "A read-only query must not fetch missing objects"
+        assert result["stdout"] == ""
+        assert {p.relative_to(objects): p.read_bytes()
+                for p in objects.rglob("*") if p.is_file()} == before
+        assert list((control / "git-state").iterdir()) == []
+    finally:
+        service.close()
 
 
 def test_pull_from_sibling_updates_tracked_ignored_file_outside_workspace(tmp_path):

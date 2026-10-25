@@ -28,13 +28,12 @@ class SensitiveAudit:
         except (ValueError, OverflowError):
             raise GatewayError("invalid_argument", "Sensitive audit expiry must be UTC.") from None
         remaining = (date - datetime.now(timezone.utc)).total_seconds()
-        if remaining > 3600 or remaining <= 0:
-            raise GatewayError("invalid_argument", "Sensitive audit must expire in the next 60 minutes.")
+        if remaining <= 0:
+            raise GatewayError("invalid_argument", "Sensitive audit expiry must be in the future.")
         scopes = tuple(_parts(p) for p in paths)
         allowed = tuple(_parts(p) for p in write_paths)
-        if any(not p or any(part.startswith(".") and part == ".." for part in p)
-               for p in scopes):
-            raise GatewayError("invalid_argument", "Sensitive audit needs nonempty relative paths.")
+        if any(not p and value != "." for p, value in zip(scopes, paths)):
+            raise GatewayError("invalid_argument", "Sensitive audit needs relative paths or explicit workspace root '.'.")
         if allowed and any(not any(p[:len(a)] == a for a in allowed) for p in scopes):
             raise GatewayError("invalid_argument", "Sensitive audit scopes must lie inside writable scopes.")
         self.paths = scopes
@@ -57,7 +56,7 @@ class SensitiveAudit:
 
     def allows_scope_time(self) -> bool:
         # A wall-clock forward jump must expire audit immediately; a backward
-        # jump must not extend the monotonic cap.
+        # jump must not extend the duration calculated at startup.
         return (self.deadline is not None and self._expires_utc is not None
                 and time.monotonic() < self.deadline
                 and datetime.now(timezone.utc) < self._expires_utc)

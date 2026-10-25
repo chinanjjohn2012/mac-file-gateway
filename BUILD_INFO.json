@@ -64,6 +64,7 @@
       "status",
       "diff",
       "log",
+      "rev-parse",
       "branch",
       "switch",
       "add",

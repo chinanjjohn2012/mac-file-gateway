@@ -93,6 +93,31 @@ def test_create_empty_file(root):
     assert r["applied"] is True
 
 
+@pytest.mark.parametrize("name", ["manifest.sha256", "CURRENT", "ACTIVE_TASK"])
+@pytest.mark.parametrize("directory", ["src", ".scratch/review-handoff/T06/r0001"])
+def test_handoff_files_preview_create_read_and_update(root, name, directory):
+    parent = root / directory
+    parent.mkdir(parents=True, exist_ok=True)
+    path = f"{directory}/{name}"
+    with writer(root, allow_hidden_paths=(".scratch",)) as g:
+        preview = g.create_file(path, "r0001\n")
+        assert not preview["applied"]
+        assert not (parent / name).exists()
+        assert g.create_file(path, "r0001\n", dry_run=False)["applied"]
+        source = g.read_file(path)
+        assert source["content"] == "1: r0001"
+        assert name in {entry["name"] for entry in g.list_files(directory)["entries"]}
+        assert path in {match["path"] for match in g.search_files("r0001", path=directory)["matches"]}
+        updated = g.write_file(path, "r0002\n", source["file_sha256"], dry_run=False)
+        assert updated["applied"]
+        assert (parent / name).read_bytes() == b"r0002\n"
+        assert (root / updated["backup_path"]).read_bytes() == b"r0001\n"
+        with pytest.raises(GatewayError) as exc:
+            g.write_file(path, "r0003\n", source["file_sha256"], dry_run=False)
+        assert exc.value.code == "conflict"
+        assert (parent / name).read_bytes() == b"r0002\n"
+
+
 def test_create_never_overwrites_existing_file(root):
     p = root / "src/app.py"
     original = p.read_bytes()
@@ -209,7 +234,7 @@ def test_noop_does_not_backup_or_change_inode(root):
     assert not list((root / ".gateway-backups").glob("*.bak"))
 
 
-@pytest.mark.parametrize("path", ["../escape.py", "/tmp/escape.py", ".env", ".git/config", "private.pem", "a.png", "node_modules/x.py", "src/../../x.py", "src\\x.py", "x\x00.py", "credentials.json"])
+@pytest.mark.parametrize("path", ["../escape.py", "/tmp/escape.py", ".env", ".git/config", "private.pem", "a.png", "node_modules/x.py", "src/../../x.py", "src\\x.py", "x\x00.py", "credentials.json", ".env.sha256", "credentials.sha256", ".git/CURRENT", ".scratch/ACTIVE_TASK", "CURRENT.bin", "OTHER_TASK"])
 def test_write_inherits_path_denials(root, path):
     with writer(root) as g:
         with pytest.raises(GatewayError):

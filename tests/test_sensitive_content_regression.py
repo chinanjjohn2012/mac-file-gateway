@@ -7,6 +7,131 @@ import pytest
 from gateway.core import Gateway, GatewayError
 
 
+@pytest.mark.parametrize("fence", ["```python", "~~~py", "```python3"])
+@pytest.mark.parametrize("assignment", ["token = get_token()", "token = active.set(value)"])
+@pytest.mark.parametrize("bom,newline", [("", "\n"), ("\ufeff", "\r\n")])
+def test_markdown_python_dynamic_assignment_roundtrip(tmp_path, fence, assignment, bom, newline):
+    content = bom + f"# Checkpoint\n\n{fence}\n{assignment}\n{fence[:3]}\n".replace("\n", newline)
+    gateway = Gateway(tmp_path, allow_write=True)
+    try:
+        assert not gateway.create_file("DEV_CHECKPOINT.md", content)["applied"]
+        assert not (tmp_path / "DEV_CHECKPOINT.md").exists()
+        assert gateway.create_file("DEV_CHECKPOINT.md", content, dry_run=False)["applied"]
+        read = gateway.read_file("DEV_CHECKPOINT.md")
+        assert read["redacted_lines"] == 0
+        assert f"4: {assignment}" in read["content"]
+        assert gateway.search_files(assignment)["matches"][0]["line"] == 4
+        updated = gateway.replace_text(
+            "DEV_CHECKPOINT.md", assignment, "token = read_handle()",
+            read["file_sha256"], dry_run=False,
+        )
+        assert updated["applied"]
+        assert assignment in updated["diff"]
+        assert (tmp_path / "DEV_CHECKPOINT.md").read_bytes() == content.replace(assignment, "token = read_handle()").encode()
+    finally:
+        gateway.close()
+
+
+def test_markdown_checkpoint_evidence_authorization_reference(tmp_path):
+    old = "Next role: DEVELOPER A, provided current r0012 is not frozen, gateway remains readable and applicable risk-specific authorizations are verified."
+    evidence = (
+        "Detailed TEST_RISK_MATRIX with original direct evidence and separate NOT_RUN impact/authorization: "
+        "logs/cp3-g41-shared-asgi-local-developer-20261026.md. "
+        "G41 earlier missing real SQL-backed shared ASGI route test is now directly covered on R9 local scope, "
+        "but legal DM model itself remains stubbed; actual external UI/TCP and real IM/S3/IAM/old Worker/real egress "
+        "remain R3 PRODUCTION_NOT_RUN. G20-G22 real isolated worker process termination and G29 currently running "
+        "Redis old-AOF rollback/process restart remain NOT_RUN pending complete current operation-specific "
+        "process/backup/consumer impact, before-state and recovery plan; historical fault injection/isolated Redis "
+        "cannot substitute. No FULL_LOCAL_DB_REDIS_INTEGRATION_PASS or independent FULL_CODE_REVIEW_PASS. "
+        "CP0 DONE; CP1/CP2 PARTIAL, with G41 local ASGI strengthened; CP3 PARTIAL_NATIVE_TESTED; CP4 NOT_READY."
+    )
+    original = "# Checkpoint\n" + "\n" * 643 + old + "\n"
+    (tmp_path / "DEV_CHECKPOINT.md").write_text(original)
+    new = old + "\n" * 10 + evidence
+    gateway = Gateway(tmp_path, allow_write=True)
+    try:
+        sha = gateway.read_file("DEV_CHECKPOINT.md")["file_sha256"]
+        preview = gateway.replace_text("DEV_CHECKPOINT.md", old, new, sha)
+        assert not preview["applied"]
+        assert (tmp_path / "DEV_CHECKPOINT.md").read_text() == original
+        applied = gateway.replace_text("DEV_CHECKPOINT.md", old, new, sha, dry_run=False)
+        assert applied["applied"]
+        assert (tmp_path / "DEV_CHECKPOINT.md").read_text().splitlines()[654] == evidence
+        read = gateway.read_file("DEV_CHECKPOINT.md", start_line=655)
+        assert read["redacted_lines"] == 0
+        assert f"655: {evidence}" in read["content"]
+    finally:
+        gateway.close()
+
+
+@pytest.mark.parametrize("content", [
+    "```python\ntoken = get_token(); password = 'hardcoded'\n```\n",
+    "```python\ntoken = (\n    'hardcoded'\n)\n```\n",
+    "```python\nvalue = 'ghp_' + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'\n```\n",
+    "```python\n-----BEGIN PRIVATE KEY-----\nprivate-key-body\n```\n",
+    "impact/authorization: logs/evidence.md. password = 'hardcoded'\n",
+    "impact/authorization: Bearer actual-credential-value\n",
+    "impact/authorization: logs/evidence.md. authorization: Bearer actual-credential-value\n",
+    "```python\ntoken = get_token(); payload = {'password': 'hardcoded'}\n```\n",
+])
+def test_markdown_exemptions_do_not_allow_credentials(tmp_path, content):
+    gateway = Gateway(tmp_path, allow_write=True)
+    try:
+        with pytest.raises(GatewayError) as exc:
+            gateway.create_file("DEV_CHECKPOINT.md", content, dry_run=False)
+        assert exc.value.code == "sensitive_content"
+        assert not (tmp_path / "DEV_CHECKPOINT.md").exists()
+        (tmp_path / "DEV_CHECKPOINT.md").write_text(content)
+        assert gateway.read_file("DEV_CHECKPOINT.md")["redacted_lines"] > 0
+    finally:
+        gateway.close()
+
+
+@pytest.mark.parametrize("content", [
+    "```text\ntoken = get_token()\n```\n",
+    "```\ntoken = get_token()\n```\n",
+    "```python\ntoken = get_token()\n",
+    "````text\n```python\ntoken = get_token()\n```\n````\n",
+])
+def test_markdown_requires_closed_explicit_python_fence(tmp_path, content):
+    gateway = Gateway(tmp_path, allow_write=True)
+    try:
+        with pytest.raises(GatewayError) as exc:
+            gateway.create_file("DEV_CHECKPOINT.md", content)
+        assert exc.value.code == "sensitive_content"
+    finally:
+        gateway.close()
+
+
+def test_markdown_python_scan_failure_never_grants_an_exemption(tmp_path, monkeypatch):
+    from gateway import python_values
+    monkeypatch.setattr(python_values, "MAX_TOKENS", 1)
+    content = "```python\ntoken = get_token()\n```\n"
+    gateway = Gateway(tmp_path, allow_write=True)
+    try:
+        with pytest.raises(GatewayError) as exc:
+            gateway.create_file("DEV_CHECKPOINT.md", content, dry_run=False)
+        assert exc.value.details["rule_id"] == "SCAN_UNAVAILABLE"
+        assert not (tmp_path / "DEV_CHECKPOINT.md").exists()
+    finally:
+        gateway.close()
+
+
+def test_markdown_fence_edit_cannot_expose_multiline_credential(tmp_path):
+    content = "```python\ntoken = (\n    'hardcoded'\n)\n```\n"
+    (tmp_path / "DEV_CHECKPOINT.md").write_text(content)
+    gateway = Gateway(tmp_path, allow_write=True)
+    try:
+        source = gateway.read_file("DEV_CHECKPOINT.md")
+        assert "hardcoded" not in source["content"]
+        with pytest.raises(GatewayError) as exc:
+            gateway.replace_text("DEV_CHECKPOINT.md", "```python", "```text", source["file_sha256"], dry_run=False)
+        assert exc.value.code == "sensitive_content"
+        assert (tmp_path / "DEV_CHECKPOINT.md").read_text() == content
+    finally:
+        gateway.close()
+
+
 def _contextvar_source(newline="\n", bom=""):
     source = (
         "from contextvars import ContextVar\n"

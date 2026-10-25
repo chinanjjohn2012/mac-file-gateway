@@ -21,9 +21,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-write", action="store_true", default=argparse.SUPPRESS, help="Enable guarded file writes and directory creation (default: read-only)")
     parser.add_argument("--write-path", action="append", default=argparse.SUPPRESS, help="Writable relative subtree or file; repeatable; requires --allow-write")
     parser.add_argument("--sensitive-content-audit-path", action="append", default=argparse.SUPPRESS,
-                        help="Temporary heuristic write audit subtree; repeatable; requires --allow-write and --sensitive-content-audit-until")
+                        help="Temporary heuristic write audit path ('.' for this workspace); repeatable; requires --allow-write and --sensitive-content-audit-until")
     parser.add_argument("--sensitive-content-audit-until", default=argparse.SUPPRESS,
-                        help="Temporary heuristic write audit UTC expiry, at most 60 minutes from startup")
+                        help="Temporary heuristic write audit absolute UTC expiry; must be in the future")
     parser.add_argument("--backup-retention-days", type=int, default=argparse.SUPPRESS, help="Backup retention in UTC days (1-3650; default 15)")
     parser.add_argument("--allow-exec", action="store_true", default=argparse.SUPPRESS, help="Enable controlled project command execution (default: disabled)")
     parser.add_argument("--exec-path", action="append", default=argparse.SUPPRESS, help="Executable relative subtree; repeatable; required with --allow-exec")

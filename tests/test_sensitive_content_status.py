@@ -14,7 +14,7 @@ from gateway.workspaces import ActiveRuntimeInventory, WorkspaceService
 from gateway.workspaces_config import parse_workspace_config
 
 
-def _service(tmp_path):
+def _service(tmp_path, scope="src"):
     parent = tmp_path / "projects"
     parent.mkdir()
     a, b = parent / "a", parent / "b"
@@ -34,10 +34,10 @@ def _service(tmp_path):
                 "root": str(a),
                 "write": {
                     "enabled": True,
-                    "paths": ["src"],
+                    "paths": [scope],
                     "sensitive_content": {
                         "mode": "audit",
-                        "paths": ["src"],
+                        "paths": [scope],
                         "expires_at": expires_at,
                     },
                 },
@@ -151,6 +151,65 @@ def test_naive_expiry_is_rejected():
     expiry = (datetime.now(timezone.utc) + timedelta(minutes=10)).replace(tzinfo=None).isoformat()
     with pytest.raises(GatewayError, match="UTC"):
         SensitiveAudit(paths=("src",), expires_at=expiry, write_paths=("src",))
+
+
+@pytest.mark.parametrize("hours", [24, 25, 168, 87600])
+def test_root_audit_expires_at_requested_deadline(tmp_path, monkeypatch, hours):
+    import gateway.sensitive_audit as module
+    from gateway.core import Gateway
+    now = datetime(2026, 10, 26, 12, tzinfo=timezone.utc)
+
+    class FrozenUtcClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(module, "datetime", FrozenUtcClock)
+    monkeypatch.setattr(module.time, "monotonic", lambda: 100.0)
+    gateway = Gateway(tmp_path, allow_write=True, sensitive_content_audit_paths=(".",),
+                      sensitive_content_audit_until=(now + timedelta(hours=hours)).isoformat())
+    try:
+        assert gateway.info()["write_policy"]["sensitive_content"]["write_mode"] == "audit"
+        assert gateway.create_file("DEV_CHECKPOINT.md", "token = runtime_value\n", dry_run=False)["applied"]
+        assert gateway.read_file("DEV_CHECKPOINT.md")["redacted_lines"] == 1
+        with pytest.raises(GatewayError):
+            gateway.create_file("hard.md", "password = 'hardcoded'\n", dry_run=False)
+        duration = timedelta(hours=hours).total_seconds()
+        monkeypatch.setattr(module.time, "monotonic", lambda: 100.0 + duration - 1)
+        assert gateway.info()["write_policy"]["sensitive_content"]["write_mode"] == "audit"
+        monkeypatch.setattr(module.time, "monotonic", lambda: 100.0 + duration)
+        assert gateway.info()["write_policy"]["sensitive_content"]["write_mode"] == "enforce"
+        with pytest.raises(GatewayError) as exc:
+            gateway.create_file("SPRINT_STATUS.md", "token = runtime_value\n", dry_run=False)
+        assert exc.value.details["rule_id"] == "CREDENTIAL_ASSIGNMENT"
+        assert not (tmp_path / "SPRINT_STATUS.md").exists()
+    finally:
+        gateway.close()
+
+
+@pytest.mark.parametrize("seconds", [0, -1])
+def test_audit_rejects_expired_deadline(seconds):
+    expiry = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+    with pytest.raises(GatewayError):
+        SensitiveAudit(paths=(".",), expires_at=expiry)
+
+
+def test_root_audit_cannot_exceed_narrow_write_grants():
+    expiry = (datetime.now(timezone.utc) + timedelta(hours=23)).isoformat()
+    with pytest.raises(GatewayError):
+        SensitiveAudit(paths=(".",), expires_at=expiry, write_paths=("src",))
+
+
+def test_multi_workspace_root_audit_remains_workspace_scoped(tmp_path):
+    service, a, b, expiry = _service(tmp_path, scope=".")
+    try:
+        active = service.get("a").gateway
+        assert active.sensitive_audit.allows("DEV_CHECKPOINT.md")
+        assert active.sensitive_audit.allows(".scratch/review-handoff/T06/DEV_CHECKPOINT.md")
+        assert not service.get("b").gateway.sensitive_audit.allows("DEV_CHECKPOINT.md")
+        assert service.list_workspaces()["workspaces"][0]["sensitive_content"]["write_mode"] == "audit"
+    finally:
+        service.close()
 
 
 @pytest.mark.parametrize("suffix", ["Z", "+00:00"])

@@ -59,11 +59,11 @@ ALLOWED_EXTENSIONS = frozenset({
     ".sql", ".html", ".htm", ".css", ".scss", ".less", ".vue", ".svelte",
     ".md", ".mdx", ".rst", ".txt", ".json", ".jsonl", ".toml", ".yaml",
     ".yml", ".xml", ".ini", ".conf", ".cfg", ".graphql", ".gql", ".proto",
-    ".properties", ".csv", ".tsv", ".r", ".lua", ".dart", ".ex", ".exs",
+    ".properties", ".csv", ".tsv", ".r", ".lua", ".dart", ".ex", ".exs", ".sha256",
 })
 ALLOWED_FILENAMES = frozenset({
     "readme", "license", "copying", "dockerfile", "makefile", "gemfile",
-    "rakefile", "procfile", "cmakelists.txt", "justfile",
+    "rakefile", "procfile", "cmakelists.txt", "justfile", "current", "active_task",
 })
 
 # Even an explicit hidden-directory grant cannot expose credentials, version

@@ -16,6 +16,7 @@ from gateway.git_policy import (
     ("diff", {"cached": True, "stat": True}, ["-file"],
      ("diff", "--cached", "--stat", "--", ":(literal)-file")),
     ("log", {}, [], ("log", "--max-count=20")),
+    ("rev-parse", {}, [], ("--no-lazy-fetch", "rev-parse", "--verify", "HEAD^{tree}")),
     ("log", {"limit": 5, "oneline": True}, [], ("log", "--max-count=5", "--oneline")),
     ("branch", {"action": "list"}, [], ("branch", "--list")),
     ("branch", {"action": "create", "name": "topic/+x"}, [],
@@ -48,7 +49,7 @@ def test_exact_compiled_argv(command, options, paths, expected):
 
 def test_exact_command_set_and_lease():
     assert GIT_V1_COMMANDS == {"status", "diff", "log", "branch", "switch",
-                               "add", "commit", "fetch", "pull", "push"}
+                               "add", "commit", "fetch", "pull", "push", "rev-parse"}
     oid = "a" * 40
     item = compile_git_command("push", options={
         "remote": "origin", "branch": "+main",
@@ -139,6 +140,11 @@ def test_preview_is_pure_and_clear_about_checks(monkeypatch):
     def no_process(*_a, **_kw):
         raise AssertionError("Git preview cannot start any child process")
     monkeypatch.setattr(subprocess, "Popen", no_process)
+    tree = preview_git("rev-parse")
+    assert tree["effective_argv"] == ["--no-lazy-fetch", "rev-parse", "--verify", "HEAD^{tree}"]
+    assert tree["options"] == {} and tree["paths"] == []
+    assert tree["execute_started"] is False
+    assert tree["repository_checked"] is False
     result = preview_git("push", workspace="workspace-a", cwd="src",
                          options={"remote": "origin", "branch": "+main"})
     assert result["effective_argv"][-1] == "refs/heads/+main:refs/heads/+main"
@@ -150,3 +156,19 @@ def test_preview_is_pure_and_clear_about_checks(monkeypatch):
         preview_git("status", timeout_seconds=True)
     with pytest.raises(GatewayError):
         preview_git("status", timeout_seconds=1)
+
+
+@pytest.mark.parametrize("options,paths", [
+    ({"revision": "HEAD"}, []),
+    ({"revision": "HEAD~1^{tree}"}, []),
+    ({"verify": True}, []),
+    ({"args": ["--git-dir"]}, []),
+    ({"output": "/tmp/tree"}, []),
+    ({"end_of_options": True}, []),
+    ({}, ["HEAD^{tree}"]),
+    ({}, ["file.txt"]),
+])
+def test_head_tree_rejects_all_options_and_nonempty_paths(options, paths):
+    with pytest.raises(GatewayError) as exc:
+        compile_git_command("rev-parse", options=options, paths=paths)
+    assert exc.value.code == "git_option_invalid"

@@ -22,20 +22,20 @@ def git_init(root):
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
 
 
-def make_legacy(tmp_path, *, enabled=True, file_write=False):
+def make_legacy(tmp_path, *, enabled=True, file_write=False, commands=("status",)):
     root = tmp_path / "project"
     git_init(root)
     state_home = tmp_path / "control"
     state_home.mkdir(mode=0o700)
     return Gateway(
         root, allow_git=enabled,
-        git_allowed_commands=("status",) if enabled else (),
+        git_allowed_commands=commands if enabled else (),
         git_state_dir=state_home / "git-state",
         allow_write=file_write, write_paths=(".",) if file_write else (),
     )
 
 
-def make_multi(tmp_path, *, enabled=True, file_write=False):
+def make_multi(tmp_path, *, enabled=True, file_write=False, commands=("status",)):
     parent = tmp_path / "parent"
     git_init(parent)
     a, b = parent / "a", parent / "b"
@@ -51,7 +51,7 @@ def make_multi(tmp_path, *, enabled=True, file_write=False):
         "workspaces": {
             "a": {
                 "root": str(a),
-                "git": {"allowed_commands": ["status"] if enabled else []},
+                "git": {"allowed_commands": list(commands) if enabled else []},
                 "write": {"enabled": file_write,
                           "paths": ["."] if file_write else []},
             },
@@ -67,6 +67,51 @@ def request(client, args, *, status=200):
     response = client.post("/git/run", json=args)
     assert response.status_code == status, (args, response.text)
     return response.json()
+
+
+@pytest.mark.parametrize("mode", ["legacy", "multi"])
+def test_rest_head_tree_preview_unborn_and_native_result(tmp_path, monkeypatch, mode):
+    instance = (make_legacy if mode == "legacy" else make_multi)(
+        tmp_path, commands=("rev-parse",),
+    )
+    root = tmp_path / ("project" if mode == "legacy" else "parent")
+    args = {"command": "rev-parse", **({"workspace": "a"} if mode == "multi" else {})}
+    app = (create_app if mode == "legacy" else create_multi_app)(instance, enable_mcp=False)
+    try:
+        with TestClient(app, base_url="http://127.0.0.1:8765") as client:
+            def no_git(*unused, **unused_kw):
+                raise AssertionError("Preview/rejected input must not start Git")
+            with monkeypatch.context() as patch:
+                patch.setattr(subprocess, "Popen", no_git)
+                preview = request(client, args)
+                assert preview["execute_started"] is False
+                assert preview["effective_argv"] == ["--no-lazy-fetch", "rev-parse", "--verify", "HEAD^{tree}"]
+                for extra in ({"options": {"revision": "main^{tree}"}},
+                              {"paths": ["HEAD"]}):
+                    assert request(client, {**args, **extra, "dry_run": False},
+                                   status=400)["error"] == "git_option_invalid"
+                assert request(client, {**args, "command": "status"},
+                               status=403)["error"] == "git_command_not_allowed"
+                if mode == "multi":
+                    assert request(client, {**args, "workspace": "b"},
+                                   status=403)["error"] == "git_command_not_allowed"
+            unborn = request(client, {**args, "dry_run": False})
+            assert unborn["exit_code"] != 0
+            assert unborn["stdout"] == ""
+            assert unborn["cleanup_status"] == "complete"
+            subprocess.run(["git", "-c", "user.name=Fixture", "-c",
+                            "user.email=f@example.invalid", "commit", "--allow-empty",
+                            "-qm", "initial"], cwd=root, check=True)
+            expected = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"],
+                                               cwd=root, text=True)
+            result = request(client, {**args, "dry_run": False})
+            assert result["exit_code"] == 0, result["stderr"]
+            assert result["stdout"] == expected
+            assert result["cleanup_status"] == "complete"
+            assert result["output_truncated"] is False
+            assert result["timed_out"] is False
+    finally:
+        instance.close()
 
 
 def test_legacy_git_rest_is_independently_enabled_and_returns_native_schema(tmp_path):

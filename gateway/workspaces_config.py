@@ -137,8 +137,6 @@ def parse_workspace_config(config: dict[str, Any]) -> GatewaySettings:
         audit_paths = _bounded_tuple(sensitive.get("paths", []), "sensitive_content.paths")
         for audit_path in audit_paths:
             _relative(audit_path, "sensitive_content.paths")
-            if audit_path == ".":
-                raise PrivateFileError("Sensitive audit requires explicit subtree.")
         audit_until = sensitive.get("expires_at")
         if mode == "audit":
             if not allow_write or not audit_paths or type(audit_until) is not str:

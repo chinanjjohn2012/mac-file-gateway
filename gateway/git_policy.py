@@ -9,12 +9,13 @@ from .core import GatewayError
 
 GIT_V1_COMMANDS = frozenset({
     "status", "diff", "log", "branch", "switch",
-    "add", "commit", "fetch", "pull", "push",
+    "add", "commit", "fetch", "pull", "push", "rev-parse",
 })
 _OPTION_KEYS = {
     "status": {"short", "branch"},
     "diff": {"cached", "stat"},
     "log": {"limit", "oneline"},
+    "rev-parse": set(),
     "branch": {"action", "name"},
     "switch": {"name", "create"},
     "add": {"all", "update"},
@@ -140,6 +141,10 @@ def compile_git_command(command: Any, *, options: Any = _MISSING,
             enabled = values[key] = _bool(options, key)
             if enabled:
                 argv.append(flag)
+    elif command == "rev-parse":
+        # Fixed read-only HEAD tree query; no caller-controlled revisions or flags.
+        # Missing promised objects must fail rather than invoking a remote fetch.
+        argv = ["--no-lazy-fetch", command, "--verify", "HEAD^{tree}"]
     elif command == "log":
         limit = options.get("limit", 20)
         if type(limit) is not int or not 1 <= limit <= 50:

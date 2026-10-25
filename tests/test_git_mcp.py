@@ -78,18 +78,18 @@ def make_repo(path):
     subprocess.run(["git", "init", "-q"], cwd=path, check=True)
 
 
-def legacy_gateway(tmp_path, *, git_enabled=True):
+def legacy_gateway(tmp_path, *, git_enabled=True, commands=("status", "diff")):
     root = tmp_path / "project"
     make_repo(root)
     private = tmp_path / "control"
     private.mkdir(mode=0o700)
-    grants = ("status", "diff") if git_enabled else ()
+    grants = commands if git_enabled else ()
     return Gateway(root, allow_git=git_enabled,
                    git_allowed_commands=grants,
                    git_state_dir=private / "git-state")
 
 
-def multi_service(tmp_path, *, git_enabled=True):
+def multi_service(tmp_path, *, git_enabled=True, commands=("status",)):
     repo = tmp_path / "project"
     make_repo(repo)
     a, b = repo / "a", repo / "b"
@@ -101,7 +101,7 @@ def multi_service(tmp_path, *, git_enabled=True):
     runtime.mkdir()
     workspaces = {
         "a": {"root": str(a),
-              "git": {"allowed_commands": ["status"] if git_enabled else []}},
+              "git": {"allowed_commands": list(commands) if git_enabled else []}},
         "b": {"root": str(b),
               "git": {"allowed_commands": ["diff"] if git_enabled else []}},
     }
@@ -138,6 +138,41 @@ def check_git_schema(tool, *, multi):
         assert "anyOf" not in field_schema, (name, field_schema)
         assert "oneOf" not in field_schema, (name, field_schema)
         assert field_schema.get("default", "absent") is not None
+
+
+@pytest.mark.parametrize("mode", ["legacy", "multi"])
+@pytest.mark.parametrize("protocol", PROTOCOLS)
+def test_mcp_head_tree_returns_native_sha_and_rejects_other_revisions(tmp_path, mode, protocol):
+    instance = (legacy_gateway if mode == "legacy" else multi_service)(
+        tmp_path, commands=("rev-parse",),
+    )
+    root = tmp_path / "project"
+    subprocess.run(["git", "-c", "user.name=Fixture", "-c",
+                    "user.email=f@example.invalid", "commit", "--allow-empty",
+                    "-qm", "initial"], cwd=root, check=True)
+    expected = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"],
+                                       cwd=root, text=True)
+    app = (create_app if mode == "legacy" else create_multi_app)(instance)
+    args = {"command": "rev-parse", **({"workspace": "a"} if mode == "multi" else {})}
+    try:
+        with TestClient(app, base_url="http://127.0.0.1:8765") as client:
+            initialized(client, protocol)
+            result = rpc(client, "tools/call", {
+                "name": "run_git", "arguments": {**args, "dry_run": False},
+            })
+            assert result.get("isError") is not True, result
+            data = result["structuredContent"]
+            assert data["exit_code"] == 0 and data["stdout"] == expected
+            assert data["cleanup_status"] == "complete"
+            for extra in ({"options": {"revision": "HEAD~1^{tree}"}},
+                          {"paths": ["HEAD^{tree}"]}):
+                rejected = rpc(client, "tools/call", {
+                    "name": "run_git", "arguments": {**args, **extra, "dry_run": False},
+                })
+                assert rejected.get("isError") is True, rejected
+                assert "git_option_invalid" in str(rejected)
+    finally:
+        instance.close()
 
 
 @pytest.mark.parametrize("protocol", PROTOCOLS)

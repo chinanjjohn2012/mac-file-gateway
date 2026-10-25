@@ -48,9 +48,23 @@ Hard source lines are redacted on reads/search/diffs, and newly introduced
 Hard content is rejected on create/replace/whole-file write. Hard wins over
 heuristic and cannot be allowed by Audit.
 
+For Markdown (`.md`/`.mdx`, case-insensitive), closed fences explicitly
+labelled `python`, `python3` or `py` use the bounded Python classifier to
+distinguish runtime expressions such as `token = get_token()` from actual
+credential values. Fence contents are scanned as text, never executed.
+Existing Hard findings remain protected, and Python-detected multiline
+credential values are protected too. Unclosed/unlabelled/non-Python fences
+keep the legacy rules; scan-integrity failure cannot grant an exemption.
+Document line numbers, raw BOM/CRLF bytes and hidden-line provenance remain
+unchanged through read/search/preview/guarded edits.
+
+A compound prose label such as `impact/authorization: logs/evidence.md`
+names a document reference, not a credential value. This narrow Markdown
+exception requires an unquoted document path and no further credential
+assignment on that line; independent Hard findings still win.
+
 For JSON, YAML, other non-Python files, and extensionless source, existing
-V2/legacy content rules are retained. This PR does not change them, and
-an independent read/seek/REST/MCP regression covers parity.
+V2/legacy content rules are retained.
 
 ## 1.1 Ordinary pathname text — V1 amendment
 
@@ -109,11 +123,19 @@ raw-file SHA conflicts, original backups, atomic installation and fsync
 failure semantics are unchanged. Redacted/truncated display placeholders
 are never valid write content.
 
-## 4. Temporary heuristic Audit (unchanged)
+## 4. Temporary heuristic Audit
 
 Default is `enforce`. A trusted local administrator can explicitly enable
-`audit` **at startup** for already-writable paths in one Workspace, expiring
-within at most 60 minutes. It only allows writes whose new findings are
+`audit` **at startup** for already-writable paths in one Workspace, with an
+explicit future UTC expiry. The runtime calculates the duration from the
+startup time to that deadline; there is no fixed maximum duration.
+An explicit `.` scope covers that Workspace's
+already-writable paths; it cannot expand a narrower write grant or affect
+another Workspace. This operator-authorized 2026-10-26 amendment supersedes
+the original design's 60-minute/subtree-only cap and the interim 24-hour cap.
+Expired deadlines are rejected at startup, and reaching the deadline restores
+`enforce` without restart. Wall-clock rollback cannot extend the duration
+calculated at startup. Audit only allows writes whose new findings are
 **heuristic**, not Hard or `scan_unavailable`. Redaction, file/path denial,
 and all other write permissions remain active.
 

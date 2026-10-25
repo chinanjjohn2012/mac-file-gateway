@@ -58,6 +58,26 @@ def test_http_exact_replace(client, root):
     assert (root / "app.py").read_bytes() == b"count = 8\n"
 
 
+def test_http_markdown_python_and_evidence_reference(client, root):
+    content = "# Checkpoint\n```python\ntoken = get_token()\n```\n"
+    created = client.post("/create", json={"path": "DEV_CHECKPOINT.md", "content": content, "dry_run": False})
+    assert created.status_code == 200, created.text
+    source = client.get("/read", params={"path": "DEV_CHECKPOINT.md"}).json()
+    assert source["redacted_lines"] == 0
+    updated = content + "Detailed impact/authorization: logs/evidence.md. Integration remains NOT_RUN.\n"
+    request = {"path": "DEV_CHECKPOINT.md", "old_text": content, "new_text": updated,
+               "expected_sha256": source["file_sha256"]}
+    preview = client.post("/replace", json=request)
+    assert preview.status_code == 200, preview.text
+    assert not preview.json()["applied"]
+    assert (root / "DEV_CHECKPOINT.md").read_text() == content
+    applied = client.post("/replace", json={**request, "dry_run": False})
+    assert applied.status_code == 200, applied.text
+    assert (root / "DEV_CHECKPOINT.md").read_text() == updated
+    hard = client.post("/create", json={"path": "hard.md", "content": "```python\npassword = 'hardcoded'\n```\n"})
+    assert hard.status_code == 403 and hard.json()["error"] == "sensitive_content"
+
+
 def test_http_write_mode_health_is_truthful(client):
     assert client.get("/health").json()["read_only"] is False
     assert client.get("/info").json()["write_policy"]["enabled"] is True

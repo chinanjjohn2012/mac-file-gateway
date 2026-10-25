@@ -10,8 +10,16 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
+import threading
+import time
+from contextlib import contextmanager
 from types import SimpleNamespace
+import urllib.error
+import urllib.request
+
+import uvicorn
 
 import pytest
 from starlette.testclient import TestClient
@@ -219,3 +227,237 @@ def test_f1_same_service_real_git_and_file_write_survive_exec_quarantine(mixed):
     assert exc.value.code == "write_disabled"
     assert record.read_bytes() == original
     assert svc.info()["exec_policy"]["quarantined"] is True
+
+
+
+def _f1_tcp_request(port, path, body=None, *, headers=None):
+    """Genuine loopback HTTP; no TestClient, proxy or mock ASGI transport."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    payload = None if body is None else json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}", data=payload,
+        headers={**_HEADERS, **(headers or {})},
+    )
+    try:
+        with opener.open(request, timeout=5) as reply:
+            data = reply.read()
+            return reply.status, json.loads(data) if data else None
+    except urllib.error.HTTPError as exc:
+        data = exc.read()
+        return exc.code, json.loads(data) if data else None
+
+
+def _f1_tcp_rpc(port, method, params, ident):
+    status, body = _f1_tcp_request(port, "/mcp", {
+        "jsonrpc": "2.0", "id": ident, "method": method, "params": params})
+    assert status == 200 and body["id"] == ident, (method, status, body)
+    assert "result" in body, (method, body)
+    return body["result"]
+
+
+@contextmanager
+def _f1_real_tcp_listener(service):
+    """One ephemeral, prebound loopback socket served by real Uvicorn.
+
+    No unbounded or public interface, no user configuration, no Tunnel, no
+    real Exec subprocess. The listener is fully stopped before releasing
+    any pinned Workspace root or Exec-state ownership.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server = None
+    worker = None
+    errors = []
+    try:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(32)
+        sock.setblocking(False)
+        host, port = sock.getsockname()
+        assert host == "127.0.0.1" and port > 0
+        app = create_multi_app(service, port=port, enable_mcp=True)
+        server = uvicorn.Server(uvicorn.Config(
+            app, host="127.0.0.1", port=port, lifespan="on",
+            log_level="error", access_log=False, proxy_headers=False,
+            server_header=False, date_header=False,
+        ))
+
+        def serve():
+            try:
+                server.run(sockets=[sock])
+            except BaseException as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(
+            target=serve, name="f1-ephemeral-tcp-deny-only", daemon=True)
+        worker.start()
+        ready = False
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            if errors or not worker.is_alive():
+                raise AssertionError("F1_REAL_TCP_LISTENER_EXITED: " + repr(errors))
+            if server.started:
+                try:
+                    status, health = _f1_tcp_request(port, "/health")
+                    if status == 200:
+                        assert health["mode"] == "multi"
+                        assert health["mcp_enabled"] is True
+                        ready = True
+                        break
+                except (OSError, urllib.error.URLError):
+                    pass
+            time.sleep(0.04)
+        assert ready, "F1_REAL_TCP_LISTENER_NOT_READY"
+        yield port
+    finally:
+        if server is not None:
+            server.should_exit = True
+        sock.close()
+        if worker is not None:
+            worker.join(timeout=8)
+            assert not worker.is_alive(), "F1_REAL_TCP_LISTENER_DID_NOT_STOP"
+        assert not errors, "F1_REAL_TCP_LISTENER_FAILED: " + repr(errors)
+
+
+def test_f1_real_tcp_rest_mcp_proof_and_unhealthy_states(mixed, monkeypatch):
+    """P2-01/P2-02: real loopback TCP and official SDK tools/call.
+
+    Real private-FS witness only covers the request portion, NOT the
+    deliberate disposable PREPARED/UNKNOWN setup. Exec spawning is blocked
+    inside the request witness; independent Git uses its own real subprocess.
+    """
+    svc, a, b, config = mixed
+    assert svc._exec_state is not None
+    assert svc._exec_state.durability_state == "healthy"
+    state_root = config / "exec-state"
+    Witness, records, public_policy = _previously_reviewed_physical_witness()
+    scene = SimpleNamespace(state=state_root)
+
+    with _f1_real_tcp_listener(svc) as port:
+        # Both opt-ins are active, but no full-descendant cleanup proof
+        # exists. Real TCP must reach this exact instance and no other.
+        status, info = _f1_tcp_request(port, "/info")
+        assert status == 200
+        status, health = _f1_tcp_request(port, "/health")
+        assert status == 200
+        assert info["exec_policy"] == health["exec_policy"]
+        assert public_policy(info["exec_policy"])
+        assert info["exec_policy"]["enabled"] is True
+        assert info["exec_policy"]["adapter_exposed"] is True
+        assert info["exec_policy"]["available"] is False
+        assert info["exec_policy"]["completion_capability"] == "none"
+        public_json = json.dumps(info) + json.dumps(health)
+        assert str(a) not in public_json and str(config) not in public_json
+        status, preview = _f1_tcp_request(
+            port, "/run", {**_APPLY, "dry_run": True})
+        assert status == 200 and preview["dry_run"] is True
+        assert preview["executed"] is False and preview["workspace"] == "a"
+        init = _f1_tcp_rpc(port, "initialize", {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {"name": "f1-real-tcp-test", "version": "1"},
+        }, 1)
+        assert init["protocolVersion"] == "2025-11-25"
+        status, _ = _f1_tcp_request(port, "/mcp", {
+            "jsonrpc": "2.0", "method": "notifications/initialized"})
+        assert status in (200, 202)
+        listed = _f1_tcp_rpc(port, "tools/list", {}, 2)
+        assert "run_command" in {item["name"] for item in listed["tools"]}
+        mcp_preview = _f1_tcp_rpc(port, "tools/call", {
+            "name": "run_command",
+            "arguments": {**_APPLY, "dry_run": True}}, 3)
+        assert mcp_preview["structuredContent"]["executed"] is False
+
+        # Guard the network-only denial window with the frozen physical
+        # intent oracle, plus an explicit OS child-spawn trap.
+        witness = Witness(state_root)
+        runner_calls = []
+        popen_calls = []
+        with monkeypatch.context() as patch:
+            original_popen = subprocess.Popen
+
+            class _NoHostPopen(original_popen):
+                def __new__(cls, *args, **kwargs):
+                    popen_calls.append("Popen")
+                    raise AssertionError("F1_TCP_UNAUTHORIZED_EXEC_SPAWN")
+
+            def impossible_runner(*args, **kwargs):
+                runner_calls.append("run_command")
+                raise AssertionError("F1_TCP_UNAUTHORIZED_RUNNER")
+
+            patch.setattr(subprocess, "Popen", _NoHostPopen)
+            patch.setattr(svc.get("a").gateway, "run_command", impossible_runner)
+            witness.install(patch)
+            before = records(scene)
+            status, rest = _f1_tcp_request(port, "/run", _APPLY)
+            assert status == 503 and rest["error"] == "exec_cleanup_proof_required"
+            proof = _f1_tcp_rpc(port, "tools/call", {
+                "name": "run_command", "arguments": _APPLY}, 4)
+            assert proof.get("isError") is True
+            assert proof["structuredContent"]["error"] == "exec_cleanup_proof_required"
+            disabled = _f1_tcp_rpc(port, "tools/call", {
+                "name": "run_command", "arguments": {**_APPLY, "workspace": "b"}}, 5)
+            assert disabled.get("isError") is True
+            assert disabled["structuredContent"]["error"] == "exec_disabled"
+            status, rest_disabled = _f1_tcp_request(
+                port, "/run", {**_APPLY, "workspace": "b"})
+            assert status == 403 and rest_disabled["error"] == "exec_disabled"
+            invalid = _f1_tcp_rpc(port, "tools/call", {
+                "name": "run_command", "arguments": {**_APPLY, "dry_run": "false"}}, 6)
+            assert invalid.get("isError") is True
+            assert invalid["structuredContent"]["error"] == "invalid_argument"
+            status, spoof = _f1_tcp_request(
+                port, "/run", _APPLY, headers={"X-Gateway-Test-Mode": "1"})
+            assert status == 503 and spoof["error"] == "exec_cleanup_proof_required"
+            assert runner_calls == [] and popen_calls == []
+            assert witness.events == [] and witness._root_is_pinned()
+            assert records(scene) == before
+
+        # A real, independent Git subprocess is legal in this SAME service.
+        git_healthy = svc.invoke_git("a", "status", dry_run=False)
+        assert git_healthy["exit_code"] == 0
+        assert git_healthy["execute_started"] is True
+
+        # Seed UNKNOWN only inside disposable private state; never through
+        # a client request, never clear or remove this unresolved record.
+        store = svc._exec_state
+        st = a.stat()
+        attempt = store.prepare("a", (st.st_dev, st.st_ino))
+        store.mark_unknown(attempt)
+        record = state_root / ("r-" + attempt + ".json")
+        original_unknown = record.read_bytes()
+        assert svc.info()["exec_policy"]["quarantined"] is True
+        quarantine_witness = Witness(state_root)
+        with monkeypatch.context() as patch:
+            patch.setattr(svc.get("a").gateway, "run_command", impossible_runner)
+            quarantine_witness.install(patch)
+            before = records(scene)
+            status, quarantined = _f1_tcp_request(port, "/run", _APPLY)
+            assert status == 503 and quarantined["error"] == "exec_quarantined"
+            result = _f1_tcp_rpc(port, "tools/call", {
+                "name": "run_command", "arguments": _APPLY}, 7)
+            assert result.get("isError") is True
+            assert result["structuredContent"]["error"] == "exec_quarantined"
+            status, status_info = _f1_tcp_request(port, "/health")
+            assert status == 200 and status_info["exec_policy"]["quarantined"] is True
+            assert quarantine_witness.events == []
+            assert quarantine_witness._root_is_pinned()
+            assert records(scene) == before
+        assert record.read_bytes() == original_unknown
+        git_quarantined = svc.invoke_git("a", "status", dry_run=False)
+        assert git_quarantined["exit_code"] == 0
+        assert git_quarantined["execute_started"] is True
+
+        # Deliberately lose the disposable state owner FD; no automatic
+        # quarantine reset and no misleading proof-required status.
+        store.close()
+        assert store.durability_state == "unavailable"
+        status, unavailable = _f1_tcp_request(port, "/run", _APPLY)
+        assert status == 503 and unavailable["error"] == "exec_state_unavailable"
+        result = _f1_tcp_rpc(port, "tools/call", {
+            "name": "run_command", "arguments": _APPLY}, 8)
+        assert result.get("isError") is True
+        assert result["structuredContent"]["error"] == "exec_state_unavailable"
+        priority = _f1_tcp_rpc(port, "tools/call", {
+            "name": "run_command", "arguments": {**_APPLY, "workspace": "b"}}, 9)
+        assert priority.get("isError") is True
+        assert priority["structuredContent"]["error"] == "exec_disabled"
+        assert record.read_bytes() == original_unknown

@@ -15,11 +15,25 @@ from .multi_fields import validate_tool_arguments
 from .workspaces import WorkspaceService
 
 
+def _exec_error_result(exc: GatewayError) -> CallToolResult:
+    """Use the same public machine-readable code for every Exec rejection.
+
+    Never return private state paths, PIDs, argv or raw request contents.
+    This is a protocol error result, not authorization to retry the command.
+    """
+    return CallToolResult(
+        content=[TextContent(type="text", text=exc.code)],
+        structured_content={"error": exc.code},
+        is_error=True,
+    )
+
 class StrictWorkspaceMCP(MCPServer):
     async def call_tool(self, name: str, arguments: dict[str, Any], context: Context | None = None):
         try:
             validate_tool_arguments(name, arguments, multi=True)
         except GatewayError as exc:
+            if name == "run_command":
+                return _exec_error_result(exc)
             raise ToolError(f'{exc.code}: {exc}') from None
         return await super().call_tool(name, arguments, context=context)
 
@@ -78,17 +92,9 @@ def build_multi_mcp(service: WorkspaceService, *, port: int = 8765) -> MCPServer
                     timeout_seconds, dry_run,
                 )
             except GatewayError as exc:
-                if exc.code == "exec_cleanup_proof_required":
-                    # MCP SDK 2.x preserves explicit CallToolResult values.
-                    # Both the error flag and machine-readable code must
-                    # survive the official SDK tools/call dispatch.
-                    return CallToolResult(
-                        content=[TextContent(type="text",
-                                             text=f"{exc.code}: {exc}")],
-                        structured_content={"error": exc.code},
-                        is_error=True,
-                    )
-                raise ToolError(f"{exc.code}: {exc}") from None
+                # MCP SDK's ToolError fallback omits structuredContent, so
+                # every F1 Exec error uses this one sanitized code path.
+                return _exec_error_result(exc)
 
     if service.any_git:
         git_annotations = ToolAnnotations(

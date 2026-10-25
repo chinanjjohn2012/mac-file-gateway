@@ -1,7 +1,8 @@
-859299b39f3817c9928b5cacd834de8518d75c8ab1ee383c9b59a716e9330cd1  ./.github/workflows/controlled-exec-tests.yml
+90bdd8b96afe840b23f19700515e91445fcd4e1232085cf46a29fadd2df77ced  ./.github/workflows/controlled-exec-tests.yml
 0a159690690057881521d984609616e2a3092d5ed7de15f5bfe569129b148e4e  ./.github/workflows/multi-exec-b1b1-default-deny-red.yml
 deb25674f304104b8e41cf70e1431c1b7bdc18943f4e1aedf7610f95171f6d7c  ./.github/workflows/multi-exec-f1-macos-arm64-isolated.yml
 67e5e58ee2e27b8d490299d7b96c9da52ba2c902f83a2f08bf1d581c24094140  ./.github/workflows/multi-exec-f1-rc-macos-arm64.yml
+985e64d8fe31e56947159ae051e28276e7988ad187d639eada40b1f166bad3dc  ./.github/workflows/multi-exec-g05-macos-arm64.yml
 93a05fb6b9560073be015aae929d192781084e148887aba1ef31a3711df5cfc2  ./.github/workflows/multi-exec-macos-lifecycle.yml
 a1706a650e6f2804a1fd99187d85bae93267ca0e04744805ab7c6c28a44cd08f  ./.github/workflows/multi-exec-r1-red.yml
 cbf50c5750fc83b69cbcd4e43ed116eefda12a1ef91c45f0d5706dd5df25a15a  ./.github/workflows/multi-exec-r2-t02-admission-red.yml
@@ -14,6 +15,7 @@ fffd94c70313a5e83590207596735c9c56ae744343f88ee9e875cfb506ecb708  ./BUILD_INFO.j
 1b5c9b97775f1d9d76205c430e2b6113dc0a8cb7be6e0d50619e330121b88f5d  ./docs/CONTROLLED_EXEC.md
 6133250e80219b7f0948cfb9bdf22fc5536460f3eee14fa3841dd55a09113afe  ./docs/DIRECTORY_API.md
 3b6860053cfd22d05f6ac3dcc53f9b2ad203710655697bee247adf905de19619  ./docs/FILE_LIFECYCLE_API.md
+55c23411aabc73db7ef8224e15bb6fcdb0f25e4bec6f37a821f730c7fe9bb945  ./docs/GITHUB_G05_CI_ADMISSION.md
 c6d07712257af3239190499e9a895a6a69851da59051416c5e2ea48a8af2105e  ./docs/GIT_CLI_V1_DESIGN.md
 29ccaaefc6a9f10bd984b5289dc362ab27723325195168e37d8d04baa39a8042  ./docs/GIT_CLI_V1_IMPLEMENTATION_PLAN.md
 a6fea4cb1d0eb43d09154106ea2beaa7dc6d6e46e038cb669aa8641db26847e8  ./docs/LOCAL_SKILL_BRIDGE_IMPLEMENTATION_PLAN.md
@@ -129,6 +131,7 @@ b6309e55d4507c94493708c7028a1ceafa51bcba6eb9a4bf1d4f43db9b37abd1  ./tests/test_e
 2634a291fff10e36ba10940d1c6d6a717bef3be7a2c2e9a9b1178f9d2fe8573a  ./tests/test_exec_state_t01.py
 8dd0fda9430ec1d557f36e08bf4b6f1b5f15b723cf5dc4ca18650817d8704c06  ./tests/test_file_lifecycle.py
 090bd7c4eeee68aa57cece6924f481535c2177a6b7c41be9af67e2e64deedea4  ./tests/test_file_lifecycle_http.py
+6fc6c41945c84859bf1075edd42f0d4db873118c1523cf0782c22b8623ac8a48  ./tests/test_g05_ci_admission.py
 21839294fa8d450d3ad48059f99415175fe4b20859a7d0f69014384b04ca914c  ./tests/test_git_adapter_not_exposed.py
 a8cd41b95e0ca52718e0ac063ca3005f6d111e513c2ab976bbabfb0289a84147  ./tests/test_git_cli.py
 2011858285d043f62fd2550a0cde268c70ff0e44eae1066c12c6e93756f67fdf  ./tests/test_git_cli_args.py
@@ -200,6 +203,7 @@ c2e91cca22bd1ecf037358a253e33504ccf929e29534a245ff91d0bab3defe67  ./tests/test_w
 d4c009b8db994234522713addff672089869728d0ac81788dc27effba3168fdb  ./tools/check_local_skill_bridge.py
 9c2fe6459eed7ef8fffe08891971c25ec3d142c859fba6386c161ac97bb8c120  ./tools/collect_local_skill_policy.py
 6b0a5f1252e90d7b3479993a37bf9be265bb28680f0aff62552c6f4f863b23ab  ./tools/diagnose_lock.py
+28770606b9ac099a804c9059246b8435a212b45c27dd866de795c638affd9159  ./tools/g05_ci_admission.py
 7a22abddd640ec65fe3c151e4ebcad79c5a23f35feede6d5919ffc5f09639468  ./tools/verify_multi_exec_b1b1_default_deny_red.py
 d6563f7918539464ae7ec1fabe2c7973a436edde89d61dc457794a96d8fc4143  ./tools/verify_multi_exec_r2_t02_admission_red.py
 9237e22ee7a9b2a1076b4833edf36f60611d68140f4c847a3627d82237b5bdc1  ./tools/verify_multi_exec_recovery_r1_red.py

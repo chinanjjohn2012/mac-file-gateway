@@ -1,0 +1,63 @@
+name: G05 isolated macOS ARM64 source admission (F1 deny-only)
+
+on:
+  pull_request:
+    branches:
+      - rc/multi-exec-f1-deny-only-ms1-20261025
+    paths:
+      - ".github/workflows/multi-exec-g05-macos-arm64.yml"
+      - ".github/workflows/controlled-exec-tests.yml"
+      - "tools/g05_ci_admission.py"
+      - "tests/test_g05_ci_admission.py"
+      - "docs/GITHUB_G05_CI_ADMISSION.md"
+      - "MANIFEST.sha256"
+
+permissions:
+  contents: read
+
+jobs:
+  g05-macos-arm64:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.sha == 'ea7989800ba1f1e759739d5bf3a700c1691801a6'
+    runs-on: macos-15
+    timeout-minutes: 18
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      GATEWAY_NATIVE_C_ALLOWED: "false"
+      C3B03_S3S6_FIRST_C_LOAD_AUTHORIZED: "false"
+      C3B03_S3S6_GROUP_SIGNAL_AUTHORIZED: "false"
+    steps:
+      - name: Checkout exact candidate with no credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: G05 preflight before setup, package installation and imports
+        shell: bash
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "${{ runner.environment }}" = "github-hosted"
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          [[ "$(sw_vers -productVersion)" == 15.* ]]
+          python3 -I -S tools/g05_ci_admission.py --expected-head "$G05_EXPECTED_HEAD"
+      - name: Use Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install existing test dependencies only
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: G05 independent clean/ignored/untracked admission regressions
+        run: python -m pytest -q -p no:cacheprovider tests/test_g05_ci_admission.py
+      - name: Existing F1 deny-only loopback REST/MCP and Git/File regression
+        run: python -m pytest -q -p no:cacheprovider tests/test_multi_exec_f1.py
+      - name: Confirm no tracked code modification
+        run: |
+          git diff --exit-code
+          echo "G05_MACOS_REPOSITORY_ADMISSION_AND_DENY_ONLY=TESTED"
+          echo "G05_REAL_EXEC_APPLY=NOT_RUN; F3_NATIVE_SIGNALS=NOT_RUN"
+          echo "G05_USER_MAC_TUNNEL=NOT_TESTED; NO_MERGE; NO_DEPLOY"

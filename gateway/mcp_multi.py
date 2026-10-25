@@ -6,7 +6,7 @@ from typing import Annotated, Any, Callable
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import Field, StrictBool
 from starlette.concurrency import run_in_threadpool
 
@@ -15,11 +15,25 @@ from .multi_fields import validate_tool_arguments
 from .workspaces import WorkspaceService
 
 
+def _exec_error_result(exc: GatewayError) -> CallToolResult:
+    """Use the same public machine-readable code for every Exec rejection.
+
+    Never return private state paths, PIDs, argv or raw request contents.
+    This is a protocol error result, not authorization to retry the command.
+    """
+    return CallToolResult(
+        content=[TextContent(type="text", text=exc.code)],
+        structured_content={"error": exc.code},
+        is_error=True,
+    )
+
 class StrictWorkspaceMCP(MCPServer):
     async def call_tool(self, name: str, arguments: dict[str, Any], context: Context | None = None):
         try:
             validate_tool_arguments(name, arguments, multi=True)
         except GatewayError as exc:
+            if name == "run_command":
+                return _exec_error_result(exc)
             raise ToolError(f'{exc.code}: {exc}') from None
         return await super().call_tool(name, arguments, context=context)
 
@@ -67,9 +81,10 @@ def build_multi_mcp(service: WorkspaceService, *, port: int = 8765) -> MCPServer
         ) -> dict[str, Any]:
             """Run an allowlisted command only in an explicitly enabled Workspace.
 
-            Opt-in execution runs project code with the Gateway OS user's
-            privileges; it is not a filesystem sandbox. No automatic retries
-            after disconnection; synchronous Worker retains the service lease.
+            F1 allows only validated preview. Apply without independently
+            approved whole-descendant cleanup proof is denied before any
+            Exec Runner or PREPARED intent. No automatic retries or local
+            privilege escalation. Git has separate admission.
             """
             try:
                 return await run_in_threadpool(
@@ -77,7 +92,9 @@ def build_multi_mcp(service: WorkspaceService, *, port: int = 8765) -> MCPServer
                     timeout_seconds, dry_run,
                 )
             except GatewayError as exc:
-                raise ToolError(f"{exc.code}: {exc}") from None
+                # MCP SDK's ToolError fallback omits structuredContent, so
+                # every F1 Exec error uses this one sanitized code path.
+                return _exec_error_result(exc)
 
     if service.any_git:
         git_annotations = ToolAnnotations(

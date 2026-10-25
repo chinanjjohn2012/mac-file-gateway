@@ -278,22 +278,31 @@ class WorkspaceService:
 
     def invoke_exec(self, name: str, cwd: str, argv: list[str],
                     timeout_seconds: int = 60, dry_run: bool = True) -> dict[str, Any]:
-        """Own one synchronous attempt until CommandRunner returns.
+        """Keep safe previews, but deny ordinary apply without cleanup proof.
 
-        No queued waiter, no automatic replay after a lost response, and no
-        release of pinned roots while a worker is active. This deliberately
-        reuses the Legacy allowlist/runner; it is not an OS sandbox or a
-        claim that every descendant has exited after a group timeout.
+        The effective F1 product has *no* approved full-descendant cleanup
+        qualification. Never start a CommandRunner or write even a transient
+        PREPARED record for dry_run=False. This is a service-side gate shared
+        by direct, REST and SDK MCP calls; it is not a global Popen guard and
+        leaves the separately authorized Git worker fully independent.
         """
         with self._lifecycle:
             ctx = self.require_exec(name)
-            # B0: deny both previews and applies against an untrusted store.
-            # A separate reviewed B1 step will deny *healthy* applies when
-            # no approved full-tree cleanup proof/acceptance grant exists.
+            # B0 durable/ownership/UNKNOWN denial comes before proof status.
             if self._exec_state is None:
                 raise GatewayError(
                     "exec_state_unavailable", "Exec durable state is unavailable.")
             self._exec_state.require_healthy()
+            if type(dry_run) is not bool:
+                raise GatewayError("invalid_argument", "dry_run must be boolean.")
+            # F1 has NO positive cleanup-proof path. Proof denial wins over
+            # an occupied Worker slot and happens before Runner/PREPARED.
+            # Never use an instance-global subprocess ban: Git may spawn
+            # only via its own separately authorized durable protocol.
+            if not dry_run:
+                raise GatewayError(
+                    "exec_cleanup_proof_required",
+                    "Exec apply is unavailable without independently reviewed full-descendant cleanup proof.")
             if name in self._exec_active or len(self._exec_active) >= 4:
                 raise GatewayError("busy", "A controlled command already occupies this execution slot.")
             self._exec_active.add(name)
@@ -391,14 +400,15 @@ class WorkspaceService:
                     reason = "state_io_unavailable"
             return {"name": "Mac File Gateway", "version": "2.5.0", "mode": "multi",
                     "workspace_count": len(self._workspaces),
-                    "read_only": not (self.any_write or self.any_exec or self.any_git),
+                    "read_only": not (self.any_write or self.any_git),
                     "file_read_only": not self.any_write, "path_base": ".",
                     "workspaces": self.list_workspaces()["workspaces"],
                     "exec_policy": {
                         "enabled": self.settings.exec_enabled,
-                        # B0 retains historical healthy eligibility until
-                        # B1's proof gate and test-only acceptance bridge.
-                        "available": effective and durability == "healthy",
+                        # No independently approved full-tree cleanup
+                        # qualification exists in F1, even when healthy.
+                        "available": False,
+                        "completion_capability": "none",
                         "adapter_exposed": self._exec_adapter_exposed,
                         "durability_state": durability,
                         "quarantined": durability == "quarantined",

@@ -42,9 +42,16 @@ def run_multi(args) -> int:
             else:
                 git_state = 'disabled by policy or unavailable'
             exec_policy = service.info()['exec_policy']
-            exec_state = ('API registered (per-Workspace opt-in; preview default)'
-                          if exec_policy['adapter_exposed'] and exec_policy['available']
-                          else 'disabled by policy')
+            if not exec_policy['adapter_exposed']:
+                exec_state = 'disabled by policy'
+            elif exec_policy['durability_state'] == 'healthy':
+                # F1 advertises an available *preview*, not a runnable
+                # command. A disabled apply is not a disabled opt-in.
+                exec_state = 'API registered (preview only; apply requires cleanup proof)'
+            else:
+                exec_state = ('API registered (durable state ' +
+                              exec_policy['durability_state'] +
+                              '; preview and apply fail closed)')
             print('Controlled Exec ' + exec_state +
                   '; Local Skills disabled; Git CLI ' + git_state + '.', file=sys.stderr)
             uvicorn.run(app, host='127.0.0.1', port=settings.port,

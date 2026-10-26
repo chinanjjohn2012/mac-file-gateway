@@ -307,7 +307,13 @@ class WorkspaceService:
                 # Its result is deliberately non-authoritative: the existing
                 # product error stays hard-coded, so a false/faulty decision
                 # cannot grant Exec or advance to Worker/PREPARED.
-                self._runner_coordinator.deny_unqualified_apply()
+                try:
+                    self._runner_coordinator.deny_unqualified_apply()
+                except Exception:
+                    # A non-authoritative R1 advisory must not replace the
+                    # stable denial with a 500 or leak internal fault details.
+                    # Never fall through to the Worker slot, Runner or PREPARED.
+                    pass
                 raise GatewayError(
                     "exec_cleanup_proof_required",
                     "Exec apply is unavailable without independently reviewed full-descendant cleanup proof.")

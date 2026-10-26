@@ -7,6 +7,7 @@ on:
       - 'gateway/r2s_state_s2.py'
       - 'tests/test_r2s_s1_offline.py'
       - 'tests/test_r2s_s2_private_fs.py'
+      - 'tests/test_r2s_s2_review_r002.py'
       - 'MANIFEST.sha256'
       - 'requirements*.txt'
       - 'ci/wheel-locks/**'
@@ -26,6 +27,11 @@ jobs:
         ) ||
         (
           github.event.pull_request.head.ref == 'review/multi-exec-r2s-s0-s2-r001-20261027' &&
+          github.event.pull_request.base.ref == 'design/multi-exec-r2s-native-a-r002-fix-20261026' &&
+          github.event.pull_request.base.sha == '638f7723f523f6d38bf0737ce61d1971abec4e76'
+        ) ||
+        (
+          github.event.pull_request.head.ref == 'fix/multi-exec-r2s-s0-s2-r002-20261027' &&
           github.event.pull_request.base.ref == 'design/multi-exec-r2s-native-a-r002-fix-20261026' &&
           github.event.pull_request.base.sha == '638f7723f523f6d38bf0737ce61d1971abec4e76'
         )
@@ -89,6 +95,7 @@ jobs:
           python -m pytest -q -rs -p no:cacheprovider
           tests/test_r2s_s1_offline.py
           tests/test_r2s_s2_private_fs.py
+          tests/test_r2s_s2_review_r002.py
           tests/test_runner_seam_r1.py
           tests/test_multi_exec_f1.py
           tests/test_exec_state_t01.py

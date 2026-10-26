@@ -94,7 +94,8 @@ class OfflineS1:
             # no escaped descendants. This is a deliberately conservative
             # proposed S1 boot gate, NOT an implemented production mechanism.
             uncertain = {"PREPARED", "STARTING", "RUNNING",
-                         "CLEANUP_PENDING", "RETIRED_LIMITED", "UNKNOWN"}
+                         "CLEANUP_PENDING", "RETIRED_LIMITED", "UNKNOWN",
+                         "RETIRED"}  # v1 group-only result cannot authorize v2
             if any(x["phase"] in uncertain
                    for x in self.state["attempts"].values()):
                 self.state["quarantined"] = True
@@ -471,6 +472,7 @@ def test_boundary_v1_retired_never_auto_upgrades_to_native():
     })
     # A historical v1 group-only RETIRED is NOT a safe v2 boot marker.
     old = OfflineS1(journal)
+    assert old.quarantined
     assert not old.state["consent_active"]
     with pytest.raises(Denied):
         old.prepare()

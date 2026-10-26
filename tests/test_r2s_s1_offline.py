@@ -766,3 +766,159 @@ def test_b85_p2_01_legal_clean_consent_boot_still_dispatches(fake):
     a = reboot.prepare()
     reboot.dispatch(a)
     assert reboot.fake_starts == 1
+
+
+# r003 NEW source-level B/C counterexamples; test-first RED on the r002 model.
+# No external processes, locks, signals, filesystem or product imports.
+@pytest.mark.parametrize(
+    ("binding", "value"), [
+        ("backend_version", "unsupported-fake-backend"),
+        ("root", (0, 0)),
+        ("root", ("0", 2)),
+        ("exec_scope", ""),
+    ],
+)
+def test_r003_unsupported_live_binding_reapproval_fails_closed(fake, binding, value):
+    with pytest.raises(Denied):
+        fake.change_binding(**{binding: value})
+    assert fake.fake_starts == 0
+    assert fake.quarantined
+    with pytest.raises(Denied):
+        fake.approve_local()
+    with pytest.raises(Denied):
+        fake.prepare()
+
+
+@pytest.mark.parametrize(
+    ("binding", "value"), [
+        ("backend_version", "unsupported-fake-backend"),
+        ("root", (0, 0)),
+        ("exec_scope", ""),
+    ],
+)
+def test_r003_invalid_mutated_live_binding_denies_prepare(fake, binding, value):
+    fake.state[binding] = value
+    with pytest.raises(Denied):
+        fake.prepare()
+    assert fake.fake_starts == 0
+    assert fake.quarantined
+
+
+def test_r003_valid_new_root_local_reapproval_allows_exactly_one_fake_start(fake):
+    previous_epoch = fake.state["consent_epoch"]
+    fake.change_binding(root=(707, 808))
+    assert not fake.state["consent_active"]
+    assert not fake.quarantined
+    assert fake.approve_local() == previous_epoch + 2  # revoke and new grant
+    a = fake.prepare()
+    assert a.root == (707, 808)
+    fake.dispatch(a)
+    assert fake.fake_starts == 1
+    with pytest.raises(Denied):
+        fake.dispatch(a)
+
+
+@pytest.mark.parametrize(
+    ("leader", "group"), [
+        ("false", "false"),
+        (1, 1),
+        (True, "true"),
+        (None, True),
+        (False, True),
+        (True, False),
+        (True, None),
+        ([True], True),
+    ],
+)
+def test_r003_untrusted_cleanup_evidence_cannot_retire_limited(fake, leader, group):
+    a = fake.prepare()
+    fake.dispatch(a)
+    with pytest.raises(Denied):
+        fake.retire_limited(
+            a, fake_leader_reaped=leader, fake_group_absent=group,
+        )
+    assert fake.state_of(a)["phase"] == "UNKNOWN"
+    assert fake.state_of(a)["full_tree_clean"] == "not_proven"
+    assert fake.commit_delivery(a) == "quarantined"
+    assert fake.quarantined
+    assert fake.fake_starts == 1
+
+
+def test_r003_zero_epoch_copied_active_consent_cannot_start():
+    journal = MemoryJournal()
+    bogus = OfflineS1._new_state()
+    bogus["consent_active"] = True
+    assert bogus["consent_epoch"] == 0
+    journal.commit(bogus)
+    boot = OfflineS1(journal)
+    assert boot.quarantined
+    assert not boot.state["available"]
+    assert journal.snapshot == bogus  # retain suspect snapshot as evidence
+    with pytest.raises(Denied):
+        boot.prepare()
+    assert boot.fake_starts == 0
+
+
+@pytest.mark.parametrize("bad_schema", [2.0, "2", True])
+def test_r003_non_integer_schema_never_accepted_as_version_two(bad_schema):
+    journal = MemoryJournal()
+    source = OfflineS1._new_state()
+    source["state_schema"] = bad_schema
+    source["consent_active"] = True
+    source["consent_epoch"] = 1
+    journal.commit(source)
+    boot = OfflineS1(journal)
+    assert boot.quarantined
+    with pytest.raises(Denied):
+        boot.prepare()
+
+
+@pytest.mark.parametrize("bad_phase", [[], {"stage": "RUNNING"}])
+def test_r003_unhashable_phase_is_conservative_boot_not_exception(fake, bad_phase):
+    a = _limited(fake)
+    snapshot = fake.journal.read()
+    snapshot["attempts"][a.attempt_id]["phase"] = bad_phase
+    fake.journal.commit(snapshot)
+    boot = OfflineS1(fake.journal)
+    assert boot.quarantined
+    assert not boot.state["available"]
+    assert fake.journal.snapshot == snapshot  # no forced forensic rewrite
+    with pytest.raises(Denied):
+        boot.prepare()
+
+
+def test_r003_two_clean_restarts_have_distinct_persisted_owner_epochs(fake):
+    before = fake.state["owner_generation"]
+    boot_one = OfflineS1(fake.journal)
+    boot_two = OfflineS1(fake.journal)
+    assert not boot_one.quarantined
+    assert not boot_two.quarantined
+    assert boot_one.state["owner_generation"] == before + 1
+    assert boot_two.state["owner_generation"] == before + 2
+    assert fake.journal.read()["owner_generation"] == before + 2
+    a = boot_two.prepare()
+    boot_two.dispatch(a)
+    assert boot_two.fake_starts == 1
+
+
+def test_r003_clean_boot_owner_epoch_commit_failure_denies(fake):
+    fake.journal.fail_next_commit = True
+    boot = OfflineS1(fake.journal)
+    assert boot.quarantined
+    assert fake.journal.unresolved_failed_commit
+    with pytest.raises(Denied):
+        boot.prepare()
+    second_boot = OfflineS1(fake.journal)
+    assert second_boot.quarantined
+    with pytest.raises(Denied):
+        second_boot.prepare()
+
+
+def test_r003_same_epoch_true_booleans_remain_limited_not_full(fake):
+    a = fake.prepare()
+    fake.dispatch(a)
+    fake.retire_limited(a, fake_leader_reaped=True, fake_group_absent=True)
+    assert fake.state_of(a)["phase"] == "RETIRED_LIMITED"
+    assert fake.state_of(a)["full_tree_clean"] == "not_proven"
+    assert fake.commit_delivery(a) == "limited"
+    assert not fake.quarantined

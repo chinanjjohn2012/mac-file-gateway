@@ -1004,3 +1004,92 @@ def test_r003_same_epoch_true_booleans_remain_limited_not_full(fake):
     assert fake.state_of(a)["full_tree_clean"] == "not_proven"
     assert fake.commit_delivery(a) == "limited"
     assert not fake.quarantined
+
+
+# S1 T0 P3-only byte accounting cases. These use a synthetic JSON-like
+# footprint, never actual disk writes, fsync, OS process or signal.
+def test_s1_t0_per_attempt_4096_byte_cap_denies_new_intent_and_boot():
+    journal = MemoryJournal()
+    fake = OfflineS1(journal)
+    fake.approve_local()
+    fake.change_binding(exec_scope="allowed-" + "x" * 5000)
+    fake.approve_local()
+    old = journal.read()
+    assert not old["attempts"]
+    with pytest.raises(DurabilityUnavailable, match="fake journal capacity"):
+        fake.prepare()
+    assert fake.fake_starts == 0
+    assert fake.quarantined
+    assert journal.unresolved_failed_commit
+    assert journal.snapshot == old  # no silent tombstone GC or false commit
+    boot = OfflineS1(journal)
+    assert boot.quarantined
+    with pytest.raises(Denied):
+        boot.prepare()
+
+
+def test_s1_t0_total_16mib_model_with_smaller_fixture_limit_fails_closed():
+    import json
+
+    journal = MemoryJournal()
+    fake = OfflineS1(journal)
+    fake.approve_local()
+    before = journal.read()
+    size = len(json.dumps(before, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False).encode("utf-8"))
+    journal.max_total_bytes = size + 12
+    with pytest.raises(DurabilityUnavailable, match="fake journal capacity"):
+        fake.late_positive_survivor("f" * 32)
+    assert journal.unresolved_failed_commit
+    assert fake.quarantined
+    assert journal.read() == before
+    reboot = OfflineS1(journal)
+    assert reboot.quarantined
+    with pytest.raises(Denied):
+        reboot.prepare()
+
+
+def test_s1_t0_orphan_repeat_does_not_grow_unbounded_evidence(fake):
+    fake.late_positive_survivor("f" * 32)
+    frozen = fake.journal.read()
+    for _ in range(20):
+        fake.late_positive_survivor("e" * 32)
+    assert fake.state["events"] == frozen["events"]
+    assert fake.fake_starts == 0
+    assert fake.quarantined
+
+
+def test_s1_t0_exact_total_byte_boundary_allows_same_size_safe_revision(fake):
+    import json
+
+    journal = fake.journal
+    before = journal.read()
+    exact_size = len(json.dumps(before, sort_keys=True, separators=(",", ":"),
+                                ensure_ascii=False).encode("utf-8"))
+    journal.max_total_bytes = exact_size
+    fake.edit_workspace("mutable-b")  # same byte count as initial mutable-a
+    assert not fake.quarantined
+    assert journal.read()["source_revision"] == "mutable-b"
+    with pytest.raises(DurabilityUnavailable, match="fake journal capacity"):
+        fake.edit_workspace("a" * 1000)
+    assert fake.quarantined
+    assert journal.unresolved_failed_commit
+
+
+def test_s1_t0_byte_quota_defaults_and_corrupt_existing_snapshot_boot_denied():
+    import json
+
+    journal = MemoryJournal()
+    assert journal.max_record_bytes == 4096
+    assert journal.max_total_bytes == 16 * 1024 * 1024
+    fake = OfflineS1(journal)
+    fake.approve_local()
+    saved = journal.read()
+    journal.max_total_bytes = len(json.dumps(
+        saved, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")) - 1
+    boot = OfflineS1(journal)
+    assert boot.quarantined
+    with pytest.raises(Denied):
+        boot.prepare()
+    assert fake.fake_starts == 0

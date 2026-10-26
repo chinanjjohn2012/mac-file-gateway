@@ -499,3 +499,129 @@ def test_negative_no_production_backend_or_real_os_side_effects():
         pure.dispatch(profile="native_limited", proof=True)
     assert pure.fake_starts == 0
     assert pure.fake_signals == 0
+
+
+# r002 B/C independently derived counterexamples. Append tests first to obtain
+# original RED on old S1 model before making the implementation safe.
+def test_b85_p2_01_foreign_phase_boot_blocks_consent(fake):
+    a = _limited(fake)
+    snap = fake.journal.read()
+    snap["attempts"][a.attempt_id]["phase"] = "FOREIGN_PHASE"
+    fake.journal.commit(snap)
+    boot = OfflineS1(fake.journal)
+    assert boot.quarantined
+    assert boot.fake_starts == 0
+    with pytest.raises(Denied):
+        boot.prepare()
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"), [
+        ("state_schema", 999),
+        ("state_schema", None),
+        ("profile", "strict_f3"),
+        ("backend_version", "unsupported-fake-backend"),
+    ],
+)
+def test_b85_p2_01_unknown_version_profile_backend_boot_blocks(fake, field, invalid):
+    snap = fake.journal.read()  # a valid, active consent, no running attempt
+    if invalid is None:
+        snap.pop(field, None)
+    else:
+        snap[field] = invalid
+    fake.journal.commit(snap)
+    boot = OfflineS1(fake.journal)
+    assert boot.quarantined
+    assert boot.fake_starts == 0
+    with pytest.raises(Denied):
+        boot.prepare()
+
+
+def test_b85_p2_01_missing_record_fields_cold_boot_is_safe(fake):
+    snap = fake.journal.read()
+    snap["attempts"]["1" * 32] = {"ticket": {"attempt_id": "1" * 32}}
+    fake.journal.commit(snap)
+    boot = OfflineS1(fake.journal)
+    assert boot.quarantined
+    with pytest.raises(Denied):
+        boot.prepare()
+
+
+def test_b85_p2_02_failed_revoke_commit_then_empty_boot_never_rearms(fake):
+    initial = fake.journal.read()
+    assert initial["consent_active"] and not initial["attempts"]
+    fake.journal.fail_next_commit = True
+    with pytest.raises(DurabilityUnavailable):
+        fake.revoke_local()
+    assert fake.quarantined
+    assert fake.journal.snapshot == initial  # failed commit left older consent
+    reboot = OfflineS1(fake.journal)
+    assert reboot.quarantined
+    assert reboot.fake_starts == 0
+    with pytest.raises(Denied):
+        reboot.prepare()
+
+
+def test_b85_p2_02_failed_binding_revoke_then_boot_stays_closed(fake):
+    fake.journal.fail_next_commit = True
+    with pytest.raises(DurabilityUnavailable):
+        fake.change_binding(root=(403, 404))
+    reboot = OfflineS1(fake.journal)
+    assert reboot.quarantined
+    with pytest.raises(Denied):
+        reboot.prepare()
+    assert reboot.fake_starts == 0
+
+
+def test_c85_p2_reissue_during_running_fences_old_finalization(fake):
+    a = fake.prepare()
+    fake.dispatch(a)
+    assert fake.state_of(a)["phase"] == "RUNNING"
+    assert fake.approve_local() == 2  # a new consent epoch is not A's grant
+    with pytest.raises(Denied):
+        fake.retire_limited(a, fake_leader_reaped=True, fake_group_absent=True)
+    assert fake.state_of(a)["phase"] == "UNKNOWN"
+    assert fake.quarantined
+    assert fake.commit_delivery(a) == "quarantined"
+    assert fake.state_of(a)["full_tree_clean"] == "not_proven"
+    assert fake.fake_starts == 1
+
+
+def test_c85_p2_valid_same_epoch_retirement_remains_legal(fake):
+    a = _limited(fake)
+    assert fake.state_of(a)["phase"] == "RETIRED_LIMITED"
+    assert fake.state_of(a)["full_tree_clean"] == "not_proven"
+    assert fake.commit_delivery(a) == "limited"
+    assert not fake.quarantined
+
+
+def test_c85_p2_late02_restarts_owner_before_old_a_observer(fake):
+    a = _limited(fake)
+    assert fake.commit_delivery(a, ack=True) == "limited"
+    b = fake.prepare()
+    fake.dispatch(b, lose_ack=True)
+    old_owner = fake.state["owner_generation"]
+    assert fake.fake_starts == 2  # A and B dispatched BEFORE restart
+    reboot = OfflineS1(fake.journal)
+    assert reboot.state["owner_generation"] == old_owner + 1
+    assert reboot.quarantined  # unretired B and limited A are uncertain
+    with pytest.raises(Denied, match="stale"):
+        reboot.dispatch(b)
+    reboot.late_positive_survivor(a.attempt_id)  # trusted synthetic observer
+    assert reboot.state_of(a)["phase"] == "UNKNOWN"
+    assert reboot.state_of(a)["delivery_committed"] == "limited"
+    assert reboot.state_of(b)["phase"] == "UNKNOWN"
+    assert reboot.fake_starts == 0  # never attribute preboot B as fresh launch
+    assert reboot.fake_signals == 0
+    with pytest.raises(Denied):
+        reboot.prepare()
+
+
+def test_b85_p2_01_legal_clean_consent_boot_still_dispatches(fake):
+    before_epoch = fake.state["consent_epoch"]
+    reboot = OfflineS1(fake.journal)
+    assert not reboot.quarantined
+    assert reboot.state["consent_epoch"] == before_epoch
+    a = reboot.prepare()
+    reboot.dispatch(a)
+    assert reboot.fake_starts == 1

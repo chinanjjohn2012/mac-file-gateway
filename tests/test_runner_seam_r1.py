@@ -212,9 +212,19 @@ def test_r1_protocol_source_has_no_process_or_network_implementations():
     assert not hasattr(RunnerCoordinator(), "terminate_and_prove")
 
 
-def test_f1_is_not_wired_to_new_seam_and_durable_schema_v1_is_unchanged():
+def test_f1_only_wires_inert_denial_and_durable_schema_v1_is_unchanged():
     source = inspect.getsource(WorkspaceService.invoke_exec)
-    assert "runner_seam" not in inspect.getsource(WorkspaceService)
+    assert "RunnerCoordinator()" in inspect.getsource(WorkspaceService.__init__)
+    assert "deny_unqualified_apply()" in source
     assert "exec_cleanup_proof_required" in source
     assert source.index("if not dry_run:") < source.index("if name in self._exec_active")
+    assert "runner_seam" in inspect.getsource(seam)
     assert _PHASES == {"PREPARED", "RUNNING", "UNKNOWN", "RETIRED"}
+
+
+def test_production_decision_is_always_denied_even_after_forged_full_evidence():
+    coordinator = RunnerCoordinator()
+    assert coordinator.deny_unqualified_apply() == AdmissionDecision()
+    fake = CleanupEvidence(scope="full_bound_domain", full_descendant_tree_clean="proven")
+    assert fake.full_descendant_tree_clean == "proven"
+    assert coordinator.deny_unqualified_apply().allowed is False

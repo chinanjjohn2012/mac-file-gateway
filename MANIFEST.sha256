@@ -8,6 +8,7 @@ deb25674f304104b8e41cf70e1431c1b7bdc18943f4e1aedf7610f95171f6d7c  ./.github/work
 ce9fe947ce301fbc79ce522bf1012bb2b5bec9f60c81c1cabda1bb80e5e46575  ./.github/workflows/multi-exec-r1-a0-macos-arm64.yml
 a1706a650e6f2804a1fd99187d85bae93267ca0e04744805ab7c6c28a44cd08f  ./.github/workflows/multi-exec-r1-red.yml
 cbf50c5750fc83b69cbcd4e43ed116eefda12a1ef91c45f0d5706dd5df25a15a  ./.github/workflows/multi-exec-r2-t02-admission-red.yml
+f970be05ef76a4161e0ae05ba574e767fbb21abb1a634612c04b0404fe26d0ff  ./.github/workflows/multi-exec-r2s-s2-macos-arm64.yml
 a248a4a4ac7da92f555f034bbb9637fb77fab91a7078f5d093366cf8a937f88f  ./.github/workflows/sensitive-content-macos.yml
 ef06acea97a3c12d0a236a36d6d1bd74b735c62b712e3ad69e50c6f87ac90b90  ./.gitignore
 fffd94c70313a5e83590207596735c9c56ae744343f88ee9e875cfb506ecb708  ./BUILD_INFO.json
@@ -104,6 +105,7 @@ ef8da654ca40d588678a6530a5e3ad910373fe47ebfa00c5fc921d55736278f4  ./gateway/mult
 6aa7f73525d75bc1f045fa61ed5c8d11ec8d20ad75ac54f27e5f8f294d799321  ./gateway/multi_fields.py
 bb79f96059a70afae1846e51f7baf281e9f64e1dc7367f3387df4d16cccf4112  ./gateway/private_fs.py
 aa6fefa3f692fd91dc70f5dbcfddc3e7651715e6a06ee75673024542e6104069  ./gateway/python_values.py
+22400d33ec04e176ed19f95cdd5f09338a621001f547e99e981ec443c661a9b9  ./gateway/r2s_state_s2.py
 505fe05321dc037932d9affe3ef22430d5d0c983f7afe99a8eb42ac780515a32  ./gateway/runner_seam.py
 1aa012aa17fd0aa8aa787c5bfb8b8fcfc4fb245db5e41d014e41cd58d2ccdb77  ./gateway/sensitive_audit.py
 079ad6262cd37521fa193924e79e7f3030e2834727dcc9121a5786a673c5fc89  ./gateway/visibility.py
@@ -203,6 +205,7 @@ fc6af6165b710b2b377989b9651ee92f4c2ec9b584e2df07a6e1bef9f9829bf9  ./tests/test_p
 e7964276adb716be32fc0c898b4192cf151992ed744165480e662d172cc2dc01  ./tests/test_phase1_workspaces.py
 5c5579c0c9b9363ca5cacdb65aefad0dbe37cf2c272bb2239d81469c2eb124f4  ./tests/test_phase1_workspaces_config.py
 088891fd3835c39f4b4c940f62d709e938d4a331c364beb5f0adf6d046dca96a  ./tests/test_r2s_s1_offline.py
+9f4afddebdbdbcec622f98188949db627e9c2cca60dbe563ff71db512feacef2  ./tests/test_r2s_s2_private_fs.py
 f03bc8d2a4442734bc0c5dade463b7fc63c82582fe5de98c4dd9438d6e4ac12c  ./tests/test_runner_seam_r1.py
 707ea577b30627d7c58a2b22c1442aca2b216537b156db2ed61135b69cce575a  ./tests/test_sensitive_content_regression.py
 8f021953af22ee4d733f5f63b41d58c7193fbcb89ef369d48cb931b8ba37ed5f  ./tests/test_sensitive_content_status.py

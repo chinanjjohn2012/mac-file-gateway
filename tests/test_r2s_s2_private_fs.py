@@ -89,6 +89,55 @@ def test_s2_clean_restart_rotates_owner_but_keeps_fake_consent(isolated):
         assert restarted.snapshot()["attempts"][ticket.attempt_id]["phase"] == "UNKNOWN"  # old owner cannot preserve live PREPARED
 
 
+def test_s2_reapproval_with_outstanding_prepared_fences_prior_ticket(isolated):
+    # Re-consent is a different epoch and may not grandfather an old PREPARED
+    # record. Persist UNKNOWN/quarantine even though nothing can spawn here.
+    with open_s2(isolated) as s:
+        s.approve_fake()
+        old = s.prepare_offline()
+        with pytest.raises(S2Blocked, match="unresolved|prepared|fenced"):
+            s.approve_fake()
+        v = s.snapshot()
+        assert v["consent_epoch"] == 2
+        assert not v["consent_active"]
+        assert v["quarantined"]
+        assert v["attempts"][old.attempt_id]["phase"] == "UNKNOWN"
+        assert v["attempts"][old.attempt_id]["token"] == old.token
+        with pytest.raises(S2Blocked):
+            s.prepare_offline()
+    with open_s2(isolated) as s:
+        assert s.status == "quarantined"
+        assert s.snapshot()["attempts"][old.attempt_id]["phase"] == "UNKNOWN"
+
+
+def test_s2_reconsent_without_unresolved_ticket_stays_valid(isolated):
+    with open_s2(isolated) as s:
+        s.approve_fake()
+        s.approve_fake()
+        assert s.status == "healthy"
+        assert s.snapshot()["consent_epoch"] == 2
+        assert s.prepare_offline().consent_epoch == 2
+
+
+def test_s2_mismatched_workspace_on_boot_cannot_inherit_old_consent(isolated):
+    root, _ = isolated
+    with open_s2(isolated) as s:
+        s.approve_fake()
+        old = s.snapshot()["binding"]
+    foreign = root.parent.parent / "replacement-workspace"
+    foreign.mkdir(mode=0o700)
+    with S2PrivateState(root, workspace_root=foreign) as imported:
+        v = imported.snapshot()
+        assert imported.status == "quarantined"
+        assert v["binding"] == old  # forensic identity retained
+        assert not v["consent_active"]
+        assert v["quarantined"]
+        with pytest.raises(S2Blocked):
+            imported.prepare_offline()
+    with open_s2(isolated) as again:
+        assert again.status == "quarantined"  # no automatic reapproval
+
+
 def test_s2_revoke_after_prepared_durably_fences_without_any_dispatch(isolated):
     with open_s2(isolated) as s:
         s.approve_fake()

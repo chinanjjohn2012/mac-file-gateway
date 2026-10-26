@@ -216,6 +216,16 @@ class S2PrivateState:
             # A valid PREPARED from an earlier owner is uncertain, not replayable.
             next_value = deepcopy(self._value)
             next_value["owner_generation"] = uuid4().hex
+            # A valid-looking persisted fake consent may belong to a different
+            # pinned Workspace. Never expose that copied binding as healthy
+            # after taking a new owner lease; retain the old binding for audit.
+            binding = next_value["binding"]
+            if binding is not None:
+                ws = os.fstat(self._workspace_fd)
+                if (binding["dev"] != ws.st_dev or binding["ino"] != ws.st_ino
+                        or not self._workspace_still_pinned()):
+                    next_value["consent_active"] = False
+                    next_value["quarantined"] = True
             # The former owner's PREPARED ticket has no surviving lease or
             # permission to advance. Persist UNKNOWN rather than carrying a
             # misleading live PREPARED phase into the new owner generation.
@@ -378,6 +388,18 @@ class S2PrivateState:
             v = self.snapshot()
             v["binding"] = binding
             v["consent_epoch"] += 1
+            # Reapproval is an epoch transition, not a grandfathered start
+            # permission for tickets prepared under the old epoch. Persist
+            # those old tickets as UNKNOWN and reject this reapproval, rather
+            # than leaving a misleading live PREPARED intent behind.
+            if any(r["phase"] == "PREPARED" for r in v["attempts"].values()):
+                for record in v["attempts"].values():
+                    if record["phase"] == "PREPARED":
+                        record["phase"] = "UNKNOWN"
+                v["consent_active"] = False
+                v["quarantined"] = True
+                self._save(v)
+                raise S2Blocked("unresolved offline ticket fenced on reapproval")
             v["consent_active"] = True
             self._save(v)
 

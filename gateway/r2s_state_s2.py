@@ -30,7 +30,8 @@ class S2Unavailable(S2Blocked):
 _DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _READ = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
 _NEW = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
-_LOCK = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+_LOCK = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
+_LOCK_INITIAL = _LOCK | os.O_CREAT | os.O_EXCL
 _UUID = re.compile(r"[a-f0-9]{32}\Z")
 _SCOPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _STORE_NAME = "exec-state-s2-candidate"
@@ -40,7 +41,7 @@ _LIMIT_COUNT = 4096
 _LIMIT_TOTAL = 16 * 1024 * 1024
 _ROOT_FIELDS = frozenset({"schema_version", "consent_epoch", "consent_active",
                           "binding", "owner_generation", "attempts", "quarantined",
-                          "orphan_positive"})
+                          "orphan_positive", "owner_active", "lock_identity"})
 _ATTEMPT_FIELDS = frozenset({"consent_epoch", "owner_generation", "token",
                              "binding", "phase", "cleanup_scope", "delivered",
                              "late_positive"})
@@ -99,13 +100,20 @@ def _strict_state(value: object, *, max_records: int, max_total: int) -> None:
     epoch = value["consent_epoch"]
     if type(epoch) is not int or not 0 <= epoch <= 2**63 - 1:
         raise ValueError("invalid consent epoch")
-    if type(value["consent_active"]) is not bool or type(value["quarantined"]) is not bool:
-        raise ValueError("invalid consent/fence flags")
+    if (type(value["consent_active"]) is not bool
+            or type(value["quarantined"]) is not bool
+            or type(value["owner_active"]) is not bool):
+        raise ValueError("invalid consent/fence/owner-lease flags")
     if type(value["orphan_positive"]) is not bool or (value["orphan_positive"] and not value["quarantined"]):
         raise ValueError("orphan observation must quarantine")
     if ((value["consent_active"] and (epoch == 0 or not _valid_binding(value["binding"])))
             or (value["binding"] is not None and not _valid_binding(value["binding"]))):
         raise ValueError("invalid or copied active consent")
+    lock_identity = value["lock_identity"]
+    if (type(lock_identity) is not dict or set(lock_identity) != {"dev", "ino"}
+            or any(type(lock_identity[k]) is not int or lock_identity[k] <= 0
+                   for k in ("dev", "ino"))):
+        raise ValueError("invalid owner lock identity")
     if type(value["owner_generation"]) is not str or not _UUID.fullmatch(value["owner_generation"]):
         raise ValueError("invalid owner generation")
     attempts = value["attempts"]
@@ -125,9 +133,12 @@ def _strict_state(value: object, *, max_records: int, max_total: int) -> None:
                 or type(record["delivered"]) is not bool
                 or type(record["late_positive"]) is not bool):
             raise ValueError("invalid attempt identity")
-        if type(record["phase"]) is not str or record["phase"] not in ("PREPARED", "UNKNOWN", "RETIRED_LIMITED"):
+        # S2 is NONSPAWNING: no reviewed Limited backend, observation or
+        # retirement writer exists. A well-shaped imported LIMITED record is
+        # forged/unqualified evidence; reject it before any boot mutation.
+        if type(record["phase"]) is not str or record["phase"] not in ("PREPARED", "UNKNOWN"):
             raise ValueError("unqualified attempt phase")
-        if (record["cleanup_scope"] != ("original_group_only" if record["phase"] == "RETIRED_LIMITED" else "none")
+        if (record["cleanup_scope"] != "none"
                 or (record["late_positive"] and record["phase"] != "UNKNOWN")
                 or (record["phase"] == "UNKNOWN" and not value["quarantined"])):
             raise ValueError("cleanup/uncertainty mismatch")
@@ -185,16 +196,30 @@ class S2PrivateState:
             parent = _pin(os.path.dirname(raw))
             try:
                 _private_directory(parent)
+                created = False
                 try:
                     os.mkdir(_STORE_NAME, 0o700, dir_fd=parent)
                     os.fsync(parent)
+                    created = True
                 except FileExistsError:
                     pass
                 self._fd = os.open(_STORE_NAME, _DIR, dir_fd=parent)
             finally:
                 os.close(parent)
             _private_directory(self._fd)
-            self._lock_fd = os.open("owner.lock", _LOCK, 0o600, dir_fd=self._fd)
+            prior_names = set(os.listdir(self._fd))
+            # Never create a second lock inode for a pre-existing v2 state.
+            # A missing/unlinked owner.lock would permit split-brain flock
+            # ownership and could resurrect an active fake consent.
+            if created:
+                if prior_names:
+                    raise S2Blocked("new private root was not empty")
+                lock_flags = _LOCK_INITIAL
+            else:
+                if "owner.lock" not in prior_names or _STATE_NAME not in prior_names:
+                    raise S2Blocked("foreign or interrupted v2 state: owner/state lock absent")
+                lock_flags = _LOCK  # NO O_CREAT for an existing state root
+            self._lock_fd = os.open("owner.lock", lock_flags, 0o600, dir_fd=self._fd)
             self._check_file(self._lock_fd, size_limit=None)
             lock = os.fstat(self._lock_fd)
             self._lock_identity = (lock.st_dev, lock.st_ino)
@@ -205,6 +230,12 @@ class S2PrivateState:
                 raise S2Blocked("foreign or interrupted v2 state; offline inspection required")
             if _STATE_NAME in names:
                 self._value = self._read_state()
+                # Persisted owner-lock identity must survive a clean restart.
+                # A same-name replacement inode is NOT continuity, even if it
+                # is 0600, owned by this UID, and can acquire a new flock.
+                saved_lock = self._value["lock_identity"]
+                if (saved_lock["dev"], saved_lock["ino"]) != self._lock_identity:
+                    raise S2Blocked("owner lock inode was replaced")
                 self._state_identity = self._identity(os.stat(
                     _STATE_NAME, dir_fd=self._fd, follow_symlinks=False))
             else:
@@ -212,10 +243,21 @@ class S2PrivateState:
                     "schema_version": 2, "consent_epoch": 0, "consent_active": False,
                     "binding": None, "owner_generation": uuid4().hex,
                     "attempts": {}, "quarantined": False, "orphan_positive": False,
+                    "owner_active": False,
+                    "lock_identity": {"dev": lock.st_dev, "ino": lock.st_ino},
                 }
             # A valid PREPARED from an earlier owner is uncertain, not replayable.
             next_value = deepcopy(self._value)
             next_value["owner_generation"] = uuid4().hex
+            # Pre-pending OSError/ENOSPC cannot leave any new filesystem byte.
+            # Hence the only safe cross-restart fence is a PRE-COMMITTED
+            # owner-active bit, durably set at owner acquisition BEFORE any
+            # admission, approval or revocation. Only a successful clean close
+            # seals this bit false. Failed transitions MUST NOT seal it.
+            if next_value["owner_active"]:
+                next_value["consent_active"] = False
+                next_value["quarantined"] = True
+            next_value["owner_active"] = True
             # A valid-looking persisted fake consent may belong to a different
             # pinned Workspace. Never expose that copied binding as healthy
             # after taking a new owner lease; retain the old binding for audit.
@@ -359,6 +401,15 @@ class S2PrivateState:
         if (self._closed or os.getpid() != self._pid or self._status != "healthy"):
             raise S2Blocked("v2 state not healthy; no offline admission")
 
+    def _require_forensic_owner(self) -> None:
+        # Late trusted SYNTHETIC attribution is allowed while quarantined,
+        # unlike new admission. The held lock, session and state inodes are
+        # still verified by the following _commit. No retry or unlock path.
+        if (self._closed or os.getpid() != self._pid
+                or self._status not in ("healthy", "quarantined")
+                or self._fd < 0 or self._lock_fd < 0):
+            raise S2Blocked("v2 forensic owner unavailable")
+
     def _save(self, value: dict) -> None:
         self._commit(value)
         self._value = value
@@ -452,7 +503,7 @@ class S2PrivateState:
     def late_positive_fake(self, ticket: OfflineTicket | None) -> None:
         """Trusted synthetic positive/orphan event; NO OS observer or signal."""
         with self._gate:
-            self._require()
+            self._require_forensic_owner()
             v = self.snapshot()
             record = (v["attempts"].get(ticket.attempt_id)
                       if type(ticket) is OfflineTicket else None)
@@ -471,6 +522,21 @@ class S2PrivateState:
     def close(self) -> None:
         with self._gate:
             if not self._closed:
+                # Successful, ordered shutdown is the ONLY way to seal the
+                # owner-active marker and retain fake consent across a clean
+                # restart. A failed I/O/faulted transition leaves it dirty,
+                # even if the pending-file creation itself failed (ENOSPC).
+                # If the sealing commit fails, do not hide prior exceptions or
+                # falsely treat the next boot as clean.
+                if (os.getpid() == self._pid
+                        and self._status in ("healthy", "quarantined")
+                        and self._value is not None and self._fd >= 0):
+                    try:
+                        sealed = deepcopy(self._value)
+                        sealed["owner_active"] = False
+                        self._save(sealed)
+                    except (S2Blocked, S2Unavailable, OSError, ValueError):
+                        self._status = "unavailable"
                 self._closed = True
                 for key in ("_lock_fd", "_fd", "_workspace_fd"):
                     fd = getattr(self, key)

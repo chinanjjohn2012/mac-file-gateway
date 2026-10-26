@@ -1,5 +1,15 @@
 # Multi-Workspace Exec R1-A0: non-spawning Runner seam and T0 contracts
 
+**Historical scope note:** This document describes the original R1-A0 inert
+snapshot on PR #80 only, where the coordinator was not wired into
+WorkspaceService. The later cumulative R1-stage integration on the distinct
+stage PR adds a **denial-only** synchronous Worker hook; the F1 public
+response remains hard-coded to reject, before any Worker slot or PREPARED.
+For the actual stage review target and combined source scope, see
+`docs/MULTI_WORKSPACE_EXEC_R1_STAGE_GATE.md`. This historical A0
+description is NOT a claim that the current integrated stage has no
+WorkspaceService import.
+
 **Status: R1-A0 CODE CANDIDATE ONLY / NO POSITIVE EXEC / NO INTEGRATION OR ACTIVATION APPROVAL.**
 **Task:** MULTI-EXEC-R1-A0-NONSPAWNING-SEAM-20261026.
 **Source ancestry:** PR #79 exact reviewed CI/dev resolver Head

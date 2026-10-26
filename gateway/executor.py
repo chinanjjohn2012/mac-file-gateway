@@ -32,7 +32,7 @@ _SAFE_ENV_KEYS = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE")
 _MAX_ARGV = 64
 _MAX_ARG_CHARS = 1_024
 _MAX_ARGV_CHARS = 8_192
-_MAX_OUTPUT_CHARS = 48_000
+_MAX_OUTPUT_CHARS = 1_048_576
 
 
 def _parse_scope(value: str) -> tuple[str, ...]:

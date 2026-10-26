@@ -58,9 +58,16 @@ The gateway passes an argv array directly to `subprocess.Popen(..., shell=False)
 - timeout: 1-300 seconds, default 60
 - timeout termination: process group kill
 - stdout/stderr: continuously drained with bounded retained bytes
-- returned output: best-effort credential line redaction and 48k-character cap per stream
+- returned output: best-effort credential line redaction and a fixed 1,048,576-character cap per stream (stdout and stderr independently); no extra configuration is required
 - inherited environment: small allowlist only; `VIRTUAL_ENV` and common secret variables are not inherited
 - Pipenv: gateway sets `PIPENV_PIPFILE` and uses `pipenv run`
+
+The character limit applies after UTF-8 decoding and redaction. Retained raw
+bytes remain bounded to four times that limit per stream, while excess bytes
+are continuously drained. Outputs above either limit set `stdout_truncated`
+or `stderr_truncated`; `exit_code=0` alone does not prove that an inventory or
+test log was returned in full. File read/search pagination and Local Skill
+Bridge output limits are separate from this controlled-command limit.
 
 ## Security boundary
 

@@ -17,6 +17,8 @@ from gateway.git_policy import (
      ("diff", "--cached", "--stat", "--", ":(literal)-file")),
     ("log", {}, [], ("log", "--max-count=20")),
     ("rev-parse", {}, [], ("--no-lazy-fetch", "rev-parse", "--verify", "HEAD^{tree}")),
+    ("rev-parse", {"target": "tree"}, [], ("--no-lazy-fetch", "rev-parse", "--verify", "HEAD^{tree}")),
+    ("rev-parse", {"target": "head"}, [], ("--no-lazy-fetch", "rev-parse", "--verify", "HEAD^{commit}")),
     ("log", {"limit": 5, "oneline": True}, [], ("log", "--max-count=5", "--oneline")),
     ("branch", {"action": "list"}, [], ("branch", "--list")),
     ("branch", {"action": "create", "name": "topic/+x"}, [],
@@ -145,6 +147,10 @@ def test_preview_is_pure_and_clear_about_checks(monkeypatch):
     assert tree["options"] == {} and tree["paths"] == []
     assert tree["execute_started"] is False
     assert tree["repository_checked"] is False
+    head = preview_git("rev-parse", options={"target": "head"})
+    assert head["effective_argv"] == ["--no-lazy-fetch", "rev-parse", "--verify", "HEAD^{commit}"]
+    assert head["options"] == {"target": "head"}
+    assert head["execute_started"] is False and head["repository_checked"] is False
     result = preview_git("push", workspace="workspace-a", cwd="src",
                          options={"remote": "origin", "branch": "+main"})
     assert result["effective_argv"][-1] == "refs/heads/+main:refs/heads/+main"
@@ -171,4 +177,11 @@ def test_preview_is_pure_and_clear_about_checks(monkeypatch):
 def test_head_tree_rejects_all_options_and_nonempty_paths(options, paths):
     with pytest.raises(GatewayError) as exc:
         compile_git_command("rev-parse", options=options, paths=paths)
+    assert exc.value.code == "git_option_invalid"
+
+
+@pytest.mark.parametrize("target", [None, True, 1, [], {}, "", "HEAD", "HEAD~1", "main", "--git-dir"])
+def test_rev_parse_rejects_targets_outside_fixed_selector(target):
+    with pytest.raises(GatewayError) as exc:
+        compile_git_command("rev-parse", options={"target": target})
     assert exc.value.code == "git_option_invalid"

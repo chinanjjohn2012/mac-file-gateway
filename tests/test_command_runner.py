@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 
 import pytest
@@ -184,12 +185,50 @@ def test_timeout_kills_process_group(root, fake_bin):
 
 
 def test_output_is_bounded(root, fake_bin):
-    executable(fake_bin / "pytest", "i=0; while [ $i -lt 9000 ]; do printf 1234567890; i=$((i+1)); done")
+    (root / "service-c" / "large.txt").write_text("x" * 5_000_000)
+    executable(fake_bin / "pytest", "cat large.txt\ncat large.txt >&2\n")
     g = Gateway(root, allow_exec=True, exec_paths=("service-c",))
     try:
         result = g.run_command("service-c", ["pytest"], dry_run=False)
+        assert result["exit_code"] == 0 and not result["timed_out"]
         assert result["stdout_truncated"] is True
+        assert result["stderr_truncated"] is True
         assert len(result["stdout"]) <= result["output_limit_chars"]
+        assert len(result["stderr"]) <= result["output_limit_chars"]
+        assert result["stdout"].endswith("[...output truncated...]")
+        assert result["stderr"].endswith("[...output truncated...]")
+    finally:
+        g.close()
+
+
+def test_large_json_inventory_is_complete_on_both_streams(root, fake_bin):
+    entries = [{"path": f"src/module_{i}.py", "sha256": "a" * 64} for i in range(1000)]
+    payload = json.dumps({"entries": entries, "status": "complete"}, indent=2)
+    (root / "service-c" / "inventory.json").write_text(payload)
+    executable(fake_bin / "pytest", "cat inventory.json\ncat inventory.json >&2\n")
+    g = Gateway(root, allow_exec=True, exec_paths=("service-c",))
+    try:
+        result = g.run_command("service-c", ["pytest"], dry_run=False)
+        assert result["exit_code"] == 0 and not result["timed_out"]
+        assert len(payload) > 48_000
+        for stream in ("stdout", "stderr"):
+            assert not result[stream + "_truncated"]
+            assert result[stream] == payload
+            assert json.loads(result[stream])["entries"] == entries
+    finally:
+        g.close()
+
+
+def test_large_unicode_output_counts_characters_without_corruption(root, fake_bin):
+    payload = "\U0001f642" * 300_000 + "\ncomplete"
+    (root / "service-c" / "unicode.txt").write_text(payload)
+    executable(fake_bin / "pytest", "cat unicode.txt\n")
+    g = Gateway(root, allow_exec=True, exec_paths=("service-c",))
+    try:
+        result = g.run_command("service-c", ["pytest"], dry_run=False)
+        assert result["exit_code"] == 0
+        assert not result["stdout_truncated"]
+        assert result["stdout"] == payload
     finally:
         g.close()
 

@@ -1,6 +1,8 @@
 import os
+import json
 from pathlib import Path
 
+import pytest
 from starlette.testclient import TestClient
 
 from gateway.core import Gateway
@@ -61,5 +63,52 @@ def test_http_run_rejects_shell(tmp_path):
             r = c.post("/run", json={"cwd": "service-c", "argv": ["sh", "-c", "echo bad"], "dry_run": False})
             assert r.status_code == 403
             assert r.json()["error"] == "command_not_allowed"
+    finally:
+        g.close()
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+def test_http_large_command_output_returns_complete_json(tmp_path, monkeypatch, transport):
+    if transport == "mcp":
+        pytest.importorskip("mcp")
+    project = tmp_path / "project"
+    project.mkdir()
+    payload = {"entries": [{"path": f"module_{i}.py", "sha256": "a" * 64} for i in range(1000)]}
+    text = json.dumps(payload, indent=2)
+    (project / "inventory.json").write_text(text)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    executable(bin_dir / "pytest", "cat inventory.json\n")
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+    g = Gateway(project, allow_exec=True, exec_paths=(".",))
+    try:
+        with TestClient(create_app(g, enable_mcp=transport == "mcp"), base_url="http://127.0.0.1:8765") as client:
+            arguments = {"cwd": ".", "argv": ["pytest"], "dry_run": False}
+            if transport == "rest":
+                response = client.post("/run", json=arguments)
+                assert response.status_code == 200, response.text[:1000]
+                result = response.json()
+            else:
+                headers = {"Accept": "application/json, text/event-stream"}
+                initialized = client.post("/mcp", headers=headers, json={
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                        "protocolVersion": "2025-11-25", "capabilities": {},
+                        "clientInfo": {"name": "large-output-test", "version": "1"},
+                    },
+                })
+                assert initialized.status_code == 200, initialized.text[:1000]
+                client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+                response = client.post("/mcp", headers=headers, json={
+                    "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": {"name": "run_command", "arguments": arguments},
+                })
+                assert response.status_code == 200, response.text[:1000]
+                tool_result = response.json()["result"]
+                assert not tool_result.get("isError"), str(tool_result)[:1000]
+                result = tool_result["structuredContent"]
+            assert result["exit_code"] == 0
+            assert not result["stdout_truncated"]
+            assert json.loads(result["stdout"]) == payload
+            assert len(result["stdout"]) > 48_000
     finally:
         g.close()

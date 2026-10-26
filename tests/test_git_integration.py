@@ -79,8 +79,9 @@ def apply(service, workspace, command, *, options=None, paths=None, timeout=30):
 
 @pytest.mark.parametrize("object_format", ["sha1", "sha256"])
 @pytest.mark.parametrize("detached", [False, True])
+@pytest.mark.parametrize("target", ["tree", "head"])
 def test_head_tree_is_native_committed_tree_and_preserves_dirty_state(
-    tmp_path, object_format, detached,
+    tmp_path, object_format, detached, target,
 ):
     repo, a, b, control, service = fixture(
         tmp_path, grants={"a": ["rev-parse"], "b": ["log"]},
@@ -90,8 +91,10 @@ def test_head_tree_is_native_committed_tree_and_preserves_dirty_state(
         if detached:
             git(repo, "checkout", "--detach", "-q")
         # Independent native commit-object evidence, not a gateway-derived hash.
-        expected = git(repo, "cat-file", "-p", "HEAD").splitlines()[0].split()[1]
-        assert expected == git(repo, "rev-parse", "HEAD^{tree}")
+        revision = "HEAD^{commit}" if target == "head" else "HEAD^{tree}"
+        expected = (git(repo, "rev-parse", "HEAD") if target == "head"
+                    else git(repo, "cat-file", "-p", "HEAD").splitlines()[0].split()[1])
+        assert expected == git(repo, "rev-parse", revision)
         (a / "one.txt").write_text("staged change\n")
         git(repo, "add", "a/one.txt")
         (a / "one.txt").write_text("unstaged change\n")
@@ -99,11 +102,11 @@ def test_head_tree_is_native_committed_tree_and_preserves_dirty_state(
         index = (repo / ".git" / "index").read_bytes()
         before = git(repo, "status", "--porcelain=v1")
         head = git(repo, "rev-parse", "HEAD")
-        result = apply(service, "a", "rev-parse")
+        result = apply(service, "a", "rev-parse", options={"target": target})
         assert result["exit_code"] == 0, result["stderr"]
         assert result["stdout"] == expected + "\n"
         assert len(expected) == {"sha1": 40, "sha256": 64}[object_format]
-        assert result["effective_argv"] == ["--no-lazy-fetch", "rev-parse", "--verify", "HEAD^{tree}"]
+        assert result["effective_argv"] == ["--no-lazy-fetch", "rev-parse", "--verify", revision]
         assert result["output_truncated"] is False and result["timed_out"] is False
         assert (repo / ".git" / "index").read_bytes() == index
         assert git(repo, "status", "--porcelain=v1") == before
@@ -119,8 +122,9 @@ def test_head_tree_is_native_committed_tree_and_preserves_dirty_state(
 
 
 @pytest.mark.parametrize("missing_object", ["tree", "commit"])
+@pytest.mark.parametrize("target", ["tree", "head"])
 def test_head_tree_missing_promised_object_fails_without_fetch_or_object_writes(
-    tmp_path, missing_object,
+    tmp_path, missing_object, target,
 ):
     repo, a, b, control, service = fixture(tmp_path, grants={"a": ["rev-parse"]})
     try:
@@ -131,13 +135,18 @@ def test_head_tree_missing_promised_object_fails_without_fetch_or_object_writes(
         git(repo, "push", "-q", "origin", "HEAD:refs/heads/main")
         oid = git(repo, "rev-parse", "HEAD^{tree}" if missing_object == "tree" else "HEAD")
         git(repo, "config", "remote.origin.promisor", "true")
+        head = git(repo, "rev-parse", "HEAD")
         objects = repo / ".git" / "objects"
         (objects / oid[:2] / oid[2:]).unlink()
         before = {p.relative_to(objects): p.read_bytes()
                   for p in objects.rglob("*") if p.is_file()}
-        result = apply(service, "a", "rev-parse")
-        assert result["exit_code"] != 0, "A read-only query must not fetch missing objects"
-        assert result["stdout"] == ""
+        result = apply(service, "a", "rev-parse", options={"target": target})
+        if target == "head" and missing_object == "tree":
+            assert result["exit_code"] == 0
+            assert result["stdout"] == head + "\n"
+        else:
+            assert result["exit_code"] != 0, "A read-only query must not fetch missing objects"
+            assert result["stdout"] == ""
         assert {p.relative_to(objects): p.read_bytes()
                 for p in objects.rglob("*") if p.is_file()} == before
         assert list((control / "git-state").iterdir()) == []

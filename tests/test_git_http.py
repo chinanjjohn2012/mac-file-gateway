@@ -70,12 +70,15 @@ def request(client, args, *, status=200):
 
 
 @pytest.mark.parametrize("mode", ["legacy", "multi"])
-def test_rest_head_tree_preview_unborn_and_native_result(tmp_path, monkeypatch, mode):
+@pytest.mark.parametrize("target", ["tree", "head"])
+def test_rest_head_tree_preview_unborn_and_native_result(tmp_path, monkeypatch, mode, target):
     instance = (make_legacy if mode == "legacy" else make_multi)(
         tmp_path, commands=("rev-parse",),
     )
     root = tmp_path / ("project" if mode == "legacy" else "parent")
-    args = {"command": "rev-parse", **({"workspace": "a"} if mode == "multi" else {})}
+    args = {"command": "rev-parse", "options": {"target": target},
+            **({"workspace": "a"} if mode == "multi" else {})}
+    revision = "HEAD^{commit}" if target == "head" else "HEAD^{tree}"
     app = (create_app if mode == "legacy" else create_multi_app)(instance, enable_mcp=False)
     try:
         with TestClient(app, base_url="http://127.0.0.1:8765") as client:
@@ -85,12 +88,12 @@ def test_rest_head_tree_preview_unborn_and_native_result(tmp_path, monkeypatch, 
                 patch.setattr(subprocess, "Popen", no_git)
                 preview = request(client, args)
                 assert preview["execute_started"] is False
-                assert preview["effective_argv"] == ["--no-lazy-fetch", "rev-parse", "--verify", "HEAD^{tree}"]
+                assert preview["effective_argv"] == ["--no-lazy-fetch", "rev-parse", "--verify", revision]
                 for extra in ({"options": {"revision": "main^{tree}"}},
                               {"paths": ["HEAD"]}):
                     assert request(client, {**args, **extra, "dry_run": False},
                                    status=400)["error"] == "git_option_invalid"
-                assert request(client, {**args, "command": "status"},
+                assert request(client, {**args, "command": "status", "options": {}},
                                status=403)["error"] == "git_command_not_allowed"
                 if mode == "multi":
                     assert request(client, {**args, "workspace": "b"},
@@ -102,7 +105,7 @@ def test_rest_head_tree_preview_unborn_and_native_result(tmp_path, monkeypatch, 
             subprocess.run(["git", "-c", "user.name=Fixture", "-c",
                             "user.email=f@example.invalid", "commit", "--allow-empty",
                             "-qm", "initial"], cwd=root, check=True)
-            expected = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"],
+            expected = subprocess.check_output(["git", "rev-parse", revision],
                                                cwd=root, text=True)
             result = request(client, {**args, "dry_run": False})
             assert result["exit_code"] == 0, result["stderr"]

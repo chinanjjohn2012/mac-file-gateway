@@ -15,7 +15,7 @@ _OPTION_KEYS = {
     "status": {"short", "branch"},
     "diff": {"cached", "stat"},
     "log": {"limit", "oneline"},
-    "rev-parse": set(),
+    "rev-parse": {"target"},
     "branch": {"action", "name"},
     "switch": {"name", "create"},
     "add": {"all", "update"},
@@ -142,9 +142,14 @@ def compile_git_command(command: Any, *, options: Any = _MISSING,
             if enabled:
                 argv.append(flag)
     elif command == "rev-parse":
-        # Fixed read-only HEAD tree query; no caller-controlled revisions or flags.
+        # Select between two fixed read-only HEAD queries, never arbitrary refs.
         # Missing promised objects must fail rather than invoking a remote fetch.
-        argv = ["--no-lazy-fetch", command, "--verify", "HEAD^{tree}"]
+        target = options.get("target", "tree")
+        if type(target) is not str or target not in {"tree", "head"}:
+            _invalid("rev-parse.target must be 'tree' or 'head'.")
+        if "target" in options:
+            values["target"] = target
+        argv = ["--no-lazy-fetch", command, "--verify", "HEAD^{commit}" if target == "head" else "HEAD^{tree}"]
     elif command == "log":
         limit = options.get("limit", 20)
         if type(limit) is not int or not 1 <= limit <= 50:

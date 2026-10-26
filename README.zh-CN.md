@@ -13,7 +13,7 @@
 - `MANIFEST.sha256` 发布清单一致性校验。
 - Git CLI V1（2.5.0 源码，默认关闭）：Legacy 需要 `--allow-git` 与 `--git-command`；Multi 需要服务端 `server.git.enabled` 和每个 Workspace 的 `git.allowed_commands`，默认关闭。
 - 只有经过明确授权，才会注册 `run_git`（REST：`POST /git/run`），默认 `dry_run=true`；其权限、父仓库范围和断连风险详见主 README 新增的 Git CLI 小节。
-- HEAD Tree SHA 查询：单独授权 `rev-parse` 后，调用 `run_git(command="rev-parse", dry_run=false)`（Multi 另需 workspace），固定执行 `git --no-lazy-fetch rev-parse --verify 'HEAD^{tree}'`；不接受 options 或 paths 内容，SHA 返回在 `stdout`。详见主 README 的“HEAD Tree SHA 只读查询”；本地实现不代表已部署或完成 Tunnel 验收。
+- HEAD 提交 SHA / Tree SHA 查询：单独授权 `rev-parse` 后，调用 `run_git(command="rev-parse", dry_run=false)`（Multi 另需 workspace）默认查询 `HEAD^{tree}`；`options={"target":"head"}` 查询 `HEAD` 提交 SHA。只允许 `tree` / `head` 两个固定目标，不接受其他 options 或 paths 内容，均保留 `--no-lazy-fetch`。SHA 返回在 `stdout`，详见主 README 的“HEAD 提交 SHA / Tree SHA 只读查询”；本地实现不代表已部署或完成 Tunnel 验收。
 
 **版本与发布边界：** 本文档描述包含 Git CLI V1 的 2.5.0 源码，不代表已创建 GitHub Release、完成生产部署或批准生产 Git。Git 依然默认关闭，必须经过运营者单独授权才能启用。
 

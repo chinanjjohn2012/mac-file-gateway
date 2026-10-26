@@ -133,13 +133,15 @@ Local Skill Bridge 与 `--allow-exec` 是两套独立能力。启用 Local Skill
 
 Legacy 必须同时使用 `--allow-git` 和至少一个 `--git-command NAME`；Multi 需要私有配置中的 `server.git.enabled=true` 及对应 Workspace 的 `git.allowed_commands` 非空。Multi 请求必须明确给出 `workspace`，无默认 Workspace。这个工具不继承文件写权限、普通 `run_command` 或 Local Skill Bridge 的权限；Multi stdio 仍不支持。
 
-支持的命令为：`status`、`diff`、`log`、`rev-parse`、`branch`、`switch`、`add`、`commit`、`fetch`、`pull`、`push`。其中 `rev-parse` 仅支持固定的 HEAD Tree SHA 只读查询。不支持 `checkout`、`clone`、任意 argv、Git 全局 flags 或 shell。所有调用默认 `dry_run=true`，预览**完全不启动 Git，包括 `rev-parse`**。详细授权、API 形状和不可撤销的 Git 副作用见下方“Git CLI V1”章节。
+支持的命令为：`status`、`diff`、`log`、`rev-parse`、`branch`、`switch`、`add`、`commit`、`fetch`、`pull`、`push`。其中 `rev-parse` 仅支持固定的 HEAD 提交 SHA 或 Tree SHA 只读查询。不支持 `checkout`、`clone`、任意 argv、Git 全局 flags 或 shell。所有调用默认 `dry_run=true`，预览**完全不启动 Git，包括 `rev-parse`**。详细授权、API 形状和不可撤销的 Git 副作用见下方“Git CLI V1”章节。
 
 ### 预览、安全保护和限制
 
 **修改预览：** `create_file`、`write_file`、`replace_text`、`create_directory`、删除/移动操作以及 `run_command` 默认采用预览模式。文件写入和受控命令只有明确使用实际执行参数后才会真正执行。
 
 **访问范围：** 所有文件路径都以启动时选择的项目根目录为基准。可以通过 `--write-path` 和 `--exec-path` 进一步缩小写入及命令执行范围。
+
+**受控命令输出：** `run_command` 的 stdout/stderr 各自默认最多返回 **1,048,576 字符**，无需额外配置。输出仍脱敏；超限会设置对应的 `stdout_truncated` / `stderr_truncated`。退出码为 0 不代表返回了完整输出。
 
 **版本保护：** 修改、删除或移动已有文件时使用 `read_file` 返回的 `file_sha256` 做版本校验。源文件在读取后发生变化会返回冲突，不会直接覆盖。
 
@@ -445,7 +447,7 @@ Legacy MCP `run_git(command, cwd=".", options={}, paths=[], timeout_seconds=120,
 | `status` | `short`、`branch` | 原生状态，可选显式 paths |
 | `diff` | `cached`、`stat` | 原生 diff，可选显式 paths |
 | `log` | `limit`（1–50）、`oneline` | 默认最多 20 条 |
-| `rev-parse` | 无（仅空对象） | 固定 `--no-lazy-fetch rev-parse --verify HEAD^{tree}`，只读；不接受 paths |
+| `rev-parse` | `target`（`tree` 默认值 / `head`） | 固定 `--no-lazy-fetch rev-parse --verify HEAD^{tree}` 或 `HEAD^{commit}`，只读；不接受 paths |
 | `branch` | `action`（list/create/delete）、`name` | 创建或删除需要 name |
 | `switch` | `name`、`create` | 固定 `--no-guess`，不会隐式创建远端同名分支 |
 | `add` | `all`、`update` | 互斥；两者都未启用时须提供 paths |
@@ -456,14 +458,20 @@ Legacy MCP `run_git(command, cwd=".", options={}, paths=[], timeout_seconds=120,
 
 `timeout_seconds` 为 **10–900 秒**（默认 120），覆盖发现仓库、等待同仓库锁、检查、执行以及清理。Git REST 请求独立受 65,536 字节 Body 上限限制。执行结果包含 `execute_started`、`repository_checked`、`remote_checked`、`branch_checked`、`exit_code`、`timed_out`、`output_truncated`、`cleanup_status` 等字段；不把退出码非零直接当成进程清理失败，也不会将截断结果声称为完整输出。
 
-#### HEAD Tree SHA 只读查询
+#### HEAD 提交 SHA / Tree SHA 只读查询
 
-新增的 `rev-parse` 能力固定执行 `git --no-lazy-fetch rev-parse --verify 'HEAD^{tree}'`，返回查询时 HEAD 提交对应的原生 Tree 对象 ID，不使用工作区文件或暂存区推算。命令无用户可控的 ref、revision、format、argv 或额外 flags；`options` 只能省略或为 `{}`，`paths` 只能省略或为 `[]`。固定的 `--no-lazy-fetch` 禁止 partial clone 自动拉取缺失对象；本地对象缺失时直接失败，不连接 remote 或补写对象库。旧版 Git 若不支持此参数会直接失败，不回退为允许 fetch 的命令。它不修改工作区、index 或 refs，支持 detached HEAD，原样保留 Git 输出的完整 SHA-1 / SHA-256。
+`rev-parse` 默认固定执行 `git --no-lazy-fetch rev-parse --verify 'HEAD^{tree}'`，返回查询时 HEAD 提交对应的原生 Tree 对象 ID；指定 `options: {"target":"head"}` 则固定执行 `git --no-lazy-fetch rev-parse --verify 'HEAD^{commit}'`，验证提交对象存在并返回 HEAD 提交 SHA。不使用工作区文件或暂存区推算。`target` 只接受 `tree` / `head` 两个枚举值；不接受任意 ref、revision、format、argv 或额外 flags，`paths` 只能省略或为 `[]`。原有省略 `options` 或 `{}` 的调用仍查询 Tree。固定的 `--no-lazy-fetch` 禁止 partial clone 自动拉取缺失对象；所需本地对象缺失时直接失败，不连接 remote 或补写对象库。旧版 Git 若不支持此参数会直接失败，不回退为允许 fetch 的命令。它不修改工作区、index 或 refs，支持 detached HEAD，原样保留 Git 输出的完整 SHA-1 / SHA-256。
 
 需单独授权：Legacy 增加 `--allow-git --git-command rev-parse`；Multi 在 `server.git.enabled=true` 下为目标 Workspace 设置 `git.allowed_commands: ["rev-parse"]`。已有 `status` / `log` 授权不会自动授予此命令。MCP `run_git` 和 REST `POST /git/run` 使用相同请求：
 
 ```json
 {"workspace":"project-a","command":"rev-parse","dry_run":false}
+```
+
+独立查询当前 HEAD 提交 SHA：
+
+```json
+{"workspace":"project-a","command":"rev-parse","options":{"target":"head"},"dry_run":false}
 ```
 
 Legacy 删除 `workspace` 字段。默认 `dry_run=true` 仍只返回预览，不提供 Tree SHA。实际执行成功时，`stdout` 是完整 Tree SHA 加换行；确认 `exit_code=0`、`timed_out=false`、`output_truncated=false`、`cleanup_status="complete"` 后读取。无提交的仓库（unborn HEAD）返回 Git 原生非零退出码及 `stderr`，不返回成功 SHA。本次新增能力的源码和本地测试证据不代表已部署、启用或完成真实 Tunnel 验收。
@@ -876,7 +884,7 @@ To revert, stop the Multi listener and start the previous positional-root comman
 
 - **Default denial:** Legacy requires both `--allow-git` and repeatable `--git-command NAME`. Multi requires `server.git.enabled: true` and a nonempty per-Workspace `git.allowed_commands`. A Multi `run_git` call must specify `workspace`; Legacy does not accept that field. General Exec/Local Skills grants do not enable Git.
 - **Interface:** MCP `run_git` or `POST /git/run` uses `command`, `cwd` (default "."), `options` (object), `paths` (array), `timeout_seconds` (10–900, default 120) and `dry_run` (default true). These options/paths can be omitted, but explicit JSON null is invalid. The REST endpoint has a separate 65,536-byte body cap.
-- **Allowed Git commands:** `status`, `diff`, `log`, `rev-parse`, `branch`, `switch`, `add`, `commit`, `fetch`, `pull`, `push`. `rev-parse` is restricted to the read-only command `git --no-lazy-fetch rev-parse --verify 'HEAD^{tree}'`, with empty options/paths and a separate explicit command grant. Missing local objects fail without fetching; Git versions without `--no-lazy-fetch` support fail closed. Use `dry_run=false` to obtain the full native SHA-1/SHA-256 in `stdout`; unborn HEAD returns a nonzero Git exit. No raw argv, `checkout`, `clone`, or arbitrary shell. Apply requires `dry_run=false`; preview launches **zero** Git subprocesses, including repository discovery.
+- **Allowed Git commands:** `status`, `diff`, `log`, `rev-parse`, `branch`, `switch`, `add`, `commit`, `fetch`, `pull`, `push`. `rev-parse` has only two fixed read-only targets: `options.target="tree"` (default, `HEAD^{tree}`) or `"head"` (`HEAD^{commit}`). Both use `git --no-lazy-fetch rev-parse --verify`, require empty paths and a separate explicit command grant, and accept no arbitrary refs or flags. Missing required local objects fail without fetching; Git versions without `--no-lazy-fetch` support fail closed. Use `dry_run=false` to obtain the full native SHA-1/SHA-256 in `stdout`; unborn HEAD returns a nonzero Git exit. No raw argv, `checkout`, `clone`, or arbitrary shell. Apply requires `dry_run=false`; preview launches **zero** Git subprocesses, including repository discovery.
 - **Repository privilege is broader than File API:** The actual repository can be an ancestor of the Workspace. Explicit local cwd/paths stay Workspace-contained, but native Git `pull`, `add -A`, hooks, filters, remote/credential helpers can change files outside the chosen Workspace. File `read_only`, hidden/exclude/redaction rules and backup guarantees **do not apply** to Git effects/output. Git is **not an OS sandbox**.
 - **Crash/disconnect:** A disconnected or timed-out MCP client may not know whether a non-idempotent Git operation finished. Never automatically retry `commit`, `pull` or `push`. Durable `DISCOVERING`/`RUNNING` intent is required before Git Popen; uncertain cleanup triggers persistent quarantine. There is **no** Web/MCP/REST quarantine reset. Only a trusted local administrator, after Gateway shutdown and independent evidence that the affected main process/group/children have exited, may perform offline recovery. Repeated restart is not a recovery method.
 - **Status:** Git CLI V1 is included in the 2.5.0 source tree and is disabled by default. Independent code review, native macOS verification and live Secure MCP Tunnel E2E were completed for the reviewed pre-release Git code. A source version number is **not** a GitHub Release or deployment attestation, and those verifications do **not** authorize enabling production Git. Final merge, release and production grants require separate operator approval.

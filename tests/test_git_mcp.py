@@ -142,7 +142,8 @@ def check_git_schema(tool, *, multi):
 
 @pytest.mark.parametrize("mode", ["legacy", "multi"])
 @pytest.mark.parametrize("protocol", PROTOCOLS)
-def test_mcp_head_tree_returns_native_sha_and_rejects_other_revisions(tmp_path, mode, protocol):
+@pytest.mark.parametrize("target", ["tree", "head"])
+def test_mcp_head_tree_returns_native_sha_and_rejects_other_revisions(tmp_path, mode, protocol, target):
     instance = (legacy_gateway if mode == "legacy" else multi_service)(
         tmp_path, commands=("rev-parse",),
     )
@@ -150,10 +151,12 @@ def test_mcp_head_tree_returns_native_sha_and_rejects_other_revisions(tmp_path, 
     subprocess.run(["git", "-c", "user.name=Fixture", "-c",
                     "user.email=f@example.invalid", "commit", "--allow-empty",
                     "-qm", "initial"], cwd=root, check=True)
-    expected = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"],
+    revision = "HEAD^{commit}" if target == "head" else "HEAD^{tree}"
+    expected = subprocess.check_output(["git", "rev-parse", revision],
                                        cwd=root, text=True)
     app = (create_app if mode == "legacy" else create_multi_app)(instance)
-    args = {"command": "rev-parse", **({"workspace": "a"} if mode == "multi" else {})}
+    args = {"command": "rev-parse", "options": {"target": target},
+            **({"workspace": "a"} if mode == "multi" else {})}
     try:
         with TestClient(app, base_url="http://127.0.0.1:8765") as client:
             initialized(client, protocol)

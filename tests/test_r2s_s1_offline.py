@@ -102,11 +102,14 @@ class OfflineS1:
                 self.state["quarantined"] = True
             if self.journal.unresolved_failed_commit:
                 self._boot_denied("unresolved-journal-transaction")
-            elif self.state["quarantined"]:
+            else:
+                # A new test-only owner lease must be committed even if no
+                # unresolved attempt exists. Two clean restarts cannot borrow
+                # the same owner generation from the same journal snapshot.
                 try:
                     self._commit()
                 except DurabilityUnavailable:
-                    pass  # in-memory unavailable still denies; no positive path
+                    pass  # failed owner fencing remains unavailable/denied
 
     @staticmethod
     def _new_state() -> dict:
@@ -119,6 +122,48 @@ class OfflineS1:
             "quarantined": False, "available": True,
             "attempts": {}, "events": [],
         }
+
+    @staticmethod
+    def _supported_binding(root: object, exec_scope: object,
+                           backend_version: object) -> bool:
+        """Single exact offline-only binding predicate for BOOT and LIVE.
+
+        This fake deliberately has exactly one supported backend
+        implementation. A local reapproval cannot upgrade arbitrary code or
+        a malformed root to a qualified backend. No OS identity is checked.
+        """
+        return (
+            type(root) is tuple
+            and len(root) == 2
+            and all(type(x) is int and x > 0 for x in root)
+            and type(exec_scope) is str
+            and bool(exec_scope.strip())
+            and type(backend_version) is str
+            and backend_version == "fake-backend-v1"
+        )
+
+    def _reject_invalid_binding(self) -> None:
+        """Conservative test-only quarantine, not a production reset path."""
+        self.state["consent_active"] = False
+        self.state["quarantined"] = True
+        self.state["available"] = False
+        for record in self.state["attempts"].values():
+            if record["phase"] in (
+                "PREPARED", "STARTING", "RUNNING", "CLEANUP_PENDING"
+            ):
+                record["phase"] = "UNKNOWN"
+        try:
+            self._commit()
+        except DurabilityUnavailable:
+            pass
+        raise Denied("unsupported fake root, grant or backend binding")
+
+    def _require_supported_binding(self) -> None:
+        if not self._supported_binding(
+            self.state["root"], self.state["exec_scope"],
+            self.state["backend_version"],
+        ):
+            self._reject_invalid_binding()
 
     def _boot_denied(self, reason: str) -> None:
         self.state["quarantined"] = True
@@ -143,7 +188,10 @@ class OfflineS1:
         }
         if set(value) != expected:
             return False
-        if value["state_schema"] != 2 or value["profile"] != "offline_fake_v2":
+        if (type(value["state_schema"]) is not int
+                or value["state_schema"] != 2
+                or type(value["profile"]) is not str
+                or value["profile"] != "offline_fake_v2"):
             return False
         for key, minimum in (("consent_epoch", 0),
                              ("owner_generation", 1), ("next_attempt", 1)):
@@ -152,14 +200,14 @@ class OfflineS1:
         for key in ("consent_active", "quarantined", "available"):
             if type(value[key]) is not bool:
                 return False
-        root = value["root"]
-        if (type(root) is not tuple or len(root) != 2
-                or any(type(x) is not int or x <= 0 for x in root)):
+        # A real local consent grant MUST have incremented consent_epoch:
+        # consent_active=True, epoch=0 is logically impossible, even if
+        # the copied dictionary has all fields and a supported backend.
+        if value["consent_active"] and value["consent_epoch"] == 0:
             return False
-        if (type(value["exec_scope"]) is not str
-                or not value["exec_scope"]):
-            return False
-        if value["backend_version"] != "fake-backend-v1":
+        if not OfflineS1._supported_binding(
+            value["root"], value["exec_scope"], value["backend_version"],
+        ):
             return False
         if (type(value["source_revision"]) is not str
                 or not value["source_revision"]):
@@ -184,6 +232,7 @@ class OfflineS1:
             if (type(attempt_id) is not str or len(attempt_id) != 32
                     or any(c not in "0123456789abcdef" for c in attempt_id)
                     or type(item) is not dict or set(item) != record_keys
+                    or type(item["phase"]) is not str
                     or item["phase"] not in phases):
                 return False
             t = item["ticket"]
@@ -192,7 +241,7 @@ class OfflineS1:
             if t["attempt_id"] != attempt_id:
                 return False
             if (type(t["consent_epoch"]) is not int
-                    or not 0 <= t["consent_epoch"] <= value["consent_epoch"]):
+                    or not 1 <= t["consent_epoch"] <= value["consent_epoch"]):
                 return False
             if (type(t["owner_generation"]) is not int
                     or not 1 <= t["owner_generation"] <= value["owner_generation"]):
@@ -219,7 +268,8 @@ class OfflineS1:
                     or type(item["late_positive"]) is not bool
                     or item["delivery_committed"] not in
                     (None, "limited", "quarantined")
-                    or item["delivery_ack"] not in (None, True, False)):
+                    or (item["delivery_ack"] is not None
+                        and type(item["delivery_ack"]) is not bool)):
                 return False
             if (item["phase"] == "PREPARED"
                     and item["fake_dispatches"] != 0):
@@ -241,8 +291,11 @@ class OfflineS1:
     def _admissible(self) -> None:
         if self.quarantined:
             raise Denied("fake global Exec quarantined/unavailable")
+        self._require_supported_binding()
         if not self.state["consent_active"]:
             raise Denied("no local operator consent")
+        if self.state["consent_epoch"] < 1:
+            self._reject_invalid_binding()
         if len(self.state["attempts"]) >= self.max_records:
             self.state["quarantined"] = True
             self.state["events"].append("quota:do-not-evict")
@@ -253,6 +306,7 @@ class OfflineS1:
         """An explicit *test-only* local operation; never public API consent."""
         if self.quarantined:
             raise Denied("fake quarantine cannot be cleared by reapproval")
+        self._require_supported_binding()
         self.state["consent_epoch"] += 1
         self.state["consent_active"] = True
         # A new local approval epoch is NEVER a free pass to finalize a
@@ -284,10 +338,20 @@ class OfflineS1:
     def change_binding(self, *, root: tuple[int, int] | None = None,
                        exec_scope: str | None = None,
                        backend_version: str | None = None) -> None:
+        self._require_supported_binding()
         changes = {
             "root": root, "exec_scope": exec_scope,
             "backend_version": backend_version,
         }
+        candidate = {
+            key: (value if value is not None else self.state[key])
+            for key, value in changes.items()
+        }
+        if not self._supported_binding(
+            candidate["root"], candidate["exec_scope"],
+            candidate["backend_version"],
+        ):
+            self._reject_invalid_binding()
         actually_changed = False
         for key, value in changes.items():
             if value is not None and self.state[key] != value:
@@ -338,6 +402,7 @@ class OfflineS1:
         record = self._checked(ticket)
         if record["phase"] != "PREPARED":
             raise Denied("fake start_once cannot be replayed")
+        self._require_supported_binding()
         expected = (ticket.consent_epoch == self.state["consent_epoch"]
                     and self.state["consent_active"]
                     and ticket.root == self.state["root"]
@@ -367,6 +432,7 @@ class OfflineS1:
                        fake_group_absent: bool) -> None:
         """Hypothetical group-only outcome, never a full-descendant proof."""
         record = self._checked(ticket)
+        self._require_supported_binding()
         still_authorized = (
             ticket.consent_epoch == self.state["consent_epoch"]
             and self.state["consent_active"]
@@ -379,9 +445,20 @@ class OfflineS1:
             self.state["quarantined"] = True
             self._commit()
             raise Denied("stale consent at fake cleanup finalization")
-        if record["phase"] != "RUNNING" or not (
-                fake_leader_reaped and fake_group_absent) or self.quarantined:
+        if record["phase"] != "RUNNING" or self.quarantined:
             raise Denied("no qualified fake limited retirement")
+        # A bool annotation is not a runtime proof: strings such as "false",
+        # integers and truthy containers are NOT authenticated observations.
+        # Both predicates must be exact True. Missing/negative/uncertain
+        # cleanup evidence is a durable-UNKNOWN surrogate, never "limited".
+        if (type(fake_leader_reaped) is not bool
+                or fake_leader_reaped is not True
+                or type(fake_group_absent) is not bool
+                or fake_group_absent is not True):
+            record["phase"] = "UNKNOWN"
+            self.state["quarantined"] = True
+            self._commit()
+            raise Denied("no exact positive fake cleanup evidence")
         record["phase"] = "RETIRED_LIMITED"
         record["was_limited"] = True
         record["cleanup_scope"] = "original_group_only"

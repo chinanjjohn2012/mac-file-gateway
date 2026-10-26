@@ -1,12 +1,15 @@
-name: R1-A0 inert Runner seam macOS 15 ARM64 (no real Exec)
+name: R1-stage non-spawning Runner macOS 15 ARM64 (no real Exec)
 
 on:
   pull_request:
     paths:
       - '.github/workflows/multi-exec-r1-a0-macos-arm64.yml'
       - 'gateway/runner_seam.py'
+      - 'gateway/workspaces.py'
       - 'tests/test_runner_seam_r1.py'
+      - 'tests/test_multi_exec_f1.py'
       - 'docs/MULTI_WORKSPACE_EXEC_RUNNER_R1_NONSPAWNING_SEAM.md'
+      - 'docs/MULTI_WORKSPACE_EXEC_R1_STAGE_GATE.md'
       - 'MANIFEST.sha256'
       - 'requirements*.txt'
       - 'ci/wheel-locks/**'
@@ -18,7 +21,7 @@ jobs:
   r1-a0-nonspawning:
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.head.ref == 'feat/multi-exec-r1-nonspawning-runner-seam-20261026' &&
+      github.event.pull_request.head.ref == 'feat/multi-exec-r1-stage-integration-20261026' &&
       github.event.pull_request.base.ref == 'fix/ci-wheel-sse-starlette-pin-20261026' &&
       github.event.pull_request.base.sha == 'b95414ae0287b66def3fb25853a0a553a9849aca'
     runs-on: macos-15
@@ -76,7 +79,7 @@ jobs:
             --wheel-record "$RUNNER_TEMP/r1-a0-wheels.json" \
             --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256 \
             --installed-record "$RUNNER_TEMP/r1-a0-installed.json"
-      - name: R1-A0 inert protocol and real F1 deny-only, source and state tests
+      - name: R1-stage deny-only Coordinator, real F1 and G05 state tests
         run: >-
           python -m pytest -q -rs -p no:cacheprovider
           tests/test_runner_seam_r1.py
@@ -107,8 +110,8 @@ jobs:
             ! -name '*.pyc' ! -name '*.pyo' -print0 \
           | LC_ALL=C sort -z | xargs -0 shasum -a 256 > "$RUNNER_TEMP/r1-a0-MANIFEST.sha256"
           diff -u MANIFEST.sha256 "$RUNNER_TEMP/r1-a0-MANIFEST.sha256"
-          echo R1_A0_MACOS_HOSTED_SAFE_T1=PASS
-          echo R1_A0_POSITIVE_MULTI_EXEC=NOT_RUN
-          echo R1_A0_NATIVE_SIGNALS_VM=NOT_RUN
-          echo R1_A0_USER_MAC_TUNNEL=NOT_RUN
+          echo R1_STAGE_MACOS_HOSTED_SAFE_T1=PASS
+          echo R1_STAGE_POSITIVE_MULTI_EXEC=NOT_RUN
+          echo R1_STAGE_NATIVE_SIGNALS_VM=NOT_RUN
+          echo R1_STAGE_USER_MAC_TUNNEL=NOT_RUN
           echo R1_A0_DEPENDENCY_PROVENANCE_SCOPE=SOURCE_LOCKED_WHEELS_AND_RECORD_LISTED_ONLY

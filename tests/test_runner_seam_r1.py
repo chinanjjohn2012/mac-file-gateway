@@ -218,7 +218,7 @@ def test_f1_only_wires_inert_denial_and_durable_schema_v1_is_unchanged():
     assert "deny_unqualified_apply()" in source
     assert "exec_cleanup_proof_required" in source
     assert source.index("if not dry_run:") < source.index("if name in self._exec_active")
-    assert "runner_seam" in inspect.getsource(seam)
+    assert "def deny_unqualified_apply(" in inspect.getsource(seam)
     assert _PHASES == {"PREPARED", "RUNNING", "UNKNOWN", "RETIRED"}
 
 

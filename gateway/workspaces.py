@@ -21,6 +21,7 @@ from .git_cli import GitCLIExecutor
 from .git_repository import GitRepositoryCoordinator
 from .git_state import GitStateStore
 from .exec_state import ExecStateStore
+from .runner_seam import RunnerCoordinator
 
 _READ = frozenset({"list_files", "read_file", "search_files"})
 _WRITE = frozenset({"create_directory", "delete_directory", "create_file", "write_file",
@@ -123,6 +124,8 @@ class WorkspaceService:
         self._git_executor: GitCLIExecutor | None = None
         self._git_adapter_exposed = False
         self._exec_adapter_exposed = False
+        # R1 source-only deny coordinator, not a live process Runner.
+        self._runner_coordinator = RunnerCoordinator()
         self._exec_active: set[str] = set()
         # B0: own the private Exec state across the service lifetime.
         # Healthy no-proof admission is separately gated in B1/C.
@@ -300,6 +303,11 @@ class WorkspaceService:
             # Never use an instance-global subprocess ban: Git may spawn
             # only via its own separately authorized durable protocol.
             if not dry_run:
+                # The R1 Coordinator has no launch method or qualified backend.
+                # Its result is deliberately non-authoritative: the existing
+                # product error stays hard-coded, so a false/faulty decision
+                # cannot grant Exec or advance to Worker/PREPARED.
+                self._runner_coordinator.deny_unqualified_apply()
                 raise GatewayError(
                     "exec_cleanup_proof_required",
                     "Exec apply is unavailable without independently reviewed full-descendant cleanup proof.")

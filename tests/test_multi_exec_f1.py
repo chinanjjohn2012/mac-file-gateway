@@ -473,3 +473,48 @@ def test_f1_real_tcp_rest_mcp_proof_and_unhealthy_states(mixed, monkeypatch):
         assert priority.get("isError") is True
         assert priority["structuredContent"]["error"] == "exec_disabled"
         assert record.read_bytes() == original_unknown
+
+def test_r1_only_calls_deny_coordinator_on_healthy_nonpreview_apply(mixed, monkeypatch):
+    """Actual sync + REST denial, valid preview, independent Git/File and UNKNOWN."""
+    from gateway.runner_seam import RunnerCoordinator
+    svc, a, _b, config = mixed
+    seen = []
+    original = RunnerCoordinator.deny_unqualified_apply
+
+    def observe(self):
+        seen.append("deny")
+        return original(self)
+
+    monkeypatch.setattr(RunnerCoordinator, "deny_unqualified_apply", observe)
+    store = svc._exec_state
+    assert store is not None and store.durability_state == "healthy"
+    before_files = sorted(p.name for p in (config / "exec-state").iterdir())
+    assert svc.invoke_exec("a", "src", ["python", "hello.py"], dry_run=True)["executed"] is False
+    assert seen == []
+    assert _error_code(svc, dry_run=False) == "exec_cleanup_proof_required"
+    assert seen == ["deny"]
+    with TestClient(create_multi_app(svc, enable_mcp=False),
+                    base_url="http://127.0.0.1:8765") as client:
+        result = client.post("/run", json=_APPLY)
+        assert result.status_code == 503
+        assert result.json()["error"] == "exec_cleanup_proof_required"
+    assert seen == ["deny", "deny"]
+    assert not svc._exec_active
+    assert sorted(p.name for p in (config / "exec-state").iterdir()) == before_files
+    assert _error_code(svc, workspace="b", dry_run=False) == "exec_disabled"
+    assert seen == ["deny", "deny"]
+
+    # File and Git remain truly usable even though the new Exec seam denies.
+    result = svc.invoke_git("a", "status", dry_run=False)
+    assert result["exit_code"] == 0 and result["execute_started"] is True
+    assert svc.invoke("a", "create_file", "src/r1-adjacent.txt",
+                      "legal\\n", False)["workspace"] == "a"
+    assert (a / "src" / "r1-adjacent.txt").read_text() == "legal\\n"
+
+    st = a.stat()
+    attempt = store.prepare("a", (st.st_dev, st.st_ino))
+    store.mark_unknown(attempt)
+    assert _error_code(svc, dry_run=False) == "exec_quarantined"
+    assert seen == ["deny", "deny"]
+    after_unknown = svc.invoke_git("a", "status", dry_run=False)
+    assert after_unknown["exit_code"] == 0 and after_unknown["execute_started"] is True

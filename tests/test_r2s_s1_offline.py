@@ -9,6 +9,7 @@ states are hypothetical predicates from the independently reviewed S0 design.
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from dataclasses import asdict, dataclass
 
 import pytest
@@ -30,6 +31,42 @@ class MemoryJournal:
     fail_next_commit: bool = False
     commits: int = 0
     unresolved_failed_commit: bool = False
+    max_record_bytes: int = 4096
+    max_total_bytes: int = 16 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        if (type(self.max_record_bytes) is not int
+                or not 1 <= self.max_record_bytes <= 4096
+                or type(self.max_total_bytes) is not int
+                or not 1 <= self.max_total_bytes <= 16 * 1024 * 1024):
+            raise ValueError("unsupported fake journal byte budget")
+
+    @staticmethod
+    def _size(value: object) -> int:
+        """Synthetic canonical UTF-8 JSON footprint, NOT actual file bytes."""
+        return len(json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8"))
+
+    def fits_limits(self, value: object) -> bool:
+        """Pure T0 bounded payload model, not a disk/fsync implementation."""
+        if type(value) is not dict:
+            return False
+        records = value.get("attempts")
+        if type(records) is not dict or len(records) > 4096:
+            return False
+        try:
+            if any(
+                self._size(record) > self.max_record_bytes
+                for record in records.values()
+            ):
+                return False
+            # Include consent, forensic tombstones, and ALL events (including
+            # orphans) in the total, rather than silently deleting UNKNOWN.
+            return self._size(value) <= self.max_total_bytes
+        except (TypeError, ValueError, OverflowError, RecursionError):
+            return False
 
     def commit(self, value: dict) -> None:
         # Separate T0 journal uncertainty marker: survives an OfflineS1 owner
@@ -41,6 +78,12 @@ class MemoryJournal:
             raise DurabilityUnavailable("injected fake journal failure")
         if self.unresolved_failed_commit:
             raise DurabilityUnavailable("fake journal has unresolved failed commit")
+        if not self.fits_limits(value):
+            # No durable claim: this marker exists only within the shared
+            # Python journal object, but avoids a healthy stale snapshot
+            # being promoted after a failed synthetic oversized write.
+            self.unresolved_failed_commit = True
+            raise DurabilityUnavailable("fake journal capacity exceeded")
         self.snapshot = deepcopy(value)
         self.commits += 1
 
@@ -83,7 +126,7 @@ class OfflineS1:
             self.state = self._new_state()
             if self.journal.unresolved_failed_commit:
                 self._boot_denied("unresolved-journal-transaction")
-        elif not self._compatible_snapshot(previous):
+        elif not self.journal.fits_limits(previous) or not self._compatible_snapshot(previous):
             # Keep the exact suspect bytes in journal.snapshot for forensics;
             # do not parse unknown records as a healthy active grant or
             # overwrite a corrupt snapshot with an empty healthy one.
@@ -483,7 +526,12 @@ class OfflineS1:
         self.state["quarantined"] = True
         record = self.state["attempts"].get(attempt_id)
         if record is None:
-            self.state["events"].append("orphan:unknown-attribution")
+            # Unknown attribution has no authenticated identifier to retain;
+            # one persistent uncertain marker suffices. Never unquarantine,
+            # invent an attempt/PID, or append unbounded duplicate strings.
+            marker = "orphan:unknown-attribution"
+            if marker not in self.state["events"]:
+                self.state["events"].append(marker)
         elif not record["late_positive"]:
             record["late_positive"] = True
             record["phase"] = "UNKNOWN"  # prior limited evidence retained

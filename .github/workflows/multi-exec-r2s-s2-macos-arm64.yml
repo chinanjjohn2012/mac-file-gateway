@@ -18,9 +18,18 @@ jobs:
   r2s-s2-offline-t1:
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.head.ref == 'fix/multi-exec-r2s-s2-nonspawning-stage-20261027' &&
-      github.event.pull_request.base.ref == 'fix/multi-exec-r2s-s1-r003-stage-20261027' &&
-      github.event.pull_request.base.sha == 'c59f18d522f6decf97b10b9ef36c36eba3994806'
+      (
+        (
+          github.event.pull_request.head.ref == 'fix/multi-exec-r2s-s2-nonspawning-stage-20261027' &&
+          github.event.pull_request.base.ref == 'fix/multi-exec-r2s-s1-r003-stage-20261027' &&
+          github.event.pull_request.base.sha == 'c59f18d522f6decf97b10b9ef36c36eba3994806'
+        ) ||
+        (
+          github.event.pull_request.head.ref == 'review/multi-exec-r2s-s0-s2-r001-20261027' &&
+          github.event.pull_request.base.ref == 'design/multi-exec-r2s-native-a-r002-fix-20261026' &&
+          github.event.pull_request.base.sha == '638f7723f523f6d38bf0737ce61d1971abec4e76'
+        )
+      )
     runs-on: macos-15
     timeout-minutes: 20
     env:

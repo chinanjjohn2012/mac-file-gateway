@@ -1,6 +1,7 @@
 """R1 non-operational Runner protocol and fail-closed coordination seam.
 
-This module provides a deny-only R1 control seam to WorkspaceService.\nIt has no live Runner backend or ExecStateStore connection.
+This module provides a deny-only R1 control seam to WorkspaceService.
+It has no live Runner backend or ExecStateStore connection.
 It has no process-launch, signal, VM, filesystem, network or worker functions.
 The current D0/F1 contract still rejects all ordinary dry_run=False Exec.
 

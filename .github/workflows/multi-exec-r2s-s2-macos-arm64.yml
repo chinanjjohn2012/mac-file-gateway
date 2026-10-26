@@ -1,0 +1,123 @@
+name: R2-S S2 nonspawning private-FS macOS 15 ARM64 (no Native Exec)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/multi-exec-r2s-s2-macos-arm64.yml'
+      - 'gateway/r2s_state_s2.py'
+      - 'tests/test_r2s_s1_offline.py'
+      - 'tests/test_r2s_s2_private_fs.py'
+      - 'MANIFEST.sha256'
+      - 'requirements*.txt'
+      - 'ci/wheel-locks/**'
+
+permissions:
+  contents: read
+
+jobs:
+  r2s-s2-offline-t1:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (
+        (
+          github.event.pull_request.head.ref == 'fix/multi-exec-r2s-s2-nonspawning-stage-20261027' &&
+          github.event.pull_request.base.ref == 'fix/multi-exec-r2s-s1-r003-stage-20261027' &&
+          github.event.pull_request.base.sha == 'c59f18d522f6decf97b10b9ef36c36eba3994806'
+        ) ||
+        (
+          github.event.pull_request.head.ref == 'review/multi-exec-r2s-s0-s2-r001-20261027' &&
+          github.event.pull_request.base.ref == 'design/multi-exec-r2s-native-a-r002-fix-20261026' &&
+          github.event.pull_request.base.sha == '638f7723f523f6d38bf0737ce61d1971abec4e76'
+        )
+      )
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONNOUSERSITE: '1'
+      GATEWAY_NATIVE_C_ALLOWED: 'false'
+      C3B03_S3S6_FIRST_C_LOAD_AUTHORIZED: 'false'
+      C3B03_S3S6_GROUP_SIGNAL_AUTHORIZED: 'false'
+    steps:
+      - name: Checkout exact PR Head without credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Authenticate hosted Darwin 15 ARM64 and G05 source before imports
+        shell: bash
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "${{ runner.environment }}" = github-hosted
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          [[ "$(sw_vers -productVersion)" == 15.* ]]
+          python3 -I -S tools/g05_ci_admission.py --expected-head "$G05_EXPECTED_HEAD"
+      - name: Install reviewed Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Resolve binary wheels in isolated hosted runner
+        run: >-
+          python -m pip download --disable-pip-version-check
+          --only-binary=:all: -r requirements-dev.txt
+          --dest "$RUNNER_TEMP/r2s-s2-wheelhouse"
+      - name: Verify locked macOS wheel hashes before installation
+        run: >-
+          python -I -S tools/ci_dependency_provenance.py wheels
+          --wheelhouse "$RUNNER_TEMP/r2s-s2-wheelhouse"
+          --wheel-record "$RUNNER_TEMP/r2s-s2-wheels.json"
+          --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256
+      - name: Offline install from verified wheel bytes
+        run: >-
+          python -m pip install --disable-pip-version-check --no-index
+          --find-links "$RUNNER_TEMP/r2s-s2-wheelhouse" --force-reinstall
+          -r requirements-dev.txt
+      - name: Record installed RECORD-listed hashes before tests
+        run: |
+          python -m pip check
+          python -I tools/ci_dependency_provenance.py installed \
+            --wheelhouse "$RUNNER_TEMP/r2s-s2-wheelhouse" \
+            --wheel-record "$RUNNER_TEMP/r2s-s2-wheels.json" \
+            --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256 \
+            --installed-record "$RUNNER_TEMP/r2s-s2-installed.json"
+      - name: Isolated S1 and S2 T0 T1 plus F1 nonspawning regression
+        run: >-
+          python -m pytest -q -rs -p no:cacheprovider
+          tests/test_r2s_s1_offline.py
+          tests/test_r2s_s2_private_fs.py
+          tests/test_runner_seam_r1.py
+          tests/test_multi_exec_f1.py
+          tests/test_exec_state_t01.py
+          tests/test_multi_exec_boot_b0.py
+          tests/test_g05_ci_admission.py
+          tests/test_ci_dependency_provenance.py
+      - name: Verify source wheel and installed RECORD hashes after tests
+        run: >-
+          python -I tools/ci_dependency_provenance.py verify
+          --wheelhouse "$RUNNER_TEMP/r2s-s2-wheelhouse"
+          --wheel-record "$RUNNER_TEMP/r2s-s2-wheels.json"
+          --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256
+          --installed-record "$RUNNER_TEMP/r2s-s2-installed.json"
+      - name: Verify release Manifest and unchanged tracked source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          git diff --cached --exit-code
+          find . -type f \
+            ! -path './.git/*' \
+            ! -path './.pytest_cache/*' \
+            ! -path '*/__pycache__/*' \
+            ! -path './MANIFEST.sha256' \
+            ! -name '*.pyc' ! -name '*.pyo' -print0 \
+          | LC_ALL=C sort -z | xargs -0 shasum -a 256 > "$RUNNER_TEMP/r2s-s2-MANIFEST.sha256"
+          diff -u MANIFEST.sha256 "$RUNNER_TEMP/r2s-s2-MANIFEST.sha256"
+          echo R2S_S2_HOSTED_MACOS_DISPOSABLE_PRIVATE_FS_T1=PASS
+          echo R2S_S2_POSITIVE_NATIVE_EXEC=NOT_RUN
+          echo R2S_S2_HOST_SIGNALS_T2_T3=NOT_AUTHORIZED
+          echo R2S_S2_USER_MAC_TUNNEL=NOT_RUN
+          echo R2S_S2_DEPENDENCY_PROVENANCE_SCOPE=LOCKED_WHEELS_AND_RECORD_LISTED_ONLY

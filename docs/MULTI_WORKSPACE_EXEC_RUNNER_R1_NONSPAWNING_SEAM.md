@@ -3,11 +3,11 @@
 **Status: R1-A0 CODE CANDIDATE ONLY / NO POSITIVE EXEC / NO INTEGRATION OR ACTIVATION APPROVAL.**
 **Task:** MULTI-EXEC-R1-A0-NONSPAWNING-SEAM-20261026.
 **Source ancestry:** PR #79 exact reviewed CI/dev resolver Head
-\`b95414ae0287b66def3fb25853a0a553a9849aca\` and Tree
-\`b5931b1c61dc5af0bf07e1fe657008d0f56f0854\`.
+`b95414ae0287b66def3fb25853a0a553a9849aca` and Tree
+`b5931b1c61dc5af0bf07e1fe657008d0f56f0854`.
 **Design reference (NOT a parent, current authority amendment or runtime grant):**
-PR #78 r002 fixed Head \`d502254934961ebe53720fb0708def85db6cd202\`,
-Tree \`b54fb1e875264aa4d046410533f1998d07052359\`;
+PR #78 r002 fixed Head `d502254934961ebe53720fb0708def85db6cd202`,
+Tree `b54fb1e875264aa4d046410533f1998d07052359`;
 four reviewed proposed RUNNER_*_V1 design documents, each reviewed by
 independent B and C with TARGETED_REVIEW_PASS for T0 design clarity only.
 **Current operative authority** remains D0 section 0 and the production-first
@@ -15,25 +15,25 @@ F1 deny-only plan from PR #76 / PR #79 source.
 
 ## 1. Deliberately limited deliverable
 
-- New \`gateway/runner_seam.py\` provides immutable typed identifiers and
+- New `gateway/runner_seam.py` provides immutable typed identifiers and
   distinct command, cleanup and response-delivery results, a descriptive
-  \`RunnerBackend\` Protocol, plus \`RunnerCoordinator.evaluate()\`.
+  `RunnerBackend` Protocol, plus `RunnerCoordinator.evaluate()`.
 - The coordinator **always returns** the denied decision:
-  \`allowed=false\`, \`error_code=exec_cleanup_proof_required\`,
-  \`completion_capability=none\`, even when given a fake backend that claims
+  `allowed=false`, `error_code=exec_cleanup_proof_required`,
+  `completion_capability=none`, even when given a fake backend that claims
   a complete domain proof.
 - The coordinator **never calls** a backend method or process API. No
-  \`allocate/start_once/observe/terminate_and_prove/reconcile\` implementation
+  `allocate/start_once/observe/terminate_and_prove/reconcile` implementation
   exists in the Gateway runtime. The Protocol is descriptive only.
 - The reference and outcome data classes are NOT signed qualifications or
-  authority. A forged \`CleanupEvidence(full_bound_domain, proven)\` object
+  authority. A forged `CleanupEvidence(full_bound_domain, proven)` object
   cannot change the coordinator decision.
 - Identifiers are structural fields, not authenticated owner-lock, persistent
   generation, OS process identity or a target for a host signal.
-- \`tests/test_runner_seam_r1.py\` adds pure T0 success/denial/boundary/invalid
+- `tests/test_runner_seam_r1.py` adds pure T0 success/denial/boundary/invalid
   data tests. These do NOT prove real cleanup, durable PREPARED, crash
   reconciliation, owner revocation or an authentic backend.
-- No existing \`WorkspaceService.invoke_exec\`, REST, MCP, CommandRunner,
+- No existing `WorkspaceService.invoke_exec`, REST, MCP, CommandRunner,
   ExecStateStore, config schema, Git/File policy, user Mac or installation
   is changed. Existing unchanged product F1 tests and original CI provide
   the real transport/Preview/denied Exec/authorized Git/File regression path.
@@ -53,7 +53,7 @@ F1 deny-only plan from PR #76 / PR #79 source.
    operator reset remain NO-GO; no native OS calls are added.
 6. The source has no process/network/signal imports, and its coordinator has
    no start/stop method. This is **nonoperative** code, not a positive runner.
-7. Existing F1 retains \`dry_run=false\` denial before any Worker slot,
+7. Existing F1 retains `dry_run=false` denial before any Worker slot,
    Runner/Popen or PREPARED. Real same-service File Write/Git grants and
    official REST/MCP routing stay subject to the existing tests and authority.
 
@@ -65,7 +65,7 @@ F1 deny-only plan from PR #76 / PR #79 source.
   qualified Native Limited, Strict F3, automatic UNKNOWN repair or
   versioned recovery. Any candidate mutable Workspace trust remains
   unapproved until explicit product-owner decision and independent D0 amendment.
-- No live \`RunnerCoordinator\` wiring into \`WorkspaceService\` or real
+- No live `RunnerCoordinator` wiring into `WorkspaceService` or real
   transport. Current ExecStateStore schema v1 remains untouched.
 - The T0 Mock/test outcomes are NOT substitute evidence for real R1+ durability,
   macOS live group identity, strict OS domain termination or integration.

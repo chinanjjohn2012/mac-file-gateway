@@ -21,7 +21,7 @@ jobs:
   r1-a0-nonspawning:
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.head.ref == 'feat/multi-exec-r1-stage-integration-20261026' &&
+      github.event.pull_request.head.ref == 'fix/multi-exec-r1-coordinator-fault-20261026' &&
       github.event.pull_request.base.ref == 'fix/ci-wheel-sse-starlette-pin-20261026' &&
       github.event.pull_request.base.sha == 'b95414ae0287b66def3fb25853a0a553a9849aca'
     runs-on: macos-15

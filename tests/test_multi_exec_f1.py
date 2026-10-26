@@ -473,3 +473,143 @@ def test_f1_real_tcp_rest_mcp_proof_and_unhealthy_states(mixed, monkeypatch):
         assert priority.get("isError") is True
         assert priority["structuredContent"]["error"] == "exec_disabled"
         assert record.read_bytes() == original_unknown
+
+def test_r1_only_calls_deny_coordinator_on_healthy_nonpreview_apply(mixed, monkeypatch):
+    """Actual sync + REST denial, valid preview, independent Git/File and UNKNOWN."""
+    from gateway.runner_seam import RunnerCoordinator
+    svc, a, _b, config = mixed
+    seen = []
+    original = RunnerCoordinator.deny_unqualified_apply
+
+    def observe(self):
+        seen.append("deny")
+        return original(self)
+
+    monkeypatch.setattr(RunnerCoordinator, "deny_unqualified_apply", observe)
+    store = svc._exec_state
+    assert store is not None and store.durability_state == "healthy"
+    before_files = sorted(p.name for p in (config / "exec-state").iterdir())
+    assert svc.invoke_exec("a", "src", ["python", "hello.py"], dry_run=True)["executed"] is False
+    assert seen == []
+    assert _error_code(svc, dry_run=False) == "exec_cleanup_proof_required"
+    assert seen == ["deny"]
+    with TestClient(create_multi_app(svc, enable_mcp=False),
+                    base_url="http://127.0.0.1:8765") as client:
+        result = client.post("/run", json=_APPLY)
+        assert result.status_code == 503
+        assert result.json()["error"] == "exec_cleanup_proof_required"
+    assert seen == ["deny", "deny"]
+    assert not svc._exec_active
+    assert sorted(p.name for p in (config / "exec-state").iterdir()) == before_files
+    assert _error_code(svc, workspace="b", dry_run=False) == "exec_disabled"
+    assert seen == ["deny", "deny"]
+
+    # File and Git remain truly usable even though the new Exec seam denies.
+    result = svc.invoke_git("a", "status", dry_run=False)
+    assert result["exit_code"] == 0 and result["execute_started"] is True
+    assert svc.invoke("a", "create_file", "src/r1-adjacent.txt",
+                      "legal\\n", False)["workspace"] == "a"
+    assert (a / "src" / "r1-adjacent.txt").read_text() == "legal\\n"
+
+    st = a.stat()
+    attempt = store.prepare("a", (st.st_dev, st.st_ino))
+    store.mark_unknown(attempt)
+    assert _error_code(svc, dry_run=False) == "exec_quarantined"
+    assert seen == ["deny", "deny"]
+    after_unknown = svc.invoke_git("a", "status", dry_run=False)
+    assert after_unknown["exit_code"] == 0 and after_unknown["execute_started"] is True
+
+
+@pytest.mark.parametrize("fault_type", [RuntimeError, ValueError])
+def test_r1_coordinator_internal_fault_preserves_stable_rejection(
+    mixed, monkeypatch, fault_type
+):
+    """R1 T0 fault: never promote a broken decision seam to Exec or public 500.
+
+    Deliberately inject a trusted-process coordinator exception; the real
+    direct, REST and official MCP ingress must keep the same hard-coded F1
+    proof-required denial. This is NOT a real child/OS descendant test.
+    """
+    from gateway.runner_seam import RunnerCoordinator
+
+    svc, a, _b, config = mixed
+    store = svc._exec_state
+    assert store is not None and store.durability_state == "healthy"
+    # A legitimate preview must still work before and after the failed Apply.
+    assert svc.invoke_exec("a", "src", ["python", "hello.py"],
+                           dry_run=True)["executed"] is False
+    Witness, records, _ = _previously_reviewed_physical_witness()
+    scene = SimpleNamespace(state=config / "exec-state")
+    seen = []
+
+    def broken_deny(self):
+        seen.append("denied")
+        raise fault_type("never-leak-internal-coordinator-secret")
+
+    with TestClient(create_multi_app(svc), base_url="http://127.0.0.1:8765") as client:
+        initialized = _mcp(client, "initialize", {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": {"name": "r1-coordinator-fault-test", "version": "1"}}, 61)
+        assert "result" in initialized
+        client.post("/mcp", headers=_HEADERS,
+                    json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+        with monkeypatch.context() as patch:
+            def impossible_runner(*args, **kwargs):
+                raise AssertionError("EXEC_RUNNER_MUST_NOT_BE_CALLED")
+
+            def impossible_host_process(*args, **kwargs):
+                raise AssertionError("EXEC_POPEN_MUST_NOT_BE_CALLED")
+
+            witness = Witness(scene.state)
+            patch.setattr(RunnerCoordinator, "deny_unqualified_apply", broken_deny)
+            patch.setattr(svc.get("a").gateway, "run_command", impossible_runner)
+            patch.setattr(subprocess, "Popen", impossible_host_process)
+            witness.install(patch)
+            before = records(scene)
+
+            # Invalid Apply is never replaced by an internal fault or 500.
+            assert _error_code(svc) == "exec_cleanup_proof_required"
+            rest = client.post("/run", json=_APPLY)
+            assert rest.status_code == 503, rest.text
+            assert rest.json()["error"] == "exec_cleanup_proof_required"
+            assert "never-leak-internal" not in rest.text
+            result = _mcp(client, "tools/call", {
+                "name": "run_command", "arguments": _APPLY}, 62)
+            assert result["result"]["isError"] is True
+            assert result["result"]["structuredContent"]["error"] == (
+                "exec_cleanup_proof_required"
+            )
+            assert "never-leak-internal" not in str(result)
+
+            # Denial cannot create or erase an intent, launch a worker, or
+            # leave a slot held after a failed synchronous request.
+            assert seen == ["denied", "denied", "denied"]
+            assert not svc._exec_active
+            assert svc._active_operations == 0
+            assert witness.events == []
+            assert witness._root_is_pinned()
+            assert records(scene) == before
+
+    # Fault in the coordinator cannot affect lawful adjacent operations.
+    legal = svc.invoke_git("a", "status", dry_run=False)
+    assert legal["execute_started"] is True and legal["exit_code"] == 0
+    created = svc.invoke("a", "create_file", "src/r1-coordinator-fault.txt",
+                         "legal\n", False)
+    assert created["workspace"] == "a"
+    assert (a / "src" / "r1-coordinator-fault.txt").read_text() == "legal\n"
+    assert svc.invoke_exec("a", "src", ["python", "hello.py"],
+                           dry_run=True)["executed"] is False
+
+    # Existing stronger error priorities must still outrank the broken seam.
+    with monkeypatch.context() as patch:
+        patch.setattr(RunnerCoordinator, "deny_unqualified_apply", broken_deny)
+        with pytest.raises(GatewayError) as exc:
+            svc.invoke_exec("b", "src", ["python", "hello.py"], dry_run=False)
+        assert exc.value.code == "exec_disabled"
+        st = a.stat()
+        attempt = store.prepare("a", (st.st_dev, st.st_ino))
+        store.mark_unknown(attempt)
+        with pytest.raises(GatewayError) as exc:
+            svc.invoke_exec("a", "src", ["python", "hello.py"], dry_run=False)
+        assert exc.value.code == "exec_quarantined"
+    assert seen == ["denied", "denied", "denied"]

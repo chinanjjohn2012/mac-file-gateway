@@ -1,0 +1,117 @@
+name: R1-stage non-spawning Runner macOS 15 ARM64 (no real Exec)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/multi-exec-r1-a0-macos-arm64.yml'
+      - 'gateway/runner_seam.py'
+      - 'gateway/workspaces.py'
+      - 'tests/test_runner_seam_r1.py'
+      - 'tests/test_multi_exec_f1.py'
+      - 'docs/MULTI_WORKSPACE_EXEC_RUNNER_R1_NONSPAWNING_SEAM.md'
+      - 'docs/MULTI_WORKSPACE_EXEC_R1_STAGE_GATE.md'
+      - 'MANIFEST.sha256'
+      - 'requirements*.txt'
+      - 'ci/wheel-locks/**'
+
+permissions:
+  contents: read
+
+jobs:
+  r1-a0-nonspawning:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'fix/multi-exec-r1-coordinator-fault-20261026' &&
+      github.event.pull_request.base.ref == 'fix/ci-wheel-sse-starlette-pin-20261026' &&
+      github.event.pull_request.base.sha == 'b95414ae0287b66def3fb25853a0a553a9849aca'
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONNOUSERSITE: '1'
+      PYTHONPATH: ''
+      GATEWAY_NATIVE_C_ALLOWED: 'false'
+      C3B03_S3S6_FIRST_C_LOAD_AUTHORIZED: 'false'
+      C3B03_S3S6_GROUP_SIGNAL_AUTHORIZED: 'false'
+    steps:
+      - name: Checkout exact PR Head without credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Authenticate hosted Darwin 15 ARM64 and G05 source before imports
+        shell: bash
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "${{ runner.environment }}" = github-hosted
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          [[ "$(sw_vers -productVersion)" == 15.* ]]
+          python3 -I -S tools/g05_ci_admission.py --expected-head "$G05_EXPECTED_HEAD"
+      - name: Install reviewed Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Download binary wheels into an isolated runner directory
+        run: >-
+          python -m pip download --disable-pip-version-check
+          --only-binary=:all: -r requirements-dev.txt
+          --dest "$RUNNER_TEMP/r1-a0-wheelhouse"
+      - name: Verify exact source-locked macOS wheel SHA256 before installation
+        run: >-
+          python -I -S tools/ci_dependency_provenance.py wheels
+          --wheelhouse "$RUNNER_TEMP/r1-a0-wheelhouse"
+          --wheel-record "$RUNNER_TEMP/r1-a0-wheels.json"
+          --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256
+      - name: Offline install from reviewed binary wheels only
+        run: >-
+          python -m pip install --disable-pip-version-check --no-index
+          --find-links "$RUNNER_TEMP/r1-a0-wheelhouse" --force-reinstall
+          -r requirements-dev.txt
+      - name: Record installed RECORD-listed file hashes
+        run: |
+          python -m pip check
+          python -I tools/ci_dependency_provenance.py installed \
+            --wheelhouse "$RUNNER_TEMP/r1-a0-wheelhouse" \
+            --wheel-record "$RUNNER_TEMP/r1-a0-wheels.json" \
+            --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256 \
+            --installed-record "$RUNNER_TEMP/r1-a0-installed.json"
+      - name: R1-stage deny-only Coordinator, real F1 and G05 state tests
+        run: >-
+          python -m pytest -q -rs -p no:cacheprovider
+          tests/test_runner_seam_r1.py
+          tests/test_multi_exec_f1.py
+          tests/test_exec_state_t01.py
+          tests/test_multi_exec_boot_b0.py
+          tests/test_phase1_review_identity.py
+          tests/test_g05_ci_admission.py
+          tests/test_ci_dependency_provenance.py
+      - name: Verify locked wheel and installed RECORD bytes after tests
+        run: >-
+          python -I tools/ci_dependency_provenance.py verify
+          --wheelhouse "$RUNNER_TEMP/r1-a0-wheelhouse"
+          --wheel-record "$RUNNER_TEMP/r1-a0-wheels.json"
+          --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256
+          --installed-record "$RUNNER_TEMP/r1-a0-installed.json"
+      - name: Verify Manifest and tracked source stability
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          git diff --cached --exit-code
+          find . -type f \
+            ! -path './.git/*' \
+            ! -path './.pytest_cache/*' \
+            ! -path '*/__pycache__/*' \
+            ! -path './MANIFEST.sha256' \
+            ! -name '*.pyc' ! -name '*.pyo' -print0 \
+          | LC_ALL=C sort -z | xargs -0 shasum -a 256 > "$RUNNER_TEMP/r1-a0-MANIFEST.sha256"
+          diff -u MANIFEST.sha256 "$RUNNER_TEMP/r1-a0-MANIFEST.sha256"
+          echo R1_STAGE_MACOS_HOSTED_SAFE_T1=PASS
+          echo R1_STAGE_POSITIVE_MULTI_EXEC=NOT_RUN
+          echo R1_STAGE_NATIVE_SIGNALS_VM=NOT_RUN
+          echo R1_STAGE_USER_MAC_TUNNEL=NOT_RUN
+          echo R1_A0_DEPENDENCY_PROVENANCE_SCOPE=SOURCE_LOCKED_WHEELS_AND_RECORD_LISTED_ONLY

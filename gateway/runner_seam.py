@@ -1,6 +1,6 @@
 """R1 non-operational Runner protocol and fail-closed coordination seam.
 
-This module is NOT connected to WorkspaceService, REST, MCP or ExecStateStore.
+This module provides a deny-only R1 control seam to WorkspaceService.\nIt has no live Runner backend or ExecStateStore connection.
 It has no process-launch, signal, VM, filesystem, network or worker functions.
 The current D0/F1 contract still rejects all ordinary dry_run=False Exec.
 
@@ -170,9 +170,10 @@ class AdmissionDecision:
 class RunnerCoordinator:
     """Inert interface seam; ignores untrusted/fake backends, always denies.
 
-    It is intentionally not integrated into production routing. In particular,
-    this class never calls the RunnerBackend protocol, allocates an attempt,
-    persists PREPARED, sends a signal or produces completion evidence.
+    The only production call is deny_unqualified_apply() in the shared
+    synchronous Worker. The coordinator never calls RunnerBackend,
+    allocates an attempt, persists PREPARED, sends a signal or produces
+    cleanup evidence. REST/MCP never have a positive Runner path.
     """
 
     __slots__ = ()
@@ -183,4 +184,12 @@ class RunnerCoordinator:
         if type(intent) is not AttemptIdentity:
             raise TypeError("an AttemptIdentity is required")
         # backend is deliberately never inspected, called, stored or trusted.
+        return AdmissionDecision()
+
+    def deny_unqualified_apply(self) -> AdmissionDecision:
+        """R1/F1 production decision: no qualified positive execution exists.
+
+        No attempt identity, durable intent, Worker slot or backend is allocated.
+        The caller must reject before any command or transient PREPARED write.
+        """
         return AdmissionDecision()

@@ -110,7 +110,7 @@ def test_attempt_identity_and_command_are_immutable_and_no_argv_repr():
     assert ProposedCommand(cwd=".", argv=("go", "test")).timeout_seconds == 60
 
 
-@pytest.mark.parametrize("request", [
+@pytest.mark.parametrize("case_kwargs", [
     dict(cwd="", argv=("pytest",)),
     dict(cwd=".", argv=[]),
     dict(cwd=".", argv=("python", "")),
@@ -118,9 +118,9 @@ def test_attempt_identity_and_command_are_immutable_and_no_argv_repr():
     dict(cwd=".", argv=("pytest",), timeout_seconds=301),
     dict(cwd=".", argv=("pytest",), timeout_seconds=True),
 ])
-def test_command_data_rejects_malformed_fields_without_executing(request):
+def test_command_data_rejects_malformed_fields_without_executing(case_kwargs):
     with pytest.raises(ValueError):
-        ProposedCommand(**request)
+        ProposedCommand(**case_kwargs)
 
 
 def test_bound_reference_is_opaque_and_not_a_numeric_pid_authority():

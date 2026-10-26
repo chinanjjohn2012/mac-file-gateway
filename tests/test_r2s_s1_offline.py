@@ -575,9 +575,14 @@ def test_t0_rev_05_mutable_workspace_change_not_backend_version_pin(fake):
 
     clean = OfflineS1()
     clean.approve_local()
-    clean.change_binding(backend_version="fake-backend-v2")
+    # Only fake-backend-v1 is supported in S1. The stricter r003 model
+    # rejects and quarantines this unsupported update immediately, not only
+    # on a later prepare or restart.
+    with pytest.raises(Denied, match="unsupported fake"):
+        clean.change_binding(backend_version="fake-backend-v2")
     assert not clean.state["consent_active"]
-    with pytest.raises(Denied, match="no local"):
+    assert clean.quarantined
+    with pytest.raises(Denied):
         clean.prepare()
 
 

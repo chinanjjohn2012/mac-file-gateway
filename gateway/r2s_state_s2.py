@@ -216,8 +216,13 @@ class S2PrivateState:
             # A valid PREPARED from an earlier owner is uncertain, not replayable.
             next_value = deepcopy(self._value)
             next_value["owner_generation"] = uuid4().hex
-            if any(v["phase"] == "PREPARED" for v in next_value["attempts"].values()):
-                next_value["quarantined"] = True
+            # The former owner's PREPARED ticket has no surviving lease or
+            # permission to advance. Persist UNKNOWN rather than carrying a
+            # misleading live PREPARED phase into the new owner generation.
+            for record in next_value["attempts"].values():
+                if record["phase"] == "PREPARED":
+                    record["phase"] = "UNKNOWN"
+                    next_value["quarantined"] = True
             self._commit(next_value)
             self._value = next_value
             self._status = "quarantined" if next_value["quarantined"] else "healthy"
@@ -291,7 +296,6 @@ class S2PrivateState:
         A fault after mutation leaves pending forensic evidence. A fault before
         mutation leaves old valid state or a pending marker; no silent reset.
         """
-        _strict_state(value, max_records=self._max_records, max_total=self._max_total)
         try:
             self._check_live_inodes()
         except (OSError, S2Blocked, ValueError) as exc:
@@ -307,6 +311,11 @@ class S2PrivateState:
             finally:
                 os.close(fd)
             os.fsync(self._fd)
+            # Quota/schema rejection is itself an uncertain attempt to mutate
+            # durable state. Record a synced forensic fence *before* checking
+            # payload limits so a previously healthy active-consent snapshot
+            # cannot be reopened after a rejected/oversized PREPARED write.
+            _strict_state(value, max_records=self._max_records, max_total=self._max_total)
             if self._fault_at == "after_pending":
                 raise OSError("injected pending fault")
             fd = os.open(temp, _NEW, 0o600, dir_fd=self._fd)
@@ -332,9 +341,9 @@ class S2PrivateState:
             os.fsync(self._fd)
             self._state_identity = self._identity(os.stat(
                 _STATE_NAME, dir_fd=self._fd, follow_symlinks=False))
-        except (OSError, ValueError, OverflowError):
+        except (OSError, ValueError, TypeError, OverflowError, RecursionError):
             self._status = "unavailable"
-            raise S2Unavailable("v2 transition durability unconfirmed") from None
+            raise S2Unavailable("v2 transition durability or capacity unconfirmed") from None
 
     def _require(self) -> None:
         if (self._closed or os.getpid() != self._pid or self._status != "healthy"):

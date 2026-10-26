@@ -86,7 +86,7 @@ def test_s2_clean_restart_rotates_owner_but_keeps_fake_consent(isolated):
         assert restarted.status == "quarantined"
         with pytest.raises(S2Blocked):
             restarted.prepare_offline()
-        assert restarted.snapshot()["attempts"][ticket.attempt_id]["phase"] == "PREPARED"
+        assert restarted.snapshot()["attempts"][ticket.attempt_id]["phase"] == "UNKNOWN"  # old owner cannot preserve live PREPARED
 
 
 def test_s2_revoke_after_prepared_durably_fences_without_any_dispatch(isolated):
@@ -271,6 +271,26 @@ def test_s2_real_state_quota_fail_closed_and_no_silent_eviction(isolated):
     with open_s2(isolated) as again:
         assert again.status == "quarantined"  # unresolved PREPARED preserved
         assert t.attempt_id in again.snapshot()["attempts"]
+
+
+def test_s2_total_byte_quota_persists_fail_closed_marker_before_restart(isolated):
+    # A valid approved snapshot is smaller than 512 bytes, but adding even
+    # one PREPARED record exceeds this bounded journal. Overflow must not
+    # surface as a plain ValueError with a still-healthy owner.
+    with open_s2(isolated, max_total_bytes=512) as s:
+        s.approve_fake()
+        before = stored(isolated)
+        with pytest.raises(S2Unavailable, match="quota|capacity"):
+            s.prepare_offline()
+        assert s.status == "unavailable"
+        assert stored(isolated) == before  # failed intent never committed
+        root, _ = isolated
+        assert any(p.name.startswith("pending-") for p in root.iterdir())
+        with pytest.raises(S2Blocked):
+            s.prepare_offline()
+    # A previously valid active-consent snapshot cannot be revived by reboot.
+    with pytest.raises(S2Blocked, match="foreign or interrupted"):
+        open_s2(isolated, max_total_bytes=512)
 
 
 def test_s2_mutable_workspace_contents_do_not_revoke_offline_consent(isolated):

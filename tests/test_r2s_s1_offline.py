@@ -29,11 +29,18 @@ class MemoryJournal:
     snapshot: dict | None = None
     fail_next_commit: bool = False
     commits: int = 0
+    unresolved_failed_commit: bool = False
 
     def commit(self, value: dict) -> None:
+        # Separate T0 journal uncertainty marker: survives an OfflineS1 owner
+        # restart that shares THIS MemoryJournal object. This is NOT an actual
+        # disk-durable fence and cannot qualify a native storage backend.
         if self.fail_next_commit:
             self.fail_next_commit = False
+            self.unresolved_failed_commit = True
             raise DurabilityUnavailable("injected fake journal failure")
+        if self.unresolved_failed_commit:
+            raise DurabilityUnavailable("fake journal has unresolved failed commit")
         self.snapshot = deepcopy(value)
         self.commits += 1
 
@@ -73,37 +80,151 @@ class OfflineS1:
         self.fake_signals = 0
         previous = self.journal.read()
         if previous is None:
-            self.state = {
-                "consent_epoch": 0,
-                "consent_active": False,
-                "owner_generation": 1,
-                "next_attempt": 1,
-                "root": (101, 202),
-                "exec_scope": "runner-grants-v1",
-                "backend_version": "fake-backend-v1",
-                "source_revision": "mutable-a",
-                "quarantined": False,
-                "available": True,
-                "attempts": {},
-                "events": [],
-            }
+            self.state = self._new_state()
+            if self.journal.unresolved_failed_commit:
+                self._boot_denied("unresolved-journal-transaction")
+        elif not self._compatible_snapshot(previous):
+            # Keep the exact suspect bytes in journal.snapshot for forensics;
+            # do not parse unknown records as a healthy active grant or
+            # overwrite a corrupt snapshot with an empty healthy one.
+            self.state = self._new_state()
+            self._boot_denied("unsupported-persisted-state")
         else:
             self.state = previous
             self.state["owner_generation"] += 1
-            # An old group-limited result cannot become a new-boot proof of
-            # no escaped descendants. This is a deliberately conservative
-            # proposed S1 boot gate, NOT an implemented production mechanism.
+            # Every unretired and limited-group-only prior attempt is a
+            # conservative T0 boot obstacle. Completed response/slot release
+            # never proves an escaped process absent.
             uncertain = {"PREPARED", "STARTING", "RUNNING",
-                         "CLEANUP_PENDING", "RETIRED_LIMITED", "UNKNOWN",
-                         "RETIRED"}  # v1 group-only result cannot authorize v2
+                         "CLEANUP_PENDING", "RETIRED_LIMITED", "UNKNOWN"}
             if any(x["phase"] in uncertain
                    for x in self.state["attempts"].values()):
                 self.state["quarantined"] = True
-            if self.state["quarantined"]:
+            if self.journal.unresolved_failed_commit:
+                self._boot_denied("unresolved-journal-transaction")
+            elif self.state["quarantined"]:
                 try:
                     self._commit()
                 except DurabilityUnavailable:
                     pass  # in-memory unavailable still denies; no positive path
+
+    @staticmethod
+    def _new_state() -> dict:
+        return {
+            "state_schema": 2, "profile": "offline_fake_v2",
+            "consent_epoch": 0, "consent_active": False,
+            "owner_generation": 1, "next_attempt": 1,
+            "root": (101, 202), "exec_scope": "runner-grants-v1",
+            "backend_version": "fake-backend-v1", "source_revision": "mutable-a",
+            "quarantined": False, "available": True,
+            "attempts": {}, "events": [],
+        }
+
+    def _boot_denied(self, reason: str) -> None:
+        self.state["quarantined"] = True
+        self.state["available"] = False
+        self.state["events"].append("boot:" + reason)
+
+    @staticmethod
+    def _compatible_snapshot(value: object) -> bool:
+        """Validate exact S1 fake schema and attribution BEFORE trusting grants.
+
+        No v1 migration, unknown profile, backend version, record shape or
+        phase is a valid authority. The fake performs no actual serialization,
+        OS liveness observation, cryptographic proof, or storage qualification.
+        """
+        if type(value) is not dict:
+            return False
+        expected = {
+            "state_schema", "profile", "consent_epoch", "consent_active",
+            "owner_generation", "next_attempt", "root", "exec_scope",
+            "backend_version", "source_revision", "quarantined", "available",
+            "attempts", "events",
+        }
+        if set(value) != expected:
+            return False
+        if value["state_schema"] != 2 or value["profile"] != "offline_fake_v2":
+            return False
+        for key, minimum in (("consent_epoch", 0),
+                             ("owner_generation", 1), ("next_attempt", 1)):
+            if type(value[key]) is not int or value[key] < minimum:
+                return False
+        for key in ("consent_active", "quarantined", "available"):
+            if type(value[key]) is not bool:
+                return False
+        root = value["root"]
+        if (type(root) is not tuple or len(root) != 2
+                or any(type(x) is not int or x <= 0 for x in root)):
+            return False
+        if (type(value["exec_scope"]) is not str
+                or not value["exec_scope"]):
+            return False
+        if value["backend_version"] != "fake-backend-v1":
+            return False
+        if (type(value["source_revision"]) is not str
+                or not value["source_revision"]):
+            return False
+        if (type(value["events"]) is not list
+                or not all(type(x) is str for x in value["events"])):
+            return False
+        records = value["attempts"]
+        if type(records) is not dict or len(records) > 4096:
+            return False
+        ticket_keys = set(Ticket.__dataclass_fields__)
+        record_keys = {
+            "ticket", "phase", "fake_dispatches", "cleanup_scope",
+            "full_tree_clean", "was_limited", "delivery_committed",
+            "delivery_ack", "late_positive",
+        }
+        phases = {
+            "PREPARED", "STARTING", "RUNNING", "CLEANUP_PENDING",
+            "RETIRED_LIMITED", "UNKNOWN",
+        }
+        for attempt_id, item in records.items():
+            if (type(attempt_id) is not str or len(attempt_id) != 32
+                    or any(c not in "0123456789abcdef" for c in attempt_id)
+                    or type(item) is not dict or set(item) != record_keys
+                    or item["phase"] not in phases):
+                return False
+            t = item["ticket"]
+            if type(t) is not dict or set(t) != ticket_keys:
+                return False
+            if t["attempt_id"] != attempt_id:
+                return False
+            if (type(t["consent_epoch"]) is not int
+                    or not 0 <= t["consent_epoch"] <= value["consent_epoch"]):
+                return False
+            if (type(t["owner_generation"]) is not int
+                    or not 1 <= t["owner_generation"] <= value["owner_generation"]):
+                return False
+            if (type(t["attempt_generation"]) is not int
+                    or not 1 <= t["attempt_generation"] < value["next_attempt"]
+                    or int(attempt_id, 16) != t["attempt_generation"]):
+                return False
+            tr = t["root"]
+            if (type(tr) is not tuple or len(tr) != 2
+                    or any(type(x) is not int or x <= 0 for x in tr)):
+                return False
+            if (type(t["exec_scope"]) is not str or not t["exec_scope"]
+                    or type(t["backend_version"]) is not str
+                    or not t["backend_version"]):
+                return False
+            if (type(item["fake_dispatches"]) is not int
+                    or not 0 <= item["fake_dispatches"] <= 1
+                    or item["cleanup_scope"] not in
+                    ("none", "original_group_only")
+                    or item["full_tree_clean"] != "not_proven"):
+                return False
+            if (type(item["was_limited"]) is not bool
+                    or type(item["late_positive"]) is not bool
+                    or item["delivery_committed"] not in
+                    (None, "limited", "quarantined")
+                    or item["delivery_ack"] not in (None, True, False)):
+                return False
+            if (item["phase"] == "PREPARED"
+                    and item["fake_dispatches"] != 0):
+                return False
+        return True
 
     @property
     def quarantined(self) -> bool:
@@ -134,6 +255,14 @@ class OfflineS1:
             raise Denied("fake quarantine cannot be cleared by reapproval")
         self.state["consent_epoch"] += 1
         self.state["consent_active"] = True
+        # A new local approval epoch is NEVER a free pass to finalize a
+        # command already issued under the old one. Fence any in-flight
+        # PREPARED/STARTING/RUNNING work before accepting the new epoch.
+        for record in self.state["attempts"].values():
+            if record["phase"] in ("PREPARED", "STARTING", "RUNNING",
+                                   "CLEANUP_PENDING"):
+                record["phase"] = "UNKNOWN"
+                self.state["quarantined"] = True
         self._commit()
         return self.state["consent_epoch"]
 
@@ -238,6 +367,18 @@ class OfflineS1:
                        fake_group_absent: bool) -> None:
         """Hypothetical group-only outcome, never a full-descendant proof."""
         record = self._checked(ticket)
+        still_authorized = (
+            ticket.consent_epoch == self.state["consent_epoch"]
+            and self.state["consent_active"]
+            and ticket.root == self.state["root"]
+            and ticket.exec_scope == self.state["exec_scope"]
+            and ticket.backend_version == self.state["backend_version"]
+        )
+        if not still_authorized:
+            record["phase"] = "UNKNOWN"
+            self.state["quarantined"] = True
+            self._commit()
+            raise Denied("stale consent at fake cleanup finalization")
         if record["phase"] != "RUNNING" or not (
                 fake_leader_reaped and fake_group_absent) or self.quarantined:
             raise Denied("no qualified fake limited retirement")

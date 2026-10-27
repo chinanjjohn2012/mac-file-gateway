@@ -64,10 +64,10 @@ jobs:
           assert not git("ls-files", "--others", "--exclude-standard", "-z")
           assert not git("ls-files", "--others", "--ignored", "--exclude-standard", "-z")
           assert not git("status", "--porcelain", "--untracked-files=all")
-          expected = sorted(
+          expected = [
               hashlib.sha256(Path(p).read_bytes()).hexdigest() + "  ./" + p
-              for p in entries if p != "MANIFEST.sha256"
-          )
+              for p in sorted(entries) if p != "MANIFEST.sha256"
+          ]
           actual = Path("MANIFEST.sha256").read_text(encoding="utf-8").splitlines()
           assert actual == expected, ("MANIFEST_MISMATCH", len(actual), len(expected))
           assert len(entries) == len(actual) + 1

@@ -1,0 +1,65 @@
+name: V2 governance candidate T0 (PR75 only, nonproduction)
+
+on:
+  pull_request:
+    paths:
+      - 'docs/review-governance-v2/**'
+      - 'tests/test_review_governance_v2_candidate.py'
+      - 'tools/review_governance_v2_preflight.py'
+      - '.github/workflows/review-governance-v2-candidate.yml'
+      - 'MANIFEST.sha256'
+
+permissions:
+  contents: read
+
+jobs:
+  design-only-t0:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.number == 75 &&
+      github.event.pull_request.head.ref == 'docs/github-review-handoff-v2-20261025' &&
+      github.event.pull_request.base.ref == 'release/ms1' &&
+      github.event.pull_request.base.sha == '2f163eeb83fc2f984354dc6d231a614dca5aa9af'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONNOUSERSITE: '1'
+    steps:
+      - name: Checkout exact PR Head without credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: G05-style HEAD Tree Blob mode and Manifest pre-import admission
+        shell: bash
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          python3 -B -I -S tools/review_governance_v2_preflight.py --expected-head "$EXPECTED_HEAD"
+      - name: Run offline stdlib governance source and migration state T0
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -I -S -m unittest discover -s tests -p 'test_review_governance_v2_candidate.py' -v
+          echo V2_GOVERNANCE_MIGRATION_T0_MODEL=PASS
+          echo V2_GOVERNANCE_B_C_INDEPENDENT_REVIEW=NOT_ISSUED
+          echo V2_GOVERNANCE_PROJECT_SOURCE_SYNC=NOT_VERIFIED
+          echo V2_GOVERNANCE_ACTIVATION=NOT_EFFECTIVE
+          echo V2_GOVERNANCE_NATIVE_T2_T3=NOT_AUTHORIZED
+      - name: Final checkout integrity (no source changed by tests)
+        shell: bash
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          python3 -B -I -S tools/review_governance_v2_preflight.py --expected-head "$EXPECTED_HEAD"
+          echo V2_GOVERNANCE_T0_POSTTEST_G05_STRICT=PASS
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git status --porcelain --untracked-files=all)"
+          echo V2_GOVERNANCE_T0_FINAL_SOURCE_UNCHANGED=PASS

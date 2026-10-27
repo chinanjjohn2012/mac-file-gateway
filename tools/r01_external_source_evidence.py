@@ -257,6 +257,8 @@ def _repo_attested_file(path: Path, repo: Path) -> Path:
     if not under(source, root):
         raise EvidenceError("unattested HEAD module outside tracked root: " + str(path))
     manifest = root / "MANIFEST.sha256"
+    if manifest.is_symlink() or not manifest.is_file():
+        raise EvidenceError("missing or unsafe HEAD G05 MANIFEST: " + str(manifest))
     regular(manifest)
     relative = source.relative_to(root).as_posix()
     hashes = {}

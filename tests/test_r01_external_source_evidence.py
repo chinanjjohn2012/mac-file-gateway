@@ -715,3 +715,104 @@ def test_r008_nested_head_directory_deleted_untracked_module_must_deny(tmp_path)
                                 roots=[str(repo), str(site), str(nested)])
     with pytest.raises(probe.EvidenceError, match="nested|unattested|unqualified"):
         probe.verify_runtime(observation, repo, snapshot)
+
+
+# r009 reviewer-derived RED: actual disposable Git/CPython import/delete.
+# No Gateway Exec, real process groups, signals, destructive T2/T3, or Mac user state.
+@pytest.mark.parametrize("root_name", ["tools", "tests", "."])
+def test_r009_transient_import_under_approved_root_requires_history(tmp_path, root_name):
+    site = _site(tmp_path)
+    snapshot = probe.site_snapshot([site])
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    trusted_root = repo if root_name == "." else repo / root_name
+    trusted_root.mkdir(exist_ok=True)
+    (trusted_root / "tracked_entry_r009.py").write_text("VALUE=1\n")
+    _r007_commit_repo(repo)
+    head_a = _r008_git(repo, "rev-parse", "HEAD")
+    child = (
+        "import sys,json,os,importlib;"
+        "sys.path.insert(0,sys.argv[1]);"
+        "p=sys.argv[2];"
+        "open(p,'w').write('VALUE=901\\n');"
+        "m=importlib.import_module('ephemeral_r009');"
+        "v=m.VALUE;"
+        "del sys.modules['ephemeral_r009'];"
+        "os.unlink(p);"
+        "print(json.dumps({'value':v,'sys_path':sys.path,"
+        "'retained':'ephemeral_r009' in sys.modules}))"
+    )
+    ephemeral = trusted_root / "ephemeral_r009.py"
+    executed = subprocess.run(
+        [sys.executable, "-B", "-I", "-S", "-c", child, str(trusted_root), str(ephemeral)],
+        capture_output=True, text=True, check=False,
+    )
+    assert executed.returncode == 0, executed.stderr
+    state = json.loads(executed.stdout)
+    assert state["value"] == 901 and state["retained"] is False
+    assert str(trusted_root) in state["sys_path"] and not ephemeral.exists()
+    assert _r008_git(repo, "status", "--porcelain") == ""
+    assert _r008_git(repo, "rev-parse", "HEAD") == head_a
+    runtime = _r007_runtime(
+        repo, site, snapshot, tmp_path / ("r009-" + str(root_name).replace(".", "root") + ".json"),
+        roots=[str(repo), str(site), str(trusted_root)],
+    )
+    data = json.loads(runtime.read_text())
+    data["r01_phase"] = "pytest"
+    # No capture of actual transient Python exec, despite a clean Git state
+    # and loaded_origins=[]: cannot qualify this as fixed HEAD source.
+    runtime.write_text(json.dumps(data))
+    with pytest.raises(probe.EvidenceError, match="audit|history|temporal|unqualified"):
+        probe.verify_runtime(runtime, repo, snapshot)
+
+
+def _r009_probe_child(repo: Path, root: Path, filename: str, *, tracked: bool) -> str:
+    """Run the exact add-on scanner's audit hook in a real isolated CPython."""
+    module = "ephemeral_r009" if not tracked else "tracked_entry_r009"
+    source = root / (module + ".py")
+    if not tracked:
+        source.write_text("VALUE=901\n")
+    program = (
+        "import sys,importlib,importlib.util;"
+        "spec=importlib.util.spec_from_file_location('r009_probe',sys.argv[1]);"
+        "probe=importlib.util.module_from_spec(spec);spec.loader.exec_module(probe);"
+        "state=probe.install_repo_exec_audit(probe.Path(sys.argv[2]));"
+        "sys.path.insert(0,sys.argv[3]);"
+        "print('VALUE',importlib.import_module(sys.argv[4]).VALUE);"
+        "print('AUDIT_EVENTS',state['checked'])"
+    )
+    process = subprocess.run(
+        [sys.executable, "-B", "-I", "-S", "-c", program,
+         str(SCRIPT), str(repo), str(root), module],
+        capture_output=True, text=True, check=False,
+    )
+    if not tracked:
+        source.unlink(missing_ok=True)
+    assert _r008_git(repo, "status", "--porcelain") == ""
+    return (str(process.returncode) + "\n" + process.stdout + process.stderr)
+
+
+@pytest.mark.parametrize("root_name", ["tools", "tests"])
+def test_r009_real_python_exec_audit_denies_ephemeral_before_module_execution(tmp_path, root_name):
+    repo = tmp_path / "repo"
+    root = repo / root_name
+    root.mkdir(parents=True)
+    (root / "tracked_entry_r009.py").write_text("VALUE=1\n")
+    _r007_commit_repo(repo)
+    result = _r009_probe_child(repo, root, "ephemeral_r009.py", tracked=False)
+    assert result.splitlines()[0] != "0"
+    assert "unattested" in result or "unqualified" in result
+    assert "VALUE 901" not in result
+
+
+@pytest.mark.parametrize("root_name", ["tools", "tests"])
+def test_r009_real_python_exec_audit_permits_head_tracked_source(tmp_path, root_name):
+    repo = tmp_path / "repo"
+    root = repo / root_name
+    root.mkdir(parents=True)
+    (root / "tracked_entry_r009.py").write_text("VALUE=1\n")
+    _r007_commit_repo(repo)
+    result = _r009_probe_child(repo, root, "tracked_entry_r009.py", tracked=True)
+    assert result.splitlines()[0] == "0", result
+    assert "VALUE 1" in result
+    assert "AUDIT_EVENTS " in result

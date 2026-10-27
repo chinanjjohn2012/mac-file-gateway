@@ -8,7 +8,12 @@ it does NOT approve the rules or activate V2 for any real review round.
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import textwrap
 import unittest
 
 
@@ -149,6 +154,82 @@ class MigrationTableTests(unittest.TestCase):
         self.assertEqual(simulated_review(b_pass=True, c_pass=True, scope_full=True,
                                           blockers=1), "BLOCKED")
 
+
+
+class ReviewerR004CounterexampleTests(unittest.TestCase):
+    """Direct T0 RED probes from current r003 B/C independent findings."""
+
+    @staticmethod
+    def _git(cwd, *args):
+        return subprocess.check_output(["git", *args], cwd=cwd, stderr=subprocess.PIPE)
+
+    def _fixture(self, directory):
+        repo = Path(directory)
+        self._git(repo, "init", "-q")
+        self._git(repo, "config", "core.filemode", "true")
+        path = repo / "governance.md"
+        path.write_text("test-only governance fixture\n", encoding="utf-8")
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        (repo / "MANIFEST.sha256").write_text(
+            digest + "  ./governance.md\n", encoding="utf-8"
+        )
+        self._git(repo, "add", "-A")
+        self._git(repo, "-c", "user.name=T0", "-c",
+                  "user.email=t0@example.invalid", "commit", "-q", "-m", "fixture")
+        return repo, path, self._git(repo, "rev-parse", "HEAD").decode().strip()
+
+    def _run_real_preflight(self, repo, expected_head):
+        checkout = ROOT.parents[1]
+        script = checkout / "tools" / "review_governance_v2_preflight.py"
+        if script.is_file():
+            cmd = [sys.executable, "-I", "-S", str(script),
+                   "--expected-head", expected_head]
+        else:
+            workflow = (checkout / ".github" / "workflows" /
+                        "review-governance-v2-candidate.yml").read_text("utf-8")
+            # On r003, run the actual inlined CI verifier verbatim. On r004,
+            # the same tests run the newly extracted production-of-this-workflow
+            # preflight script, not a second hand-written imitation.
+            marker = "          python3 -I -S - <<'PY'\n"
+            self.assertIn(marker, workflow)
+            inline = workflow.split(marker, 1)[1].split("\n          PY", 1)[0]
+            cmd = [sys.executable, "-I", "-S", "-c", textwrap.dedent(inline)]
+        return subprocess.run(
+            cmd, cwd=repo, env={**os.environ, "EXPECTED_HEAD": expected_head},
+            capture_output=True, text=True, check=False,
+        )
+
+    def test_r006_each_high_risk_change_not_only_one_point(self):
+        core = _text("INDEPENDENT_CODE_REVIEW_RULES_V2_CANDIDATE.md")
+        role = _text("ROLE_B_STANDARDS_V2_CANDIDATE.md")
+        self.assertIn("每个高风险变更点至少独立设计一个有意义的反例", core)
+        self.assertIn("每个高风险变更点", role)
+        self.assertNotIn("对至少一个有意义的高风险点", role)
+
+    def test_proven_p1_must_report_fail_not_evidence_blocked(self):
+        # r003 incorrectly returns BLOCKED for a conclusively proven P1.
+        self.assertEqual(
+            simulated_review(b_pass=True, c_pass=True, scope_full=True,
+                             blockers=1, evidence_ok=True), "FAIL"
+        )
+
+    def test_preflight_rejects_executable_bit_drift_even_if_status_clean(self):
+        with tempfile.TemporaryDirectory(prefix="v2-t0-mode-") as tmp:
+            repo, path, head = self._fixture(tmp)
+            self.assertEqual(self._run_real_preflight(repo, head).returncode, 0)
+            path.chmod(0o755)
+            self._git(repo, "config", "core.filemode", "false")
+            self.assertEqual(self._git(repo, "status", "--porcelain"), b"")
+            result = self._run_real_preflight(repo, head)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_preflight_rejects_undisclosed_assume_unchanged_flag(self):
+        with tempfile.TemporaryDirectory(prefix="v2-t0-index-") as tmp:
+            repo, path, head = self._fixture(tmp)
+            self._git(repo, "update-index", "--assume-unchanged", "governance.md")
+            self.assertEqual(self._git(repo, "status", "--porcelain"), b"")
+            result = self._run_real_preflight(repo, head)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
 if __name__ == "__main__":
     unittest.main()

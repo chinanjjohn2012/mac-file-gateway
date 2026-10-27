@@ -57,6 +57,9 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          echo V2_GOVERNANCE_T0_POSTTEST_IGNORED_PATHS_BEGIN
+          git ls-files --others --ignored --exclude-standard | sed -n '1,60p'
+          echo V2_GOVERNANCE_T0_POSTTEST_IGNORED_PATHS_END
           python3 -I -S tools/review_governance_v2_preflight.py --expected-head "$EXPECTED_HEAD"
           echo V2_GOVERNANCE_T0_POSTTEST_G05_STRICT=PASS
           git diff --exit-code

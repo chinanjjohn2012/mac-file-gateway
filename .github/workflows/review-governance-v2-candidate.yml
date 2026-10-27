@@ -39,12 +39,12 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
-          python3 -I -S tools/review_governance_v2_preflight.py --expected-head "$EXPECTED_HEAD"
+          python3 -B -I -S tools/review_governance_v2_preflight.py --expected-head "$EXPECTED_HEAD"
       - name: Run offline stdlib governance source and migration state T0
         shell: bash
         run: |
           set -euo pipefail
-          python3 -I -S -m unittest discover -s tests -p 'test_review_governance_v2_candidate.py' -v
+          python3 -B -I -S -m unittest discover -s tests -p 'test_review_governance_v2_candidate.py' -v
           echo V2_GOVERNANCE_MIGRATION_T0_MODEL=PASS
           echo V2_GOVERNANCE_B_C_INDEPENDENT_REVIEW=NOT_ISSUED
           echo V2_GOVERNANCE_PROJECT_SOURCE_SYNC=NOT_VERIFIED
@@ -57,10 +57,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
-          echo V2_GOVERNANCE_T0_POSTTEST_IGNORED_PATHS_BEGIN
-          git ls-files --others --ignored --exclude-standard | sed -n '1,60p'
-          echo V2_GOVERNANCE_T0_POSTTEST_IGNORED_PATHS_END
-          python3 -I -S tools/review_governance_v2_preflight.py --expected-head "$EXPECTED_HEAD"
+          python3 -B -I -S tools/review_governance_v2_preflight.py --expected-head "$EXPECTED_HEAD"
           echo V2_GOVERNANCE_T0_POSTTEST_G05_STRICT=PASS
           git diff --exit-code
           git diff --cached --exit-code

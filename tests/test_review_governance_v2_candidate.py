@@ -585,7 +585,7 @@ class ReviewerR004CounterexampleTests(unittest.TestCase):
     def test_posttest_workflow_uses_same_strict_verifier_twice(self):
         workflow = (ROOT.parents[1] / ".github" / "workflows" /
                     "review-governance-v2-candidate.yml").read_text("utf-8")
-        command = ('python3 -I -S tools/review_governance_v2_preflight.py '
+        command = ('python3 -B -I -S tools/review_governance_v2_preflight.py '
                    '--expected-head "$EXPECTED_HEAD"')
         self.assertEqual(workflow.count(command), 2)
         pre, final = workflow.split(
@@ -596,6 +596,23 @@ class ReviewerR004CounterexampleTests(unittest.TestCase):
         self.assertIn(command, final)
         self.assertIn("EXPECTED_HEAD:", final)
         self.assertIn("V2_GOVERNANCE_T0_FINAL_SOURCE_UNCHANGED=PASS", final)
+
+    def test_isolated_ci_python_no_bytecode_even_when_env_ignored(self):
+        workflow = (ROOT.parents[1] / ".github" / "workflows" /
+                    "review-governance-v2-candidate.yml").read_text("utf-8")
+        self.assertIn("python3 -B -I -S -m unittest discover", workflow)
+        self.assertEqual(
+            workflow.count("python3 -B -I -S tools/review_governance_v2_preflight.py"),
+            2,
+        )
+        # -I ignores PYTHON* environment variables; -B is the effective gate.
+        result = subprocess.run(
+            [sys.executable, "-B", "-I", "-S", "-c",
+             "import sys; print(sys.dont_write_bytecode)"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "True")
 
     def test_posttest_actual_step_accepts_clean_disposable_repo(self):
         with tempfile.TemporaryDirectory(prefix="v2-post-clean-") as tmp:

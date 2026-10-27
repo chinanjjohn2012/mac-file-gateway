@@ -537,6 +537,9 @@ class ReviewerR004CounterexampleTests(unittest.TestCase):
     def _posttest_fixture(self, directory):
         """Commit exact checked-in preflight tool to an isolated temporary repo."""
         repo, tracked, _ = self._fixture(directory)
+        # Suppress asynchronous Git maintenance while disposable fixtures exit.
+        self._git(repo, "config", "gc.auto", "0")
+        self._git(repo, "config", "maintenance.auto", "false")
         source = ROOT.parents[1] / "tools" / "review_governance_v2_preflight.py"
         target = repo / "tools" / "review_governance_v2_preflight.py"
         target.parent.mkdir(parents=True)

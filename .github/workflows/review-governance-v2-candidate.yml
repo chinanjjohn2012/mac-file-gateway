@@ -52,8 +52,13 @@ jobs:
           echo V2_GOVERNANCE_NATIVE_T2_T3=NOT_AUTHORIZED
       - name: Final checkout integrity (no source changed by tests)
         shell: bash
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          python3 -I -S tools/review_governance_v2_preflight.py --expected-head "$EXPECTED_HEAD"
+          echo V2_GOVERNANCE_T0_POSTTEST_G05_STRICT=PASS
           git diff --exit-code
           git diff --cached --exit-code
           test -z "$(git status --porcelain --untracked-files=all)"

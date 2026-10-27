@@ -10,6 +10,7 @@ on:
       - 'tests/test_r2s_s2_review_r002.py'
       - 'tests/test_r2s_s2_review_r003.py'
       - 'tests/test_r01_external_source_evidence.py'
+      - 'tools/r01_external_source_evidence.py'
       - 'MANIFEST.sha256'
       - 'requirements*.txt'
       - 'ci/wheel-locks/**'
@@ -84,6 +85,10 @@ jobs:
           python -m pip install --disable-pip-version-check --no-index
           --find-links "$RUNNER_TEMP/r2s-s2-wheelhouse" --force-reinstall
           -r requirements-dev.txt
+      - name: R01 additional pre-site importable-source scan (nonspawning T1)
+        run: python -B -I -S tools/r01_external_source_evidence.py preimport --snapshot "$RUNNER_TEMP/r01-site-preimport.json"
+      - name: Capture actual hosted macOS Python import roots
+        run: python -B tools/r01_external_source_evidence.py runtime --runtime "$RUNNER_TEMP/r01-startup-runtime.json"
       - name: Record installed RECORD-listed hashes before tests
         run: |
           python -m pip check
@@ -93,6 +98,8 @@ jobs:
             --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256 \
             --installed-record "$RUNNER_TEMP/r2s-s2-installed.json"
       - name: Isolated S1 and S2 T0 T1 plus F1 nonspawning regression
+        env:
+          R01_PYTEST_IMPORT_ROOT_TRACE: ${{ runner.temp }}/r01-pytest-imports.json
         run: >-
           python -m pytest -q -rs -p no:cacheprovider
           tests/test_r2s_s1_offline.py
@@ -100,6 +107,7 @@ jobs:
           tests/test_r2s_s2_review_r002.py
           tests/test_r2s_s2_review_r003.py
           tests/test_r01_external_source_evidence.py
+          -p tools.r01_external_source_evidence
           tests/test_runner_seam_r1.py
           tests/test_multi_exec_f1.py
           tests/test_exec_state_t01.py
@@ -113,6 +121,10 @@ jobs:
           --wheel-record "$RUNNER_TEMP/r2s-s2-wheels.json"
           --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256
           --installed-record "$RUNNER_TEMP/r2s-s2-installed.json"
+      - name: Verify additional R01 pre/post importables and actual import roots
+        run: |
+          python -B -I -S tools/r01_external_source_evidence.py verify --snapshot "$RUNNER_TEMP/r01-site-preimport.json" --runtime "$RUNNER_TEMP/r01-startup-runtime.json" --repo "$GITHUB_WORKSPACE"
+          python -B -I -S tools/r01_external_source_evidence.py verify --snapshot "$RUNNER_TEMP/r01-site-preimport.json" --runtime "$RUNNER_TEMP/r01-pytest-imports.json" --repo "$GITHUB_WORKSPACE"
       - name: Verify release Manifest and unchanged tracked source
         shell: bash
         run: |

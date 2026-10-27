@@ -56,11 +56,18 @@ jobs:
         run: python -I -S tools/ci_dependency_provenance.py wheels --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/ubuntu-3.13-x86_64.sha256
       - name: Install verified wheel inputs with the network index disabled
         run: python -m pip install --disable-pip-version-check --no-index --find-links "$RUNNER_TEMP/f1-g05-wheelhouse" --force-reinstall -r requirements-dev.txt
+      - name: R01 additional site-root source evidence before site import
+        run: python -B -I -S tools/r01_external_source_evidence.py preimport --snapshot "$RUNNER_TEMP/r01-site-preimport.json"
+      - name: Capture actual site-enabled Python startup import roots
+        run: python -B tools/r01_external_source_evidence.py runtime --runtime "$RUNNER_TEMP/r01-startup-runtime.json"
       - name: Record RECORD-listed installed file hashes before tests
         run: |
           python -m pip check
           python -I tools/ci_dependency_provenance.py installed --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/ubuntu-3.13-x86_64.sha256 --installed-record "$RUNNER_TEMP/f1-g05-installed.json"
-      - run: python -m pytest -q -rs
+      - name: Full pytest with independent R01 import-origin trace
+        env:
+          R01_PYTEST_IMPORT_ROOT_TRACE: ${{ runner.temp }}/r01-pytest-imports.json
+        run: python -m pytest -q -rs -p tools.r01_external_source_evidence
       - run: python tests/smoke_live.py
       - run: python tests/smoke_mcp_live.py
       - run: python tests/smoke_mcp_stdio.py
@@ -71,6 +78,10 @@ jobs:
       - run: bash -n setup.sh run.sh verify.sh tunnel.sh
       - name: Recheck wheel locks and RECORD-listed files after tests
         run: python -I tools/ci_dependency_provenance.py verify --wheelhouse "$RUNNER_TEMP/f1-g05-wheelhouse" --wheel-record "$RUNNER_TEMP/f1-g05-wheels.json" --source-lock ci/wheel-locks/ubuntu-3.13-x86_64.sha256 --installed-record "$RUNNER_TEMP/f1-g05-installed.json"
+      - name: Recheck additional R01 site source and actual interpreter import roots
+        run: |
+          python -B -I -S tools/r01_external_source_evidence.py verify --snapshot "$RUNNER_TEMP/r01-site-preimport.json" --runtime "$RUNNER_TEMP/r01-startup-runtime.json" --repo "$GITHUB_WORKSPACE"
+          python -B -I -S tools/r01_external_source_evidence.py verify --snapshot "$RUNNER_TEMP/r01-site-preimport.json" --runtime "$RUNNER_TEMP/r01-pytest-imports.json" --repo "$GITHUB_WORKSPACE"
       - name: Verify release manifest
         run: |
           find . -type f \

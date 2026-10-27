@@ -20,6 +20,7 @@ import marshal
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import sysconfig
 import zipfile
@@ -155,6 +156,7 @@ def scan_root(root: Path) -> dict:
     importable = []
     derived = []
     pths = []
+    imperative_pth = []
     unknown_non_exec = 0
     for base, dirs, files in os.walk(root, followlinks=False):
         for name in sorted(dirs):
@@ -188,9 +190,16 @@ def scan_root(root: Path) -> dict:
             importable.append([rel, d])
             if name.endswith(".pth"):
                 pths.append([rel, d])
-                for line in p.read_text("utf-8").splitlines():
+                for line_number, line in enumerate(p.read_text("utf-8").splitlines(), 1):
                     line = line.strip()
-                    if not line or line.startswith("#") or line.startswith("import "):
+                    if not line or line.startswith("#"):
+                        continue
+                    if line.startswith(("import ", "import\t")):
+                        # CPython site.py executes these directives at startup.
+                        # A passive end-of-session census cannot prove their
+                        # effects if imported files are later removed.
+                        imperative_pth.append([rel, line_number,
+                                               hashlib.sha256(line.encode("utf-8")).hexdigest()])
                         continue
                     injected = Path(os.path.abspath(str(root / line)))
                     if injected.exists():
@@ -210,6 +219,7 @@ def scan_root(root: Path) -> dict:
         raise EvidenceError("site root has no examined importable source")
     return {"path": str(root), "dist_record_count": len(dist_records),
             "importable": importable, "derived_bytecode": derived, "pth": pths,
+            "imperative_pth": imperative_pth,
             "unlisted_nonexecutables": unknown_non_exec}
 
 
@@ -250,25 +260,73 @@ def _require_canonical_path(path: Path) -> Path:
     return resolved
 
 
-def _repo_attested_file(path: Path, repo: Path) -> Path:
-    """Only a regular source present in the frozen G05 Manifest may be trusted."""
+def _read_git_head_manifest(repo: Path) -> dict[str, str]:
+    """Compare local manifest to immutable committed HEAD content, not self-report."""
     root = _require_canonical_path(repo)
-    source = _require_canonical_path(path)
-    if not under(source, root):
-        raise EvidenceError("unattested HEAD module outside tracked root: " + str(path))
+    if not root.is_dir():
+        raise EvidenceError("missing HEAD repository: " + str(root))
     manifest = root / "MANIFEST.sha256"
     if manifest.is_symlink() or not manifest.is_file():
         raise EvidenceError("missing or unsafe HEAD G05 MANIFEST: " + str(manifest))
     regular(manifest)
-    relative = source.relative_to(root).as_posix()
+
+    def git(*args: str) -> bytes:
+        # Git read-only object queries, not shell and never any repo write.
+        # Do not inherit caller-controlled Git overrides into source identity.
+        clean_env = {key: value for key, value in os.environ.items()
+                     if not key.startswith("GIT_")}
+        try:
+            completed = subprocess.run(["git", "-C", str(root), *args],
+                                       capture_output=True, timeout=15, check=False,
+                                       env=clean_env)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise EvidenceError("immutable HEAD source query unavailable") from exc
+        if completed.returncode != 0:
+            raise EvidenceError("immutable HEAD source query failed: " +
+                                " ".join(args))
+        return completed.stdout
+
+    actual_root = _require_canonical_path(Path(git("rev-parse", "--show-toplevel").decode("utf-8").strip()))
+    if actual_root != root:
+        raise EvidenceError("HEAD source root differs from repository checkout")
+    head = git("rev-parse", "--verify", "HEAD^{commit}").decode("ascii").strip()
+    if len(head) != 40 or any(ch not in "0123456789abcdef" for ch in head):
+        raise EvidenceError("invalid immutable Git HEAD identity")
+    expected = os.environ.get("G05_EXPECTED_HEAD")
+    workspace = os.environ.get("GITHUB_WORKSPACE")
+    if expected and workspace and Path(workspace).resolve(strict=False) == root and head != expected:
+        raise EvidenceError("HEAD source SHA differs from G05 expected checkout")
+    immutable = git("show", head + ":MANIFEST.sha256")
+    if manifest.read_bytes() != immutable:
+        raise EvidenceError("working MANIFEST differs from immutable Git HEAD source")
     hashes = {}
-    for line in manifest.read_text("utf-8").splitlines():
-        if len(line) < 68 or line[64:68] != "  ./" or len(line[:64]) != 64:
-            raise EvidenceError("invalid G05 manifest line")
-        rel, expected = line[68:], line[:64]
-        if not rel or rel in hashes or any(ch not in "0123456789abcdef" for ch in expected):
-            raise EvidenceError("invalid G05 manifest entry")
-        hashes[rel] = expected
+    try:
+        lines = immutable.decode("utf-8").splitlines()
+    except UnicodeError as exc:
+        raise EvidenceError("invalid immutable Git HEAD manifest encoding") from exc
+    for line in lines:
+        if len(line) < 69 or line[64:68] != "  ./":
+            raise EvidenceError("invalid immutable HEAD MANIFEST line")
+        rel, expected_hash = line[68:], line[:64]
+        if (not rel or rel in hashes or any(ch not in "0123456789abcdef"
+                                             for ch in expected_hash)
+                or Path(rel).is_absolute() or ".." in Path(rel).parts):
+            raise EvidenceError("invalid immutable HEAD MANIFEST entry")
+        hashes[rel] = expected_hash
+    if not hashes:
+        raise EvidenceError("empty immutable HEAD MANIFEST")
+    return hashes
+
+
+def _repo_attested_file(path: Path, repo: Path,
+                        hashes: dict[str, str] | None = None) -> Path:
+    """Require real source bytes matching the immutable HEAD MANIFEST."""
+    root = _require_canonical_path(repo)
+    source = _require_canonical_path(path)
+    if not under(source, root):
+        raise EvidenceError("unattested HEAD module outside tracked root: " + str(path))
+    if hashes is None:
+        hashes = _read_git_head_manifest(root)
     for candidate in (source, *source.parents):
         if not under(candidate, root):
             break
@@ -276,7 +334,7 @@ def _repo_attested_file(path: Path, repo: Path) -> Path:
             regular(candidate)
             rel = candidate.relative_to(root).as_posix()
             if rel not in hashes:
-                raise EvidenceError("unattested HEAD module not in G05 MANIFEST: " + rel)
+                raise EvidenceError("unattested HEAD module not in immutable MANIFEST: " + rel)
             if digest(candidate) != hashes[rel]:
                 raise EvidenceError("changed HEAD module source bytes: " + rel)
             if candidate != source and not archive_bytes(candidate):
@@ -341,6 +399,22 @@ def verify_runtime(path: Path, repo: Path, snapshot: dict) -> dict:
     if not isinstance(paths, list) or not paths:
         raise EvidenceError("actual Python sys.path not observed")
     roots = [Path(root["path"]) for root in snapshot["site"]]
+    repo = _require_canonical_path(repo)
+    imperative = [
+        [rel, line_number] for site in snapshot["site"]
+        for rel, line_number, _digest in site.get("imperative_pth", [])
+    ]
+    if imperative:
+        raise EvidenceError("unqualified imperative .pth startup execution: " +
+                            repr(imperative[:8]))
+    repo_hashes = None
+
+    def head_hashes() -> dict[str, str]:
+        nonlocal repo_hashes
+        if repo_hashes is None:
+            repo_hashes = _read_git_head_manifest(repo)
+        return repo_hashes
+
     site_attested = {}
     for root in snapshot["site"]:
         site_attested.update({str(Path(root["path"]) / rel): sha for rel, sha in root["importable"]})
@@ -357,6 +431,25 @@ def verify_runtime(path: Path, repo: Path, snapshot: dict) -> dict:
                     raise EvidenceError("unattested site import root: " + str(location))
             elif not archive_bytes(source):
                 raise EvidenceError("non-ZIP file in Python sys.path: " + str(location))
+        elif category == "HEAD_REPOSITORY_G05":
+            location = _require_canonical_path(Path(value or str(repo)))
+            if location == repo:
+                if not location.is_dir():
+                    raise EvidenceError("missing HEAD repository import root: " + str(location))
+            elif location.is_dir():
+                # An arbitrary post-G05 generated directory cannot become a
+                # trusted import root merely by sharing the checkout prefix.
+                relative = location.relative_to(repo).as_posix() + "/"
+                if not any(name.startswith(relative) for name in head_hashes()):
+                    raise EvidenceError("unattested HEAD directory import root: " + str(location))
+            elif location.is_file():
+                candidate = _repo_attested_file(location, repo, head_hashes())
+                if not archive_bytes(candidate):
+                    raise EvidenceError("non-ZIP HEAD file in Python sys.path: " + str(location))
+            else:
+                # Includes a ZIP executed during startup then unlinked, and
+                # a generated path removed while the old sys.path survived.
+                raise EvidenceError("missing or unattested HEAD import root: " + str(location))
         observed.append([value, category])
     if not any(category == "INSTALLED_SITE_ROOT" for _, category in observed):
         raise EvidenceError("runtime site root not observed")
@@ -381,7 +474,7 @@ def verify_runtime(path: Path, repo: Path, snapshot: dict) -> dict:
                     raise EvidenceError("actual site-imported module outside attested inputs: " + origin)
                 checked_site_modules += 1
             elif category == "HEAD_REPOSITORY_G05":
-                _repo_attested_file(file, repo)
+                _repo_attested_file(file, repo, head_hashes())
         except EvidenceError:
             # External fixtures, lexical escapes and untracked/changed HEAD
             # inputs are NEVER silently upgraded to verified source identity.
@@ -444,6 +537,10 @@ def main(argv: list[str] | None = None) -> int:
         elif current != read_json(args.snapshot):
             raise EvidenceError("site importable file-set or bytes changed after tests")
         print(f"R01_EXACT_INTERPRETER={sys.executable}")
+        imperative_count = sum(len(site.get("imperative_pth", [])) for site in current["site"])
+        print("R01_IMPERATIVE_PTH_STARTUP_EFFECTS=" +
+              ("NOT_ATTESTED count=" + str(imperative_count)
+               if imperative_count else "NONE_OBSERVED"))
         print("R01_SITE_IMPORTABLE_SOURCE_SET=PASS site_roots=" + str(len(roots))
               + " files=" + str(sum(len(s["importable"]) for s in current["site"])))
         derived_count = sum(len(site["derived_bytecode"]) for site in current["site"])

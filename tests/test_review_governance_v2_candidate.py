@@ -534,5 +534,129 @@ class ReviewerR004CounterexampleTests(unittest.TestCase):
             )
 
 
+    def _posttest_fixture(self, directory):
+        """Commit exact checked-in preflight tool to an isolated temporary repo."""
+        repo, tracked, _ = self._fixture(directory)
+        source = ROOT.parents[1] / "tools" / "review_governance_v2_preflight.py"
+        target = repo / "tools" / "review_governance_v2_preflight.py"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(source.read_bytes())
+        paths = ("governance.md", "tools/review_governance_v2_preflight.py")
+        (repo / "MANIFEST.sha256").write_text(
+            "".join(
+                hashlib.sha256((repo / path).read_bytes()).hexdigest()
+                + "  ./" + path + "\n"
+                for path in paths
+            ), encoding="utf-8",
+        )
+        self._git(repo, "add", "-A")
+        self._git(repo, "-c", "user.name=T0", "-c",
+                  "user.email=t0@example.invalid", "commit", "-q", "-m",
+                  "commit source verifier for final-gate T0")
+        return repo, tracked, self._git(repo, "rev-parse", "HEAD").decode().strip()
+
+    def _run_actual_ci_final_step(self, repo, expected_head):
+        """Execute the ACTUAL final workflow shell step, not a modelled copy."""
+        workflow = (ROOT.parents[1] / ".github" / "workflows" /
+                    "review-governance-v2-candidate.yml").read_text("utf-8")
+        marker = "      - name: Final checkout integrity (no source changed by tests)\n"
+        self.assertEqual(workflow.count(marker), 1)
+        tail = workflow.split(marker, 1)[1]
+        self.assertIn("        run: |\n", tail)
+        raw = tail.split("        run: |\n", 1)[1]
+        lines = []
+        for line in raw.splitlines():
+            if line.startswith("          "):
+                lines.append(line[10:])
+            elif not line.strip():
+                break
+            else:
+                self.fail("Unsupported final YAML shell indentation")
+        self.assertTrue(lines)
+        return subprocess.run(
+            ["bash", "-c", "\n".join(lines) + "\n"],
+            cwd=repo, env={**os.environ, "EXPECTED_HEAD": expected_head},
+            capture_output=True, text=True, check=False,
+        )
+
+    def test_posttest_workflow_uses_same_strict_verifier_twice(self):
+        workflow = (ROOT.parents[1] / ".github" / "workflows" /
+                    "review-governance-v2-candidate.yml").read_text("utf-8")
+        command = ('python3 -I -S tools/review_governance_v2_preflight.py '
+                   '--expected-head "$EXPECTED_HEAD"')
+        self.assertEqual(workflow.count(command), 2)
+        pre, final = workflow.split(
+            "      - name: Final checkout integrity (no source changed by tests)\n",
+            1,
+        )
+        self.assertIn(command, pre)
+        self.assertIn(command, final)
+        self.assertIn("EXPECTED_HEAD:", final)
+        self.assertIn("V2_GOVERNANCE_T0_FINAL_SOURCE_UNCHANGED=PASS", final)
+
+    def test_posttest_actual_step_accepts_clean_disposable_repo(self):
+        with tempfile.TemporaryDirectory(prefix="v2-post-clean-") as tmp:
+            repo, tracked, head = self._posttest_fixture(tmp)
+            result = self._run_actual_ci_final_step(repo, head)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("V2_GOVERNANCE_T0_FINAL_SOURCE_UNCHANGED=PASS",
+                          result.stdout)
+
+    def test_posttest_actual_step_rejects_chmod_and_filemode_false(self):
+        with tempfile.TemporaryDirectory(prefix="v2-post-mode-") as tmp:
+            repo, tracked, head = self._posttest_fixture(tmp)
+            self.assertEqual(self._run_actual_ci_final_step(repo, head).returncode, 0)
+            tracked.chmod(0o755)
+            self._git(repo, "config", "core.filemode", "false")
+            self.assertEqual(self._git(repo, "status", "--porcelain"), b"")
+            result = self._run_actual_ci_final_step(repo, head)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("CORE_FILEMODE_DISABLED", result.stderr)
+            self.assertNotIn("V2_GOVERNANCE_T0_FINAL_SOURCE_UNCHANGED=PASS",
+                             result.stdout)
+
+    def test_posttest_actual_step_rejects_assume_unchanged(self):
+        with tempfile.TemporaryDirectory(prefix="v2-post-assume-") as tmp:
+            repo, tracked, head = self._posttest_fixture(tmp)
+            self._git(repo, "update-index", "--assume-unchanged", "governance.md")
+            self.assertEqual(self._git(repo, "status", "--porcelain"), b"")
+            result = self._run_actual_ci_final_step(repo, head)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("HIDDEN_INDEX_FLAG_OR_DUPLICATE", result.stderr)
+
+    def test_posttest_actual_step_rejects_skip_worktree(self):
+        with tempfile.TemporaryDirectory(prefix="v2-post-skip-") as tmp:
+            repo, tracked, head = self._posttest_fixture(tmp)
+            self._git(repo, "update-index", "--skip-worktree", "governance.md")
+            self.assertEqual(self._git(repo, "status", "--porcelain"), b"")
+            result = self._run_actual_ci_final_step(repo, head)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("HIDDEN_INDEX_FLAG_OR_DUPLICATE", result.stderr)
+
+    def test_posttest_actual_step_rejects_ignored_source_shadow(self):
+        with tempfile.TemporaryDirectory(prefix="v2-post-shadow-") as tmp:
+            repo, tracked, head = self._posttest_fixture(tmp)
+            with (repo / ".git" / "info" / "exclude").open(
+                "a", encoding="utf-8"
+            ) as ignored_rules:
+                ignored_rules.write("\nshadow.py\n")
+            (repo / "shadow.py").write_text(
+                "raise RuntimeError('not imported by these tests')\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(self._git(repo, "status", "--porcelain"), b"")
+            result = self._run_actual_ci_final_step(repo, head)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("IGNORED_REPOSITORY_INPUT", result.stderr)
+
+    def test_posttest_actual_step_rejects_untracked_source(self):
+        with tempfile.TemporaryDirectory(prefix="v2-post-untracked-") as tmp:
+            repo, tracked, head = self._posttest_fixture(tmp)
+            (repo / "foreign.py").write_text("x = 1\n", encoding="utf-8")
+            result = self._run_actual_ci_final_step(repo, head)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+
 if __name__ == "__main__":
     unittest.main()

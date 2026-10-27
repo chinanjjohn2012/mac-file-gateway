@@ -81,7 +81,7 @@ def read_record(root: Path, file: Path) -> set[str]:
 
 
 
-def verify_derived_bytecode(pyc: Path, root: Path, recorded: set[str]) -> str:
+def verify_derived_bytecode(pyc: Path, root: Path, recorded: set[str]) -> tuple[str, bool]:
     """Validate unlisted optimized pyc against its RECORD-listed .py source.
 
     pip may generate PEP 3147 .opt-1.pyc outside RECORD during install.
@@ -102,11 +102,14 @@ def verify_derived_bytecode(pyc: Path, root: Path, recorded: set[str]) -> str:
     if flags not in (0, 1, 3):
         raise EvidenceError("invalid derived bytecode PEP552 flags")
     if flags & 1:
-        if payload[8:16] != importlib.util.source_hash(code):
-            raise EvidenceError("derived bytecode source hash mismatch")
-    elif (int.from_bytes(payload[8:12], "little") != int(src.stat().st_mtime) & 0xffffffff
-          or int.from_bytes(payload[12:16], "little") != len(code) & 0xffffffff):
-        raise EvidenceError("derived bytecode source timestamp/size mismatch")
+        header_matches = payload[8:16] == importlib.util.source_hash(code)
+    else:
+        header_matches = (int.from_bytes(payload[8:12], "little") == int(src.stat().st_mtime) & 0xffffffff
+                          and int.from_bytes(payload[12:16], "little") == len(code) & 0xffffffff)
+    # An installer may leave stale invalidation metadata. A different header
+    # does not give license to accept unreviewed bytecode: require an EXACT
+    # independent recompilation of its executable payload from recorded .py.
+    # Record mismatch as an explicit gap; do not claim PEP552 header identity.
     label = pyc.name
     if ".opt-2.pyc" in label:
         optimize = 2
@@ -122,7 +125,7 @@ def verify_derived_bytecode(pyc: Path, root: Path, recorded: set[str]) -> str:
         raise EvidenceError("cannot reproduce derived bytecode") from exc
     if payload[16:] != marshal.dumps(compiled):
         raise EvidenceError("derived bytecode payload differs from recorded source")
-    return src.relative_to(root).as_posix()
+    return src.relative_to(root).as_posix(), header_matches
 
 
 def scan_root(root: Path) -> dict:
@@ -154,8 +157,8 @@ def scan_root(root: Path) -> dict:
                 continue
             if rel not in recorded:
                 if name.endswith(".pyc"):
-                    origin = verify_derived_bytecode(p, root, recorded)
-                    derived.append([rel, origin])
+                    origin, header_matches = verify_derived_bytecode(p, root, recorded)
+                    derived.append([rel, origin, header_matches])
                 else:
                     raise EvidenceError("RECORD-unlisted importable/executable: " + rel)
             d = digest(p)
@@ -326,6 +329,8 @@ def main(argv: list[str] | None = None) -> int:
         if derived_count:
             print("R01_SITE_RECORD_UNLISTED_PYC=REPRODUCIBLY_DERIVED_FROM_RECORDED_SOURCE count="
                   + str(derived_count))
+            stale = sum(1 for site in current["site"] for row in site["derived_bytecode"] if not row[2])
+            print("R01_PYC_INVALIDATION_HEADER_MISMATCH=OBSERVED_COUNT_" + str(stale))
         else:
             print("R01_SITE_UNLISTED_EXECUTABLES=NONE_DETECTED")
         print("R01_SITE_UNVERIFIED_EXECUTABLES=NONE_DETECTED")

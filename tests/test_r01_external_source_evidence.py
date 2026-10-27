@@ -165,9 +165,29 @@ def test_pip_like_unlisted_optimized_pyc_accepted_only_if_reproducible(tmp_path)
     py_compile.compile(str(src), cfile=str(pyc), doraise=True, optimize=1)
     result = probe.site_snapshot([site])
     assert result['site'][0]['derived_bytecode'] == [
-        ['safe/__pycache__/__init__.cpython-313.opt-1.pyc', 'safe/__init__.py']
+        ['safe/__pycache__/__init__.cpython-313.opt-1.pyc', 'safe/__init__.py', True]
     ]
     old = pyc.read_bytes()
     pyc.write_bytes(old[:-1] + bytes([old[-1] ^ 1]))
+    with pytest.raises(probe.EvidenceError, match='payload differs'):
+        probe.site_snapshot([site])
+
+
+def test_stale_pyc_header_only_accepted_with_identical_recompiled_payload(tmp_path):
+    site = _site(tmp_path)
+    src = site/'safe'/'__init__.py'
+    cache = site/'safe'/'__pycache__'
+    cache.mkdir()
+    pyc = cache/'__init__.cpython-313.opt-1.pyc'
+    py_compile.compile(str(src), cfile=str(pyc), doraise=True, optimize=1)
+    original = bytearray(pyc.read_bytes())
+    # Wrong cache invalidation timestamp cannot be called matching PEP552,
+    # but the on-disk executable bytecode is still fully reproducible.
+    original[8:12] = (0).to_bytes(4, 'little')
+    pyc.write_bytes(original)
+    snapshot = probe.site_snapshot([site])
+    assert snapshot['site'][0]['derived_bytecode'][0][2] is False
+    original[-1] ^= 1
+    pyc.write_bytes(original)
     with pytest.raises(probe.EvidenceError, match='payload differs'):
         probe.site_snapshot([site])

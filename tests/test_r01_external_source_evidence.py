@@ -305,3 +305,20 @@ def test_r005_runtime_changed_recorded_zip_root_rejected(tmp_path):
         stream.write(b"changed after preimport")
     with pytest.raises(probe.EvidenceError, match="changed|mismatch|unattested"):
         probe.verify_runtime(runtime, repo, snapshot)
+
+
+def test_r005_real_recorded_zip_member_origin_attested(tmp_path):
+    site = _site(tmp_path)
+    archive = _r005_zip(site, "legitimate.pyz")
+    _r005_record(site, archive.name)
+    _r005_pth(site, archive.name)
+    snapshot = probe.site_snapshot([site])
+    runtime, repo = _r005_observation(site, tmp_path, snapshot, archive)
+    observation = json.loads(runtime.read_text())
+    # CPython zipimport module.__file__ is archive.pyz/inner.py, not an OS file.
+    observation["loaded_origins"] = [
+        ["r005_zip_probe", str(archive) + "/r005_zip_probe.py"]
+    ]
+    runtime.write_text(json.dumps(observation))
+    verified = probe.verify_runtime(runtime, repo, snapshot)
+    assert verified["attested_site_module_origins"] == 1

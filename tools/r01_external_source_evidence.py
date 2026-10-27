@@ -22,13 +22,15 @@ from pathlib import Path
 import stat
 import sys
 import sysconfig
+import zipfile
 
 
 class EvidenceError(ValueError):
     pass
 
 
-_SUFFIXES = (".py", ".pyc", ".pyo", ".so", ".pyd", ".dll", ".dylib", ".pth", ".zip", ".egg", ".whl")
+_SUFFIXES = (".py", ".pyc", ".pyo", ".so", ".pyd", ".dll", ".dylib", ".pth", ".zip", ".pyz", ".egg", ".whl")
+_ARCHIVE_SUFFIXES = (".zip", ".pyz", ".egg", ".whl")
 
 
 def source_like(name: str) -> bool:
@@ -128,6 +130,18 @@ def verify_derived_bytecode(pyc: Path, root: Path, recorded: set[str]) -> tuple[
     return src.relative_to(root).as_posix(), header_matches
 
 
+def archive_bytes(path: Path) -> bool:
+    """Inspect real ZIP central-directory bytes regardless of file suffix.
+
+    CPython zipimport can load ZIP payloads from .pyz and arbitrary names.
+    Filename-only checks are insufficient for pre-import source closure.
+    """
+    try:
+        return zipfile.is_zipfile(path)
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise EvidenceError("ZIP archive inspection failed: " + str(path)) from exc
+
+
 def scan_root(root: Path) -> dict:
     if root.is_symlink() or not root.is_dir():
         raise EvidenceError("site root missing or symlink: " + str(root))
@@ -151,7 +165,12 @@ def scan_root(root: Path) -> dict:
             p = Path(base) / name
             regular(p)
             rel = p.relative_to(root).as_posix()
-            if not source_like(name):
+            # Both recognized archive suffixes AND actual ZIP magic matter:
+            # a bare .asset/noextension ZIP is importable after a .pth injection.
+            is_zip = archive_bytes(p)
+            if name.lower().endswith(_ARCHIVE_SUFFIXES) and not is_zip:
+                raise EvidenceError("invalid ZIP archive: " + rel)
+            if not source_like(name) and not is_zip:
                 if rel not in recorded:
                     unknown_non_exec += 1
                 continue
@@ -170,8 +189,19 @@ def scan_root(root: Path) -> dict:
                     if not line or line.startswith("#") or line.startswith("import "):
                         continue
                     injected = Path(os.path.abspath(str(root / line)))
-                    if injected.exists() and not under(injected, root):
-                        raise EvidenceError(".pth injects outside site root: " + rel)
+                    if injected.exists():
+                        if not under(injected, root):
+                            raise EvidenceError(".pth injects outside site root: " + rel)
+                        if injected.is_file() or injected.is_symlink():
+                            regular(injected)
+                            if archive_bytes(injected):
+                                # The complete scan covers these bytes too.
+                                # A .pth path cannot justify unlisted ZIP input.
+                                relative = injected.relative_to(root).as_posix()
+                                if relative not in recorded:
+                                    raise EvidenceError("RECORD-unlisted importable/executable: " + relative)
+                            elif injected.name.lower().endswith(_ARCHIVE_SUFFIXES):
+                                raise EvidenceError("invalid ZIP archive in .pth: " + rel)
     if not importable:
         raise EvidenceError("site root has no examined importable source")
     return {"path": str(root), "dist_record_count": len(dist_records),
@@ -220,6 +250,35 @@ def _classify_root(value: str, repo: Path, site: list[Path]) -> str:
     raise EvidenceError("unexpected actual Python import root: " + str(p))
 
 
+def site_attested_file(path: Path, roots: list[Path],
+                       hashes: dict[str, str]) -> Path | None:
+    """Resolve the real, hashed source for site files or ZIP member paths.
+
+    A module __file__ or sys.path may contain archive.pyz/pkg/module.py,
+    while the ZIP file itself is the independently hashed importable input.
+    """
+    for root in roots:
+        if not under(path, root):
+            continue
+        for candidate in (path, *path.parents):
+            if not under(candidate, root):
+                break
+            if candidate.is_symlink():
+                raise EvidenceError("symlink in site source path: " + str(candidate))
+            if candidate.is_file():
+                regular(candidate)
+                expected = hashes.get(str(candidate))
+                if expected is None:
+                    raise EvidenceError("unattested site import source: " + str(candidate))
+                if digest(candidate) != expected:
+                    raise EvidenceError("changed site import source bytes: " + str(candidate))
+                if candidate != path and not archive_bytes(candidate):
+                    raise EvidenceError("module origin traverses non-ZIP file: " + str(candidate))
+                return candidate
+        return None
+    return None
+
+
 def verify_runtime(path: Path, repo: Path, snapshot: dict) -> dict:
     data = read_json(path)
     if data.get("executable") != snapshot["interpreter"] or data.get("prefix") != snapshot["prefix"]:
@@ -230,18 +289,27 @@ def verify_runtime(path: Path, repo: Path, snapshot: dict) -> dict:
     if not isinstance(paths, list) or not paths:
         raise EvidenceError("actual Python sys.path not observed")
     roots = [Path(root["path"]) for root in snapshot["site"]]
+    site_attested = {}
+    for root in snapshot["site"]:
+        site_attested.update({str(Path(root["path"]) / rel): sha for rel, sha in root["importable"]})
     observed = []
     for value in paths:
         if not isinstance(value, str):
             raise EvidenceError("invalid sys.path entry")
-        observed.append([value, _classify_root(value, repo.absolute(), roots)])
+        category = _classify_root(value, repo.absolute(), roots)
+        if category == "INSTALLED_SITE_ROOT":
+            location = Path(value or str(repo)).absolute()
+            source = site_attested_file(location, roots, site_attested)
+            if source is None:
+                if location.is_symlink() or not location.is_dir():
+                    raise EvidenceError("unattested site import root: " + str(location))
+            elif not archive_bytes(source):
+                raise EvidenceError("non-ZIP file in Python sys.path: " + str(location))
+        observed.append([value, category])
     if not any(category == "INSTALLED_SITE_ROOT" for _, category in observed):
         raise EvidenceError("runtime site root not observed")
     checked_site_modules = 0
     unmatched_test_modules = []
-    site_attested = {}
-    for root in snapshot["site"]:
-        site_attested.update({str(Path(root["path"]) / rel): sha for rel, sha in root["importable"]})
     for entry in data.get("loaded_origins", []):
         if not isinstance(entry, list) or len(entry) != 2:
             raise EvidenceError("bad imported-module origin record")
@@ -254,12 +322,8 @@ def verify_runtime(path: Path, repo: Path, snapshot: dict) -> dict:
             unmatched_test_modules.append([name, origin])
             continue
         if any(under(file, root) for root in roots):
-            expected = site_attested.get(str(file))
-            if expected is None:
-                raise EvidenceError("actual site-imported module outside RECORD: " + origin)
-            regular(file)
-            if digest(file) != expected:
-                raise EvidenceError("actual site-imported module bytes changed: " + origin)
+            if site_attested_file(file, roots, site_attested) is None:
+                raise EvidenceError("actual site-imported module outside attested inputs: " + origin)
             checked_site_modules += 1
         else:
             try:

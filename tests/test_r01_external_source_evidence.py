@@ -612,3 +612,106 @@ def test_r007_imperative_pth_unobserved_startup_effect_refused(tmp_path):
     observation = _r007_runtime(repo, site, snapshot, tmp_path / "r007-pth-only.json")
     with pytest.raises(probe.EvidenceError, match="pth|startup|unqualified|imperative"):
         probe.verify_runtime(observation, repo, snapshot)
+
+
+# r008: actual disposable Git + Python evidence counterexamples, no Gateway Exec.
+def _r008_git(repo: Path, *args: str) -> str:
+    p = subprocess.run(["git", "-C", str(repo), *args],
+                       capture_output=True, text=True, check=False)
+    assert p.returncode == 0, (args, p.stderr)
+    return p.stdout.strip()
+
+
+def test_r008_required_original_pr_head_in_ci(tmp_path, monkeypatch):
+    site = _site(tmp_path)
+    snapshot = probe.site_snapshot([site])
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    source = repo / "tracked_r008.py"
+    source.write_text("VALUE=8\n")
+    _r007_commit_repo(repo)
+    head_a = _r008_git(repo, "rev-parse", "HEAD")
+    observation = _r007_runtime(repo, site, snapshot, tmp_path / "r008-expected.json",
+                                origins=[["tracked_r008", str(source)]])
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(repo))
+    monkeypatch.delenv("G05_EXPECTED_HEAD", raising=False)
+    with pytest.raises(probe.EvidenceError, match="expected|missing|HEAD"):
+        probe.verify_runtime(observation, repo, snapshot)
+    monkeypatch.setenv("G05_EXPECTED_HEAD", head_a)
+    assert probe.verify_runtime(observation, repo, snapshot)["out_of_scope_module_origins"] == []
+
+
+def test_r008_real_git_a_to_b_commit_does_not_rebind_early_head(tmp_path, monkeypatch):
+    site = _site(tmp_path)
+    snapshot = probe.site_snapshot([site])
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    source = repo / "tracked_r008.py"
+    source.write_text("VALUE=8\n")
+    _r007_commit_repo(repo)
+    head_a = _r008_git(repo, "rev-parse", "HEAD")
+    observation = _r007_runtime(repo, site, snapshot, tmp_path / "r008-rebind.json",
+                                origins=[["tracked_r008", str(source)]])
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(repo))
+    monkeypatch.setenv("G05_EXPECTED_HEAD", head_a)
+    assert probe.verify_runtime(observation, repo, snapshot)["out_of_scope_module_origins"] == []
+    source.write_text("VALUE=99\n")
+    (repo / "MANIFEST.sha256").write_text(
+        hashlib.sha256(source.read_bytes()).hexdigest() + "  ./tracked_r008.py\n")
+    _r008_git(repo, "add", "--", "tracked_r008.py", "MANIFEST.sha256")
+    _r008_git(repo, "-c", "user.name=R01 Test", "-c",
+              "user.email=r01-test@example.invalid", "commit", "-q",
+              "-m", "second independently committed source")
+    head_b = _r008_git(repo, "rev-parse", "HEAD")
+    assert head_b != head_a
+    assert _r008_git(repo, "status", "--porcelain") == ""
+    monkeypatch.delenv("G05_EXPECTED_HEAD", raising=False)
+    with pytest.raises(probe.EvidenceError, match="expected|missing|HEAD"):
+        probe.verify_runtime(observation, repo, snapshot)
+    monkeypatch.setenv("G05_EXPECTED_HEAD", head_a)
+    with pytest.raises(probe.EvidenceError, match="HEAD|expected"):
+        probe.verify_runtime(observation, repo, snapshot)
+
+
+def test_r008_preimport_blocks_recorded_imperative_pth_before_site(tmp_path):
+    site = _site(tmp_path)
+    (site / "active_r008.pth").write_text("import sys;sys._r008_marker=1\n")
+    _r005_record(site, "active_r008.pth")
+    evidence = tmp_path / "r008-preimport.json"
+    p = subprocess.run([sys.executable, "-B", "-I", "-S", str(SCRIPT), "preimport",
+                        "--site-root", str(site), "--snapshot", str(evidence)],
+                       capture_output=True, text=True, check=False)
+    assert p.returncode == 2, (p.stdout, p.stderr)
+    assert "imperative" in p.stderr or "unattested" in p.stderr
+    assert not evidence.exists()
+
+
+def test_r008_nested_head_directory_deleted_untracked_module_must_deny(tmp_path):
+    site = _site(tmp_path)
+    snapshot = probe.site_snapshot([site])
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    nested = repo / "pkg_r008"
+    nested.mkdir()
+    (nested / "README.txt").write_text("tracked metadata only\n")
+    _r007_commit_repo(repo)
+    ephemeral = nested / "ephemeral_r008.py"
+    ephemeral.write_text("VALUE=72\n")
+    cmd = ("import sys,os,json;"
+           "sys.path.insert(0,sys.argv[1]);"
+           "import ephemeral_r008;"
+           "v=ephemeral_r008.VALUE;"
+           "del sys.modules['ephemeral_r008'];"
+           "os.unlink(sys.argv[2]);"
+           "print(json.dumps({'value':v,"
+           "'retained':'ephemeral_r008' in sys.modules}))")
+    p = subprocess.run([sys.executable, "-B", "-I", "-S", "-c", cmd,
+                        str(nested), str(ephemeral)], capture_output=True,
+                       text=True, check=False)
+    assert p.returncode == 0, p.stderr
+    assert json.loads(p.stdout) == {"value": 72, "retained": False}
+    assert not ephemeral.exists() and _r008_git(repo, "status", "--porcelain") == ""
+    observation = _r007_runtime(repo, site, snapshot, tmp_path / "r008-nested.json",
+                                roots=[str(repo), str(site), str(nested)])
+    with pytest.raises(probe.EvidenceError, match="nested|unattested|unqualified"):
+        probe.verify_runtime(observation, repo, snapshot)

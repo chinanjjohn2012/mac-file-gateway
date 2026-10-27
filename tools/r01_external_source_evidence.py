@@ -261,9 +261,9 @@ def _repo_attested_file(path: Path, repo: Path) -> Path:
     relative = source.relative_to(root).as_posix()
     hashes = {}
     for line in manifest.read_text("utf-8").splitlines():
-        if len(line) < 67 or line[64:67] != "  ./" or len(line[:64]) != 64:
+        if len(line) < 68 or line[64:68] != "  ./" or len(line[:64]) != 64:
             raise EvidenceError("invalid G05 manifest line")
-        rel, expected = line[67:], line[:64]
+        rel, expected = line[68:], line[:64]
         if not rel or rel in hashes or any(ch not in "0123456789abcdef" for ch in expected):
             raise EvidenceError("invalid G05 manifest entry")
         hashes[rel] = expected

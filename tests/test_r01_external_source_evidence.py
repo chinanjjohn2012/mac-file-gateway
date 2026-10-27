@@ -322,3 +322,123 @@ def test_r005_real_recorded_zip_member_origin_attested(tmp_path):
     runtime.write_text(json.dumps(observation))
     verified = probe.verify_runtime(runtime, repo, snapshot)
     assert verified["attested_site_module_origins"] == 1
+
+
+# r006 reviewer-derived lexical and symlink import-root/source-origin negatives.
+# These are harmless, disposable CPython imports, not Gateway Exec or signals.
+import hashlib
+
+
+@pytest.mark.parametrize("anchor", ["repo", "site"])
+def test_r006_actual_recorded_pth_parent_escape_import_root_denied(tmp_path, anchor):
+    site = _site(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "r006_external_probe.py").write_text("VALUE=42\n")
+    escaped = str((repo if anchor == "repo" else site) / ".." / "outside")
+    (site / "escape_r006.pth").write_text(
+        "import sys;sys.path.insert(0," + repr(escaped) + ")\n"
+    )
+    _r005_record(site, "escape_r006.pth")
+    snapshot = probe.site_snapshot([site])
+    # Execute genuine site.addsitedir() and importlib through a disposable interpreter.
+    command = (
+        "import sys,site,json;"
+        "site.addsitedir(sys.argv[1]);"
+        "import r006_external_probe;"
+        "print(json.dumps({'sys_path':sys.path,"
+        "'origin':r006_external_probe.__file__,"
+        "'value':r006_external_probe.VALUE}))"
+    )
+    actual = subprocess.run(
+        [sys.executable, "-B", "-I", "-S", "-c", command, str(site)],
+        capture_output=True, text=True, check=False
+    )
+    assert actual.returncode == 0, actual.stderr
+    runtime = json.loads(actual.stdout)
+    assert runtime["value"] == 42
+    assert ".." in Path(runtime["origin"]).parts
+    assert Path(runtime["origin"]).resolve().parent == outside.resolve()
+    observation = tmp_path / "r006-runtime.json"
+    observation.write_text(json.dumps({
+        "schema": 1, "executable": snapshot["interpreter"],
+        "prefix": snapshot["prefix"], "user_site_enabled": False,
+        "sys_path": [str(repo)] + runtime["sys_path"],
+        # For the site case the root must fail independently of module-origin
+        # validation, whose old path already rejects the unlisted site member.
+        "loaded_origins": ([["r006_external_probe", runtime["origin"]]]
+                           if anchor == "repo" else []),
+    }))
+    with pytest.raises(probe.EvidenceError, match="unexpected|noncanonical|unattested"):
+        probe.verify_runtime(observation, repo, snapshot)
+
+
+def test_r006_actual_parent_escape_module_origin_not_qualified_as_head(tmp_path):
+    site = _site(tmp_path)
+    snapshot = probe.site_snapshot([site])
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    escaped = repo / ".." / "outside" / "r006_external_probe.py"
+    escaped.write_text("VALUE=42\n")
+    observation = tmp_path / "r006-origin.json"
+    observation.write_text(json.dumps({
+        "schema": 1, "executable": snapshot["interpreter"],
+        "prefix": snapshot["prefix"], "user_site_enabled": False,
+        "sys_path": [str(repo), str(site)],
+        "loaded_origins": [["r006_external_probe", str(escaped)]],
+    }))
+    # A path outside the HEAD Tree must not silently become "G05 trusted".
+    try:
+        checked = probe.verify_runtime(observation, repo, snapshot)
+    except probe.EvidenceError:
+        pass
+    else:
+        assert ["r006_external_probe", str(escaped)] in checked["out_of_scope_module_origins"]
+
+
+def test_r006_repo_origin_requires_manifest_and_matching_sha256(tmp_path):
+    site = _site(tmp_path)
+    snapshot = probe.site_snapshot([site])
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    source = repo / "tracked_r006.py"
+    source.write_text("VALUE=8\n")
+    observation = tmp_path / "r006-repo-origin.json"
+    observation.write_text(json.dumps({
+        "schema": 1, "executable": snapshot["interpreter"],
+        "prefix": snapshot["prefix"], "user_site_enabled": False,
+        "sys_path": [str(repo), str(site)],
+        "loaded_origins": [["tracked_r006", str(source)]],
+    }))
+    # A trusted directory name by itself is not a verified tracked Git Blob.
+    with pytest.raises(probe.EvidenceError, match="MANIFEST|manifest|unattested|HEAD"):
+        probe.verify_runtime(observation, repo, snapshot)
+    sha = hashlib.sha256(source.read_bytes()).hexdigest()
+    (repo / "MANIFEST.sha256").write_text(sha + "  ./tracked_r006.py\n")
+    assert probe.verify_runtime(observation, repo, snapshot)["out_of_scope_module_origins"] == []
+    source.write_text("VALUE=9\n")
+    with pytest.raises(probe.EvidenceError, match="changed|mismatch|unattested|HEAD"):
+        probe.verify_runtime(observation, repo, snapshot)
+
+
+def test_r006_repo_symlink_root_outside_not_qualified(tmp_path):
+    site = _site(tmp_path)
+    snapshot = probe.site_snapshot([site])
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (repo / "linked").symlink_to(outside, target_is_directory=True)
+    observation = tmp_path / "r006-link.json"
+    observation.write_text(json.dumps({
+        "schema": 1, "executable": snapshot["interpreter"],
+        "prefix": snapshot["prefix"], "user_site_enabled": False,
+        "sys_path": [str(repo), str(site), str(repo / "linked")],
+        "loaded_origins": [],
+    }))
+    with pytest.raises(probe.EvidenceError, match="unexpected|noncanonical|symlink"):
+        probe.verify_runtime(observation, repo, snapshot)

@@ -191,3 +191,117 @@ def test_stale_pyc_header_only_accepted_with_identical_recompiled_payload(tmp_pa
     pyc.write_bytes(original)
     with pytest.raises(probe.EvidenceError, match='payload differs'):
         probe.site_snapshot([site])
+
+# r005 independent disposable T0/T1 adversarial ZIP/zipapp path coverage.
+import zipfile
+
+
+def _r005_zip(site: Path, name: str) -> Path:
+    archive = site / name
+    with zipfile.ZipFile(archive, "w") as zipped:
+        zipped.writestr("r005_zip_probe.py", "VALUE=12345\n")
+    return archive
+
+
+def _r005_record(site: Path, rel: str) -> None:
+    with (site / "safe_pkg-1.0.dist-info" / "RECORD").open("a", newline="") as stream:
+        csv.writer(stream).writerow([rel, "", ""])
+
+
+def _r005_pth(site: Path, name: str) -> None:
+    (site / "legal.pth").write_text(name + "\n")
+    _r005_record(site, "legal.pth")
+
+
+def _r005_observation(site: Path, tmp_path: Path, snapshot: dict, archive: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    obs = tmp_path / "r005-runtime.json"
+    obs.write_text(json.dumps({
+        "schema": 1, "executable": snapshot["interpreter"],
+        "prefix": snapshot["prefix"], "user_site_enabled": False,
+        "sys_path": [str(repo), str(site), str(archive)],
+        "loaded_origins": [],
+    }))
+    return obs, repo
+
+
+@pytest.mark.parametrize("name", ["unlisted.pyz", "unlisted.asset", "noextension"])
+def test_r005_unlisted_zipimport_via_recorded_pth_denied(tmp_path, name):
+    site = _site(tmp_path)
+    archive = _r005_zip(site, name)
+    _r005_pth(site, name)
+    assert zipfile.is_zipfile(archive)
+    # Execute only harmless code in a brand-new temporary Python site.
+    actual = subprocess.run([
+        sys.executable, "-B", "-I", "-S", "-c",
+        "import sys,site;site.addsitedir(sys.argv[1]);"
+        "import r005_zip_probe;print(r005_zip_probe.VALUE)", str(site),
+    ], capture_output=True, text=True, check=False)
+    assert actual.returncode == 0, actual.stderr
+    assert actual.stdout.strip() == "12345"
+    with pytest.raises(probe.EvidenceError, match="RECORD-unlisted"):
+        probe.site_snapshot([site])
+
+
+@pytest.mark.parametrize("name", ["recorded.pyz", "recorded.asset"])
+def test_r005_recorded_zip_and_pth_legally_hashed(tmp_path, name):
+    site = _site(tmp_path)
+    archive = _r005_zip(site, name)
+    _r005_record(site, name)
+    _r005_pth(site, name)
+    assert zipfile.is_zipfile(archive)
+    result = probe.site_snapshot([site])
+    found = [row[0] for row in result["site"][0]["importable"]]
+    assert name in found and "legal.pth" in found
+    assert result["site"][0]["unlisted_nonexecutables"] == 0
+
+
+def test_r005_recorded_zip_bytes_change_not_inherited(tmp_path):
+    site = _site(tmp_path)
+    archive = _r005_zip(site, "tracked.pyz")
+    _r005_record(site, archive.name)
+    first = probe.site_snapshot([site])
+    assert archive.name in [row[0] for row in first["site"][0]["importable"]]
+    with archive.open("ab") as stream:
+        stream.write(b"changed since preimport")
+    assert probe.site_snapshot([site]) != first
+
+
+def test_r005_corrupt_recorded_pyz_via_pth_rejected(tmp_path):
+    site = _site(tmp_path)
+    archive = site / "corrupt.pyz"
+    archive.write_bytes(b"corrupt non-ZIP bytes")
+    _r005_record(site, archive.name)
+    _r005_pth(site, archive.name)
+    assert not zipfile.is_zipfile(archive)
+    with pytest.raises(probe.EvidenceError, match="invalid|corrupt|ZIP"):
+        probe.site_snapshot([site])
+
+
+def test_r005_unlisted_plain_metadata_still_allowed(tmp_path):
+    site = _site(tmp_path)
+    (site / "README.note").write_bytes(b"plain nonzip documentation")
+    assert probe.site_snapshot([site])["site"][0]["unlisted_nonexecutables"] == 1
+
+
+def test_r005_runtime_unattested_site_zip_root_rejected(tmp_path):
+    site = _site(tmp_path)
+    snapshot = probe.site_snapshot([site])
+    archive = _r005_zip(site, "late.pyz")
+    runtime, repo = _r005_observation(site, tmp_path, snapshot, archive)
+    with pytest.raises(probe.EvidenceError, match="unattested|unlisted|ZIP"):
+        probe.verify_runtime(runtime, repo, snapshot)
+
+
+def test_r005_runtime_changed_recorded_zip_root_rejected(tmp_path):
+    site = _site(tmp_path)
+    archive = _r005_zip(site, "recorded.pyz")
+    _r005_record(site, archive.name)
+    snapshot = probe.site_snapshot([site])
+    runtime, repo = _r005_observation(site, tmp_path, snapshot, archive)
+    assert probe.verify_runtime(runtime, repo, snapshot)["observed"][-1][1] == "INSTALLED_SITE_ROOT"
+    with archive.open("ab") as stream:
+        stream.write(b"changed after preimport")
+    with pytest.raises(probe.EvidenceError, match="changed|mismatch|unattested"):
+        probe.verify_runtime(runtime, repo, snapshot)

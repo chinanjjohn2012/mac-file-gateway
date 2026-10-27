@@ -169,6 +169,10 @@ def scan_root(root: Path) -> dict:
             # a bare .asset/noextension ZIP is importable after a .pth injection.
             is_zip = archive_bytes(p)
             if name.lower().endswith(_ARCHIVE_SUFFIXES) and not is_zip:
+                # Keep the original negative contract: an unlisted would-be
+                # archive fails as UNLISTED even when its ZIP bytes are corrupt.
+                if rel not in recorded:
+                    raise EvidenceError("RECORD-unlisted importable/executable: " + rel)
                 raise EvidenceError("invalid ZIP archive: " + rel)
             if not source_like(name) and not is_zip:
                 if rel not in recorded:

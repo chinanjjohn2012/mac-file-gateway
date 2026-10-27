@@ -8,7 +8,7 @@ deb25674f304104b8e41cf70e1431c1b7bdc18943f4e1aedf7610f95171f6d7c  ./.github/work
 ce9fe947ce301fbc79ce522bf1012bb2b5bec9f60c81c1cabda1bb80e5e46575  ./.github/workflows/multi-exec-r1-a0-macos-arm64.yml
 a1706a650e6f2804a1fd99187d85bae93267ca0e04744805ab7c6c28a44cd08f  ./.github/workflows/multi-exec-r1-red.yml
 cbf50c5750fc83b69cbcd4e43ed116eefda12a1ef91c45f0d5706dd5df25a15a  ./.github/workflows/multi-exec-r2-t02-admission-red.yml
-8fe6cc650e3556433bbff1214dfd860a9ac1010c70e42852e2c233722a92a2d5  ./.github/workflows/multi-exec-r2s-s2-macos-arm64.yml
+5f92a358e1a9c08d9de7f1882a7fc5d5e0e5d01306406824ebd1102c3af1c4da  ./.github/workflows/multi-exec-r2s-s2-macos-arm64.yml
 a248a4a4ac7da92f555f034bbb9637fb77fab91a7078f5d093366cf8a937f88f  ./.github/workflows/sensitive-content-macos.yml
 ef06acea97a3c12d0a236a36d6d1bd74b735c62b712e3ad69e50c6f87ac90b90  ./.gitignore
 fffd94c70313a5e83590207596735c9c56ae744343f88ee9e875cfb506ecb708  ./BUILD_INFO.json
@@ -204,6 +204,7 @@ fc6af6165b710b2b377989b9651ee92f4c2ec9b584e2df07a6e1bef9f9829bf9  ./tests/test_p
 9665914f8208c14970b14fe6b5e3fca74456892044a2865e9b3d49e833cb2fee  ./tests/test_phase1_visibility.py
 e7964276adb716be32fc0c898b4192cf151992ed744165480e662d172cc2dc01  ./tests/test_phase1_workspaces.py
 5c5579c0c9b9363ca5cacdb65aefad0dbe37cf2c272bb2239d81469c2eb124f4  ./tests/test_phase1_workspaces_config.py
+a9dfb649d7d918713fbe34365017d2f38abab394ab9a36c05fbace9f8a428ee9  ./tests/test_r01_external_source_evidence.py
 088891fd3835c39f4b4c940f62d709e938d4a331c364beb5f0adf6d046dca96a  ./tests/test_r2s_s1_offline.py
 9f4afddebdbdbcec622f98188949db627e9c2cca60dbe563ff71db512feacef2  ./tests/test_r2s_s2_private_fs.py
 51e9010642227557240e77298be4d9617fc45bbbe3425deb2c5576f66cbb3f66  ./tests/test_r2s_s2_review_r002.py

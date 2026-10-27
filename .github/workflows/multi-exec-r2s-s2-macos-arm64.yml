@@ -9,6 +9,7 @@ on:
       - 'tests/test_r2s_s2_private_fs.py'
       - 'tests/test_r2s_s2_review_r002.py'
       - 'tests/test_r2s_s2_review_r003.py'
+      - 'tests/test_r01_external_source_evidence.py'
       - 'MANIFEST.sha256'
       - 'requirements*.txt'
       - 'ci/wheel-locks/**'
@@ -98,6 +99,7 @@ jobs:
           tests/test_r2s_s2_private_fs.py
           tests/test_r2s_s2_review_r002.py
           tests/test_r2s_s2_review_r003.py
+          tests/test_r01_external_source_evidence.py
           tests/test_runner_seam_r1.py
           tests/test_multi_exec_f1.py
           tests/test_exec_state_t01.py

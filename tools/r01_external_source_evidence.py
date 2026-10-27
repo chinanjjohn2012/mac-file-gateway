@@ -238,8 +238,53 @@ def read_json(file: Path) -> dict:
     return value
 
 
+def _require_canonical_path(path: Path) -> Path:
+    """Reject lexical parent escapes, symlinks and other aliases to trusted roots."""
+    raw = str(path)
+    if any(part == ".." for part in path.parts):
+        raise EvidenceError("noncanonical Python import path: " + raw)
+    absolute = path.absolute()
+    resolved = path.resolve(strict=False)
+    if absolute != resolved:
+        raise EvidenceError("noncanonical/symlink Python import path: " + raw)
+    return resolved
+
+
+def _repo_attested_file(path: Path, repo: Path) -> Path:
+    """Only a regular source present in the frozen G05 Manifest may be trusted."""
+    root = _require_canonical_path(repo)
+    source = _require_canonical_path(path)
+    if not under(source, root):
+        raise EvidenceError("unattested HEAD module outside tracked root: " + str(path))
+    manifest = root / "MANIFEST.sha256"
+    regular(manifest)
+    relative = source.relative_to(root).as_posix()
+    hashes = {}
+    for line in manifest.read_text("utf-8").splitlines():
+        if len(line) < 67 or line[64:67] != "  ./" or len(line[:64]) != 64:
+            raise EvidenceError("invalid G05 manifest line")
+        rel, expected = line[67:], line[:64]
+        if not rel or rel in hashes or any(ch not in "0123456789abcdef" for ch in expected):
+            raise EvidenceError("invalid G05 manifest entry")
+        hashes[rel] = expected
+    for candidate in (source, *source.parents):
+        if not under(candidate, root):
+            break
+        if candidate.is_file():
+            regular(candidate)
+            rel = candidate.relative_to(root).as_posix()
+            if rel not in hashes:
+                raise EvidenceError("unattested HEAD module not in G05 MANIFEST: " + rel)
+            if digest(candidate) != hashes[rel]:
+                raise EvidenceError("changed HEAD module source bytes: " + rel)
+            if candidate != source and not archive_bytes(candidate):
+                raise EvidenceError("HEAD module origin traverses non-ZIP file: " + rel)
+            return candidate
+    raise EvidenceError("unattested HEAD module source: " + str(path))
+
+
 def _classify_root(value: str, repo: Path, site: list[Path]) -> str:
-    p = Path(value or str(repo)).absolute()
+    p = _require_canonical_path(Path(value or str(repo)))
     if under(p, repo):
         return "HEAD_REPOSITORY_G05"
     if any(under(p, root) for root in site):
@@ -261,6 +306,7 @@ def site_attested_file(path: Path, roots: list[Path],
     A module __file__ or sys.path may contain archive.pyz/pkg/module.py,
     while the ZIP file itself is the independently hashed importable input.
     """
+    path = _require_canonical_path(path)
     for root in roots:
         if not under(path, root):
             continue
@@ -302,7 +348,7 @@ def verify_runtime(path: Path, repo: Path, snapshot: dict) -> dict:
             raise EvidenceError("invalid sys.path entry")
         category = _classify_root(value, repo.absolute(), roots)
         if category == "INSTALLED_SITE_ROOT":
-            location = Path(value or str(repo)).absolute()
+            location = _require_canonical_path(Path(value or str(repo)))
             source = site_attested_file(location, roots, site_attested)
             if source is None:
                 if location.is_symlink() or not location.is_dir():
@@ -325,17 +371,22 @@ def verify_runtime(path: Path, repo: Path, snapshot: dict) -> dict:
             # Relative entries cannot prove a source identity. Report the gap.
             unmatched_test_modules.append([name, origin])
             continue
-        if any(under(file, root) for root in roots):
-            if site_attested_file(file, roots, site_attested) is None:
-                raise EvidenceError("actual site-imported module outside attested inputs: " + origin)
-            checked_site_modules += 1
-        else:
-            try:
-                _classify_root(str(file), repo.absolute(), roots)
-            except EvidenceError:
-                # Fixtures may import disposable modules outside the app tree;
-                # never silently treat these as source-qualified production.
-                unmatched_test_modules.append([name, origin])
+        try:
+            _require_canonical_path(file)
+            category = _classify_root(str(file), repo.absolute(), roots)
+            if category == "INSTALLED_SITE_ROOT":
+                if site_attested_file(file, roots, site_attested) is None:
+                    raise EvidenceError("actual site-imported module outside attested inputs: " + origin)
+                checked_site_modules += 1
+            elif category == "HEAD_REPOSITORY_G05":
+                _repo_attested_file(file, repo)
+        except EvidenceError:
+            # External fixtures, lexical escapes and untracked/changed HEAD
+            # inputs are NEVER silently upgraded to verified source identity.
+            unmatched_test_modules.append([name, origin])
+    if unmatched_test_modules:
+        raise EvidenceError("unattested or noncanonical loaded module origins: "
+                            + repr(unmatched_test_modules[:4]))
     return {"observed": observed, "module_count": data.get("module_count", 0),
             "attested_site_module_origins": checked_site_modules,
             "out_of_scope_module_origins": unmatched_test_modules}

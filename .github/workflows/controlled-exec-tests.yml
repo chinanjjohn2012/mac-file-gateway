@@ -85,7 +85,7 @@ jobs:
         run: |
           test -n "$G05_EXPECTED_HEAD"
           python -B -I -S tools/r01_external_source_evidence.py verify --snapshot "$RUNNER_TEMP/r01-site-preimport.json" --runtime "$RUNNER_TEMP/r01-startup-runtime.json" --repo "$GITHUB_WORKSPACE"
-          python -B -I -S tools/r01_external_source_evidence.py verify --snapshot "$RUNNER_TEMP/r01-site-preimport.json" --runtime "$RUNNER_TEMP/r01-pytest-imports.json" --repo "$GITHUB_WORKSPACE"
+          python -B -I -S tools/r01_external_source_evidence.py verify --snapshot "$RUNNER_TEMP/r01-site-preimport.json" --runtime "$RUNNER_TEMP/r01-pytest-imports.json" --repo "$GITHUB_WORKSPACE" --require-repo-exec-audit
       - name: Verify release manifest
         env:
           G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}

@@ -350,6 +350,48 @@ def _repo_attested_file(path: Path, repo: Path,
     raise EvidenceError("unattested HEAD module source: " + str(path))
 
 
+def install_repo_exec_audit(repo: Path) -> dict:
+    """Fail closed at each CPython 'exec' audit event for HEAD-repository code.
+
+    This covers ordinary Python modules executed after the hook is armed,
+    including modules later removed from sys.modules and deleted on disk.
+    The repo/path and SHA256 must be valid at the actual execution event.
+    It is NOT an OS/process-tree, custom native loader, untrusted-auditor,
+    startup-before-hook or other subprocess provenance guarantee.
+    """
+    root = _require_canonical_path(repo)
+    hashes = _read_git_head_manifest(root)
+    state = {"root": str(root), "checked": 0, "denied": 0, "sources": {}}
+
+    def on_exec(event: str, args: tuple) -> None:
+        if event != "exec" or not args:
+            return
+        code = args[0]
+        filename = getattr(code, "co_filename", None)
+        if not isinstance(filename, str):
+            return
+        path = Path(filename)
+        if not path.is_absolute():
+            return  # <string>, builtins and nonfile eval are NOT source-pinned.
+        if not under(path, root):
+            return  # Approved site / runner roots have separate limited gates.
+        try:
+            real = _repo_attested_file(path, root, hashes)
+            rel = real.relative_to(root).as_posix()
+            source_hash = hashes[rel]
+        except (EvidenceError, OSError, ValueError) as exc:
+            state["denied"] += 1
+            raise EvidenceError("unattested HEAD Python source at exec event: " +
+                                str(path)) from exc
+        state["checked"] += 1
+        state["sources"][rel] = source_hash
+
+    # Once installed CPython audit hooks cannot be removed by test cleanup.
+    # This is a trusted isolated CI evidence hook, NOT a hostile-code sandbox.
+    sys.addaudithook(on_exec)
+    return state
+
+
 def _classify_root(value: str, repo: Path, site: list[Path]) -> str:
     p = _require_canonical_path(Path(value or str(repo)))
     if under(p, repo):
@@ -396,7 +438,7 @@ def site_attested_file(path: Path, roots: list[Path],
     return None
 
 
-def verify_runtime(path: Path, repo: Path, snapshot: dict) -> dict:
+def verify_runtime(path: Path, repo: Path, snapshot: dict, *, require_exec_audit: bool = False) -> dict:
     data = read_json(path)
     if data.get("executable") != snapshot["interpreter"] or data.get("prefix") != snapshot["prefix"]:
         raise EvidenceError("runtime Python identity differs from pre-import scanner")
@@ -421,6 +463,35 @@ def verify_runtime(path: Path, repo: Path, snapshot: dict) -> dict:
         if repo_hashes is None:
             repo_hashes = _read_git_head_manifest(repo)
         return repo_hashes
+
+    phase = data.get("r01_phase")
+    if require_exec_audit or phase == "pytest":
+        if phase != "pytest":
+            raise EvidenceError("missing actual pytest temporal source audit phase")
+        audit = data.get("repo_exec_audit")
+        if (not isinstance(audit, dict) or audit.get("root") != str(repo)
+                or audit.get("status") != "ARMED_BEFORE_INITIAL_CONFTESTS"
+                or type(audit.get("checked")) is not int or audit["checked"] < 1
+                or type(audit.get("denied")) is not int or audit["denied"] != 0):
+            raise EvidenceError("missing/unqualified pytest repo exec audit history")
+        sources = audit.get("sources")
+        if not isinstance(sources, list) or not sources:
+            raise EvidenceError("missing temporal executed HEAD source identities")
+        hashes = head_hashes()
+        previous = ""
+        for row in sources:
+            if (not isinstance(row, list) or len(row) != 2
+                    or not all(isinstance(x, str) for x in row)):
+                raise EvidenceError("invalid temporal repo exec audit record")
+            rel, expected = row
+            if (rel <= previous or hashes.get(rel) != expected or
+                    Path(rel).is_absolute() or ".." in Path(rel).parts):
+                raise EvidenceError("unqualified temporal HEAD executed source: " + rel)
+            previous = rel
+        if audit["checked"] < len(sources):
+            raise EvidenceError("invalid temporal HEAD executed source count")
+    elif phase not in (None, "startup"):
+        raise EvidenceError("unknown R01 runtime source observation phase")
 
     site_attested = {}
     for root in snapshot["site"]:
@@ -509,11 +580,33 @@ def runtime_report() -> dict:
             "module_count": len(sys.modules)}
 
 
+_PYTEST_EXEC_AUDIT = None
+
+
+def pytest_load_initial_conftests(early_config, parser, args):
+    """Arm before conftests/test collection (after pytest/plugin bootstrap)."""
+    global _PYTEST_EXEC_AUDIT
+    if os.environ.get("R01_PYTEST_IMPORT_ROOT_TRACE"):
+        if _PYTEST_EXEC_AUDIT is not None:
+            raise EvidenceError("duplicate R01 pytest source audit installation")
+        _PYTEST_EXEC_AUDIT = install_repo_exec_audit(Path(__file__).resolve().parents[1])
+
+
 def pytest_sessionfinish(session, exitstatus):
     """Optional pytest import-root evidence; no change to test behavior."""
     path = os.environ.get("R01_PYTEST_IMPORT_ROOT_TRACE")
     if path:
+        if _PYTEST_EXEC_AUDIT is None:
+            raise EvidenceError("R01 pytest temporal source audit not armed before collection")
         report = runtime_report()
+        report["r01_phase"] = "pytest"
+        report["repo_exec_audit"] = {
+            "root": _PYTEST_EXEC_AUDIT["root"],
+            "status": "ARMED_BEFORE_INITIAL_CONFTESTS",
+            "checked": _PYTEST_EXEC_AUDIT["checked"],
+            "denied": _PYTEST_EXEC_AUDIT["denied"],
+            "sources": sorted([k, v] for k, v in _PYTEST_EXEC_AUDIT["sources"].items()),
+        }
         modules = []
         for name, module in sorted(sys.modules.copy().items()):
             origin = getattr(module, "__file__", None)
@@ -522,6 +615,9 @@ def pytest_sessionfinish(session, exitstatus):
         report["loaded_origins"] = modules
         write_new(Path(path), report)
         print("R01_ACTUAL_PYTEST_IMPORT_ROOTS_CAPTURED=PASS")
+        print("R01_REPO_PYTHON_EXEC_AUDIT_CAPTURED=YES count=" +
+              str(_PYTEST_EXEC_AUDIT["checked"]) + " unique=" +
+              str(len(_PYTEST_EXEC_AUDIT["sources"])))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -531,13 +627,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runtime", type=Path)
     parser.add_argument("--repo", type=Path)
     parser.add_argument("--site-root", type=Path, action="append")
+    parser.add_argument("--require-repo-exec-audit", action="store_true")
     args = parser.parse_args(argv)
     try:
         if args.mode == "runtime":
             if args.runtime is None:
                 raise EvidenceError("runtime output required")
-            write_new(args.runtime, runtime_report())
+            report = runtime_report()
+            report["r01_phase"] = "startup"
+            write_new(args.runtime, report)
             print("R01_RUNTIME_IMPORT_ROOT_OBSERVED=PASS")
+            print("R01_REPO_PYTHON_EXEC_AUDIT_SCOPE=STARTUP_ONLY_NOT_FULL_HISTORY")
             return 0
         if args.snapshot is None:
             raise EvidenceError("snapshot path required")
@@ -576,8 +676,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.runtime:
             if args.repo is None:
                 raise EvidenceError("repo root required for runtime check")
-            observed = verify_runtime(args.runtime, args.repo, current)
+            observed = verify_runtime(
+                args.runtime, args.repo, current,
+                require_exec_audit=args.require_repo_exec_audit)
             print("R01_ACTUAL_PYTHON_IMPORT_ROOTS=OBSERVED_AND_CLASSIFIED")
+            if args.require_repo_exec_audit:
+                print("R01_PYTEST_REPO_EXEC_AUDIT_VERIFIED=PASS")
             for value, category in observed["observed"]:
                 print("R01_IMPORT_ROOT=" + category + " " + value)
             print("R01_ACTUAL_SITE_MODULE_ORIGINS_SHA256_CHECKED="

@@ -405,7 +405,7 @@ def verify_runtime(path: Path, repo: Path, snapshot: dict) -> dict:
         for rel, line_number, _digest in site.get("imperative_pth", [])
     ]
     if imperative:
-        raise EvidenceError("unqualified imperative .pth startup execution: " +
+        raise EvidenceError("unattested/unqualified imperative .pth startup execution: " +
                             repr(imperative[:8]))
     repo_hashes = None
 
@@ -480,7 +480,7 @@ def verify_runtime(path: Path, repo: Path, snapshot: dict) -> dict:
             # inputs are NEVER silently upgraded to verified source identity.
             unmatched_test_modules.append([name, origin])
     if unmatched_test_modules:
-        raise EvidenceError("unattested or noncanonical loaded module origins: "
+        raise EvidenceError("unattested HEAD/site or noncanonical loaded module origins: "
                             + repr(unmatched_test_modules[:4]))
     return {"observed": observed, "module_count": data.get("module_count", 0),
             "attested_site_module_origins": checked_site_modules,

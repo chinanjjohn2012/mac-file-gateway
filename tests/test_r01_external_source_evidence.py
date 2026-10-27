@@ -419,6 +419,7 @@ def test_r006_repo_origin_requires_manifest_and_matching_sha256(tmp_path):
         probe.verify_runtime(observation, repo, snapshot)
     sha = hashlib.sha256(source.read_bytes()).hexdigest()
     (repo / "MANIFEST.sha256").write_text(sha + "  ./tracked_r006.py\n")
+    _r007_commit_repo(repo)
     assert probe.verify_runtime(observation, repo, snapshot)["out_of_scope_module_origins"] == []
     source.write_text("VALUE=9\n")
     with pytest.raises(probe.EvidenceError, match="changed|mismatch|unattested|HEAD"):
@@ -441,4 +442,173 @@ def test_r006_repo_symlink_root_outside_not_qualified(tmp_path):
         "loaded_origins": [],
     }))
     with pytest.raises(probe.EvidenceError, match="unexpected|noncanonical|symlink"):
+        probe.verify_runtime(observation, repo, snapshot)
+
+
+# r007 test-first RED from C90-R006-P2-01. All source generation/imports
+# happen in disposable private pytest directories; no Gateway Exec or signals.
+def _r007_commit_repo(repo: Path):
+    """Build a genuine local committed HEAD and complete SHA256 manifest."""
+    entries = []
+    for path in sorted(repo.rglob("*")):
+        if path.is_file() and ".git" not in path.parts and path.name != "MANIFEST.sha256":
+            rel = path.relative_to(repo).as_posix()
+            entries.append(hashlib.sha256(path.read_bytes()).hexdigest() + "  ./" + rel + "\n")
+    manifest = repo / "MANIFEST.sha256"
+    if not manifest.exists():
+        manifest.write_text("".join(entries))
+    for argv in (
+        ["init", "-q"],
+        ["add", "--", "."],
+        ["-c", "user.name=R01 Test", "-c", "user.email=r01-test@example.invalid",
+         "commit", "-q", "-m", "disposable HEAD source"],
+    ):
+        proc = subprocess.run(["git", "-C", str(repo), *argv],
+                              capture_output=True, text=True, check=False)
+        assert proc.returncode == 0, (argv, proc.stderr)
+
+
+def _r007_runtime(repo: Path, site: Path, snapshot: dict, observation: Path,
+                  *, roots: list[str] | None = None, origins: list | None = None) -> Path:
+    observation.write_text(json.dumps({
+        "schema": 1, "executable": snapshot["interpreter"],
+        "prefix": snapshot["prefix"], "user_site_enabled": False,
+        "sys_path": roots if roots is not None else [str(repo), str(site)],
+        "loaded_origins": [] if origins is None else origins,
+    }))
+    return observation
+
+
+def test_r007_transient_recorded_pth_generated_deleted_zip_refused(tmp_path):
+    site = _site(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "tracked.py").write_text("VALUE=3\n")
+    _r007_commit_repo(repo)
+    phantom_zip = repo / "transient_unlisted.pyz"
+    code = (
+        "import sys,os,zipfile\n"
+        "p=" + repr(str(phantom_zip)) + "\n"
+        "with zipfile.ZipFile(p,'w') as z:z.writestr('r007_probe.py','VALUE=77\\n')\n"
+        "sys.path.insert(0,p)\n"
+        "import r007_probe\n"
+        "sys._r007_marker=r007_probe.VALUE\n"
+        "del sys.modules['r007_probe']\n"
+        "os.unlink(p)\n"
+    )
+    (site / "active_r007.pth").write_text("import sys;exec(" + repr(code) + ")\n")
+    _r005_record(site, "active_r007.pth")
+    snapshot = probe.site_snapshot([site])
+    command = (
+        "import sys,site,json;"
+        "site.addsitedir(sys.argv[1]);"
+        "print(json.dumps({'marker':sys._r007_marker,"
+        "'sys_path':sys.path,'module_retained':'r007_probe' in sys.modules}))"
+    )
+    actual = subprocess.run([sys.executable, "-B", "-I", "-S", "-c", command, str(site)],
+                            capture_output=True, text=True, check=False)
+    assert actual.returncode == 0, actual.stderr
+    seen = json.loads(actual.stdout)
+    assert seen["marker"] == 77 and seen["module_retained"] is False
+    assert str(phantom_zip) in seen["sys_path"]
+    assert not phantom_zip.exists()
+    observation = _r007_runtime(
+        repo, site, snapshot, tmp_path / "r007-transient.json",
+        roots=[str(repo)] + seen["sys_path"],
+    )
+    with pytest.raises(probe.EvidenceError, match="unattested|unqualified|missing|HEAD|pth"):
+        probe.verify_runtime(observation, repo, snapshot)
+
+
+def test_r007_missing_repo_zip_sys_path_must_not_be_head_qualified(tmp_path):
+    site = _site(tmp_path)
+    snapshot = probe.site_snapshot([site])
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    ziproot = repo / "removed.zip"
+    observation = _r007_runtime(repo, site, snapshot, tmp_path / "r007-missing.json",
+                                roots=[str(repo), str(site), str(ziproot)])
+    with pytest.raises(probe.EvidenceError, match="unattested|missing|HEAD"):
+        probe.verify_runtime(observation, repo, snapshot)
+
+
+def test_r007_present_untracked_repo_zip_sys_path_must_be_rejected(tmp_path):
+    site = _site(tmp_path)
+    snapshot = probe.site_snapshot([site])
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "tracked.py").write_text("VALUE=3\n")
+    _r007_commit_repo(repo)
+    ziproot = _r005_zip(repo, "untracked.pyz")
+    observation = _r007_runtime(repo, site, snapshot, tmp_path / "r007-untracked.json",
+                                roots=[str(repo), str(site), str(ziproot)])
+    with pytest.raises(probe.EvidenceError, match="unattested|HEAD|MANIFEST"):
+        probe.verify_runtime(observation, repo, snapshot)
+
+
+def test_r007_tracked_repo_zip_positive_then_changed_bytes_negative(tmp_path):
+    site = _site(tmp_path)
+    snapshot = probe.site_snapshot([site])
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    ziproot = _r005_zip(repo, "legitimate.pyz")
+    _r007_commit_repo(repo)
+    observation = _r007_runtime(repo, site, snapshot, tmp_path / "r007-legal.json",
+                                roots=[str(repo), str(site), str(ziproot)])
+    assert probe.verify_runtime(observation, repo, snapshot)["observed"][-1][1] == "HEAD_REPOSITORY_G05"
+    with ziproot.open("ab") as stream:
+        stream.write(b"unauthorized drift")
+    with pytest.raises(probe.EvidenceError, match="changed|unattested|HEAD"):
+        probe.verify_runtime(observation, repo, snapshot)
+
+
+def test_r007_coordinated_repo_source_and_manifest_drift_rejected(tmp_path):
+    site = _site(tmp_path)
+    snapshot = probe.site_snapshot([site])
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src = repo / "tracked.py"
+    src.write_text("VALUE=3\n")
+    _r007_commit_repo(repo)
+    observation = _r007_runtime(
+        repo, site, snapshot, tmp_path / "r007-drift.json",
+        origins=[["tracked", str(src)]],
+    )
+    assert probe.verify_runtime(observation, repo, snapshot)["out_of_scope_module_origins"] == []
+    src.write_text("VALUE=9\n")
+    (repo / "MANIFEST.sha256").write_text(
+        hashlib.sha256(src.read_bytes()).hexdigest() + "  ./tracked.py\n"
+    )
+    with pytest.raises(probe.EvidenceError, match="immutable|HEAD|MANIFEST|changed"):
+        probe.verify_runtime(observation, repo, snapshot)
+
+
+def test_r007_plain_recorded_pth_directory_stays_legal(tmp_path):
+    site = _site(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (site / "legal_r007.pth").write_text("safe\n")
+    _r005_record(site, "legal_r007.pth")
+    snapshot = probe.site_snapshot([site])
+    observation = _r007_runtime(repo, site, snapshot, tmp_path / "r007-legal-pth.json",
+                                roots=[str(repo), str(site), str(site / "safe")])
+    assert probe.verify_runtime(observation, repo, snapshot)["out_of_scope_module_origins"] == []
+
+
+def test_r007_imperative_pth_unobserved_startup_effect_refused(tmp_path):
+    site = _site(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (site / "active_r007.pth").write_text("import sys;sys._r007_marker=77\n")
+    _r005_record(site, "active_r007.pth")
+    snapshot = probe.site_snapshot([site])
+    # Actual CPython site.addsitedir runs the hook, but the final sys.path and
+    # sys.modules have no trace that its arbitrary imperative effect occurred.
+    actual = subprocess.run([
+        sys.executable, "-B", "-I", "-S", "-c",
+        "import sys,site;site.addsitedir(sys.argv[1]);print(sys._r007_marker)",
+        str(site)], capture_output=True, text=True, check=False)
+    assert actual.returncode == 0 and actual.stdout.strip() == "77", actual.stderr
+    observation = _r007_runtime(repo, site, snapshot, tmp_path / "r007-pth-only.json")
+    with pytest.raises(probe.EvidenceError, match="pth|startup|unqualified|imperative"):
         probe.verify_runtime(observation, repo, snapshot)

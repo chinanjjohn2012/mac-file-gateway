@@ -15,6 +15,8 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import re
+from typing import NamedTuple
 
 
 ROOT = Path(__file__).resolve().parents[1] / "docs" / "review-governance-v2"
@@ -44,20 +46,121 @@ def simulated_activation(*, b_design_pass=False, c_design_pass=False,
                 future_round, snapshot_stable))
 
 
-def simulated_review(*, b_pass=False, c_pass=False, scope_full=False,
-                     same_snapshot=True, blockers=0, evidence_ok=True):
-    """A small T0 counterexample table: never substitutes for a role Review."""
-    if not same_snapshot:
-        return "SNAPSHOT_CHANGED"
-    if blockers or not evidence_ok:
-        return "BLOCKED"
-    if not b_pass:
-        return "NEXT_ROLE_B"
-    if not c_pass:
-        return "NEXT_ROLE_C"
-    if not scope_full:
-        return "TARGETED_ONLY"
-    return "ROLE_PAIR_ELIGIBLE_FOR_SEPARATE_R10_CHECK"
+class ReviewIdentity(NamedTuple):
+    """One full reviewer-visible version tuple, not merely a Head SHA."""
+    base: str
+    head: str
+    tree: str
+    contract_version: str
+    ruleset_id: str
+
+
+class ReviewEvaluation(NamedTuple):
+    review_progress: str
+    evidence_status: str
+    verdict: str
+    decision: str
+    review_level: str
+
+
+SAMPLE_TARGET = ReviewIdentity("a" * 40, "b" * 40, "c" * 40,
+                               "S0-contract-v1", "ICR-V2.0")
+
+
+def simulated_review(*, target: ReviewIdentity,
+                     b_review: ReviewIdentity | None = None,
+                     c_review: ReviewIdentity | None = None,
+                     b_verdict: str | None = None,
+                     c_verdict: str | None = None,
+                     b_scope_full: bool = False,
+                     c_scope_full: bool = False,
+                     confirmed_defect: str | None = None,
+                     evidence_ok: bool = True,
+                     required_test_not_run: bool = False,
+                     review_activities_complete: bool = True) -> ReviewEvaluation:
+    """Isolated state-table simulator, NOT the actual GitHub review engine.
+
+    A known proven P0/P1/P2 merits REVIEW_COMPLETE+SUFFICIENT+FAIL.
+    Missing decisive evidence merits REVIEW_COMPLETE+INSUFFICIENT+BLOCKED.
+    Snapshot and contract identities are compared independently per role.
+    """
+    def result(progress, evidence, verdict, decision, level="NONE"):
+        return ReviewEvaluation(progress, evidence, verdict, decision, level)
+
+    if not all(re.fullmatch(r"[0-9a-f]{40}", val)
+               for val in (target.base, target.head, target.tree)):
+        return result("REVIEW_COMPLETE", "INSUFFICIENT", "BLOCKED", "BLOCKED")
+    if not target.contract_version or not target.ruleset_id:
+        return result("REVIEW_COMPLETE", "INSUFFICIENT", "BLOCKED", "BLOCKED")
+    if any(v is not None and v != target for v in (b_review, c_review)):
+        return result("SNAPSHOT_CHANGED", "INSUFFICIENT", "BLOCKED",
+                      "SNAPSHOT_CHANGED")
+    if confirmed_defect in ("P0", "P1", "P2") or "FAIL" in (b_verdict, c_verdict):
+        return result("REVIEW_COMPLETE", "SUFFICIENT", "FAIL", "FAIL")
+    if not review_activities_complete:
+        return result("REVIEW_INCOMPLETE", "NOT_ASSESSED",
+                      "NOT_ISSUED", "REVIEW_INCOMPLETE")
+    if not evidence_ok or required_test_not_run or "BLOCKED" in (b_verdict, c_verdict):
+        return result("REVIEW_COMPLETE", "INSUFFICIENT", "BLOCKED", "BLOCKED")
+    if b_review is None or b_verdict is None:
+        return result("REVIEW_INCOMPLETE", "NOT_ASSESSED",
+                      "NOT_ISSUED", "NEXT_ROLE_B")
+    if c_review is None or c_verdict is None:
+        return result("REVIEW_INCOMPLETE", "NOT_ASSESSED",
+                      "NOT_ISSUED", "NEXT_ROLE_C")
+    if b_verdict != "PASS" or c_verdict != "PASS":
+        return result("REVIEW_COMPLETE", "INSUFFICIENT", "BLOCKED", "BLOCKED")
+    if not (b_scope_full and c_scope_full):
+        return result("REVIEW_COMPLETE", "SUFFICIENT", "PASS",
+                      "TARGETED_ONLY", "TARGETED_REVIEW_PASS")
+    return result("REVIEW_COMPLETE", "SUFFICIENT", "PASS",
+                  "ROLE_PAIR_ELIGIBLE_FOR_SEPARATE_R10_CHECK",
+                  "ROLE_FULL_SCOPE_PASS")
+
+
+def simulated_executed_identity(*, target: ReviewIdentity,
+                               executed_commit: str, executed_tree: str,
+                               merge_commit: str,
+                               merge_parents: tuple[str, str]) -> str:
+    """Separates observed Head from synthetic Merge without auto-retest waiver."""
+    if executed_commit == target.head and executed_tree == target.tree:
+        return "HEAD_EXECUTED"
+    if executed_commit == merge_commit and merge_parents == (target.base, target.head):
+        if executed_tree == target.tree:
+            return "SAME_TREE_MERGE_EXECUTED_HEAD_NOT_SEPARATELY_EXECUTED"
+        return "MERGE_TREE_DIFFERENT_HEAD_RETEST_REQUIRED"
+    return "EXECUTED_IDENTITY_UNPROVEN"
+
+
+def simulated_source_visibility(remote_committed_only: bool,
+                                claim_local_uncommitted: bool) -> str:
+    if remote_committed_only and claim_local_uncommitted:
+        return "LOCAL_WORKTREE_NOT_OBSERVED"
+    return "BOUNDED_SOURCE_CLAIM_ONLY"
+
+
+def simulated_reviewer_independence(same_github_account: bool) -> str:
+    return ("LOGICAL_SESSIONS_ONLY_NOT_TWO_HUMANS"
+            if same_github_account else "ACCOUNT_DIFFERENCE_NOT_HUMAN_PROOF")
+
+
+def simulated_command_access(role: str, command: str) -> str:
+    if role == "A" and command == "下一步":
+        return "READ_ONLY"
+    return "REQUIRES_DISTINCT_AUTHORIZATION"
+
+
+def simulated_risk_test(tier: str, explicitly_authorized: bool) -> str:
+    if tier not in {"T0", "T1", "T2", "T3"}:
+        return "NOT_RUN"
+    if tier == "T0":
+        return "SAFE_MODEL_ONLY"
+    return "ISOLATED_ONLY" if explicitly_authorized else "NOT_RUN"
+
+
+def simulated_legacy_review_transfer(old_v1_approved: bool,
+                                     new_v2_activated: bool) -> str:
+    return "HISTORICAL_ONLY_NO_AUTO_PASS"
 
 
 class CandidateSourceIdentityTests(unittest.TestCase):
@@ -109,6 +212,18 @@ class CandidateSourceIdentityTests(unittest.TestCase):
 
 
 class MigrationTableTests(unittest.TestCase):
+    def evaluate(self, *, b=True, c=True, scope_full=True, **other):
+        return simulated_review(
+            target=SAMPLE_TARGET,
+            b_review=SAMPLE_TARGET if b else None,
+            c_review=SAMPLE_TARGET if c else None,
+            b_verdict="PASS" if b else None,
+            c_verdict="PASS" if c else None,
+            b_scope_full=scope_full,
+            c_scope_full=scope_full,
+            **other,
+        )
+
     def test_positive_model_only_when_all_gates_true(self):
         gates = dict(b_design_pass=True, c_design_pass=True,
                      user_approved=True, three_projects_same_bytes=True,
@@ -127,33 +242,149 @@ class MigrationTableTests(unittest.TestCase):
                                               three_projects_same_bytes=False))
 
     def test_only_b_finished_needs_c(self):
-        self.assertEqual(simulated_review(b_pass=True, c_pass=False, scope_full=True),
-                         "NEXT_ROLE_C")
+        output = self.evaluate(b=True, c=False)
+        self.assertEqual(output.decision, "NEXT_ROLE_C")
+        self.assertEqual(output.verdict, "NOT_ISSUED")
 
     def test_only_c_finished_needs_b(self):
-        self.assertEqual(simulated_review(b_pass=False, c_pass=True, scope_full=True),
-                         "NEXT_ROLE_B")
+        output = self.evaluate(b=False, c=True)
+        self.assertEqual(output.decision, "NEXT_ROLE_B")
+        self.assertEqual(output.review_progress, "REVIEW_INCOMPLETE")
 
     def test_two_targeted_roles_are_not_full(self):
-        self.assertEqual(simulated_review(b_pass=True, c_pass=True, scope_full=False),
-                         "TARGETED_ONLY")
+        output = self.evaluate(scope_full=False)
+        self.assertEqual(output.decision, "TARGETED_ONLY")
+        self.assertEqual(output.review_level, "TARGETED_REVIEW_PASS")
+        self.assertNotEqual(output.decision, "FULL_CODE_REVIEW_PASS")
 
     def test_two_full_roles_still_require_separate_r10(self):
-        self.assertEqual(simulated_review(b_pass=True, c_pass=True, scope_full=True),
+        output = self.evaluate()
+        self.assertEqual(output.decision,
                          "ROLE_PAIR_ELIGIBLE_FOR_SEPARATE_R10_CHECK")
+        self.assertEqual(output.evidence_status, "SUFFICIENT")
+        self.assertNotEqual(output.decision, "FULL_CODE_REVIEW_PASS")
 
-    def test_head_base_or_tree_drift_invalidates_old_signoff(self):
-        self.assertEqual(simulated_review(b_pass=True, c_pass=True, scope_full=True,
-                                          same_snapshot=False), "SNAPSHOT_CHANGED")
+    def test_head_base_tree_contract_and_ruleset_mismatch_each_fence(self):
+        for field, altered in (
+            ("base", SAMPLE_TARGET._replace(base="d" * 40)),
+            ("head", SAMPLE_TARGET._replace(head="e" * 40)),
+            ("tree", SAMPLE_TARGET._replace(tree="f" * 40)),
+            ("contract", SAMPLE_TARGET._replace(contract_version="other")),
+            ("rules", SAMPLE_TARGET._replace(ruleset_id="ICR-V1.0")),
+        ):
+            with self.subTest(mismatch=field):
+                for b_bad in (True, False):
+                    outcome = simulated_review(
+                        target=SAMPLE_TARGET,
+                        b_review=altered if b_bad else SAMPLE_TARGET,
+                        c_review=SAMPLE_TARGET if b_bad else altered,
+                        b_verdict="PASS", c_verdict="PASS",
+                        b_scope_full=True, c_scope_full=True,
+                    )
+                    self.assertEqual(outcome.decision, "SNAPSHOT_CHANGED")
+                    self.assertEqual(outcome.verdict, "BLOCKED")
 
-    def test_missing_source_or_evidence_blocks(self):
-        self.assertEqual(simulated_review(b_pass=True, c_pass=True, scope_full=True,
-                                          evidence_ok=False), "BLOCKED")
+    def test_base_advanced_without_new_head_must_recheck(self):
+        advanced = SAMPLE_TARGET._replace(base="d" * 40)
+        output = simulated_review(
+            target=advanced, b_review=SAMPLE_TARGET, c_review=SAMPLE_TARGET,
+            b_verdict="PASS", c_verdict="PASS",
+            b_scope_full=True, c_scope_full=True,
+        )
+        self.assertEqual(output.review_progress, "SNAPSHOT_CHANGED")
 
-    def test_p1_defect_blocks_regardless_of_green_roles(self):
-        self.assertEqual(simulated_review(b_pass=True, c_pass=True, scope_full=True,
-                                          blockers=1), "BLOCKED")
+    def test_missing_source_or_external_evidence_blocks(self):
+        output = self.evaluate(evidence_ok=False)
+        self.assertEqual(
+            (output.review_progress, output.evidence_status, output.verdict),
+            ("REVIEW_COMPLETE", "INSUFFICIENT", "BLOCKED"),
+        )
 
+    def test_required_native_test_not_run_is_complete_but_blocked(self):
+        output = self.evaluate(required_test_not_run=True)
+        self.assertEqual(
+            (output.review_progress, output.evidence_status, output.verdict),
+            ("REVIEW_COMPLETE", "INSUFFICIENT", "BLOCKED"),
+        )
+
+    def test_confirmed_p1_is_fail_not_blocked_or_incomplete(self):
+        output = self.evaluate(confirmed_defect="P1", required_test_not_run=True)
+        self.assertEqual(
+            (output.review_progress, output.evidence_status, output.verdict),
+            ("REVIEW_COMPLETE", "SUFFICIENT", "FAIL"),
+        )
+
+    def test_confirmed_p0_and_p2_are_also_fail(self):
+        for severity in ("P0", "P2"):
+            with self.subTest(severity=severity):
+                self.assertEqual(
+                    self.evaluate(confirmed_defect=severity).verdict, "FAIL"
+                )
+
+    def test_known_role_fail_cannot_be_relabelled_blocked_or_pass(self):
+        outcome = simulated_review(
+            target=SAMPLE_TARGET, b_review=SAMPLE_TARGET,
+            b_verdict="FAIL", c_review=None,
+        )
+        self.assertEqual(outcome.verdict, "FAIL")
+
+    def test_unfinished_review_activity_not_relabelled_complete(self):
+        output = self.evaluate(review_activities_complete=False)
+        self.assertEqual(
+            (output.review_progress, output.evidence_status, output.verdict),
+            ("REVIEW_INCOMPLETE", "NOT_ASSESSED", "NOT_ISSUED"),
+        )
+
+    def test_incomplete_target_identity_blocks(self):
+        broken = SAMPLE_TARGET._replace(head="unknown")
+        output = simulated_review(target=broken)
+        self.assertEqual(output.decision, "BLOCKED")
+
+    def test_head_vs_merge_execution_is_not_same_commit_proof(self):
+        merge = "d" * 40
+        self.assertEqual(simulated_executed_identity(
+            target=SAMPLE_TARGET, executed_commit=SAMPLE_TARGET.head,
+            executed_tree=SAMPLE_TARGET.tree, merge_commit=merge,
+            merge_parents=(SAMPLE_TARGET.base, SAMPLE_TARGET.head),
+        ), "HEAD_EXECUTED")
+        self.assertEqual(simulated_executed_identity(
+            target=SAMPLE_TARGET, executed_commit=merge,
+            executed_tree=SAMPLE_TARGET.tree, merge_commit=merge,
+            merge_parents=(SAMPLE_TARGET.base, SAMPLE_TARGET.head),
+        ), "SAME_TREE_MERGE_EXECUTED_HEAD_NOT_SEPARATELY_EXECUTED")
+        self.assertEqual(simulated_executed_identity(
+            target=SAMPLE_TARGET, executed_commit=merge,
+            executed_tree="f" * 40, merge_commit=merge,
+            merge_parents=(SAMPLE_TARGET.base, SAMPLE_TARGET.head),
+        ), "MERGE_TREE_DIFFERENT_HEAD_RETEST_REQUIRED")
+
+    def test_remote_pr_never_proves_local_uncommitted_state(self):
+        self.assertEqual(
+            simulated_source_visibility(True, True),
+            "LOCAL_WORKTREE_NOT_OBSERVED",
+        )
+
+    def test_same_github_account_not_two_independent_humans(self):
+        self.assertEqual(
+            simulated_reviewer_independence(True),
+            "LOGICAL_SESSIONS_ONLY_NOT_TWO_HUMANS",
+        )
+
+    def test_a_next_step_is_read_only(self):
+        self.assertEqual(simulated_command_access("A", "下一步"), "READ_ONLY")
+        self.assertNotEqual(simulated_command_access("A", "继续开发"), "READ_ONLY")
+
+    def test_t2_t3_requires_separate_authorization(self):
+        for tier in ("T1", "T2", "T3"):
+            with self.subTest(tier=tier):
+                self.assertEqual(simulated_risk_test(tier, False), "NOT_RUN")
+        self.assertEqual(simulated_risk_test("T0", False), "SAFE_MODEL_ONLY")
+
+    def test_legacy_v1_review_no_auto_pass_under_v2(self):
+        self.assertEqual(
+            simulated_legacy_review_transfer(True, True),
+            "HISTORICAL_ONLY_NO_AUTO_PASS",
+        )
 
 
 class ReviewerR004CounterexampleTests(unittest.TestCase):
@@ -208,10 +439,15 @@ class ReviewerR004CounterexampleTests(unittest.TestCase):
 
     def test_proven_p1_must_report_fail_not_evidence_blocked(self):
         # r003 incorrectly returns BLOCKED for a conclusively proven P1.
-        self.assertEqual(
-            simulated_review(b_pass=True, c_pass=True, scope_full=True,
-                             blockers=1, evidence_ok=True), "FAIL"
+        output = simulated_review(
+            target=SAMPLE_TARGET, b_review=SAMPLE_TARGET,
+            c_review=SAMPLE_TARGET, b_verdict="PASS", c_verdict="PASS",
+            b_scope_full=True, c_scope_full=True,
+            confirmed_defect="P1", evidence_ok=True,
         )
+        self.assertEqual(output.verdict, "FAIL")
+        self.assertEqual(output.review_progress, "REVIEW_COMPLETE")
+        self.assertEqual(output.evidence_status, "SUFFICIENT")
 
     def test_preflight_rejects_executable_bit_drift_even_if_status_clean(self):
         with tempfile.TemporaryDirectory(prefix="v2-t0-mode-") as tmp:
@@ -230,6 +466,73 @@ class ReviewerR004CounterexampleTests(unittest.TestCase):
             self.assertEqual(self._git(repo, "status", "--porcelain"), b"")
             result = self._run_real_preflight(repo, head)
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_preflight_clean_core_filemode_false_fails_closed(self):
+        with tempfile.TemporaryDirectory(prefix="v2-t0-coremode-") as tmp:
+            repo, path, head = self._fixture(tmp)
+            self._git(repo, "config", "core.filemode", "false")
+            self.assertNotEqual(
+                self._run_real_preflight(repo, head).returncode, 0,
+            )
+
+    def test_preflight_rejects_skip_worktree_index_flag(self):
+        with tempfile.TemporaryDirectory(prefix="v2-t0-skipflag-") as tmp:
+            repo, path, head = self._fixture(tmp)
+            self._git(repo, "update-index", "--skip-worktree", "governance.md")
+            self.assertNotEqual(
+                self._run_real_preflight(repo, head).returncode, 0,
+            )
+
+    def test_preflight_rejects_true_mode_drift_even_when_config_true(self):
+        with tempfile.TemporaryDirectory(prefix="v2-t0-true-mode-") as tmp:
+            repo, path, head = self._fixture(tmp)
+            path.chmod(0o755)
+            self.assertNotEqual(
+                self._run_real_preflight(repo, head).returncode, 0,
+            )
+
+    def test_preflight_rejects_head_tree_index_mode_drift(self):
+        with tempfile.TemporaryDirectory(prefix="v2-t0-indexmode-") as tmp:
+            repo, path, head = self._fixture(tmp)
+            self._git(repo, "update-index", "--chmod=+x", "governance.md")
+            self.assertNotEqual(
+                self._run_real_preflight(repo, head).returncode, 0,
+            )
+
+    def test_preflight_rejects_ignored_import_shadow(self):
+        with tempfile.TemporaryDirectory(prefix="v2-t0-shadow-") as tmp:
+            repo, path, _ = self._fixture(tmp)
+            ignored = repo / ".gitignore"
+            ignored.write_text("shadow.py\n", encoding="utf-8")
+            original = (repo / "MANIFEST.sha256").read_text("utf-8")
+            (repo / "MANIFEST.sha256").write_text(
+                hashlib.sha256(ignored.read_bytes()).hexdigest()
+                + "  ./.gitignore\n" + original, encoding="utf-8",
+            )
+            self._git(repo, "add", ".gitignore", "MANIFEST.sha256")
+            self._git(repo, "-c", "user.name=T0", "-c",
+                      "user.email=t0@example.invalid", "commit", "-q", "-m", "ignored")
+            head = self._git(repo, "rev-parse", "HEAD").decode().strip()
+            (repo / "shadow.py").write_text(
+                "raise RuntimeError('untrusted shadow import')\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(self._git(repo, "status", "--porcelain"), b"")
+            self.assertNotEqual(
+                self._run_real_preflight(repo, head).returncode, 0,
+            )
+
+    def test_preflight_rejects_untracked_and_wrong_expected_head(self):
+        with tempfile.TemporaryDirectory(prefix="v2-t0-untracked-") as tmp:
+            repo, path, head = self._fixture(tmp)
+            self.assertNotEqual(
+                self._run_real_preflight(repo, "e" * 40).returncode, 0,
+            )
+            (repo / "untracked.py").write_text("shadow = True\n", encoding="utf-8")
+            self.assertNotEqual(
+                self._run_real_preflight(repo, head).returncode, 0,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

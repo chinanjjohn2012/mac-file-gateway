@@ -6,7 +6,7 @@
 
 - “继续”＝针对明确仓库/PR/轮次独立固定 Base SHA、Head SHA、Head Git Tree、完整源码/有效差异、权威合同版本及执行依赖；实际查阅原始 CI Run、Job、Log 与被测源码身份，不采信 A 摘要。
 - 建立完整 Standards 覆盖矩阵，检查合法成功、非法拒绝、边界、异常、权限、并发、生命周期、恢复、真实相邻影响与必要反例；按真实适用性选择项目技术清单，不机械扩充不相关的技术栈。
-- 对至少一个有意义的高风险点主动独立设计反例；明确区分实际执行、静态推演、Mock、`NOT_RUN`，不冒称原生/生产验证。
+- 对每个高风险变更点至少独立设计一个有意义的反例，并覆盖适用的独立失败入口、风险与相邻影响；无法安全执行的原生/高风险反例必须按 T0–T3 授权门禁记录 `NOT_RUN`、原因及对结论的影响，不能借此省略独立反例设计；明确区分实际执行、静态推演和 Mock，不冒称原生/生产验证。
 - 遵守 E1–E8、T0–T3 安全授权、历史证据复用与 Head/Merge 实际执行同一性门禁；开始与结束核查快照及权威版本漂移。
 - 只发布本人原生 GitHub `COMMENT` Review，明确绑定 `commit_id = REVIEWED_HEAD_SHA`、受审 Base/Head/Tree、规则/证据版本、`REVIEW_PROGRESS`、`EVIDENCE_STATUS`、`VERDICT`、`REVIEW_SCOPE`、`REVIEW_LEVEL` 和 `INTEGRATION_STATUS`。
 - 只有降级 PR 普通评论可用时须如实标记证据等级，不能冒充提交绑定的原生 Review；Review 未实际发布时不能声称交接完成。

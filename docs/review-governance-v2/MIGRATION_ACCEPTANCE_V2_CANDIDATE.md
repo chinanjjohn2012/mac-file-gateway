@@ -60,3 +60,32 @@ STATUS: DRAFT / NOT_EFFECTIVE
 - 完成 B/C 独立设计复审且无阻断、用户明确批准精确文本、各 Project 同版全文读取及必要迁移 T0 验证以后，才允许为**未来明确指定的新轮次**记录 `EFFECTIVE_FOR_NEW_ROUNDS`。旧 `GH_HANDOFF_V1`、V1 Review 和产品 PR 不追认 V2 PASS；真实环境/生产/Native/T2/T3 仍需独立授权。
 - 有效性演练至少验证：仅 B 通过时下一角色 C；两项 TARGETED 不产生 FULL；Head/Base/Tree 或合同错配不拼接 PASS；Base 漂移不继承旧 PASS；用户批准但未完成 Project 同步不生效；来源/运行输入不足与必要测试 NOT_RUN 如实阻断；角色审查完成却发现 P1 得到 FAIL 而不是 INCOMPLETE；产品缺陷与独立治理门禁分离；Merge 与 Head 证据分别标识；无任何情形获得自动合并、发布或原生执行许可。
 - 所有 T0 演练只使用不触达生产的内存输入、可审计源码和隔离仓库快照。运行结果只能证明**迁移规则模拟器**的受测组合，不代表真实 A/B/C Project 已同步、不代表真实 GitHub 后端状态机、Native/生产资格或集成 PASS。
+
+## G. r004 治理 T0 迁移矩阵的可执行映射（仍为设计候选）
+
+本文件 B 节的 14 类反例由 `tests/test_review_governance_v2_candidate.py` 的隔离 **Python 模型**按下表逐项覆盖。各行只是运行在**模拟输入**上的 T0，不接触真实 B/C 会话、Project 来源、GitHub 后端、生产环境或 Native 进程。不得因为这些 T0 GREEN 就写 `EFFECTIVE_FOR_NEW_ROUNDS`、`FULL_CODE_REVIEW_PASS` 或 `INTEGRATION_PASS`。
+
+| B 节合同（顺序） | 受测源码/测试 | 实际证明等级 |
+| --- | --- | --- |
+| 1. 仅 B 完成 | `test_only_b_finished_needs_c` | T0 模拟 NEXT_ROLE_C |
+| 2. 两个 TARGETED 不能 FULL | `test_two_targeted_roles_are_not_full` | T0 模拟 TARGETED_ONLY；额外 R10 仍需核验 |
+| 3. B/C Head 或合同版本错配 | `test_head_base_tree_contract_and_ruleset_mismatch_each_fence` | 每个角色分别对 Base/Head/Tree/合同/规则身份进行 T0 拒绝 |
+| 4. Base 前进 Head 未变 | `test_base_advanced_without_new_head_must_recheck` | T0 模拟 SNAPSHOT_CHANGED |
+| 5. 关键源码/输入身份缺失 | `test_missing_source_or_external_evidence_blocks`、`test_incomplete_target_identity_blocks` | T0 模拟证据不足 BLOCKED |
+| 6. 必要原生测试 NOT_RUN | `test_required_native_test_not_run_is_complete_but_blocked` | `REVIEW_COMPLETE + INSUFFICIENT + BLOCKED`；真实 T1/T2 未运行 |
+| 7. 独立证实 P1 失败 | `test_confirmed_p1_is_fail_not_blocked_or_incomplete`、`test_proven_p1_must_report_fail_not_evidence_blocked` | `REVIEW_COMPLETE + SUFFICIENT + FAIL`；缺证仍独立 BLOCKED |
+| 8. Merge CI 非 Head CI | `test_head_vs_merge_execution_is_not_same_commit_proof` | T0 明确 EXECUTED_CODE_ID/Tree/Parents 与可能重测，不自动替代 |
+| 9. ignored 参与 import/shadow | `test_preflight_rejects_ignored_import_shadow` | 临时可丢弃 Git 仓库真实文件/索引拒绝；**未实际 import 可疑源码** |
+| 10. GitHub 远端无法证明本机未提交 | `test_remote_pr_never_proves_local_uncommitted_state` | T0 语义模拟，不声称观察了开发者 Mac |
+| 11. B/C 同一 GitHub 用户 | `test_same_github_account_not_two_independent_humans` | T0 不将逻辑会话冒充独立人类/账号 |
+| 12. A 输入“下一步” | `test_a_next_step_is_read_only` | T0 指令模型；**真实 ChatGPT/GitHub 工具副作用 NOT_RUN** |
+| 13. 未授权 T2/T3 | `test_t2_t3_requires_separate_authorization` | T0 模拟 NOT_RUN；不执行真实 Native/进程信号 |
+| 14. 旧 V1 Review 与 V2 并存 | `test_legacy_v1_review_no_auto_pass_under_v2` | T0 无历史 PASS 升级；正式迁移未发生 |
+
+附加与本轮 r003 B/C 缺陷直接相关的 T0 正反例：
+
+- **Core R06 / Standards Role**：规范正文要求对**每个高风险变更点**提出有意义的独立反例；B 角色正文必须保持同等量词，不能缩减为抽检“至少一个高风险点”。`test_r006_each_high_risk_change_not_only_one_point` 直接比对双方规范文字；不能代替 B 对真实产品风险的独立审查。
+- **真实 Git 源完整性拒绝**：`tools/review_governance_v2_preflight.py` 为治理 PR 的只读源码预检。其路径进入 Git Tree/Manifest，CI 在加载测试代码前独立核验 **HEAD Tree/index/实际文件 Blob 与可执行位**，要求 `core.filemode=true`，拒绝 `assume-unchanged`/`skip-worktree`、untracked/ignored、非普通文件、模式和 Manifest 漂移。`ReviewerR004CounterexampleTests` 在隔离临时仓库中执行干净正例与 chmod、隐藏 index flag、可疑 ignored 输入、错 Head 的负例；**不连接真实产品 Gateway 或生产资源**。
+- **回归优先级**：独立已证实 P0/P1/P2 对本快照在有足够原始证明时为 `REVIEW_COMPLETE + SUFFICIENT + FAIL`；证据不足或必要测试未执行则为 `REVIEW_COMPLETE + INSUFFICIENT + BLOCKED`；未完成审查为 `REVIEW_INCOMPLETE`；不同 Base/Head/Tree/合同/规则的角色结果不得拼接通过。
+- 本轮 r004 先提交了测试-only RED；其原始结果若与预期不同必须如实记为 UNEXPECTED_FAIL/缺证，不能制造 RED。修复后的独立 CI 必须绑定**新 Head 和实际执行身份**、明确 FAIL/SKIP/NOT_RUN/已测试范围。
+- 治理项目源同版核验、最终用户精确审批、真实多会话/权限/工具调用、副作用控制及正式新轮次生效仍保持独立 `EXTERNAL_PROCESS_GATE=NOT_VERIFIED`，不能将此程序门禁重复登记为每个产品代码 PR 的新 P0–P2，也不能据此伪造 R01/R10 PASS。

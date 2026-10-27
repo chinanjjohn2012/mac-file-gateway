@@ -1,4 +1,4 @@
-# V2.0 三角色独立复审规范 — r003 固定来源候选包
+# V2.0 三角色独立复审规范 — r004 源码一致性与迁移反例候选包
 
 **STATUS: DRAFT / NOT_APPROVED / NOT_EFFECTIVE。** 用户授权 A 修复 [PR #75](https://github.com/chinanjjohn2012/mac-file-gateway/pull/75) 的候选规范版本差异、提交新轮次交 B/C 独立设计复审；**这项开发授权不等于正式批准或切换规则**。旧 r001/r002 Review 和产品 PR 的受审 Head 保持不变。
 
@@ -10,7 +10,7 @@
 | `GITHUB_REVIEW_HANDOFF_V2_CANDIDATE.md` | A Project `GITHUB_REVIEW_HANDOFF_V2.0.md`；SHA256 `b01cdc055bb35e586019781710229dadc4ca6ed80b6f97b2e0605db78965eef0`；Git Blob `710ff3db2c106309b577ab5bdda5ece60c65e821` | **逐字节一致**；GHRH-2.0 / A/B/C 状态机 |
 | `EVIDENCE_AND_TEST_PROFILES_V2_CANDIDATE.md` | A Project `GITHUB_EVIDENCE_AND_TEST_PROFILES_V2.0.md`；SHA256 `36402e54a3b5515eed649a6cad4402cc5d41c86fe5fee36fa93d1e70f5b1e0e5`；Git Blob `2a38933ae76fcbefd7a49d4d48a3ba120cd87c6c` | **逐字节一致**；ETP-V2.0 / E1–E8、T0–T3、Head/Merge 实证 |
 | `ROLE_A_DEVELOPER_V2_CANDIDATE.md` | A Project `GITHUB_ROLE_A_DEVELOPER_V2.0.md`；SHA256 `9655c6406fdf21a42739b9b670513309b417dd44fbd68f6a85e89be93d2d6dec`；Git Blob `780b788e6c92249cd5456bc66d9a83f89cc65f40` | **逐字节一致**；A 开发/冻结/交接 |
-| `ROLE_B_STANDARDS_V2_CANDIDATE.md` | A 根据 B r002 直接指出的全文阅读/降级评论门禁修订；候选 Git Blob `c5249b443de99a4b4ef6c50ecd8ddf37fe20b387` | **B Project 实际 Role 文件字节不可由 A 直接读取：待 B 本人同版核验** |
+| `ROLE_B_STANDARDS_V2_CANDIDATE.md` | A 根据 B r002 直接指出的全文阅读/降级评论门禁修订；候选 Git Blob `cfb0b67a6e9dffdbce216d214bcde4e0fb7d86df`；SHA256 `a61ce70e49e284ba04279fe7d5a7420752f46f7270be1a3b63ff5ae26e2acdd0` | **B Project 实际 Role 文件字节不可由 A 直接读取：待 B 本人同版核验** |
 | `ROLE_C_SPEC_V2_CANDIDATE.md` | A 根据 C r002 直接指出的完整 R01–R10、报告、禁止/边界、无法全文读取须阻断等要求修订；候选 Git Blob `437eb9df09954decbc1b34d585bf97b10e8adcb6` | **C Project 实际 Role 文件字节不可由 A 直接读取：待 C 本人同版核验** |
 | `MIGRATION_ACCEPTANCE_V2_CANDIDATE.md` | V1/G01–G08 兼容、S1–S14 风险矩阵、B/C 设计审查、版本同步、T0 状态模拟和生效门禁 | 新 r003 复审范围；不是生效记录 |
 
@@ -22,6 +22,16 @@
 - **B/C P2 — R08**：原 RED 等效替代缺少“**已独立核验的等效原始失败证据**”门禁；现 Core 正文按上传版精确对齐，不接受开发者叙述代替原始 RED。
 - **B/C P2/P3 — ETP §4**：明确按 Head/Merge 两种实际执行身份、父提交、依赖/配置差异判定 Head 是否必须独立重测；不以合成 Merge GREEN 冒充全部 Head PASS。
 - **B/C P2 — 身份/角色**：恢复各角色适用的全文阅读、缺章阻断、原生绑定/降级标注，形成可复核 Git Blob 与 Project 来源同版核验任务。A 已验证四份 A Project 文件，**未完成 B/C 各自 Project 来源同步**。
+
+
+## r004：针对 r003 B/C 独立设计 FAIL 的集中修复候选
+
+- [B Standards r003](https://github.com/chinanjjohn2012/mac-file-gateway/pull/75#pullrequestreview-5661569793) 和 [C Spec r003](https://github.com/chinanjjohn2012/mac-file-gateway/pull/75#pullrequestreview-5661573250) 均在旧固定 Head `27ae17259d1abdda4502fd3776887a4f5b8cf613` 发表 `REVIEW_COMPLETE / FAIL`。旧 Review 不更改、不转移为新 PASS；本 r004 仍须新 HEAD/TREE/原始 CI 和各角色独立重审。
+- B r003 **P2-01**：B Role 保留 Core R06(1) 的“每个高风险变更点至少一个独立反例”，不再写成“至少一个高风险点”；T0 文本回归同时检查 Core/Role。
+- B r003 **P2-02 / C r003 P2-01**：模拟的 `ReviewIdentity` 显式包括 Base、Head、Tree、合同及规则版本；`ReviewEvaluation` 分开返回 `REVIEW_PROGRESS / EVIDENCE_STATUS / VERDICT / REVIEW_LEVEL`，已证实 P1 为 `REVIEW_COMPLETE + SUFFICIENT + FAIL`，证据不足/必要测试 NOT_RUN 为 `REVIEW_COMPLETE + INSUFFICIENT + BLOCKED`，未完成审查为 `REVIEW_INCOMPLETE`；双 TARGETED 不构成 FULL。
+- C r003 **P2-02**：提取独立、纯只读治理预检脚本 `tools/review_governance_v2_preflight.py`，由实际 G05-style CI 在加载测试前执行。相较旧脚本，严格比较 HEAD 原生 Git Tree、index SHA/模式、文件实际 executable bits，拒绝 `core.filemode=false`、`assume-unchanged`/`skip-worktree`、未提交/ignored/符号链接或不匹配 Manifest；T0 通过隔离临时 Git 仓库验证正例、负例，不进行生产或原生子进程操作。
+- C r003 **P3-01**：`MIGRATION_ACCEPTANCE_V2_CANDIDATE.md` G 节逐项列出原 B 节 14 行在当前 `tests/test_review_governance_v2_candidate.py` 中的对应测试和证据等级。共 **36 个测试方法**，包括独立反例、实际执行本治理预检脚本的临时 Git 仓库探针；**不等于 36 个真实平台集成用例或 14 类真实后台自动化操作**。实际 A/B/C Project 文件、ChatGPT 命令副作用和权限切换仍未验证。
+- **r004 开发原始 RED 与 GREEN 必须分别固定不同 Head、Git Tree 和 Run/Job/日志；即使测试绿色，B/C 设计 Review、用户最终批准、三个 Project 同版全文核验和新轮次启用仍为 NOT_ISSUED/NOT_VERIFIED。**
 
 ## 生效与安全门禁
 

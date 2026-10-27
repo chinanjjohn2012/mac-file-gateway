@@ -343,10 +343,15 @@ class S2PrivateState:
                 raise S2Blocked("v2 state changed outside the held owner lock")
 
     def _commit(self, value: dict) -> None:
-        """Durable pending -> temp -> replace -> dir fsync -> unlink pending.
+        """Durable pending+final fence -> replace -> sync -> remove pending -> sync.
 
-        A fault after mutation leaves pending forensic evidence. A fault before
-        mutation leaves old valid state or a pending marker; no silent reset.
+        The independent final-fsync fence is created AND directory-synced
+        before the state can be replaced. If the directory fsync AFTER pending
+        unlink fails, that fence remains for boot-time fail-closed rejection.
+        Remove the fence only after all state and primary-marker changes have
+        been confirmed by fsync. A crash before its final unlink may leave an
+        extra fence and conservatively deny recovery; missing fence means the
+        state and primary unlink were synced BEFORE fence removal.
         """
         try:
             self._check_live_inodes()
@@ -354,11 +359,20 @@ class S2PrivateState:
             self._status = "unavailable"
             raise S2Unavailable("v2 prior source identity invalid") from exc
         pending = "pending-" + uuid4().hex
+        final_fence = "final-fence-" + uuid4().hex
         temp = "temp-" + uuid4().hex
         try:
             fd = os.open(pending, _NEW, 0o600, dir_fd=self._fd)
             try:
                 os.write(fd, b"v2-mutation-uncertain\n")
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            # This separate, fsynced identity remains even if the original
+            # pending marker has already been unlinked when final fsync fails.
+            fd = os.open(final_fence, _NEW, 0o600, dir_fd=self._fd)
+            try:
+                os.write(fd, b"v2-final-directory-fsync-unconfirmed\n")
                 os.fsync(fd)
             finally:
                 os.close(fd)
@@ -390,9 +404,14 @@ class S2PrivateState:
             if self._fault_at == "after_dirsync":
                 raise OSError("injected finalization fault")
             os.unlink(pending, dir_fd=self._fd)
+            # On an error here, the durable final_fence MUST still exist.
             os.fsync(self._fd)
-            self._state_identity = self._identity(os.stat(
+            # Identity sampling is also completed while the independent
+            # fence still exists. Its removal is the last fallible operation.
+            state_identity = self._identity(os.stat(
                 _STATE_NAME, dir_fd=self._fd, follow_symlinks=False))
+            os.unlink(final_fence, dir_fd=self._fd)
+            self._state_identity = state_identity
         except (OSError, ValueError, TypeError, OverflowError, RecursionError):
             self._status = "unavailable"
             raise S2Unavailable("v2 transition durability or capacity unconfirmed") from None

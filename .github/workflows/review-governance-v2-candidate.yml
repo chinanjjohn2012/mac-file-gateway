@@ -1,0 +1,98 @@
+name: V2 governance candidate T0 (PR75 only, nonproduction)
+
+on:
+  pull_request:
+    paths:
+      - 'docs/review-governance-v2/**'
+      - 'tests/test_review_governance_v2_candidate.py'
+      - '.github/workflows/review-governance-v2-candidate.yml'
+      - 'MANIFEST.sha256'
+
+permissions:
+  contents: read
+
+jobs:
+  design-only-t0:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'docs/github-review-handoff-v2-20261025' &&
+      github.event.pull_request.base.ref == 'release/ms1' &&
+      github.event.pull_request.base.sha == '2f163eeb83fc2f984354dc6d231a614dca5aa9af'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONNOUSERSITE: '1'
+    steps:
+      - name: Checkout exact PR Head without credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: G05-style HEAD Tree Blob mode and Manifest pre-import admission
+        shell: bash
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          python3 -I -S - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import os
+          import subprocess
+
+          def git(*args):
+              return subprocess.check_output(("git",) + args)
+
+          head = git("rev-parse", "HEAD").decode().strip()
+          tree = git("rev-parse", "HEAD^{tree}").decode().strip()
+          assert head == os.environ["EXPECTED_HEAD"], (head, os.environ["EXPECTED_HEAD"])
+          tracked = git("ls-files", "--stage", "-z").split(b"\0")
+          entries = []
+          for line in filter(None, tracked):
+              ident, name = line.split(b"\t", 1)
+              mode, blob, stage = ident.decode("ascii").split(" ")
+              assert mode in {"100644", "100755"} and stage == "0", (mode, stage)
+              path = name.decode("utf-8")
+              observed = git("hash-object", "--", path).decode().strip()
+              assert observed == blob, ("BLOB_MISMATCH", path, blob, observed)
+              entries.append(path)
+          assert len(entries) == len(set(entries))
+          assert "MANIFEST.sha256" in entries
+          assert not git("ls-files", "--others", "--exclude-standard", "-z")
+          assert not git("ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+          assert not git("status", "--porcelain", "--untracked-files=all")
+          expected = sorted(
+              hashlib.sha256(Path(p).read_bytes()).hexdigest() + "  ./" + p
+              for p in entries if p != "MANIFEST.sha256"
+          )
+          actual = Path("MANIFEST.sha256").read_text(encoding="utf-8").splitlines()
+          assert actual == expected, ("MANIFEST_MISMATCH", len(actual), len(expected))
+          assert len(entries) == len(actual) + 1
+          print(f"G05_V2_CANDIDATE_HEAD={head}")
+          print(f"G05_V2_CANDIDATE_TREE={tree}")
+          print(f"G05_V2_CANDIDATE_TRACKED_BLOBS={len(entries)}")
+          print(f"G05_V2_CANDIDATE_MANIFEST_RECORDS={len(actual)}")
+          print("G05_V2_CANDIDATE_UNTRACKED_IGNORED=NONE")
+          print("G05_V2_CANDIDATE_PREIMPORT=PASS")
+          PY
+      - name: Run offline stdlib governance source and migration state T0
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S -m unittest discover -s tests -p 'test_review_governance_v2_candidate.py' -v
+          echo V2_GOVERNANCE_MIGRATION_T0_MODEL=PASS
+          echo V2_GOVERNANCE_B_C_INDEPENDENT_REVIEW=NOT_ISSUED
+          echo V2_GOVERNANCE_PROJECT_SOURCE_SYNC=NOT_VERIFIED
+          echo V2_GOVERNANCE_ACTIVATION=NOT_EFFECTIVE
+          echo V2_GOVERNANCE_NATIVE_T2_T3=NOT_AUTHORIZED
+      - name: Final checkout integrity (no source changed by tests)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git status --porcelain --untracked-files=all)"
+          echo V2_GOVERNANCE_T0_FINAL_SOURCE_UNCHANGED=PASS

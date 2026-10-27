@@ -1,14 +1,13 @@
-# GitHub Review Handoff V2.0 — A/B/C PR 状态机候选版
+# GitHub Review Handoff V2.0 — A/B/C PR 状态机
 
-`PROTOCOL_ID: GHRH-2.0-CANDIDATE`  
-`STATUS: DRAFT / NOT_EFFECTIVE`
+`PROTOCOL_ID: GHRH-2.0`  
 
 ## 1. 职责、事实来源和短命令
 
 - A / DEVELOPER：授权范围内开发、测试、提交与 PR 交接；读取 B/C 结果、统一修复和进度协调；不得代替签收。
 - B / STANDARDS_REVIEWER：独立 Standards 审查、只读源码与合同、发布自己的 SHA 绑定 COMMENT Review；不得读取/继承 C 的 Review。
 - C / SPEC_REVIEWER：独立 Spec 逐合同审查、发布自己的 SHA 绑定 COMMENT Review；不得读取/继承 B 的 Review。
-- 三聊天共用同一通用核心规则、同一版本 GitHub Handoff 和证据适配；各角色仅需一份极短职责文件，不维护三份 G01–G08 增量规则。
+- 三聊天共用同一通用核心规则、同一版本 GitHub Handoff 和证据适配；各角色只需本角色职责文件，公共规则统一维护且版本一致。
 - GitHub PR 是**动态交接唯一权威来源**。资料空间/Project 来源只保存静态规则。没有自动唤醒三个聊天，也不能凭消息缺失推断对方正在执行。
 - A `下一步`：只读检查指定 PR 的代码/Head/Base、原始证据、A 交接及双 Review，输出下一角色；绝不开发。
 - A `继续开发`：先审查最新角色结论、冻结及安全门禁后按授权开发/修复/提交/发布新交接。
@@ -28,9 +27,9 @@ REVIEW_SCOPE: FIX | TARGETED | FULL
 BASE_SHA: <完整 SHA>
 HEAD_SHA: <完整 SHA>
 HEAD_TREE: <完整 SHA>
-RULESET_ID: <已生效规则与版本>
+RULESET_ID: ICR-V2.0
 AUTHORITY_REFS: <权威文档固定 ref 与版本>
-EVIDENCE_PROFILE_ID: <已批准适配规范及版本>
+EVIDENCE_PROFILE_ID: ETP-V2.0
 EXTERNAL_INPUTS: <所需受控外部代码/配置/制品>
 ~~~
 若任务不明确，禁止擅自取“最新 PR”开始写操作。
@@ -52,8 +51,8 @@ CONTRACT_SCOPE: <范围>
 BASE_SHA: <SHA>
 HEAD_SHA: <SHA>
 HEAD_TREE: <SHA>
-RULESET_ID: <版本>
-EVIDENCE_PROFILE_ID: <版本>
+RULESET_ID: ICR-V2.0
+EVIDENCE_PROFILE_ID: ETP-V2.0
 AUTHORITY_REFS: <文件及固定 ref>
 REVIEW_SCOPE: FIX | TARGETED | FULL
 REQUESTED_REVIEWS: STANDARDS, SPEC
@@ -79,8 +78,8 @@ CONTRACT_SCOPE: <范围>
 REVIEWED_BASE_SHA: <SHA>
 REVIEWED_HEAD_SHA: <SHA>
 REVIEWED_TREE_SHA: <SHA>
-RULESET_ID: <规则版本>
-EVIDENCE_PROFILE_ID: <适配版本>
+RULESET_ID: ICR-V2.0
+EVIDENCE_PROFILE_ID: ETP-V2.0
 AUTHORITY_REFS: <权威合同固定 ref>
 REVIEW_PROGRESS: REVIEW_COMPLETE | REVIEW_INCOMPLETE | SNAPSHOT_CHANGED
 EVIDENCE_STATUS: SUFFICIENT | INSUFFICIENT | NOT_ASSESSED
@@ -108,9 +107,8 @@ A 按实际 PR 最新 Head/Base/Tree、权威合同版本、原始执行证据�
 所有查询输出 `REPO, PR, TASK_ID, REVIEW_ROUND, BASE_SHA, HEAD_SHA, REVIEW_TARGET, RULESET_ID, DEVELOPER, STANDARDS_REVIEWER, SPEC_REVIEWER, BLOCKERS, NEXT_ROLE, NEXT_COMMAND`。
 **任何单人角色结果、FIX/TARGETED PASS 或 `REVIEW_COMPLETE` 都不是 `FULL_CODE_REVIEW_PASS`。**
 
-## 6. V1 兼容策略（非常重要）
+## 6. V2.0 协议生效门禁
 
-- 旧 `GH_HANDOFF_V1` 标记与旧 STATUS 字段仅作为**历史可解析事实**保留，不能自动按 V2 `EVIDENCE_STATUS` 补值或将旧角色 PASS 升级。
-- 在途旧审查继续适用其已绑定的 V1 规则和经批准的 G01–G08 严格证据要求；GHRH-2.0-CANDIDATE 不生效。
-- 项目必须记录协议版本与起用轮次；只有 B/C 对 V2 固定稿独立评审、用户批准、A/B/C 三 Project 来源同步验证通过后才发布 `EFFECTIVE_FOR_NEW_ROUNDS`。
-- V2 不授权任何 PR 合并/部署/发布或改变现有安全实验范围。
+- 本协议只用于明确指定采用 V2.0 的新审查轮次；交接和独立 Review 统一使用 `GH_HANDOFF_V2`。不得以无版本信息的评论、角色自述或先前结论自动填补缺失的 `EVIDENCE_STATUS` 或证明当前 PASS。
+- 必须记录精确批准的规则版本、合同版本、快照身份与开始适用的轮次。只有 B/C 对同一固定规范文件快照独立复审、用户批准，且 A/B/C 三个 Project 来源都能完整读取并核验一致后，才可以声明 `EFFECTIVE_FOR_NEW_ROUNDS`。
+- 本协议不授权任何 PR 合并、部署、发布、产品安全门禁变更或高风险实验。无证据不得宣称签收或集成通过。

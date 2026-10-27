@@ -46,3 +46,17 @@ STATUS: DRAFT / NOT_EFFECTIVE
 - [ ] 批准精确版本与快照身份，记录迁移时点。
 - [ ] 三个 Project 均实际读取一致的完整规则、交接和证据适配版本。
 - [ ] 通过至少一次不修改产品代码的只读/隔离模拟验收；旧 Review 不追认。
+
+## E. 固定规范字节与独立来源同步（r003 修复候选）
+
+- **本 PR 仍是拟议规则的设计复审，不是规则正式启用。** GitHub 候选路径内的 Core/Handoff/ETP/A Role 采用 A Project 实际全文读取的 V2.0 文件**逐字节副本**；路径名包含 `_CANDIDATE` 不改变文件内部的规范 ID，也不因文件已提交而宣布生效。各文件 SHA256、Git Blob 和来源读取身份在本目录 README 记录。
+- B/C Role 的 r003 候选文本保留并补强每轮强制全文读取（R01–R10 + 报告 + 禁止 + 版本适用边界）、只读独立取证、原生 COMMENT Review 与证据缺口阻断。A 无法从自己的 Project 直接证明 B/C Project 实际挂载的 Role 文件字节；**必须由 B 和 C 分别直接全文读取各自 Project Source，报告真实 SHA256/内容差异并独立评价**。在这些核验前 `THREE_PROJECT_SYNC=NOT_VERIFIED`。
+- 候选文件和三个 Project 的最终权威文件如果字节/义务仍不同，不得冒称同一已批准规范；如需变更候选 Head 或 Project 权威来源，必须新快照重新核验与必要独立复审。任何用户批准必须绑定明确 Base/Head/Tree、规范 Git Blob/sha256 和首次适用的新轮次。
+- A/B/C 同一 GitHub 登录名不是人类/账号独立；独立评审由各自直接取证与自己的原生 Review 体现。不读取或代写别的角色结论。
+
+## F. 规范启用隔离和可复核的 T0 状态演练
+
+- 针对本目录的变更，B/C 复审目标为 **V2.0 规范设计与迁移**；普通产品 PR 只针对当前适用规则验证产品合同、完整源码、原始执行身份与安全授权。**旧治理批准/来源同步问题不应在每个产品 PR 作为新的产品 P0–P2 重复统计**，应单独登记 `EXTERNAL_PROCESS_GATE` 并链接治理复审记录。若该流程门禁实际影响 R01/R10 的当前资格，仍要诚实标记相应 `EVIDENCE_STATUS`/`R10_STATUS`，不得虚构整体 PASS。
+- 完成 B/C 独立设计复审且无阻断、用户明确批准精确文本、各 Project 同版全文读取及必要迁移 T0 验证以后，才允许为**未来明确指定的新轮次**记录 `EFFECTIVE_FOR_NEW_ROUNDS`。旧 `GH_HANDOFF_V1`、V1 Review 和产品 PR 不追认 V2 PASS；真实环境/生产/Native/T2/T3 仍需独立授权。
+- 有效性演练至少验证：仅 B 通过时下一角色 C；两项 TARGETED 不产生 FULL；Head/Base/Tree 或合同错配不拼接 PASS；Base 漂移不继承旧 PASS；用户批准但未完成 Project 同步不生效；来源/运行输入不足与必要测试 NOT_RUN 如实阻断；角色审查完成却发现 P1 得到 FAIL 而不是 INCOMPLETE；产品缺陷与独立治理门禁分离；Merge 与 Head 证据分别标识；无任何情形获得自动合并、发布或原生执行许可。
+- 所有 T0 演练只使用不触达生产的内存输入、可审计源码和隔离仓库快照。运行结果只能证明**迁移规则模拟器**的受测组合，不代表真实 A/B/C Project 已同步、不代表真实 GitHub 后端状态机、Native/生产资格或集成 PASS。

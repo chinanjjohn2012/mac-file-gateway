@@ -14,7 +14,9 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import importlib.util
 import json
+import marshal
 import os
 from pathlib import Path
 import stat
@@ -78,6 +80,51 @@ def read_record(root: Path, file: Path) -> set[str]:
     return rels
 
 
+
+def verify_derived_bytecode(pyc: Path, root: Path, recorded: set[str]) -> str:
+    """Validate unlisted optimized pyc against its RECORD-listed .py source.
+
+    pip may generate PEP 3147 .opt-1.pyc outside RECORD during install.
+    Verify PEP 552 header and recompile approved source without executing it.
+    """
+    try:
+        src = Path(importlib.util.source_from_cache(str(pyc)))
+    except (ValueError, OSError) as exc:
+        raise EvidenceError("unrecognized RECORD-unlisted bytecode: " + str(pyc)) from exc
+    if not under(src, root) or src.relative_to(root).as_posix() not in recorded:
+        raise EvidenceError("RECORD-unlisted importable/executable: " + str(pyc.relative_to(root)))
+    regular(src)
+    payload = pyc.read_bytes()
+    code = src.read_bytes()
+    if len(payload) < 16 or payload[:4] != importlib.util.MAGIC_NUMBER:
+        raise EvidenceError("invalid derived bytecode header: " + str(pyc))
+    flags = int.from_bytes(payload[4:8], "little")
+    if flags not in (0, 1, 3):
+        raise EvidenceError("invalid derived bytecode PEP552 flags")
+    if flags & 1:
+        if payload[8:16] != importlib.util.source_hash(code):
+            raise EvidenceError("derived bytecode source hash mismatch")
+    elif (int.from_bytes(payload[8:12], "little") != int(src.stat().st_mtime) & 0xffffffff
+          or int.from_bytes(payload[12:16], "little") != len(code) & 0xffffffff):
+        raise EvidenceError("derived bytecode source timestamp/size mismatch")
+    label = pyc.name
+    if ".opt-2.pyc" in label:
+        optimize = 2
+    elif ".opt-1.pyc" in label:
+        optimize = 1
+    elif label.endswith(".pyc") and ".opt-" not in label:
+        optimize = 0
+    else:
+        raise EvidenceError("unrecognized derived bytecode optimization")
+    try:
+        compiled = compile(code, str(src), "exec", dont_inherit=True, optimize=optimize)
+    except (SyntaxError, ValueError, TypeError) as exc:
+        raise EvidenceError("cannot reproduce derived bytecode") from exc
+    if payload[16:] != marshal.dumps(compiled):
+        raise EvidenceError("derived bytecode payload differs from recorded source")
+    return src.relative_to(root).as_posix()
+
+
 def scan_root(root: Path) -> dict:
     if root.is_symlink() or not root.is_dir():
         raise EvidenceError("site root missing or symlink: " + str(root))
@@ -89,6 +136,7 @@ def scan_root(root: Path) -> dict:
     for record in dist_records:
         recorded.update(read_record(root, record))
     importable = []
+    derived = []
     pths = []
     unknown_non_exec = 0
     for base, dirs, files in os.walk(root, followlinks=False):
@@ -105,7 +153,11 @@ def scan_root(root: Path) -> dict:
                     unknown_non_exec += 1
                 continue
             if rel not in recorded:
-                raise EvidenceError("RECORD-unlisted importable/executable: " + rel)
+                if name.endswith(".pyc"):
+                    origin = verify_derived_bytecode(p, root, recorded)
+                    derived.append([rel, origin])
+                else:
+                    raise EvidenceError("RECORD-unlisted importable/executable: " + rel)
             d = digest(p)
             importable.append([rel, d])
             if name.endswith(".pth"):
@@ -120,7 +172,7 @@ def scan_root(root: Path) -> dict:
     if not importable:
         raise EvidenceError("site root has no examined importable source")
     return {"path": str(root), "dist_record_count": len(dist_records),
-            "importable": importable, "pth": pths,
+            "importable": importable, "derived_bytecode": derived, "pth": pths,
             "unlisted_nonexecutables": unknown_non_exec}
 
 
@@ -270,7 +322,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"R01_EXACT_INTERPRETER={sys.executable}")
         print("R01_SITE_IMPORTABLE_SOURCE_SET=PASS site_roots=" + str(len(roots))
               + " files=" + str(sum(len(s["importable"]) for s in current["site"])))
-        print("R01_SITE_UNLISTED_EXECUTABLES=NONE_DETECTED")
+        derived_count = sum(len(site["derived_bytecode"]) for site in current["site"])
+        if derived_count:
+            print("R01_SITE_RECORD_UNLISTED_PYC=REPRODUCIBLY_DERIVED_FROM_RECORDED_SOURCE count="
+                  + str(derived_count))
+        else:
+            print("R01_SITE_UNLISTED_EXECUTABLES=NONE_DETECTED")
+        print("R01_SITE_UNVERIFIED_EXECUTABLES=NONE_DETECTED")
         print("R01_RUNNER_BOOTSTRAP_STDLIB_PROVENANCE=NOT_SOURCE_PINNED")
         if args.runtime:
             if args.repo is None:

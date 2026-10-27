@@ -2,6 +2,7 @@
 import csv
 import importlib.util
 import json
+import py_compile
 from pathlib import Path
 import subprocess
 import sys
@@ -153,3 +154,20 @@ def test_r004_record_only_verifier_explicit_scope_unchanged():
     src = original.read_text('utf-8')
     assert 'CI_UNLISTED_IMPORTABLE_FILES=NOT_ASSESSED' in src
     assert 'LOCKED_WHEELS_AND_RECORD_FILES_ONLY' in src
+
+
+def test_pip_like_unlisted_optimized_pyc_accepted_only_if_reproducible(tmp_path):
+    site = _site(tmp_path)
+    src = site/'safe'/'__init__.py'
+    cache = site/'safe'/'__pycache__'
+    cache.mkdir()
+    pyc = cache/'__init__.cpython-313.opt-1.pyc'
+    py_compile.compile(str(src), cfile=str(pyc), doraise=True, optimize=1)
+    result = probe.site_snapshot([site])
+    assert result['site'][0]['derived_bytecode'] == [
+        ['safe/__pycache__/__init__.cpython-313.opt-1.pyc', 'safe/__init__.py']
+    ]
+    old = pyc.read_bytes()
+    pyc.write_bytes(old[:-1] + bytes([old[-1] ^ 1]))
+    with pytest.raises(probe.EvidenceError, match='payload differs'):
+        probe.site_snapshot([site])

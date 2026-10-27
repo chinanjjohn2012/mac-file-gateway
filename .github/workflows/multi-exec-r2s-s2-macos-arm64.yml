@@ -47,6 +47,7 @@ jobs:
       GATEWAY_NATIVE_C_ALLOWED: 'false'
       C3B03_S3S6_FIRST_C_LOAD_AUTHORIZED: 'false'
       C3B03_S3S6_GROUP_SIGNAL_AUTHORIZED: 'false'
+      G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
     steps:
       - name: Checkout exact PR Head without credentials
         uses: actions/checkout@v4
@@ -122,13 +123,19 @@ jobs:
           --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256
           --installed-record "$RUNNER_TEMP/r2s-s2-installed.json"
       - name: Verify additional R01 pre/post importables and actual import roots
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
+          test -n "$G05_EXPECTED_HEAD"
           python -B -I -S tools/r01_external_source_evidence.py verify --snapshot "$RUNNER_TEMP/r01-site-preimport.json" --runtime "$RUNNER_TEMP/r01-startup-runtime.json" --repo "$GITHUB_WORKSPACE"
           python -B -I -S tools/r01_external_source_evidence.py verify --snapshot "$RUNNER_TEMP/r01-site-preimport.json" --runtime "$RUNNER_TEMP/r01-pytest-imports.json" --repo "$GITHUB_WORKSPACE"
       - name: Verify release Manifest and unchanged tracked source
         shell: bash
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
+          test "$(git rev-parse --verify HEAD)" = "$G05_EXPECTED_HEAD"
           git diff --exit-code
           git diff --cached --exit-code
           find . -type f \

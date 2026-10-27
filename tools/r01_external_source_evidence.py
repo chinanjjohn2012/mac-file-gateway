@@ -292,10 +292,17 @@ def _read_git_head_manifest(repo: Path) -> dict[str, str]:
     head = git("rev-parse", "--verify", "HEAD^{commit}").decode("ascii").strip()
     if len(head) != 40 or any(ch not in "0123456789abcdef" for ch in head):
         raise EvidenceError("invalid immutable Git HEAD identity")
-    expected = os.environ.get("G05_EXPECTED_HEAD")
     workspace = os.environ.get("GITHUB_WORKSPACE")
-    if expected and workspace and Path(workspace).resolve(strict=False) == root and head != expected:
-        raise EvidenceError("HEAD source SHA differs from G05 expected checkout")
+    if os.environ.get("GITHUB_ACTIONS") == "true" and not workspace:
+        raise EvidenceError("missing GITHUB_WORKSPACE source checkout identity")
+    if workspace and Path(workspace).resolve(strict=False) == root:
+        # Fixed PR event HEAD must remain bound across ALL final CI evidence
+        # steps; current mutable git HEAD alone cannot establish source identity.
+        expected = os.environ.get("G05_EXPECTED_HEAD", "")
+        if len(expected) != 40 or any(ch not in "0123456789abcdef" for ch in expected):
+            raise EvidenceError("missing or invalid original G05 expected HEAD identity")
+        if head != expected:
+            raise EvidenceError("HEAD source SHA differs from G05 expected checkout")
     immutable = git("show", head + ":MANIFEST.sha256")
     if manifest.read_bytes() != immutable:
         raise EvidenceError("working MANIFEST differs from immutable Git HEAD source")
@@ -437,11 +444,17 @@ def verify_runtime(path: Path, repo: Path, snapshot: dict) -> dict:
                 if not location.is_dir():
                     raise EvidenceError("missing HEAD repository import root: " + str(location))
             elif location.is_dir():
-                # An arbitrary post-G05 generated directory cannot become a
-                # trusted import root merely by sharing the checkout prefix.
-                relative = location.relative_to(repo).as_posix() + "/"
-                if not any(name.startswith(relative) for name in head_hashes()):
-                    raise EvidenceError("unattested HEAD directory import root: " + str(location))
+                # A tracked README does not attest a transient module which
+                # was imported and then removed. In this bounded stage only
+                # the real CI script/test invocation roots are recognized;
+                # they remain scoped observations, NOT full import tracing.
+                relative = location.relative_to(repo).as_posix()
+                if relative not in ("tools", "tests"):
+                    raise EvidenceError("unqualified nested HEAD import root: " + str(location))
+                prefix = relative + "/"
+                if not any(name.startswith(prefix) and name.endswith(".py")
+                           for name in head_hashes()):
+                    raise EvidenceError("unattested HEAD script/test directory: " + str(location))
             elif location.is_file():
                 candidate = _repo_attested_file(location, repo, head_hashes())
                 if not archive_bytes(candidate):
@@ -533,6 +546,13 @@ def main(argv: list[str] | None = None) -> int:
         roots = args.site_root or default_roots()
         current = site_snapshot(roots)
         if args.mode == "preimport":
+            # Reject known-unqualified imperative site hooks while still in
+            # -I -S, before the next site-enabled Python process runs.
+            directives = [[entry[0], entry[1]] for site in current["site"]
+                          for entry in site.get("imperative_pth", [])]
+            if directives:
+                raise EvidenceError("unattested imperative .pth before site import: "
+                                    + repr(directives[:8]))
             write_new(args.snapshot, current)
         elif current != read_json(args.snapshot):
             raise EvidenceError("site importable file-set or bytes changed after tests")

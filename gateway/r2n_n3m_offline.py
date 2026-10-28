@@ -117,12 +117,18 @@ class N3MControl:
     owner_generation: int
     state_generation: int
     consent_epoch: int
+    consent_record_id: str
     consent_active: bool
+    consent_expiry_or_null: int | None
     consent_binding_digest: str
-    consent_expiry_epoch: int | None
     owner_lock_dev: int
     owner_lock_ino: int
     global_quarantined: bool
+    global_quarantine_reason: str
+    max_attempts: int
+    max_attempt_bytes: int
+    max_total_attempt_payload: int
+    unresolved_retired_tombstone_count: int
 
     def __post_init__(self) -> None:
         if self.schema_id != "native-n3-v1" or not _id(self.namespace_id):
@@ -134,10 +140,21 @@ class N3MControl:
             raise ValueError("invalid_control_consent_epoch")
         if type(self.consent_active) is not bool or type(self.global_quarantined) is not bool:
             raise ValueError("invalid_control_flags")
+        if not _id(self.consent_record_id) or not _id(self.global_quarantine_reason):
+            raise ValueError("invalid_control_provenance")
+        if self.consent_active and self.consent_epoch == 0:
+            raise ValueError("active_consent_without_epoch")
+        if (type(self.max_attempts) is not int or not 1 <= self.max_attempts <= 4096
+                or type(self.max_attempt_bytes) is not int or not 256 <= self.max_attempt_bytes <= 4096
+                or type(self.max_total_attempt_payload) is not int
+                or not 256 <= self.max_total_attempt_payload <= 16*1024*1024
+                or type(self.unresolved_retired_tombstone_count) is not int
+                or not 0 <= self.unresolved_retired_tombstone_count <= self.max_attempts):
+            raise ValueError("invalid_control_limits")
         if (type(self.consent_binding_digest) is not str
                 or not _HEX.fullmatch(self.consent_binding_digest)):
             raise ValueError("invalid_control_binding")
-        if self.consent_expiry_epoch is not None and not _positive(self.consent_expiry_epoch):
+        if self.consent_expiry_or_null is not None and not _positive(self.consent_expiry_or_null):
             raise ValueError("invalid_control_expiry")
 
     def encoded(self) -> str:

@@ -131,12 +131,12 @@ class N3MBinding:
         paths = self.workspace_exec_paths
         if (type(paths) is not tuple or not 1 <= len(paths) <= 32
                 or any(not _scope_path(p) for p in paths)
-                or tuple(sorted(set(paths))) != paths):
+                or len(set(paths)) != len(paths)):
             raise ValueError("invalid_workspace_exec_paths")
         maps = self.workspace_exec_runners
         if (type(maps) is not tuple or len(maps) > 32
                 or any(type(item) is not str for item in maps)
-                or tuple(sorted(set(maps))) != maps):
+                or len(set(maps)) != len(maps)):
             raise ValueError("invalid_workspace_exec_runners")
         configured: dict[str, str] = {}
         for item in maps:
@@ -144,8 +144,7 @@ class N3MBinding:
                 raise ValueError("invalid_workspace_exec_runner_mapping")
             path, mode = item.split("=", 1)
             if (not _scope_path(path) or mode not in ("direct", "pipenv")
-                    or not any(_inside_scope(path, grant) for grant in paths)
-                    or path in configured):
+                    or not any(_inside_scope(path, grant) for grant in paths)):
                 raise ValueError("invalid_workspace_exec_runner_mapping")
             configured[path] = mode
         if (type(self.runner_id) is not str or self.runner_id not in ("direct", "pipenv")
@@ -190,12 +189,28 @@ class N3MBinding:
             raise ValueError("invalid_expiry")
 
     def encoded_binding(self) -> str:
-        """Canonical equality data, NOT an operative local operator signature."""
-        return _canonical(asdict(self))
+        """Canonical EFFECTIVE authority; not a local-owner signature.
+
+        Workspace configuration accepts distinct raw array items in ANY order.
+        Scope order is irrelevant to permission meaning; Runner PATH=mode is
+        last-write-wins at a repeated PATH, as in CommandRunner.__init__.
+        Canonicalizing only the final active mapping preserves the resulting
+        selected Runner without introducing an unsupported input-sort gate.
+        """
+        data = asdict(self)
+        data["workspace_exec_paths"] = sorted(self.workspace_exec_paths)
+        effective: dict[str, str] = {}
+        for item in self.workspace_exec_runners:
+            path, mode = item.split("=", 1)  # validated in __post_init__
+            effective[path] = mode
+        data["workspace_exec_runners"] = [
+            f"{path}={effective[path]}" for path in sorted(effective)
+        ]
+        return _canonical(data)
 
     def digest(self) -> str:
-        """Deterministic equality fingerprint; NOT a signature or antirollback proof."""
-        return hashlib.sha256(_canonical(asdict(self)).encode("ascii")).hexdigest()
+        """Deterministic EFFECTIVE fingerprint; NOT signature or antirollback."""
+        return hashlib.sha256(self.encoded_binding().encode("ascii")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

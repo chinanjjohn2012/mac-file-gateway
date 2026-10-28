@@ -1,0 +1,19 @@
+test_01_valid_unsorted_scope_is_accepted (__main__.T0.test_01_valid_unsorted_scope_is_accepted) ... ok
+test_02_exact_duplicate_scope_rejected (__main__.T0.test_02_exact_duplicate_scope_rejected) ... ok
+test_03_invalid_scope_rejected (__main__.T0.test_03_invalid_scope_rejected) ... ok
+test_04_valid_distinct_same_path_last_direct_accepted (__main__.T0.test_04_valid_distinct_same_path_last_direct_accepted) ... ok
+test_05_valid_distinct_same_path_last_pipenv_accepted (__main__.T0.test_05_valid_distinct_same_path_last_pipenv_accepted) ... ok
+test_06_distinct_effective_map_changes_digest (__main__.T0.test_06_distinct_effective_map_changes_digest) ... ok
+test_07_exact_duplicate_runner_rejected (__main__.T0.test_07_exact_duplicate_runner_rejected) ... ok
+test_08_invalid_runner_mode_rejected (__main__.T0.test_08_invalid_runner_mode_rejected) ... ok
+test_09_external_runner_scope_rejected (__main__.T0.test_09_external_runner_scope_rejected) ... ok
+test_10_wrong_runner_claim_rejected (__main__.T0.test_10_wrong_runner_claim_rejected) ... ok
+test_11_equivalent_unsorted_runner_maps_same_digest (__main__.T0.test_11_equivalent_unsorted_runner_maps_same_digest) ... ok
+test_12_shadowed_mapping_same_effective_digest (__main__.T0.test_12_shadowed_mapping_same_effective_digest) ... ok
+
+----------------------------------------------------------------------
+Ran 12 tests in 0.002s
+
+OK
+
+exit_code=0

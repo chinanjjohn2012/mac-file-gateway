@@ -37,10 +37,13 @@ def persisted_control(**fields):
     return N3MControl(**({
         "schema_id": "native-n3-v1", "namespace_id": "testnamespace",
         "lineage_generation": 7, "owner_generation": 1,
-        "state_generation": 1, "consent_epoch": 1,
+        "state_generation": 1, "consent_epoch": 1, "consent_record_id": "consent1",
         "consent_active": True, "consent_binding_digest": binding().digest(),
-        "consent_expiry_epoch": 1000, "owner_lock_dev": 21, "owner_lock_ino": 22,
-        "global_quarantined": False,
+        "consent_expiry_or_null": 1000, "owner_lock_dev": 21, "owner_lock_ino": 22,
+        "global_quarantined": False, "global_quarantine_reason": "none",
+        "max_attempts": 4096, "max_attempt_bytes": 4096,
+        "max_total_attempt_payload": 16 * 1024 * 1024,
+        "unresolved_retired_tombstone_count": 0,
     } | fields))
 
 
@@ -127,7 +130,11 @@ class N3MContractT0(unittest.TestCase):
         for changes in ({"schema_id": "v1"}, {"consent_epoch": True},
                         {"consent_active": 1}, {"owner_generation": 0},
                         {"owner_lock_ino": False}, {"global_quarantined": "false"},
-                        {"consent_expiry_epoch": -2}):
+                        {"consent_expiry_or_null": -2},
+                        {"consent_record_id": ""}, {"global_quarantine_reason": "bad text"},
+                        {"max_attempts": 4097}, {"max_attempt_bytes": 4097},
+                        {"max_total_attempt_payload": 16*1024*1024+1},
+                        {"unresolved_retired_tombstone_count": 4097}):
             with self.subTest(changes=changes):
                 data = asdict(persisted_control()) | changes
                 self.assert_blocked(lambda: decode_control(json.dumps(data)), "invalid_control_data")

@@ -64,7 +64,13 @@ def _canonical(data: dict) -> str:
 
 def strict_json(text: str, required: frozenset[str]) -> dict:
     """Reject duplicate/unknown keys, nonfinite constants, wrong top-level type."""
-    if type(text) is not str or len(text.encode("utf-8")) > 65536:
+    if type(text) is not str:
+        raise N3MBlocked("invalid_json_size")
+    try:
+        size = len(text.encode("utf-8"))
+    except UnicodeError as exc:
+        raise N3MBlocked("invalid_json") from exc
+    if size > 65536:
         raise N3MBlocked("invalid_json_size")
 
     def pairs(items: list[tuple[str, object]]) -> dict:
@@ -98,6 +104,7 @@ class N3MBinding:
     workspace_exec_enabled: bool
     workspace_exec_paths: tuple[str, ...]
     workspace_exec_runners: tuple[str, ...]
+    runner_cwd: str
     runner_id: str
     runner_project: str
     runner_fallback: str
@@ -143,13 +150,34 @@ class N3MBinding:
             configured[path] = mode
         if (type(self.runner_id) is not str or self.runner_id not in ("direct", "pipenv")
                 or type(self.runner_fallback) is not str
-                or not _scope_path(self.runner_project)
-                or not any(_inside_scope(self.runner_project, grant) for grant in paths)
+                or not _scope_path(self.runner_cwd) or not _scope_path(self.runner_project)
+                or not any(_inside_scope(self.runner_cwd, grant) for grant in paths)
                 or self.runner_fallback != _RUNNER_FALLBACK):
             raise ValueError("invalid_effective_runner_identity")
-        if (self.runner_project in configured
-                and configured[self.runner_project] != self.runner_id):
-            raise ValueError("contradictory_runner_selection")
+
+        def depth(path: str) -> int:
+            return 0 if path == "." else path.count("/") + 1
+
+        # Mirror executor.CommandRunner._configured_runner: nearest configured
+        # ancestor of the actual selected cwd wins BEFORE any Pipfile fallback.
+        matches = [(path, mode) for path, mode in configured.items()
+                   if _inside_scope(self.runner_cwd, path)]
+        if matches:
+            configured_project, configured_mode = max(matches, key=lambda x: depth(x[0]))
+            if (self.runner_project, self.runner_id) != (configured_project, configured_mode):
+                raise ValueError("configured_runner_precedence_mismatch")
+        else:
+            # Without an explicit map, the nearest granted execution scope
+            # defines the lower bound of a possible nearest-Pipfile search.
+            # This T0 model CANNOT prove whether a real Pipfile exists.
+            containing = max((scope for scope in paths
+                              if _inside_scope(self.runner_cwd, scope)), key=depth)
+            if self.runner_id == "direct":
+                if self.runner_project != containing:
+                    raise ValueError("fallback_direct_scope_mismatch")
+            elif not (_inside_scope(self.runner_cwd, self.runner_project)
+                      and _inside_scope(self.runner_project, containing)):
+                raise ValueError("fallback_pipenv_project_mismatch")
         if any(not _id(x) for x in (self.backend_id, self.backend_version,
                                     self.consent_format, self.operator_issuer)):
             raise ValueError("invalid_authority_identity")

@@ -18,6 +18,7 @@ class N3MBlocked(RuntimeError):
 
 
 _ID = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
+_WORKSPACE_ID = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 _RUNNER_FALLBACK = "nearest_pipfile_else_direct"
 _ACK = ("host_user_scope", "irreversible_effects", "detached_survivors")
@@ -110,9 +111,11 @@ class N3MBinding:
     expiry_epoch: int | None
 
     def __post_init__(self) -> None:
-        if not _id(self.workspace) or not all(_positive(x) for x in (self.root_dev, self.root_ino)):
+        if (type(self.workspace) is not str or not _WORKSPACE_ID.fullmatch(self.workspace)
+                or not all(_positive(x) for x in (self.root_dev, self.root_ino))):
             raise ValueError("invalid_workspace_root")
-        if self.profile != "native_limited" or self.trust_scope != "mutable_workspace":
+        if (type(self.profile) is not str or type(self.trust_scope) is not str
+                or self.profile != "native_limited" or self.trust_scope != "mutable_workspace"):
             raise ValueError("unsupported_security_profile_or_trust_scope")
         if type(self.server_exec_enabled) is not bool or type(self.workspace_exec_enabled) is not bool:
             raise ValueError("invalid_exec_grant_type")
@@ -138,7 +141,8 @@ class N3MBinding:
                     or path in configured):
                 raise ValueError("invalid_workspace_exec_runner_mapping")
             configured[path] = mode
-        if (self.runner_id not in ("direct", "pipenv")
+        if (type(self.runner_id) is not str or self.runner_id not in ("direct", "pipenv")
+                or type(self.runner_fallback) is not str
                 or not _scope_path(self.runner_project)
                 or not any(_inside_scope(self.runner_project, grant) for grant in paths)
                 or self.runner_fallback != _RUNNER_FALLBACK):

@@ -1,0 +1,57 @@
+R2-N N3-M r002 — A isolated Python method-excerpt T0 evidence
+EVIDENCE_MODE: REDUCED_SOURCE_METHOD_REPRO, NOT full GitHub model execution
+TARGET: PR #95 old Head 1204f5b11c6d6c4f682884c0b56d35b7e573d428 and new r002 proposal.
+EXECUTION_ENV: Linux Python 3.13.5, python3 -B -I -S, PYTHONDONTWRITEBYTECODE=1, safe local scratch.
+NO Network, filesystem state API, actual Runner/Native process/signal, Git/SDK/T1/T2/T3.
+NOTE: These are developer-authored small excerpt reconstructions of original/new method bodies, NOT exact unmodified GitHub source/59-case suite, original Github Actions job or independent B/C test.
+
+[ORIGINAL OLD METHOD RED]
+COMMAND: python3 -B -I -S /mnt/data/pr95_r002_work/red_expiry.py
+EXIT_CODE: 1 (expected contract failure)
+observed_phase: RETIRED_LIMITED
+consent_expired: True
+quarantined: False
+Traceback (most recent call last):
+  File "/mnt/data/pr95_r002_work/red_expiry.py", line 39, in <module>
+    assert f._record('a1') == 'UNKNOWN' and f._quarantined, 'Expected fail-closed UNKNOWN; OLD SOURCE ALLOWED RETIRED_LIMITED'
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Expected fail-closed UNKNOWN; OLD SOURCE ALLOWED RETIRED_LIMITED
+
+[REDUCED REVISED STATE EVENT T0 GREEN]
+COMMAND: PYTHONDONTWRITEBYTECODE=1 python3 -B -I -S /mnt/data/pr95_r002_work/focused_green.py
+EXIT_CODE: 0
+test_changed_binding_rejected (__main__.T0.test_changed_binding_rejected) ... ok
+test_dispatch_fault_zero_dispatch (__main__.T0.test_dispatch_fault_zero_dispatch) ... ok
+test_exact_boundary_rejected (__main__.T0.test_exact_boundary_rejected) ... ok
+test_expiry_between_start_and_retire_rejected (__main__.T0.test_expiry_between_start_and_retire_rejected) ... ok
+test_revoke_after_dispatch_not_retried (__main__.T0.test_revoke_after_dispatch_not_retried) ... ok
+test_revoke_after_starting_zero_dispatch (__main__.T0.test_revoke_after_starting_zero_dispatch) ... ok
+test_starting_fault_zero_dispatch (__main__.T0.test_starting_fault_zero_dispatch) ... ok
+test_valid_historical_limited (__main__.T0.test_valid_historical_limited) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 0.001s
+
+OK
+
+[REDUCED REVISED BINDING T0 GREEN]
+COMMAND: PYTHONDONTWRITEBYTECODE=1 python3 -B -I -S /mnt/data/pr95_r002_work/binding_green.py
+EXIT_CODE: 0
+test_canonical (__main__.T0.test_canonical) ... ok
+test_direct_to_pipenv_changes_digest (__main__.T0.test_direct_to_pipenv_changes_digest) ... ok
+test_invalid_runner (__main__.T0.test_invalid_runner) ... ok
+test_invalid_scope (__main__.T0.test_invalid_scope) ... ok
+test_legal_root_and_nested (__main__.T0.test_legal_root_and_nested) ... ok
+test_profile_denies (__main__.T0.test_profile_denies) ... ok
+test_selected_mode_must_match_exact_map (__main__.T0.test_selected_mode_must_match_exact_map) ... ok
+test_server_boolean_only (__main__.T0.test_server_boolean_only) ... ok
+test_trust_denies (__main__.T0.test_trust_denies) ... ok
+test_workspace_id_bound (__main__.T0.test_workspace_id_bound) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 0.001s
+
+OK
+
+[NOT_RUN AND IMPACT]
+The actual r002 GitHub source file gateway/r2n_n3m_offline.py and both test modules (42 inherited adapted + 17 new), together 59 test methods, were NOT executed as full immutable-source modules in these logs; full exact-Head suite and original CI/G05/installed dependency/provenance remain NOT_RUN. The reduced GREENs are limited supplementary semantic probes, not PR95 r002 PASS. No physical persistent state or true Native qualification is claimed. Independently execute/review exact fixed GitHub files under T0 as part of B/C review; no T1/T2/T3.

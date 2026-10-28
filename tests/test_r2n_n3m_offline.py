@@ -13,11 +13,15 @@ from gateway.r2n_n3m_offline import (
 
 def binding(**kw):
     return N3MBinding(**({
-        "workspace": "demo", "root_dev": 12, "root_ino": 34,
+        "workspace": "demo", "profile": "native_limited",
+        "trust_scope": "mutable_workspace",
+        "root_dev": 12, "root_ino": 34,
         "server_exec_enabled": True, "workspace_exec_enabled": True,
-        "server_exec_paths": ("runner", "tools"),
         "workspace_exec_paths": ("runner", "tools"),
-        "runner_id": "runner", "backend_id": "futuredisabled",
+        "workspace_exec_runners": (),
+        "runner_id": "direct", "runner_project": "runner",
+        "runner_fallback": "nearest_pipfile_else_direct",
+        "backend_id": "futuredisabled",
         "backend_version": "v1", "backend_config_sha256": "a" * 64,
         "risk_contract_sha256": "b" * 64, "consent_format": "v1",
         "operator_issuer": "localowner", "risk_ack": (
@@ -58,7 +62,7 @@ class N3MContractT0(unittest.TestCase):
         m = ready()
         t = m.prepare_fake(binding(), now=101)
         m.fake_first_dispatch(t, now=102)
-        m.retire_limited_fake(t)
+        m.retire_limited_fake(t, binding(), now=103)
         self.assert_blocked(lambda: m.deny_apply(t), "exec_cleanup_proof_required")
         self.assertEqual(m.snapshot()["profile"], "preview_only")
         self.assertEqual(m.snapshot()["completion_capability"], "none")
@@ -78,8 +82,10 @@ class N3MContractT0(unittest.TestCase):
         alternatives = {
             "workspace": "different", "root_dev": 99, "root_ino": 99,
             "server_exec_enabled": False, "workspace_exec_enabled": False,
-            "server_exec_paths": ("runner",), "workspace_exec_paths": ("runner",),
-            "runner_id": "tools", "backend_id": "newbackend",
+            "workspace_exec_paths": ("runner",),
+            "workspace_exec_runners": ("tools=pipenv",),
+            "runner_id": "pipenv", "runner_project": "tools",
+            "backend_id": "newbackend",
             "backend_version": "v2", "backend_config_sha256": "c" * 64,
             "risk_contract_sha256": "c" * 64, "consent_format": "v2",
             "operator_issuer": "differentowner", "expiry_epoch": 999,
@@ -106,13 +112,20 @@ class N3MContractT0(unittest.TestCase):
 
     def test_runner_must_be_in_effective_grants(self):
         with self.assertRaises(ValueError):
-            binding(server_exec_paths=("tools",))
+            binding(workspace_exec_paths=("tools",))
+        with self.assertRaises(ValueError):
+            binding(workspace_exec_runners=("outside=direct",))
 
     def test_reject_bad_scope_types_order_and_ack(self):
         bad = ({"workspace": "../other"}, {"root_dev": True},
                {"server_exec_enabled": 1}, {"workspace_exec_enabled": "true"},
-               {"server_exec_paths": ("tools", "runner")},
+               {"workspace_exec_paths": ("tools", "runner")},
                {"workspace_exec_paths": ("runner", "runner")},
+               {"workspace_exec_paths": ("../outside",)},
+               {"workspace_exec_runners": ("outside=direct",)},
+               {"runner_id": "notsupported"},
+               {"profile": "strict_f3"},
+               {"trust_scope": "nonmutable"},
                {"backend_config_sha256": "notsha"}, {"risk_ack": ()},
                {"operator_issuer": ""}, {"expiry_epoch": True},
                {"backend_id": "has space"})
@@ -216,7 +229,7 @@ class N3MContractT0(unittest.TestCase):
         m = ready()
         t = m.prepare_fake(binding(), now=101)
         m.fake_first_dispatch(t, now=102)
-        m.retire_limited_fake(t)
+        m.retire_limited_fake(t, binding(), now=103)
         d = m.decide_fake(t)
         self.assertEqual(d.kind, "LIMITED_HISTORICAL_COMPLETION_COMMITTED")
         self.assertEqual(d.cleanup_scope, "original_group_only")
@@ -229,7 +242,7 @@ class N3MContractT0(unittest.TestCase):
         m = ready()
         t = m.prepare_fake(binding(), now=101)
         m.fake_first_dispatch(t, now=102)
-        m.retire_limited_fake(t)
+        m.retire_limited_fake(t, binding(), now=103)
         m.late_positive_fake(t)
         d = m.decide_fake(t)
         self.assertEqual(d.kind, "QUARANTINED_OR_CLEANUP_UNKNOWN")
@@ -239,7 +252,7 @@ class N3MContractT0(unittest.TestCase):
         m = ready()
         t = m.prepare_fake(binding(), now=101)
         m.fake_first_dispatch(t, now=102)
-        m.retire_limited_fake(t)
+        m.retire_limited_fake(t, binding(), now=103)
         before = m.decide_fake(t)
         m.late_positive_fake(t)
         self.assertIs(m.decide_fake(t), before)
@@ -250,7 +263,7 @@ class N3MContractT0(unittest.TestCase):
         m = ready()
         a = m.prepare_fake(binding(), now=101)
         m.fake_first_dispatch(a, now=102)
-        m.retire_limited_fake(a)
+        m.retire_limited_fake(a, binding(), now=103)
         b = m.prepare_fake(binding(), now=103)
         m.late_positive_fake(a)
         self.assertEqual(m.snapshot()["phases"][b.attempt_id], "UNKNOWN")
@@ -261,7 +274,7 @@ class N3MContractT0(unittest.TestCase):
         m = ready()
         a = m.prepare_fake(binding(), now=101)
         m.fake_first_dispatch(a, now=102)
-        m.retire_limited_fake(a)
+        m.retire_limited_fake(a, binding(), now=103)
         b = m.prepare_fake(binding(), now=103)
         m.fake_first_dispatch(b, now=104)
         m.late_positive_fake(a)
@@ -315,7 +328,7 @@ class N3MContractT0(unittest.TestCase):
         m = ready()
         t = m.prepare_fake(binding(), now=101)
         m.fake_first_dispatch(t, now=102)
-        m.retire_limited_fake(t)
+        m.retire_limited_fake(t, binding(), now=103)
         m.fault_next_fake_commit("response")
         self.assert_blocked(lambda: m.decide_fake(t), "fake_commit_unavailable")
         self.assertNotIn(t.attempt_id, m.snapshot()["decisions"])
@@ -325,7 +338,7 @@ class N3MContractT0(unittest.TestCase):
         m = ready()
         t = m.prepare_fake(binding(), now=101)
         m.fake_first_dispatch(t, now=102)
-        m.retire_limited_fake(t)
+        m.retire_limited_fake(t, binding(), now=103)
         m.fault_next_fake_commit("late_event")
         self.assert_blocked(lambda: m.late_positive_fake(t), "fake_commit_unavailable")
         self.assertTrue(m.snapshot()["quarantined_fake"])
@@ -336,7 +349,7 @@ class N3MContractT0(unittest.TestCase):
         m = ready()
         t = m.prepare_fake(binding(), now=101)
         m.fake_first_dispatch(t, now=102)
-        m.retire_limited_fake(t)
+        m.retire_limited_fake(t, binding(), now=103)
         d = m.decide_fake(t)
         self.assertEqual(m.read_decision_fake(d.encoded(), t), d)
         self.assertFalse(m.snapshot()["available_for_real_exec"])
@@ -345,7 +358,7 @@ class N3MContractT0(unittest.TestCase):
         m = ready()
         t = m.prepare_fake(binding(), now=101)
         m.fake_first_dispatch(t, now=102)
-        m.retire_limited_fake(t)
+        m.retire_limited_fake(t, binding(), now=103)
         d = m.decide_fake(t)
         changes = {"namespace_id": "foreignnamespace", "lineage_generation": 88,
                    "owner_generation": 88, "consent_epoch": 88,
@@ -362,7 +375,7 @@ class N3MContractT0(unittest.TestCase):
         m = ready()
         a = m.prepare_fake(binding(), now=101)
         m.fake_first_dispatch(a, now=102)
-        m.retire_limited_fake(a)
+        m.retire_limited_fake(a, binding(), now=103)
         d = m.decide_fake(a)
         b = m.prepare_fake(binding(), now=103)
         self.assert_blocked(lambda: m.read_decision_fake(d.encoded(), b), "missing_registered_decision")
@@ -371,7 +384,7 @@ class N3MContractT0(unittest.TestCase):
         m = ready()
         t = m.prepare_fake(binding(), now=101)
         m.fake_first_dispatch(t, now=102)
-        m.retire_limited_fake(t)
+        m.retire_limited_fake(t, binding(), now=103)
         d = m.decide_fake(t)
         self.assert_blocked(lambda: m.read_decision_fake(d.encoded().replace('"decision_id":', '"decision_id":"d1","decision_id":', 1), t), "duplicate_json_key")
         self.assert_blocked(lambda: m.read_decision_fake(json.dumps(asdict(d) | {"ACK": True}), t), "unexpected_json_schema")
@@ -380,7 +393,7 @@ class N3MContractT0(unittest.TestCase):
         m = ready()
         t = m.prepare_fake(binding(), now=101)
         m.fake_first_dispatch(t, now=102)
-        m.retire_limited_fake(t)
+        m.retire_limited_fake(t, binding(), now=103)
         d = m.decide_fake(t)
         for change in ({"transport_ack": True}, {"full_descendant_tree_clean": "proven"},
                        {"cleanup_scope": "all_descendants"}):
@@ -421,7 +434,7 @@ class N3MContractT0(unittest.TestCase):
         m = ready()
         a = m.prepare_fake(binding(), now=101)
         m.fake_first_dispatch(a, now=102)
-        m.retire_limited_fake(a)
+        m.retire_limited_fake(a, binding(), now=103)
         m.late_positive_fake(None)
         d = m.decide_fake(a)
         self.assertEqual(d.kind, "QUARANTINED_OR_CLEANUP_UNKNOWN")

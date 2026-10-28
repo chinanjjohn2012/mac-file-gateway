@@ -1,0 +1,22 @@
+test_01_unordered_paths_valid (__main__.T0.test_01_unordered_paths_valid) ... ok
+test_02_unordered_map_valid (__main__.T0.test_02_unordered_map_valid) ... ok
+test_03_both_permutations_equal (__main__.T0.test_03_both_permutations_equal) ... ok
+test_04_nearest_child_pipenv (__main__.T0.test_04_nearest_child_pipenv) ... ok
+test_05_wrong_parent_claim_fails (__main__.T0.test_05_wrong_parent_claim_fails) ... ok
+test_06_exact_duplicate_scope_fails (__main__.T0.test_06_exact_duplicate_scope_fails) ... ok
+test_07_exact_duplicate_map_fails (__main__.T0.test_07_exact_duplicate_map_fails) ... ok
+test_08_same_path_last_wins_pipenv (__main__.T0.test_08_same_path_last_wins_pipenv) ... ok
+test_09_same_path_last_wins_direct (__main__.T0.test_09_same_path_last_wins_direct) ... ok
+test_10_root_dot_valid (__main__.T0.test_10_root_dot_valid) ... ok
+test_11_invalid_path (__main__.T0.test_11_invalid_path) ... ok
+test_12_invalid_mode (__main__.T0.test_12_invalid_mode) ... ok
+test_13_invalid_outside_map (__main__.T0.test_13_invalid_outside_map) ... ok
+test_14_changed_backend_fences_digest (__main__.T0.test_14_changed_backend_fences_digest) ... ok
+test_15_no_map_nearest_scope_direct (__main__.T0.test_15_no_map_nearest_scope_direct) ... ok
+test_16_no_map_hypothetical_pipenv (__main__.T0.test_16_no_map_hypothetical_pipenv) ... ok
+test_17_dot_scope_order_independent (__main__.T0.test_17_dot_scope_order_independent) ... ok
+
+----------------------------------------------------------------------
+Ran 17 tests in 0.004s
+
+OK

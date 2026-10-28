@@ -19,7 +19,7 @@ def binding(**kw):
         "server_exec_enabled": True, "workspace_exec_enabled": True,
         "workspace_exec_paths": ("runner", "tools"),
         "workspace_exec_runners": (),
-        "runner_id": "direct", "runner_project": "runner",
+        "runner_cwd": "runner", "runner_id": "direct", "runner_project": "runner",
         "runner_fallback": "nearest_pipfile_else_direct",
         "backend_id": "futuredisabled",
         "backend_version": "v1", "backend_config_sha256": "a" * 64,
@@ -84,7 +84,7 @@ class N3MContractT0(unittest.TestCase):
             "server_exec_enabled": False, "workspace_exec_enabled": False,
             "workspace_exec_paths": ("runner",),
             "workspace_exec_runners": ("tools=pipenv",),
-            "runner_id": "pipenv", "runner_project": "tools",
+            "runner_cwd": "runner/subdir", "runner_id": "pipenv",
             "backend_id": "newbackend",
             "backend_version": "v2", "backend_config_sha256": "c" * 64,
             "risk_contract_sha256": "c" * 64, "consent_format": "v2",
@@ -94,6 +94,9 @@ class N3MContractT0(unittest.TestCase):
             with self.subTest(field=field):
                 replacement = replace(before, **{field: value})
                 self.assertNotEqual(before.digest(), replacement.digest())
+        nested = replace(before, runner_cwd="runner/extra", runner_id="pipenv",
+                         runner_project="runner/extra")
+        self.assertNotEqual(before.digest(), nested.digest())
 
     def test_grant_and_scope_change_fences_prepared(self):
         m = ready()

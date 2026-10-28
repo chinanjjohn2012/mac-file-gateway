@@ -23,7 +23,7 @@ def scope(**changes):
         "workspace_exec_enabled": True,
         "workspace_exec_paths": ("runner", "src/tools"),
         "workspace_exec_runners": ("src/tools=pipenv",),
-        "runner_id": "direct",
+        "runner_cwd": "runner", "runner_id": "direct",
         "runner_project": "runner",
         "runner_fallback": "nearest_pipfile_else_direct",
         "backend_id": "futuredisabled",
@@ -115,11 +115,12 @@ class N3MReviewR002T0(unittest.TestCase):
         self.assertIn('"trust_scope":"mutable_workspace"', b.encoded_binding())
 
     def test_c95_legal_nested_scope_and_root_dot_are_accepted(self):
-        self.assertEqual(scope(workspace_exec_paths=(".", "src/tools")).workspace_exec_paths,
+        self.assertEqual(scope(workspace_exec_paths=(".", "src/tools"),
+                               runner_project=".").workspace_exec_paths,
                          (".", "src/tools"))
         self.assertEqual(scope(workspace_exec_paths=("src/tools",),
                                workspace_exec_runners=("src/tools=pipenv",),
-                               runner_id="pipenv",
+                               runner_cwd="src/tools", runner_id="pipenv",
                                runner_project="src/tools").runner_project, "src/tools")
 
     def test_c95_scope_and_runner_modes_change_canonical_digest(self):
@@ -129,7 +130,8 @@ class N3MReviewR002T0(unittest.TestCase):
                    {"workspace_exec_runners": ("src/tools=direct", "tests=pipenv"),
                     "workspace_exec_paths": ("runner", "src/tools", "tests")},
                    {"runner_id": "pipenv"},
-                   {"runner_project": "src/tools", "runner_id": "pipenv"})
+                   {"runner_cwd": "src/tools", "runner_project": "src/tools",
+                    "runner_id": "pipenv"})
         for change in changes:
             with self.subTest(change=change):
                 self.assertNotEqual(scope(**change).digest(), b.digest())

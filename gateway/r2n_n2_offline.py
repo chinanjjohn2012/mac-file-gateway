@@ -224,6 +224,10 @@ class N2MemoryFake:
         """Increment a memory counter only; DOES NOT call any backend/OS API."""
         self._check_healthy()
         r = self._current_ticket(ticket)
+        # Even an injected TEST-ONLY historical decision must never be
+        # followed by a first hypothetical dispatch of this attempt.
+        if ticket.attempt_id in self._decisions:
+            raise N2Blocked("fake_first_dispatch_after_response_decision")
         if not self._consent_active or r["phase"] != "PREPARED" or not self._boot_fence_armed:
             raise N2Blocked("fake_first_dispatch_not_qualified")
         self._fake_commit("starting")
@@ -268,6 +272,19 @@ class N2MemoryFake:
             raise N2Blocked("foreign_fake_attempt")
         if ticket.attempt_id in self._decisions:
             return self._decisions[ticket.attempt_id]  # historical, immutable
+        # PREPARED/STARTING/RUNNING are never terminal: fail closed without
+        # publishing a response decision. This single-threaded Fake records
+        # uncertainty and closes global admission in the SAME model event.
+        # It is NOT real fsync, concurrency or transport linearization proof.
+        if r["phase"] in ("PREPARED", "STARTING", "RUNNING"):
+            self._quarantined = True
+            for pending in self._records.values():
+                if pending["phase"] in ("PREPARED", "STARTING", "RUNNING"):
+                    pending["phase"] = "UNKNOWN"
+            raise N2Blocked("fake_response_before_terminal_phase")
+        if r["phase"] not in ("RETIRED_LIMITED", "UNKNOWN"):
+            self._quarantined = True
+            raise N2Blocked("fake_response_unqualified_terminal_phase")
         self._fake_commit("response")
         self._sequence += 1
         limited = r["phase"] == "RETIRED_LIMITED" and not self._quarantined

@@ -150,11 +150,24 @@ class N3MReviewR002T0(unittest.TestCase):
                 scope(workspace_exec_paths=(path,))
 
     def test_c95_invalid_runner_map_or_ambiguous_duplicate_denied(self):
-        invalid = (("src/tools=shell",), ("src/tools=pipenv", "src/tools=direct"),
+        # Exact duplicate full strings are invalid in workspaces_config._bounded_tuple.
+        # Distinct PATH=mode strings targeting one PATH are legal: the real
+        # CommandRunner dict uses last assignment for that PATH.
+        invalid = (("src/tools=shell",), ("src/tools=pipenv", "src/tools=pipenv"),
                    ("outside=direct",), ("../bad=direct",), ("src/tools=direct=oops",))
         for modes in invalid:
             with self.subTest(modes=modes), self.assertRaises(ValueError):
                 scope(workspace_exec_runners=modes)
+        direct_last = scope(workspace_exec_runners=(
+            "src/tools=pipenv", "src/tools=direct"),
+            runner_cwd="src/tools", runner_id="direct", runner_project="src/tools")
+        pipenv_last = scope(workspace_exec_runners=(
+            "src/tools=direct", "src/tools=pipenv"),
+            runner_cwd="src/tools", runner_id="pipenv", runner_project="src/tools")
+        self.assertNotEqual(direct_last.digest(), pipenv_last.digest())
+        with self.assertRaises(ValueError):
+            scope(workspace_exec_runners=("src/tools=direct", "src/tools=pipenv"),
+                  runner_cwd="src/tools", runner_id="direct", runner_project="src/tools")
 
     def test_c95_starting_commit_fail_before_any_dispatch(self):
         m = N3MOfflineModel("testnamespace", 7)

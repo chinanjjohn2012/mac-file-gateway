@@ -276,5 +276,72 @@ class N2T0Contract(unittest.TestCase):
         self.assertEqual(N2MemoryFake().snapshot()["profile"], "preview_only")
 
 
+class N2EarlyResponseRegression(unittest.TestCase):
+    """B93-R001-P2-01 regression: terminal decision before any response."""
+
+    @staticmethod
+    def prepared():
+        model = ready()
+        return model, model.prepare_fake(scope())
+
+    def test_prepared_response_denied_unknown_quarantined(self):
+        m, t = self.prepared()
+        with self.assertRaisesRegex(N2Blocked, "fake_response_before_terminal_phase"):
+            m.decide_response_fake(t)
+        s = m.snapshot()
+        self.assertEqual(s["phases"][t.attempt_id], "UNKNOWN")
+        self.assertTrue(s["quarantined"])
+        self.assertNotIn(t.attempt_id, s["decisions"])
+        self.assertEqual(s["hypothetical_dispatches"], 0)
+
+    def test_early_denial_blocks_first_dispatch_and_second_result_is_unknown(self):
+        m, t = self.prepared()
+        with self.assertRaises(N2Blocked):
+            m.decide_response_fake(t)
+        with self.assertRaises(N2Blocked):
+            m.simulate_first_dispatch_fake(t)
+        self.assertEqual(m.snapshot()["hypothetical_dispatches"], 0)
+        d = m.decide_response_fake(t)
+        self.assertEqual(d.kind, "QUARANTINED_OR_CLEANUP_UNKNOWN")
+        self.assertEqual(d.cleanup_scope, "none")
+        self.assertIsNone(d.transport_ack)
+
+    def test_running_response_before_retirement_denies_and_preserves_effect(self):
+        m, t = self.prepared()
+        m.simulate_first_dispatch_fake(t)
+        with self.assertRaisesRegex(N2Blocked, "fake_response_before_terminal_phase"):
+            m.decide_response_fake(t)
+        self.assertEqual(m.snapshot()["phases"][t.attempt_id], "UNKNOWN")
+        self.assertEqual(m.snapshot()["hypothetical_dispatches"], 1)
+        self.assertTrue(m.snapshot()["quarantined"])
+
+    def test_existing_response_decision_blocks_first_dispatch(self):
+        m, t = self.prepared()
+        # Direct private Fake mutation is only a test-only defensive counterexample.
+        m._decisions[t.attempt_id] = FakeResponseDecision(
+            t.attempt_id, 1, "QUARANTINED_OR_CLEANUP_UNKNOWN", "none")
+        with self.assertRaisesRegex(N2Blocked, "fake_first_dispatch_after_response_decision"):
+            m.simulate_first_dispatch_fake(t)
+        self.assertEqual(m.snapshot()["hypothetical_dispatches"], 0)
+
+    def test_faulted_starting_cannot_mint_preterminal_response(self):
+        m, t = self.prepared()
+        m.fault_next_fake_commit("dispatch")
+        with self.assertRaisesRegex(N2Blocked, "fake_commit_unavailable:dispatch"):
+            m.simulate_first_dispatch_fake(t)
+        with self.assertRaisesRegex(N2Blocked, "fake_response_before_terminal_phase"):
+            m.decide_response_fake(t)
+        self.assertEqual(m.snapshot()["phases"][t.attempt_id], "UNKNOWN")
+        self.assertTrue(m.snapshot()["quarantined"])
+        self.assertNotIn(t.attempt_id, m.snapshot()["decisions"])
+
+    def test_late_positive_unknown_phase_remains_valid_nonclean_decision(self):
+        m, t = self.prepared()
+        m.late_survivor_fake(t)
+        d = m.decide_response_fake(t)
+        self.assertEqual(d.kind, "QUARANTINED_OR_CLEANUP_UNKNOWN")
+        self.assertIsNone(d.transport_ack)
+
+
 if __name__ == "__main__":
     unittest.main()

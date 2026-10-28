@@ -122,7 +122,6 @@ class N3MContractT0(unittest.TestCase):
     def test_reject_bad_scope_types_order_and_ack(self):
         bad = ({"workspace": "../other"}, {"root_dev": True},
                {"server_exec_enabled": 1}, {"workspace_exec_enabled": "true"},
-               {"workspace_exec_paths": ("tools", "runner")},
                {"workspace_exec_paths": ("runner", "runner")},
                {"workspace_exec_paths": ("../outside",)},
                {"workspace_exec_runners": ("outside=direct",)},
@@ -135,6 +134,12 @@ class N3MContractT0(unittest.TestCase):
         for obj in bad:
             with self.subTest(obj=obj), self.assertRaises(ValueError):
                 binding(**obj)
+        # Workspace config accepts unique paths in ANY order; a fingerprint
+        # must bind the same effective set without inventing a sorting gate.
+        reversed_scopes = binding(workspace_exec_paths=("tools", "runner"))
+        self.assertEqual(reversed_scopes.digest(), binding().digest())
+        self.assertEqual(reversed_scopes.encoded_binding(), binding().encoded_binding())
+        # Truly invalid duplicated raw entries still fail closed above.
 
     def test_strict_control_json_valid_and_no_extra_fields(self):
         control = persisted_control()

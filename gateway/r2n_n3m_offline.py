@@ -19,6 +19,7 @@ class N3MBlocked(RuntimeError):
 
 _ID = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
+_RUNNER_FALLBACK = "nearest_pipfile_else_direct"
 _ACK = ("host_user_scope", "irreversible_effects", "detached_survivors")
 _PENDING = frozenset(("PREPARED", "STARTING", "RUNNING", "CLEANUP_PENDING"))
 _TERMINAL = frozenset(("UNKNOWN", "RETIRED_LIMITED"))
@@ -27,6 +28,29 @@ _DECISIONS = frozenset(("LIMITED_HISTORICAL_COMPLETION_COMMITTED", "QUARANTINED_
 
 def _id(value: object) -> bool:
     return type(value) is str and _ID.fullmatch(value) is not None
+
+
+def _scope_path(value: object) -> bool:
+    """Contract-only canonical relative Exec scope; no path resolution or IO.
+
+    Mirrors workspaces_config._relative for Exec (with executor UTF-8 bound):
+    '.' or nonempty slash-delimited segments, never traversal/absolute/globs.
+    """
+    if type(value) is not str or not value or len(value) > 2048:
+        return False
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        return False
+    if (size > 2048 or value.startswith(("/", "~")) or ":" in value
+            or "\\" in value or any(ord(c) < 32 or ord(c) == 127 for c in value)
+            or any(c in "*?[]" for c in value)):
+        return False
+    return value == "." or all(p and p not in (".", "..") for p in value.split("/"))
+
+
+def _inside_scope(path: str, scope: str) -> bool:
+    return scope == "." or path == scope or path.startswith(scope + "/")
 
 
 def _positive(value: object) -> bool:
@@ -65,13 +89,17 @@ def strict_json(text: str, required: frozenset[str]) -> dict:
 @dataclass(frozen=True, slots=True)
 class N3MBinding:
     workspace: str
+    profile: str
+    trust_scope: str
     root_dev: int
     root_ino: int
     server_exec_enabled: bool
     workspace_exec_enabled: bool
-    server_exec_paths: tuple[str, ...]
     workspace_exec_paths: tuple[str, ...]
+    workspace_exec_runners: tuple[str, ...]
     runner_id: str
+    runner_project: str
+    runner_fallback: str
     backend_id: str
     backend_version: str
     backend_config_sha256: str
@@ -84,14 +112,41 @@ class N3MBinding:
     def __post_init__(self) -> None:
         if not _id(self.workspace) or not all(_positive(x) for x in (self.root_dev, self.root_ino)):
             raise ValueError("invalid_workspace_root")
+        if self.profile != "native_limited" or self.trust_scope != "mutable_workspace":
+            raise ValueError("unsupported_security_profile_or_trust_scope")
         if type(self.server_exec_enabled) is not bool or type(self.workspace_exec_enabled) is not bool:
             raise ValueError("invalid_exec_grant_type")
-        for group in (self.server_exec_paths, self.workspace_exec_paths):
-            if (type(group) is not tuple or not group
-                    or any(not _id(x) for x in group)
-                    or tuple(sorted(set(group))) != group):
-                raise ValueError("invalid_effective_exec_paths")
-        if any(not _id(x) for x in (self.runner_id, self.backend_id, self.backend_version,
+        # Actual schema v1 has a SERVER Boolean grant only; path and runner
+        # allowlists belong to the selected Workspace, not the server.
+        paths = self.workspace_exec_paths
+        if (type(paths) is not tuple or not 1 <= len(paths) <= 32
+                or any(not _scope_path(p) for p in paths)
+                or tuple(sorted(set(paths))) != paths):
+            raise ValueError("invalid_workspace_exec_paths")
+        maps = self.workspace_exec_runners
+        if (type(maps) is not tuple or len(maps) > 32
+                or any(type(item) is not str for item in maps)
+                or tuple(sorted(set(maps))) != maps):
+            raise ValueError("invalid_workspace_exec_runners")
+        configured: dict[str, str] = {}
+        for item in maps:
+            if item.count("=") != 1:
+                raise ValueError("invalid_workspace_exec_runner_mapping")
+            path, mode = item.split("=", 1)
+            if (not _scope_path(path) or mode not in ("direct", "pipenv")
+                    or not any(_inside_scope(path, grant) for grant in paths)
+                    or path in configured):
+                raise ValueError("invalid_workspace_exec_runner_mapping")
+            configured[path] = mode
+        if (self.runner_id not in ("direct", "pipenv")
+                or not _scope_path(self.runner_project)
+                or not any(_inside_scope(self.runner_project, grant) for grant in paths)
+                or self.runner_fallback != _RUNNER_FALLBACK):
+            raise ValueError("invalid_effective_runner_identity")
+        if (self.runner_project in configured
+                and configured[self.runner_project] != self.runner_id):
+            raise ValueError("contradictory_runner_selection")
+        if any(not _id(x) for x in (self.backend_id, self.backend_version,
                                     self.consent_format, self.operator_issuer)):
             raise ValueError("invalid_authority_identity")
         if not all(type(x) is str and _HEX.fullmatch(x) for x in
@@ -99,10 +154,12 @@ class N3MBinding:
             raise ValueError("invalid_authority_fingerprint")
         if self.risk_ack != _ACK:
             raise ValueError("incomplete_risk_ack")
-        if self.runner_id not in self.server_exec_paths or self.runner_id not in self.workspace_exec_paths:
-            raise ValueError("runner_not_in_effective_grants")
         if self.expiry_epoch is not None and not _positive(self.expiry_epoch):
             raise ValueError("invalid_expiry")
+
+    def encoded_binding(self) -> str:
+        """Canonical equality data, NOT an operative local operator signature."""
+        return _canonical(asdict(self))
 
     def digest(self) -> str:
         """Deterministic equality fingerprint; NOT a signature or antirollback proof."""
@@ -142,6 +199,8 @@ class N3MControl:
             raise ValueError("invalid_control_flags")
         if not _id(self.consent_record_id) or not _id(self.global_quarantine_reason):
             raise ValueError("invalid_control_provenance")
+        if self.global_quarantined == (self.global_quarantine_reason == "none"):
+            raise ValueError("inconsistent_quarantine_reason")
         if self.consent_active and self.consent_epoch == 0:
             raise ValueError("active_consent_without_epoch")
         if (type(self.max_attempts) is not int or not 1 <= self.max_attempts <= 4096
@@ -394,7 +453,7 @@ class N3MOfflineModel:
         self._time(now)  # mutable script contents intentionally NOT a binding field
 
     def fault_next_fake_commit(self, stage: str) -> None:
-        if stage not in ("arm", "prepare", "response", "late_event"):
+        if stage not in ("arm", "prepare", "starting", "dispatch", "response", "late_event"):
             raise ValueError("invalid_fault_stage")
         self._fail_at = stage
 
@@ -434,7 +493,8 @@ class N3MOfflineModel:
             raise N3MBlocked("foreign_or_forged_attempt")
         return row[1]
 
-    def fake_first_dispatch(self, attempt: N3MAttempt, *, now: int) -> None:
+    def fake_starting_commit(self, attempt: N3MAttempt, *, now: int) -> None:
+        """Commit a separate T0 STARTING barrier; never starts a real process."""
         self._healthy()
         if self._binding is None:
             raise N3MBlocked("fake_binding_missing")
@@ -445,14 +505,56 @@ class N3MOfflineModel:
         if (not self._consent_active or attempt.owner_generation != self.owner_generation
                 or attempt.consent_epoch != self.consent_epoch or not self._boot_fence_fake
                 or phase != "PREPARED"):
+            raise N3MBlocked("fake_starting_unqualified")
+        try:
+            self._fake_commit("starting")
+        except N3MBlocked:
+            self._records[attempt.attempt_id] = (attempt, "UNKNOWN")
+            raise
+        self._records[attempt.attempt_id] = (attempt, "STARTING")
+
+    def fake_first_dispatch(self, attempt: N3MAttempt, *, now: int) -> None:
+        """One counter increment ONLY after hypothetical distinct STARTING."""
+        self._healthy()
+        phase = self._record(attempt)
+        if phase == "PREPARED":
+            self.fake_starting_commit(attempt, now=now)
+        elif phase != "STARTING":
             raise N3MBlocked("fake_dispatch_unqualified")
+        if self._binding is None:
+            raise N3MBlocked("fake_binding_missing")
+        self.validate_binding_fake(self._binding, now=now)
+        phase = self._record(attempt)
+        if attempt.attempt_id in self._decisions:
+            raise N3MBlocked("fake_dispatch_after_response")
+        if (not self._consent_active or attempt.owner_generation != self.owner_generation
+                or attempt.consent_epoch != self.consent_epoch or not self._boot_fence_fake
+                or phase != "STARTING"):
+            raise N3MBlocked("fake_dispatch_unqualified")
+        try:
+            self._fake_commit("dispatch")
+        except N3MBlocked:
+            self._records[attempt.attempt_id] = (attempt, "UNKNOWN")
+            raise
         self._records[attempt.attempt_id] = (attempt, "RUNNING")
         self._hypothetical_dispatches += 1  # NO process, OS or native action
 
-    def retire_limited_fake(self, attempt: N3MAttempt) -> None:
+    def retire_limited_fake(self, attempt: N3MAttempt, binding: N3MBinding,
+                            *, now: int) -> None:
+        """Requalify current consent/time/binding BEFORE limited retirement.
+
+        The Fake caller-provided binding/time has NO trusted owner provenance,
+        clock hardware proof, real signal target or persistent transaction.
+        """
         self._healthy()
         if self._record(attempt) != "RUNNING":
             raise N3MBlocked("fake_retirement_unqualified")
+        self.validate_binding_fake(binding, now=now)
+        if (not self._consent_active or attempt.owner_generation != self.owner_generation
+                or attempt.consent_epoch != self.consent_epoch
+                or attempt.binding_digest != binding.digest()):
+            self.revoke_fake()
+            raise N3MBlocked("fake_retirement_consent_changed")
         self._records[attempt.attempt_id] = (attempt, "RETIRED_LIMITED")
         # Keep boot-deny armed across this synthetic limited retirement.
 

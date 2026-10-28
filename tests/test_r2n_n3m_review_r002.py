@@ -128,7 +128,8 @@ class N3MReviewR002T0(unittest.TestCase):
                    {"workspace_exec_runners": ("src/tools=direct",)},
                    {"workspace_exec_runners": ("src/tools=direct", "tests=pipenv"),
                     "workspace_exec_paths": ("runner", "src/tools", "tests")},
-                   {"runner_id": "pipenv"}, {"runner_project": "src/tools"})
+                   {"runner_id": "pipenv"},
+                   {"runner_project": "src/tools", "runner_id": "pipenv"})
         for change in changes:
             with self.subTest(change=change):
                 self.assertNotEqual(scope(**change).digest(), b.digest())

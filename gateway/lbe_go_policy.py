@@ -158,4 +158,3 @@ def validate_go_command(argv: Sequence[str], *, workspace_root: Path,
         _inspect_output(Path(workspace_root), cwd_parts, output)
         canonical_output = "/".join(combined)
     return GoCommandPlan(tuple(argv), "direct", canonical_output)
-

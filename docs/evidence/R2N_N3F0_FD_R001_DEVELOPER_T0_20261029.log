@@ -1,0 +1,71 @@
+N3F0_FD_R001_A_EXACT_SOURCE_ORIGINAL_T0
+COMMAND=PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH="" python3 -B -I -S tests/test_r2n_n3f0_physical_t0.py -v
+EXECUTION=Linux x86_64 Python-3.13.5
+REAL_OR_HOSTED_T1=NOT_RUN (no resource-specific exact runner/path/budget approval)
+TEST_SCOPE=40 unittest methods with an entirely in-memory fake FD port (NO RealFDPort calls)
+BEFORE_TEST_FILES=tests/test_r2n_n3f0_physical_t0.py,docs/MULTI_WORKSPACE_EXEC_R2N_N3F0_FD_R001_NOTES_V1.md,gateway/__init__.py,gateway/r2n_n3f0_physical.py,docs/evidence/R2N_N3F0_FD_R001_DEVELOPER_T0_20261029.log
+AFTER_TEST_FILES=tests/test_r2n_n3f0_physical_t0.py,docs/MULTI_WORKSPACE_EXEC_R2N_N3F0_FD_R001_NOTES_V1.md,gateway/__init__.py,gateway/r2n_n3f0_physical.py,docs/evidence/R2N_N3F0_FD_R001_DEVELOPER_T0_20261029.log
+BEFORE_SOURCE_IDS:
+gateway/__init__.py bytes=119 sha256=3b613ae203e10b106b59310c947c4101d98e0f01b5143b85569a8e05f6b062e4 git_blob=5d6082cc4b6ad360475ef5bb70e9d1590545058d
+gateway/r2n_n3f0_physical.py bytes=21088 sha256=32f17fec7be683857e6e3ccc5f82fa139c155a908ef433e514a7027e3a2c9644 git_blob=2af63666b550d0a4b6d3cf5982e6e2fadf8c0b92
+tests/test_r2n_n3f0_physical_t0.py bytes=16875 sha256=060d00b0bd0159e6c200657a072edc76828e6066eefd6b57eed6234c1786486a git_blob=45db734f03777a063921ca4a9ad604827665243f
+docs/MULTI_WORKSPACE_EXEC_R2N_N3F0_FD_R001_NOTES_V1.md bytes=10043 sha256=d27f153c7e89a6cb9d6f8837bcd130ea2144bcb659da78e6e3f6783305111f52 git_blob=9e02ff80913d889803134cb06e8c78c1d0a7c0b9
+ORIGINAL_STDOUT:
+
+ORIGINAL_STDERR:
+test_01_valid_sibling_separate_parent_only_unqualified_metadata (__main__.FDReadOnlyT0.test_01_valid_sibling_separate_parent_only_unqualified_metadata) ... ok
+test_02_session_context_releases_lifetime_owner (__main__.FDReadOnlyT0.test_02_session_context_releases_lifetime_owner) ... ok
+test_03_same_parent_r001_style_forbidden (__main__.FDReadOnlyT0.test_03_same_parent_r001_style_forbidden) ... ok
+test_04_workspace_ancestor_control_forbidden (__main__.FDReadOnlyT0.test_04_workspace_ancestor_control_forbidden) ... ok
+test_05_control_inside_workspace_forbidden (__main__.FDReadOnlyT0.test_05_control_inside_workspace_forbidden) ... ok
+test_06_state_is_workspace_ancestor_forbidden (__main__.FDReadOnlyT0.test_06_state_is_workspace_ancestor_forbidden) ... ok
+test_07_workspace_equals_lineage_root_forbidden (__main__.FDReadOnlyT0.test_07_workspace_equals_lineage_root_forbidden) ... ok
+test_08_diverged_then_rejoined_forbidden (__main__.FDReadOnlyT0.test_08_diverged_then_rejoined_forbidden) ... ok
+test_09_opposite_root_containment_forbidden (__main__.FDReadOnlyT0.test_09_opposite_root_containment_forbidden) ... ok
+test_10_missing_trusted_workspace_refs_forbidden (__main__.FDReadOnlyT0.test_10_missing_trusted_workspace_refs_forbidden) ... ok
+test_11_wrong_owner_uid_forbidden (__main__.FDReadOnlyT0.test_11_wrong_owner_uid_forbidden) ... ok
+test_12_weak_private_root_mode_forbidden (__main__.FDReadOnlyT0.test_12_weak_private_root_mode_forbidden) ... ok
+test_13_hardlinked_owner_forbidden (__main__.FDReadOnlyT0.test_13_hardlinked_owner_forbidden) ... ok
+test_14_symlink_file_type_forbidden (__main__.FDReadOnlyT0.test_14_symlink_file_type_forbidden) ... ok
+test_15_second_owner_lock_forbidden (__main__.FDReadOnlyT0.test_15_second_owner_lock_forbidden) ... ok
+test_16_renamed_lock_forbidden (__main__.FDReadOnlyT0.test_16_renamed_lock_forbidden) ... ok
+test_17_missing_witness_forbidden (__main__.FDReadOnlyT0.test_17_missing_witness_forbidden) ... ok
+test_18_missing_namespace_forbidden (__main__.FDReadOnlyT0.test_18_missing_namespace_forbidden) ... ok
+test_19_boot_deny_forbidden (__main__.FDReadOnlyT0.test_19_boot_deny_forbidden) ... ok
+test_20_pending_or_final_fence_forbidden (__main__.FDReadOnlyT0.test_20_pending_or_final_fence_forbidden) ... ok
+test_21_unresolved_attempt_forbidden (__main__.FDReadOnlyT0.test_21_unresolved_attempt_forbidden) ... ok
+test_22_unresolved_response_forbidden (__main__.FDReadOnlyT0.test_22_unresolved_response_forbidden) ... ok
+test_23_duplicate_json_key_forbidden (__main__.FDReadOnlyT0.test_23_duplicate_json_key_forbidden) ... ok
+test_24_wrong_schema_forbidden (__main__.FDReadOnlyT0.test_24_wrong_schema_forbidden) ... ok
+test_25_bool_count_forbidden (__main__.FDReadOnlyT0.test_25_bool_count_forbidden) ... ok
+test_26_active_consent_forbidden (__main__.FDReadOnlyT0.test_26_active_consent_forbidden) ... ok
+test_27_unknown_quarantine_forbidden (__main__.FDReadOnlyT0.test_27_unknown_quarantine_forbidden) ... ok
+test_28_mismatched_lineage_generation_forbidden (__main__.FDReadOnlyT0.test_28_mismatched_lineage_generation_forbidden) ... ok
+test_29_stale_lock_in_control_forbidden (__main__.FDReadOnlyT0.test_29_stale_lock_in_control_forbidden) ... ok
+test_30_read_error_unavailable_without_leak (__main__.FDReadOnlyT0.test_30_read_error_unavailable_without_leak) ... ok
+test_31_duplicate_names_forbidden (__main__.FDReadOnlyT0.test_31_duplicate_names_forbidden) ... ok
+test_32_owner_file_ancestor_alias_forbidden (__main__.FDReadOnlyT0.test_32_owner_file_ancestor_alias_forbidden) ... ok
+test_33_untrusted_actor_cannot_construct_positive_snapshot (__main__.FDReadOnlyT0.test_33_untrusted_actor_cannot_construct_positive_snapshot) ... ok
+test_34_real_port_untouched_by_fake_executions (__main__.FDReadOnlyT0.test_34_real_port_untouched_by_fake_executions) ... ok
+test_35_import_only_references_os_not_physical_call (__main__.FDReadOnlyT0.test_35_import_only_references_os_not_physical_call) ... ok
+test_36_unexpected_names_limit_forbidden (__main__.FDReadOnlyT0.test_36_unexpected_names_limit_forbidden) ... ok
+test_37_incomplete_ancestry_forbidden (__main__.FDReadOnlyT0.test_37_incomplete_ancestry_forbidden) ... ok
+test_38_reordered_ancestry_forbidden (__main__.FDReadOnlyT0.test_38_reordered_ancestry_forbidden) ... ok
+test_39_stale_file_type_owner_forbidden (__main__.FDReadOnlyT0.test_39_stale_file_type_owner_forbidden) ... ok
+test_40_unrecognized_operator_authority_does_not_mint_health (__main__.FDReadOnlyT0.test_40_unrecognized_operator_authority_does_not_mint_health) ... ok
+
+----------------------------------------------------------------------
+Ran 40 tests in 0.009s
+
+OK
+
+ORIGINAL_EXIT_CODE=0
+AFTER_SOURCE_IDS:
+gateway/__init__.py bytes=119 sha256=3b613ae203e10b106b59310c947c4101d98e0f01b5143b85569a8e05f6b062e4 git_blob=5d6082cc4b6ad360475ef5bb70e9d1590545058d
+gateway/r2n_n3f0_physical.py bytes=21088 sha256=32f17fec7be683857e6e3ccc5f82fa139c155a908ef433e514a7027e3a2c9644 git_blob=2af63666b550d0a4b6d3cf5982e6e2fadf8c0b92
+tests/test_r2n_n3f0_physical_t0.py bytes=16875 sha256=060d00b0bd0159e6c200657a072edc76828e6066eefd6b57eed6234c1786486a git_blob=45db734f03777a063921ca4a9ad604827665243f
+docs/MULTI_WORKSPACE_EXEC_R2N_N3F0_FD_R001_NOTES_V1.md bytes=10043 sha256=d27f153c7e89a6cb9d6f8837bcd130ea2144bcb659da78e6e3f6783305111f52 git_blob=9e02ff80913d889803134cb06e8c78c1d0a7c0b9
+SOURCE_IDENTITY_UNCHANGED=TRUE
+UNTRACKED_IMPORT_SHADOW_BEFORE_AFTER=NONE (five-file isolated scratch; no pycache/pyc)
+T0_RESULTS=40_RUN_40_PASS_0_FAIL_0_ERROR_0_SKIP
+NOT_RUN=RealFDPort actual openat/fstat/flock/read, owner.lock, N3 real state/lineage, macOS T1, Git/File/SDK, Native T2/T3, hosted G05/RECORD

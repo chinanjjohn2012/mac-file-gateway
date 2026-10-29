@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from gateway.r2n_n3f0_offline import (  # noqa: E402
-    N3F0Node, N3F0Observation, N3F0OfflinePrivateFSAdapter,
+    N3F0Node, N3F0Observation, N3F0SyntheticTopology,
+    N3F0OfflinePrivateFSAdapter,
     N3F0NotAuthorized, N3F0Scan,
 )
 
@@ -68,6 +69,11 @@ def observed(**changes: object) -> N3F0Observation:
         "lineage_entries": ("provision-witness.v1", "owner-authority.v1"),
         "attempt_entries": (), "response_entries": (),
         "control_bytes": control(), "witness_bytes": witness(),
+        # T0-only fake FULL ancestry: shared gateway control parent (9,2),
+        # distinct sibling parent/root chains, no cross-parent containment.
+        "topology": N3F0SyntheticTopology(
+            state_ancestor_ids=((9, 2), (9, 10), (9, 20)),
+            lineage_ancestor_ids=((9, 2), (9, 11), (9, 21))),
     }
     data.update(changes)
     return N3F0Observation(**data)

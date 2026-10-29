@@ -137,6 +137,21 @@ class N3F0Node:
 
 
 @dataclass(frozen=True, slots=True)
+class N3F0SyntheticTopology:
+    """T0-only model of COMPLETE pinned ancestry from a common control root.
+
+    Chains are ordered from a separately trusted common control ancestor to
+    the named root, including its direct parent. Sharing a common prefix is
+    permitted; rejoining, cross-root containment and unknown chains are not.
+    This FAKE structure cannot prove an OS FD ancestry or local consent.
+    A future T1 adapter must derive complete identities from real pinned FDs,
+    not a client flag, JSON field or this model's values.
+    """
+    state_ancestor_ids: tuple[tuple[int, int], ...]
+    lineage_ancestor_ids: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class N3F0Observation:
     """Test-provided fake snapshot. Never construct from a remote request."""
     service_uid: int
@@ -156,6 +171,7 @@ class N3F0Observation:
     response_entries: tuple[str, ...]
     control_bytes: bytes | None
     witness_bytes: bytes | None
+    topology: N3F0SyntheticTopology | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +192,48 @@ def _deny(reason: str, *, quarantine: bool = False) -> N3F0Scan:
     return N3F0Scan("quarantined" if quarantine else "unavailable", reason)
 
 
+def _consistent_synthetic_topology(v: N3F0Observation) -> bool:
+    """Conservatively check fake complete parent/leaf identity chains.
+
+    This is ONLY internal T0 structural consistency, never a genuine proof
+    that any real filesystem ancestors were independently pinned. Missing or
+    ambiguous projection is not allowed to become healthy metadata.
+    """
+    t = v.topology
+    if type(t) is not N3F0SyntheticTopology:
+        return False
+    state, lineage = t.state_ancestor_ids, t.lineage_ancestor_ids
+    for chain, parent, root in ((state, v.state_parent, v.state_root),
+                                (lineage, v.lineage_parent, v.lineage_root)):
+        if type(chain) is not tuple or not 3 <= len(chain) <= 64:
+            return False
+        if any(type(item) is not tuple or len(item) != 2
+               or not all(_positive(number) for number in item)
+               for item in chain):
+            return False
+        if len(set(chain)) != len(chain):
+            return False
+        if chain[-2] != (parent.dev, parent.ino) or chain[-1] != (root.dev, root.ino):
+            return False
+    # The modeled roots may have shared ancestors ABOVE their divergence;
+    # they may never share a node after branching or contain each other.
+    if state[0] != lineage[0]:
+        return False
+    common = 0
+    while common < min(len(state), len(lineage)) and state[common] == lineage[common]:
+        common += 1
+    if common == len(state) or common == len(lineage):
+        return False
+    if set(state[common:]) & set(lineage[common:]):
+        return False
+    # A regular owner.lock cannot share any directory dev/ino, including an
+    # intermediate pinned ancestor, even if the five leaves looked unique.
+    owner = (v.owner_lock.dev, v.owner_lock.ino)
+    if owner in state or owner in lineage:
+        return False
+    return True
+
+
 class N3F0OfflinePrivateFSAdapter:
     """Read-only, T0-inert adapter over synthetic fstat/bytes observations.
 
@@ -187,6 +245,7 @@ class N3F0OfflinePrivateFSAdapter:
     @staticmethod
     def boot_read_order() -> tuple[str, ...]:
         return ("verify_separate_existing_parents", "pin_existing_roots",
+                "verify_complete_ancestry_separation",
                 "acquire_existing_owner_lock_exclusively", "verify_lock_fd_identity",
                 "read_existing_lineage_witness", "read_existing_n3_control",
                 "enumerate_attempt_response_and_fences", "deny_on_ambiguity")
@@ -223,6 +282,13 @@ class N3F0OfflinePrivateFSAdapter:
                    (v.owner_lock.dev, v.owner_lock.ino)
                 or v.exclusive_lock_held is not True):
             return _deny("owner_lock_unavailable")
+        all_nodes = (v.state_parent, v.lineage_parent, v.state_root,
+                     v.lineage_root, v.owner_lock)
+        identities = tuple((item.dev, item.ino) for item in all_nodes)
+        if len(set(identities)) != len(identities):
+            return _deny("lineage_not_independent")
+        if not _consistent_synthetic_topology(v):
+            return _deny("private_boundary_unverified")
         for entries in (v.state_entries, v.lineage_entries,
                         v.attempt_entries, v.response_entries):
             if (type(entries) is not tuple or len(entries) > 4096

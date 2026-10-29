@@ -1,0 +1,32 @@
+N3-F0 r002 T0 exact-source A developer evidence INDEX (not a separate hosted CI run)
+UTC_ORIGINAL_EXECUTION: 2026-10-29T03:01:55Z
+OS: Linux x86_64
+Python: CPython 3.13.5 (-B -I -S, PYTHONDONTWRITEBYTECODE=1, PYTHONNOUSERSITE=1)
+OLD_R001_HEAD: 8e5941642bacc21eb642c6d3d507ed411a2ca5df
+OLD_MODEL_GIT_BLOB: fc4d14de548edec20813f812e10917f462752839
+OLD_TEST_GIT_BLOB: 2cb015a71c7599aacb6597d288dedaaa7a5fa66e
+CURRENT_R002_MODEL_GIT_BLOB: 9a96c6dd2c6bb86b3c5ac8645845e78a9b778bfd
+CURRENT_R002_ORIGINAL_TEST_GIT_BLOB: 71a02c5c06c12880b0955bb753486973979dd29e
+CURRENT_R002_ADDED_TEST_GIT_BLOB: 1f15f5b0e1ce0c56fbaed28b904951ec0d0f0385
+
+ORIGINAL_EXACT_R001_32_METHODS: 32 RUN; 32 PASS; 0 FAIL; EXIT 0
+A_ORIGINAL_R001_CROSS_NODE_FALSIFIER: 8 RUN; 8 FAIL AS EXPECTED; EXIT 1
+CURRENT_R002_ORIGINAL_32_METHODS: 32 RUN; 32 PASS; 0 FAIL; EXIT 0
+CURRENT_R002_NEW_24_METHODS: 24 RUN; 24 PASS; 0 FAIL; EXIT 0
+FINAL_HARNESS_EXIT: 0
+CURRENT_R002_T0: 56 PASS; 0 UNEXPECTED FAIL; 0 SKIP
+
+VERBATIM ORIGINAL EXECUTION TRANSCRIPT:
+File: docs/evidence/R2N_N3F0_R002_T0_RED_GREEN_20261029.log.gz.b64
+Encoding: base64(gzip -n(original UTF8 log)) with trailing text newline
+Original uncompressed log SHA256: 821b3ebd430e4a713882294822ebce5701795419883003adf2950cf695235b39
+Gzip compressed SHA256: 7c3eb6c4903ca25f48ab3a800cd181eb59d1bcce250b5c446263055ebde332d4
+Decode in an authorized isolated T0 scratch with: base64 -d FILE.log.gz.b64 | gzip -dc
+Transcript has original full method-by-method stdout/stderr, all eight old
+RED assertions with tracebacks, four process exit statuses, and all imported
+source Git Blob/SHA256 identities before AND after execution.
+
+NOT_RUN: Actual physical N3 private FS, owner.lock, openat/fstat/flock/fsync,
+real T1, user Mac/Tunnel, Native PID/PGID/signal, T2/T3, hosted CI/G05,
+36-wheel RECORD audit, real Git/File/REST/MCP, integration, merge/deploy.
+N3-F0 source is isolated T0 only; physical port ALWAYS raises.

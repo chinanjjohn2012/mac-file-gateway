@@ -1,0 +1,152 @@
+name: LBE CI-only source-wheel macOS ARM64 T0 (isolated PR99)
+
+on:
+  pull_request:
+    branches:
+      - design/multi-exec-local-best-effort-v1-r001-20261030
+    paths:
+      - ".github/workflows/multi-exec-lbe-ci-macos-arm64.yml"
+      - ".github/workflows/controlled-exec-tests.yml"
+      - "MANIFEST.sha256"
+      - "tools/ci_wheel_constraints.py"
+      - "tests/test_ci_wheel_constraints.py"
+
+permissions:
+  contents: read
+
+jobs:
+  lbe-ci-only-wheel-lock:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'fix/multi-exec-lbe-ci-locked-wheel-resolution-r001-20261030' &&
+      github.event.pull_request.base.sha == '07b7497e3d100be70a014d6ecdb5b5db018fc708'
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONNOUSERSITE: "1"
+      PYTHONPATH: ""
+      GATEWAY_NATIVE_C_ALLOWED: "false"
+      C3B03_S3S6_FIRST_C_LOAD_AUTHORIZED: "false"
+      C3B03_S3S6_GROUP_SIGNAL_AUTHORIZED: "false"
+    steps:
+      - name: Checkout exact review HEAD without credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: G05 source, HEAD and Darwin runner identity BEFORE Python setup or imports
+        shell: bash
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "${{ runner.environment }}" = "github-hosted"
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          [[ "$(sw_vers -productVersion)" == 15.* ]]
+          python3 -I -S tools/g05_ci_admission.py --expected-head "$G05_EXPECTED_HEAD"
+
+      - name: Enforce exact PR99 source-only five-file delta (NOT old RC predicate)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor 07b7497e3d100be70a014d6ecdb5b5db018fc708 HEAD
+          python3 -I -S - <<'PY'
+          from pathlib import Path
+          import subprocess
+          baseline = "07b7497e3d100be70a014d6ecdb5b5db018fc708"
+          allow = {
+              ".github/workflows/controlled-exec-tests.yml",
+              ".github/workflows/multi-exec-lbe-ci-macos-arm64.yml",
+              "MANIFEST.sha256",
+              "tests/test_ci_wheel_constraints.py",
+              "tools/ci_wheel_constraints.py",
+          }
+          changed = set(subprocess.check_output(
+              ["git", "diff", "--name-only", baseline, "HEAD"], text=True
+          ).splitlines())
+          assert changed == allow, ("LBE CI diff/source review drift", changed ^ allow)
+          forbidden = (
+              "_exec_test_grant", "_exec_test_transport",
+              "create_private_disposable_acceptance",
+              "TestOnlyGroupRetirementGrant", "_TrustedLoopbackListener",
+          )
+          for path in Path("gateway").rglob("*.py"):
+              if path.name in {"_exec_test_grant.py", "_exec_test_transport.py"}:
+                  continue
+              assert all(token not in path.read_text(encoding="utf-8")
+                         for token in forbidden), path
+          rev = lambda name: subprocess.check_output(
+              ["git", "rev-parse", name], text=True
+          ).strip()
+          print("LBE_CI_MACOS_HEAD=" + rev("HEAD"))
+          print("LBE_CI_MACOS_TREE=" + rev("HEAD^{tree}"))
+          print("LBE_CI_MACOS_BASE=" + baseline)
+          print("LBE_CI_EXACT_FIVE_FILE_DELTA=PASS")
+          print("LBE_CI_HISTORICAL_RC_WORKFLOW_UNCHANGED=YES")
+          PY
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Build exact 36-wheel constraints from existing macOS source lock
+        run: >-
+          python -I -S tools/ci_wheel_constraints.py
+          --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256
+          > "$RUNNER_TEMP/lbe-mac-constraints.txt"
+
+      - name: Download binary wheels using source-locked versions
+        run: >-
+          python -m pip download --disable-pip-version-check --only-binary=:all:
+          -r requirements-dev.txt --constraint "$RUNNER_TEMP/lbe-mac-constraints.txt"
+          --dest "$RUNNER_TEMP/lbe-mac-wheelhouse"
+
+      - name: Verify all 36 macOS source wheel filenames and SHA256 before installation
+        run: >-
+          python -I -S tools/ci_dependency_provenance.py wheels
+          --wheelhouse "$RUNNER_TEMP/lbe-mac-wheelhouse"
+          --wheel-record "$RUNNER_TEMP/lbe-mac-wheels.json"
+          --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256
+
+      - name: Install solely from the attested local wheelhouse
+        run: >-
+          python -m pip install --disable-pip-version-check --no-index
+          --find-links "$RUNNER_TEMP/lbe-mac-wheelhouse" --force-reinstall
+          --constraint "$RUNNER_TEMP/lbe-mac-constraints.txt" -r requirements-dev.txt
+
+      - name: Record every installed RECORD-listed regular-file hash
+        run: |
+          python -m pip check
+          python -I tools/ci_dependency_provenance.py installed --wheelhouse "$RUNNER_TEMP/lbe-mac-wheelhouse" --wheel-record "$RUNNER_TEMP/lbe-mac-wheels.json" --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256 --installed-record "$RUNNER_TEMP/lbe-mac-installed.json"
+
+      - name: Run offline T0 parser, R004 negative and G05 fixture tests
+        run: >-
+          python -m pytest -q -rs -p no:cacheprovider
+          tests/test_ci_wheel_constraints.py
+          tests/test_ci_dependency_provenance.py
+          tests/test_g05_ci_admission.py
+
+      - name: Verify source-locked wheel bytes and installed RECORD hashes after tests
+        run: >-
+          python -I tools/ci_dependency_provenance.py verify
+          --wheelhouse "$RUNNER_TEMP/lbe-mac-wheelhouse"
+          --wheel-record "$RUNNER_TEMP/lbe-mac-wheels.json"
+          --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256
+          --installed-record "$RUNNER_TEMP/lbe-mac-installed.json"
+
+      - name: Check no tracked changes or permissions drift and record scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          git diff --cached --exit-code
+          echo "LBE_CI_MACOS_WHEEL_T0=COMPLETE"
+          echo "LBE_CI_MACOS_F1_PRIVATE_FS_AND_DARWIN_FIRMLINK_T1=NOT_RUN"
+          echo "LBE_CI_MACOS_POSITIVE_EXEC_AND_NATIVE_T2_T3=NOT_RUN"
+          echo "LBE_CI_MACOS_UNLISTED_IMPORTABLE_FILES=NOT_ASSESSED"
+          echo "LBE_CI_MACOS_NO_MERGE_NO_DEPLOY"

@@ -14,7 +14,9 @@ import sys
 
 _LINE = re.compile(r"([0-9a-f]{64})  ([A-Za-z0-9_.-]+\.whl)\Z")
 _PART = re.compile(r"[A-Za-z0-9_]+\Z")
-_VERSION = re.compile(r"[0-9][A-Za-z0-9._]*\Z")
+# Only numeric dotted releases occur in the two source-locked 36-wheel sets.
+# Refuse malformed pip versions (e.g. 1..2) before the resolver runs.
+_VERSION = re.compile(r"[0-9]+(?:\.[0-9]+)+\Z")
 _TAG = re.compile(r"[A-Za-z0-9_.]+\Z")
 
 

@@ -12,10 +12,10 @@ import re
 import stat
 import sys
 
-_LINE = re.compile(r"([0-9a-f]{64})  ([A-Za-z0-9_.-]+\\.whl)\\Z")
-_PART = re.compile(r"[A-Za-z0-9_]+\\Z")
-_VERSION = re.compile(r"[0-9][A-Za-z0-9._]*\\Z")
-_TAG = re.compile(r"[A-Za-z0-9_.]+\\Z")
+_LINE = re.compile(r"([0-9a-f]{64})  ([A-Za-z0-9_.-]+\.whl)\Z")
+_PART = re.compile(r"[A-Za-z0-9_]+\Z")
+_VERSION = re.compile(r"[0-9][A-Za-z0-9._]*\Z")
+_TAG = re.compile(r"[A-Za-z0-9_.]+\Z")
 
 
 def constraints_from_lock(path: Path, *, expected_count: int = 36) -> str:

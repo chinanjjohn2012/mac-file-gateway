@@ -104,3 +104,24 @@ def test_cli_pins_exact_versions(tmp_path: Path):
     assert result.returncode == 0
     assert result.stdout.splitlines()[0] == "pkg-00==1.2.0"
     assert "PINNED_FROM_SOURCE_LOCK count=36" in result.stderr
+
+
+def test_invalid_pep440_like_dotted_version_rejected(tmp_path: Path):
+    """Malformed versions such as 1..2 must fail before pip is invoked."""
+    lock = make_lock(tmp_path)
+    lock.write_text(lock.read_text().replace("pkg_00-1.2.0-", "pkg_00-1..2-"))
+    with pytest.raises(ValueError, match="version or tag"):
+        constraints_from_lock(lock)
+
+
+@pytest.mark.parametrize("platform_lock", [
+    "ubuntu-3.13-x86_64.sha256",
+    "macos-15-arm64-3.13.sha256",
+])
+def test_real_repository_platform_locks_remain_accepted(platform_lock: str):
+    """Validate every current pinned version against the strict grammar."""
+    path = Path(__file__).resolve().parents[1] / "ci" / "wheel-locks" / platform_lock
+    pins = constraints_from_lock(path).splitlines()
+    assert len(pins) == 36
+    assert "pytest==9.1.1" in pins
+    assert "pydantic==2.14.1" in pins

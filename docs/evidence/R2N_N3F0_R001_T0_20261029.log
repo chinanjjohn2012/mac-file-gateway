@@ -1,0 +1,61 @@
+N3F0_R001_ORIGINAL_DEVELOPER_T0
+CONTRACT=T0_ONLY_SYNTHETIC_PRIVATE_FS_OBSERVATIONS
+PARENT_HEAD=3479f6732c1ac357eac701871d3800adc9ab64c7
+PARENT_TREE=ef26195e711e936f2ebf4aff224a7bbdcdce270d
+EVIDENCE_CLASS=ISOLATED_LINUX_CPTHON_UNIT_NOT_NATIVE_FS
+PYTHON=Python 3.13.5
+PLATFORM=Linux x86_64
+COMMAND=PYTHONDONTWRITEBYTECODE=1 python3 -B -I -S tests/test_r2n_n3f0_offline.py -v
+SOURCE_IDENTITY_BEFORE:
+53ebeb3167ee269566538d91b9e0a7438d1c483ee6deb9257d52607281f12202  /mnt/data/n3f0_candidate/gateway/r2n_n3f0_offline.py
+085acce5aa365676d493a45d4d166d5fb27975483dd6441d45245f0de8cb933d  /mnt/data/n3f0_candidate/tests/test_r2n_n3f0_offline.py
+fc4d14de548edec20813f812e10917f462752839
+2cb015a71c7599aacb6597d288dedaaa7a5fa66e
+RAW_STDERR_BEGIN
+test_01_valid_modeled_metadata_never_exec_ready (__main__.N3F0PureMemoryT0.test_01_valid_modeled_metadata_never_exec_ready) ... ok
+test_02_physical_port_is_forbidden (__main__.N3F0PureMemoryT0.test_02_physical_port_is_forbidden) ... ok
+test_03_boot_order_never_provisions_or_unquarantines (__main__.N3F0PureMemoryT0.test_03_boot_order_never_provisions_or_unquarantines) ... ok
+test_04_both_roots_deleted_cannot_be_first_install (__main__.N3F0PureMemoryT0.test_04_both_roots_deleted_cannot_be_first_install) ... ok
+test_05_lineage_missing_never_autoinit (__main__.N3F0PureMemoryT0.test_05_lineage_missing_never_autoinit) ... ok
+test_06_namespace_missing_with_old_witness (__main__.N3F0PureMemoryT0.test_06_namespace_missing_with_old_witness) ... ok
+test_07_same_parent_cannot_prove_independent_witness (__main__.N3F0PureMemoryT0.test_07_same_parent_cannot_prove_independent_witness) ... ok
+test_08_same_root_inode_fails (__main__.N3F0PureMemoryT0.test_08_same_root_inode_fails) ... ok
+test_09_unpinned_root_or_workspace_overlap_fails (__main__.N3F0PureMemoryT0.test_09_unpinned_root_or_workspace_overlap_fails) ... ok
+test_10_missing_owner_lock_fails (__main__.N3F0PureMemoryT0.test_10_missing_owner_lock_fails) ... ok
+test_11_second_owner_cannot_claim_lock (__main__.N3F0PureMemoryT0.test_11_second_owner_cannot_claim_lock) ... ok
+test_12_lock_fd_identity_aba_fails (__main__.N3F0PureMemoryT0.test_12_lock_fd_identity_aba_fails) ... ok
+test_13_owner_lock_hardlink_or_symbolic_type_fails (__main__.N3F0PureMemoryT0.test_13_owner_lock_hardlink_or_symbolic_type_fails) ... ok
+test_14_n3_roots_strict_private_not_phase1_workspace_modes (__main__.N3F0PureMemoryT0.test_14_n3_roots_strict_private_not_phase1_workspace_modes) ... ok
+test_15_state_unknown_and_pending_names_quarantine (__main__.N3F0PureMemoryT0.test_15_state_unknown_and_pending_names_quarantine) ... ok
+test_16_boot_deny_is_never_unlatched (__main__.N3F0PureMemoryT0.test_16_boot_deny_is_never_unlatched) ... ok
+test_17_incomplete_or_duplicate_layout_denies (__main__.N3F0PureMemoryT0.test_17_incomplete_or_duplicate_layout_denies) ... ok
+test_18_surviving_any_attempt_or_response_denies (__main__.N3F0PureMemoryT0.test_18_surviving_any_attempt_or_response_denies) ... ok
+test_19_old_v1_and_s2_control_not_imported (__main__.N3F0PureMemoryT0.test_19_old_v1_and_s2_control_not_imported) ... ok
+test_20_duplicate_and_unknown_json_keys_denied (__main__.N3F0PureMemoryT0.test_20_duplicate_and_unknown_json_keys_denied) ... ok
+test_21_nonfinite_and_wrong_type_denied (__main__.N3F0PureMemoryT0.test_21_nonfinite_and_wrong_type_denied) ... ok
+test_22_strict_limits_and_record_bytes (__main__.N3F0PureMemoryT0.test_22_strict_limits_and_record_bytes) ... ok
+test_23_wrong_namespace_lineage_generation_rejected (__main__.N3F0PureMemoryT0.test_23_wrong_namespace_lineage_generation_rejected) ... ok
+test_24_control_lock_inodes_must_match (__main__.N3F0PureMemoryT0.test_24_control_lock_inodes_must_match) ... ok
+test_25_control_quarantine_preserved (__main__.N3F0PureMemoryT0.test_25_control_quarantine_preserved) ... ok
+test_26_active_consent_is_not_a_fake_positive_grant (__main__.N3F0PureMemoryT0.test_26_active_consent_is_not_a_fake_positive_grant) ... ok
+test_27_tombstones_cannot_be_evicted_for_readiness (__main__.N3F0PureMemoryT0.test_27_tombstones_cannot_be_evicted_for_readiness) ... ok
+test_28_witness_can_never_self_issue_consent (__main__.N3F0PureMemoryT0.test_28_witness_can_never_self_issue_consent) ... ok
+test_29_untrusted_input_and_bad_node_types_are_denied (__main__.N3F0PureMemoryT0.test_29_untrusted_input_and_bad_node_types_are_denied) ... ok
+test_30_malformed_or_oversized_name_lists_denied (__main__.N3F0PureMemoryT0.test_30_malformed_or_oversized_name_lists_denied) ... ok
+test_31_scan_result_cannot_be_constructed_as_permission (__main__.N3F0PureMemoryT0.test_31_scan_result_cannot_be_constructed_as_permission) ... ok
+test_32_source_static_imports_no_io_or_process_modules (__main__.N3F0PureMemoryT0.test_32_source_static_imports_no_io_or_process_modules) ... ok
+
+----------------------------------------------------------------------
+Ran 32 tests in 0.006s
+
+OK
+RAW_STDERR_END
+EXIT_CODE=0
+SOURCE_IDENTITY_AFTER:
+53ebeb3167ee269566538d91b9e0a7438d1c483ee6deb9257d52607281f12202  /mnt/data/n3f0_candidate/gateway/r2n_n3f0_offline.py
+085acce5aa365676d493a45d4d166d5fb27975483dd6441d45245f0de8cb933d  /mnt/data/n3f0_candidate/tests/test_r2n_n3f0_offline.py
+T1_PRIVATE_FS=NOT_RUN_NOT_AUTHORIZED
+NATIVE_PROCESS_SIGNALS_T2_T3=NOT_RUN_NOT_AUTHORIZED
+PRODUCT_GITHUB_CI_G05_R004_WHEELS=NOT_RUN_NOT_ATTESTED
+INTEGRATION_PASS=NOT_CLAIMED
+INDEPENDENT_B_C_REVIEW=NOT_ISSUED

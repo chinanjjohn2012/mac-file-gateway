@@ -279,6 +279,53 @@ class WorkspaceService:
             raise GatewayError("exec_disabled", "Exec is not enabled for this Workspace.")
         return ctx
 
+    @staticmethod
+    def _lbe_go_build_preview(ctx: WorkspaceContext, cwd: str,
+                              argv: list[str], timeout_seconds: int) -> dict[str, Any]:
+        """V2-only Go build preview after shared proof denial and slot checks.
+
+        This helper never calls Popen. No positive Go admission is permitted
+        by F1, including through REST or the official MCP SDK.
+        """
+        from .lbe_go_policy import GoPolicyError, validate_go_command
+        from .executor import _MAX_OUTPUT_CHARS, _canonical
+        if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 300:
+            raise GatewayError("invalid_argument", "Invalid timeout_seconds.")
+        try:
+            plan = validate_go_command(
+                argv, workspace_root=ctx.gateway._root_path,
+                cwd=cwd, exec_paths=ctx.settings.exec_paths,
+            )
+        except GoPolicyError:
+            raise GatewayError("command_not_allowed",
+                               "Go command or output is not allowed.") from None
+        # Revalidate cwd through the existing no-follow Gateway permission gate.
+        cwd_parts, _ = ctx.gateway._executor._cwd(cwd)
+        requested = list(plan.argv)
+        return {
+            "cwd": _canonical(cwd_parts),
+            "requested_argv": requested,
+            "effective_argv": requested.copy(),
+            "runner": "direct",
+            "runner_project": _canonical(cwd_parts),
+            "dry_run": True,
+            "executed": False,
+            "exit_code": None,
+            "timed_out": False,
+            "stdout": "",
+            "stderr": "",
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+            "output_limit_chars": _MAX_OUTPUT_CHARS,
+            "content_trust": "untrusted_command_output",
+            "status": "preview",
+            "mode": "preview_only",
+            "output_complete": True,
+            "process_may_be_running": False,
+            "cleanup_proven": False,
+            "full_descendant_tree_clean": "not_proven",
+        }
+
     def invoke_exec(self, name: str, cwd: str, argv: list[str],
                     timeout_seconds: int = 60, dry_run: bool = True) -> dict[str, Any]:
         """Keep safe previews, but deny ordinary apply without cleanup proof.
@@ -311,8 +358,20 @@ class WorkspaceService:
             self._exec_active.add(name)
             self._active_operations += 1
         try:
-            return {**ctx.gateway.run_command(cwd, argv, timeout_seconds, dry_run),
-                    "workspace": name}
+            if (self.settings.schema_version == 2 and type(argv) is list
+                    and len(argv) >= 2 and argv[0:2] == ["go", "build"]):
+                result = self._lbe_go_build_preview(ctx, cwd, argv, timeout_seconds)
+            else:
+                result = ctx.gateway.run_command(cwd, argv, timeout_seconds, dry_run)
+                if self.settings.schema_version == 2:
+                    # Report a v2 candidate *preview*, never a runnable mode.
+                    result = {**result, "status": "preview",
+                              "mode": "preview_only",
+                              "output_complete": True,
+                              "process_may_be_running": False,
+                              "cleanup_proven": False,
+                              "full_descendant_tree_clean": "not_proven"}
+            return {**result, "workspace": name}
         finally:
             with self._lifecycle:
                 self._exec_active.remove(name)
@@ -403,7 +462,8 @@ class WorkspaceService:
                     reason = "state_io_unavailable"
             return {"name": "Mac File Gateway", "version": "2.5.0", "mode": "multi",
                     "workspace_count": len(self._workspaces),
-                    "config_schema_version": self.settings.schema_version,
+                    **({"config_schema_version": 2}
+                       if self.settings.schema_version == 2 else {}),
                     "read_only": not (self.any_write or self.any_git),
                     "file_read_only": not self.any_write, "path_base": ".",
                     "workspaces": self.list_workspaces()["workspaces"],

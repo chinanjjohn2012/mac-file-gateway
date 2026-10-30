@@ -69,6 +69,27 @@ class CandidatePublicMetadataT0(unittest.TestCase):
                              EXPECTED[row["name"]])
             self.assertEqual(len(row["sha256"]), 64)
 
+    def test_valid_hex_but_changed_candidate_digest_fails_closed(self):
+        altered = json.loads(LOCK.read_text(encoding="utf-8"))
+        row = next(x for x in altered["additional_wheels"]
+                   if x["name"] == "distlib")
+        row["sha256"] = "0" * 64
+        lock = self.root / "changed-candidate.json"
+        lock.write_text(json.dumps(altered), encoding="utf-8")
+        with self.assertRaisesRegex(SourceMetadataError, "pinned declaration"):
+            read_lock(lock)
+
+    def test_allowed_label_but_changed_provenance_fails_closed(self):
+        altered = json.loads(LOCK.read_text(encoding="utf-8"))
+        row = next(x for x in altered["additional_wheels"]
+                   if x["name"] == "setuptools")
+        row["publication_provenance"] = (
+            "PYPI_PUBLISH_ATTESTATION_SHOWN_NOT_INDEPENDENTLY_VERIFIED")
+        lock = self.root / "changed-provenance.json"
+        lock.write_text(json.dumps(altered), encoding="utf-8")
+        with self.assertRaisesRegex(SourceMetadataError, "pinned declaration"):
+            read_lock(lock)
+
     def test_frozen_candidate_release_metadata_positive_no_closure_claim(self):
         out = inspect_metadata_dir(LOCK, self.dir)
         self.assertEqual(out["candidate_release_count"], 6)

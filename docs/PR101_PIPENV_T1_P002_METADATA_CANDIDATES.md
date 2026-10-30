@@ -45,6 +45,15 @@ all recursively selected wheels/markers/import sources are qualified.
 | platformdirs | 4.11.10 | `973c4c082b964958c71588448488d2b14fb253893dfbdb82325a14c84e540e8f` | PyPI shows publish attestation; not independently checked |
 | python-discovery | 1.6.1 | `d43fcdef879fe795352bd13ccf8d185ba5a9f86f36cfcd00529f596e737442b3` | PyPI shows publish attestation; not independently checked |
 
+**Independent declaration pinning (source-only):** the metadata inspector now
+compares each of the six candidate SHA256 strings and publication-provenance
+labels to an explicit, separate fixed table in its own reviewed source. A
+different but well-formed 64-character digest, or a swapped allowed provenance
+label, fails closed before release-JSON comparison. Two offline adversarial
+T0 regressions cover both changes. This is still a *declaration-consistency*
+gate, NOT downloaded-byte verification, package-source approval, installed
+RECORD attestation, transitive-closure qualification or native T1 permission.
+
 **Primary metadata sources (public; publisher claims not independently accepted):**
 - https://pypi.org/pypi/setuptools/84.2.1/json
 - https://pypi.org/pypi/virtualenv/21.15.0/json

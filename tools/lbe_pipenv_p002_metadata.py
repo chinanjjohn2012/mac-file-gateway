@@ -27,6 +27,33 @@ EXPECTED = {
     "setuptools": ("84.2.1", "setuptools-84.2.1-py3-none-any.whl"),
     "virtualenv": ("21.15.0", "virtualenv-21.15.0-py3-none-any.whl"),
 }
+DECLARED_CANDIDATE_LOCK = {
+    "distlib": (
+        "cf09d55b1e85a89576b036aeb71550bfd68320f3f21761ca329eadadad918638",
+        "NOT_PRESENT_IN_PYPI_UI",
+    ),
+    "filelock": (
+        "301241438c57936ef93f4243a94f2559022268bfcf9b375a9a72eb0f8db8358e",
+        "PYPI_PUBLISH_ATTESTATION_SHOWN_NOT_INDEPENDENTLY_VERIFIED",
+    ),
+    "platformdirs": (
+        "973c4c082b964958c71588448488d2b14fb253893dfbdb82325a14c84e540e8f",
+        "PYPI_PUBLISH_ATTESTATION_SHOWN_NOT_INDEPENDENTLY_VERIFIED",
+    ),
+    "python-discovery": (
+        "d43fcdef879fe795352bd13ccf8d185ba5a9f86f36cfcd00529f596e737442b3",
+        "PYPI_PUBLISH_ATTESTATION_SHOWN_NOT_INDEPENDENTLY_VERIFIED",
+    ),
+    "setuptools": (
+        "ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2",
+        "NOT_PRESENT_IN_PYPI_UI",
+    ),
+    "virtualenv": (
+        "013eb9c340466186ac8923ce920ae05becfa1390fdf3565b7eae0d191a2f4a2e",
+        "PYPI_PUBLISH_ATTESTATION_SHOWN_NOT_INDEPENDENTLY_VERIFIED",
+    ),
+}
+
 MAX_METADATA_BYTES = 4000000
 MAX_WHEEL_BYTES = 12000000
 
@@ -108,6 +135,12 @@ def read_lock(path: Path) -> list[dict[str, str]]:
                 "NOT_PRESENT_IN_PYPI_UI",
                 "PYPI_PUBLISH_ATTESTATION_SHOWN_NOT_INDEPENDENTLY_VERIFIED"):
             raise SourceMetadataError("candidate provenance status invalid")
+        # A syntactically valid digest or an allowed-looking provenance label
+        # cannot silently replace the six frozen source-only declarations.
+        if row["sha256"] != DECLARED_CANDIDATE_LOCK[name][0]:
+            raise SourceMetadataError("candidate digest differs from pinned declaration")
+        if row["publication_provenance"] != DECLARED_CANDIDATE_LOCK[name][1]:
+            raise SourceMetadataError("candidate provenance differs from pinned declaration")
     return rows
 
 

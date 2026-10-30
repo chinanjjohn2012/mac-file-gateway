@@ -75,9 +75,13 @@ The owner authorization does not manufacture B/C independent reviews.
 - An import timeout without observed exit cannot be called success. No signal
   is sent to forcibly terminate an unknown process; GitHub job remains subject
   to its explicit 12-minute outer cap. No protected shared resource.
-- If a legitimate installed console-script record escapes the private target,
-  the fail-closed checker reports FAIL rather than broadening the target
-  or silently accepting an unreviewed path.
+- pip --target's observed `virtualenv` RECORD references the generated
+  console script as `../../bin/virtualenv`; this *single exact name*, only
+  when declared by the wheel's installed console_scripts metadata, maps to
+  `RUNNER_TEMP/lbe-p004-private-site/bin/virtualenv`. The actual script bytes
+  are still SHA256/size verified, and the script is never invoked. Any other
+  `../` path or unlisted console script remains FAIL-CLOSED. This is not a
+  general RECORD traversal exception or authorization to execute virtualenv.
 
 NEXT: Inspect P004 raw CI (HEAD/TREE/runner/source wheels/installed RECORD/
 exit status), repair any bounded test defect without changing product security

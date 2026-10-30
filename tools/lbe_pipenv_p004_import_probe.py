@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import configparser
 import csv
 from email.parser import Parser
 import hashlib
@@ -107,12 +108,34 @@ def verify_installed(root: Path, expected: dict[str, str]) -> dict[str, int]:
             if len(row) != 3:
                 raise P004Error("installed RECORD malformed")
             name_field, checksum, length = row
-            path = Path(name_field)
-            if (path.is_absolute() or not name_field or "\\" in name_field
-                    or any(part in ("", ".", "..") for part in path.parts)):
-                raise P004Error("installed RECORD traversal or ambiguity: " +
-                repr(name_field[:120]))
-            path = root / path
+            # pip --target records its one generated console script as
+            # ../../bin/virtualenv relative to a temporary purelib scheme;
+            # pip places that file in the *private target*/bin on completion.
+            # Only this exact source-pinned script gets the safe mapping.
+            if name == "virtualenv" and name_field == "../../bin/virtualenv":
+                script_dir = root / "bin"
+                if (not script_dir.is_dir() or script_dir.is_symlink()):
+                    raise P004Error("virtualenv private script directory unsafe")
+                cfg = configparser.ConfigParser(interpolation=None, strict=True)
+                cfg.optionxform = str
+                try:
+                    cfg.read_string(_read_safe(
+                        root, record.parent / "entry_points.txt", 262144
+                    ).decode("utf-8", "strict"))
+                except (configparser.Error, UnicodeError) as exc:
+                    raise P004Error("virtualenv wheel entrypoint unreadable") from exc
+                if (not cfg.has_option("console_scripts", "virtualenv") or
+                        not cfg.get("console_scripts", "virtualenv").strip()
+                        .startswith("virtualenv.")):
+                    raise P004Error("virtualenv console script is not declared")
+                path = script_dir / "virtualenv"
+            else:
+                path = Path(name_field)
+                if (path.is_absolute() or not name_field or "\\" in name_field
+                        or any(part in ("", ".", "..") for part in path.parts)):
+                    raise P004Error("installed RECORD traversal or ambiguity: " +
+                                    repr(name_field[:120]))
+                path = root / path
             if name_field in inspected:
                 raise P004Error("duplicate installed RECORD entry")
             inspected.add(name_field)

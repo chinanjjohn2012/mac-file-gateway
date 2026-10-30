@@ -72,6 +72,50 @@ class OfflineInstalledSourceT0(unittest.TestCase):
         self.assertEqual(set(attested), set(VERSIONS))
         self.assertTrue(all(v == 2 for v in attested.values()))
 
+    def _record_fake_virtualenv_script(self):
+        distinfo = self.files["virtualenv"][1]
+        ep = distinfo / "entry_points.txt"
+        ep.write_text("[console_scripts]\\nvirtualenv = virtualenv.__main__:run_with_catch\\n".replace("\\n", "\n"),
+                      encoding="utf-8")
+        script_dir = self.site / "bin"
+        script_dir.mkdir()
+        script = script_dir / "virtualenv"
+        script.write_bytes(b"#!/usr/bin/env python3\\n# never executed\\n".replace(b"\\n", b"\n"))
+        record = distinfo / "RECORD"
+        with record.open(newline="", encoding="utf-8") as fp:
+            entries = list(csv.reader(fp))
+        entries.insert(-1, [ep.relative_to(self.site).as_posix(),
+                            "sha256=" + hash_b64(ep.read_bytes()),
+                            str(ep.stat().st_size)])
+        entries.insert(-1, ["../../bin/virtualenv",
+                            "sha256=" + hash_b64(script.read_bytes()),
+                            str(script.stat().st_size)])
+        with record.open("w", newline="", encoding="utf-8") as fp:
+            csv.writer(fp).writerows(entries)
+        return record
+
+    def test_exact_pip_target_virtualenv_generated_script_is_attested(self):
+        self._record_fake_virtualenv_script()
+        attested = verify_installed(self.site, VERSIONS)
+        self.assertEqual(attested["virtualenv"], 4)
+
+    def test_unlisted_console_script_traversal_is_still_rejected(self):
+        record = self._record_fake_virtualenv_script()
+        data = record.read_text(encoding="utf-8")
+        record.write_text(data.replace("../../bin/virtualenv",
+                                       "../../../bin/virtualenv"),
+                          encoding="utf-8")
+        with self.assertRaisesRegex(P004Error, "traversal"):
+            verify_installed(self.site, VERSIONS)
+
+    def test_undeclared_console_script_is_rejected(self):
+        self._record_fake_virtualenv_script()
+        (self.files["virtualenv"][1] / "entry_points.txt").write_text(
+            "[console_scripts]\\nother = other:main\\n".replace("\\n", "\n"),
+            encoding="utf-8")
+        with self.assertRaisesRegex(P004Error, "not declared"):
+            verify_installed(self.site, VERSIONS)
+
     def test_one_mutated_fake_installed_byte_fails(self):
         module = self.files["distlib"][0]
         module.write_bytes(b"changed after RECORD\n")

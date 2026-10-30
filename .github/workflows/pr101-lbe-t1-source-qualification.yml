@@ -1,0 +1,168 @@
+name: PR101 P001 source-byte qualification only (no Go/Pipenv native)
+
+on:
+  pull_request:
+    branches:
+      - rc/multi-exec-f1-g05-integrated-ms1-20261025
+    paths:
+      - ".github/workflows/pr101-lbe-t1-source-qualification.yml"
+      - "tools/lbe_t1_source_qualifier.py"
+      - "tests/test_lbe_t1_source_qualifier.py"
+      - "docs/PR101_LBE_NATIVE_TOOLCHAINS_T1_PROPOSAL.md"
+      - "MANIFEST.sha256"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr101-p001-sources-only-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  p001-source-preflight:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'feat/multi-exec-lbe-v2-config-preflight-r001-20261030' &&
+      github.event.pull_request.base.sha == '0fc1ae245de7cb582a69162c79c201d15bfaa258'
+    runs-on: macos-15
+    timeout-minutes: 12
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONNOUSERSITE: "1"
+      PYTHONPATH: ""
+      PIP_NO_INDEX: "1"
+      GOPROXY: "off"
+      GOSUMDB: "off"
+      GOTOOLCHAIN: "local"
+      CGO_ENABLED: "0"
+      GATEWAY_NATIVE_C_ALLOWED: "false"
+      C3B03_S3S6_GROUP_SIGNAL_AUTHORIZED: "false"
+      LBE_P001_REAL_GO_PIPENV_EXECUTION: "NOT_AUTHORIZED_UNTIL_LOCKED"
+    steps:
+      - name: Checkout actual PR Head without credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: G05 and disposable hosted macOS 15 ARM64 identity BEFORE downloads
+        shell: bash
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "${{ runner.environment }}" = github-hosted
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          [[ "$(sw_vers -productVersion)" == 15.* ]]
+          python3 -I -S tools/g05_ci_admission.py --expected-head "$G05_EXPECTED_HEAD"
+          test "$(git rev-parse HEAD)" = "$G05_EXPECTED_HEAD"
+          test "$(git rev-parse HEAD:docs/PR101_LBE_NATIVE_TOOLCHAINS_T1_PROPOSAL.md)" = "96bbd02cd384bd9769cd6af9f5a763442e25d61a"
+          echo "LBE_P001_EXECUTED_HEAD=$(git rev-parse HEAD)"
+          echo "LBE_P001_EXECUTED_TREE=$(git rev-parse 'HEAD^{tree}')"
+          echo "LBE_P001_EXACT_BASE=0fc1ae245de7cb582a69162c79c201d15bfaa258"
+
+      - name: Run pure stdlib malicious-archive/RECORD T0 before network
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S tests/test_lbe_t1_source_qualifier.py
+          echo "LBE_P001_SOURCE_QUALIFIER_UNIT_T0=PASS"
+
+      - name: Download exact P001 Go candidate archive into runner-owned scratch only
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="$(curl --fail --silent --show-error --location --retry 0 \
+            --proto '=https' --proto-redir '=https' --max-time 200 \
+            --max-filesize 70000000 --write-out '%{url_effective}' \
+            --output "$RUNNER_TEMP/go1.27.3.darwin-arm64.tar.gz" \
+            'https://go.dev/dl/go1.27.3.darwin-arm64.tar.gz')"
+          python3 -I -S - "$url" <<'PY'
+          import sys
+          from urllib.parse import urlparse
+          u = urlparse(sys.argv[1])
+          if u.scheme != "https" or u.hostname not in (
+              "go.dev", "dl.google.com", "storage.googleapis.com",
+          ):
+              raise SystemExit("Go source redirect outside approved HTTPS hosts")
+          print("LBE_P001_GO_DOWNLOAD_HOST=" + str(u.hostname))
+          PY
+
+      - name: Retrieve only pinned Pipenv wheel URL from official PyPI metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --retry 0 \
+            --proto '=https' --proto-redir '=https' --max-time 30 \
+            --max-filesize 1000000 \
+            --output "$RUNNER_TEMP/pipenv-2026.10.4-release.json" \
+            'https://pypi.org/pypi/pipenv/2026.10.4/json'
+          python3 -I -S - "$RUNNER_TEMP/pipenv-2026.10.4-release.json" \
+              "$RUNNER_TEMP/pipenv-2026.10.4-url.txt" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          from urllib.parse import urlparse
+          release = json.loads(Path(sys.argv[1]).read_text("utf-8"))
+          name = "pipenv-2026.10.4-py3-none-any.whl"
+          digest = "308125623e4d08dfe32936f7259a9ed33c5480baa2c9a291a1ff8a9328eeeb1f"
+          wheels = [
+              obj for obj in release.get("urls", [])
+              if obj.get("filename") == name and obj.get("packagetype") == "bdist_wheel"
+          ]
+          if release.get("info", {}).get("version") != "2026.10.4" or len(wheels) != 1:
+              raise SystemExit("Pipenv metadata did not match P001 version/wheel")
+          entry = wheels[0]
+          url = entry.get("url", "")
+          parsed = urlparse(url)
+          if (entry.get("digests", {}).get("sha256") != digest or
+                  parsed.scheme != "https" or parsed.hostname != "files.pythonhosted.org"
+                  or not parsed.path.endswith("/" + name) or
+                  not 0 < entry.get("size", 0) <= 6000000):
+              raise SystemExit("Pipenv metadata/hash/URL outside P001 lock")
+          Path(sys.argv[2]).write_text(url, encoding="utf-8")
+          print("LBE_P001_PIPENV_PYPI_METADATA_MATCH=PASS")
+          PY
+
+      - name: Download only matched Pipenv wheel (no dependency resolution)
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="$(cat "$RUNNER_TEMP/pipenv-2026.10.4-url.txt")"
+          final="$(curl --fail --silent --show-error --location --retry 0 \
+            --proto '=https' --proto-redir '=https' --max-time 90 \
+            --max-filesize 6000000 --write-out '%{url_effective}' \
+            --output "$RUNNER_TEMP/pipenv-2026.10.4-py3-none-any.whl" "$url")"
+          python3 -I -S - "$final" <<'PY'
+          import sys
+          from urllib.parse import urlparse
+          u = urlparse(sys.argv[1])
+          if u.scheme != "https" or u.hostname != "files.pythonhosted.org":
+              raise SystemExit("Pipenv wheel download redirected outside approved host")
+          print("LBE_P001_PIPENV_DOWNLOAD_HOST=files.pythonhosted.org")
+          PY
+
+      - name: Verify actual archive/wheel SHA, member safety and wheel RECORD without running binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S tools/lbe_t1_source_qualifier.py --runner-temp "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/lbe-p001-source-evidence.json"
+          echo "LBE_P001_SOURCE_BYTES_AND_ARCHIVE_INSPECTION=PASS"
+          echo "LBE_P001_GO_EXTRACTED_COMPILER=NOT_ATTESTED"
+          echo "LBE_P001_PIPENV_TRANSITIVE_WHEELS=NOT_LOCKED"
+          echo "LBE_P001_REAL_NATIVE_GO_AND_PIPENV=NOT_RUN"
+
+      - name: Recheck committed tree and never claim GO/PIPENV integration PASS
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          git diff --cached --exit-code
+          echo "LBE_P001_NEW_EXTERNAL_EXECUTED=FALSE"
+          echo "LBE_P001_OUTPUT_SOURCE_INSPECTION_ONLY=TRUE"
+          echo "LBE_P001_NO_INSTALL_NO_EXTRACT_NO_GO_NO_PIPENV"
+          echo "LBE_P001_NO_OS_SIGNAL_NO_T2_T3_NO_USER_MAC"
+          echo "LBE_P001_NO_MERGE_NO_DEPLOY"

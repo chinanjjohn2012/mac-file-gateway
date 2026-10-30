@@ -588,9 +588,10 @@ def test_dormant_plan_does_not_upgrade_v1_or_ungranted_workspace(scene):
     svc = service(scene, cfg)
     try:
         # B has no Exec scopes; no plan or new capability can be constructed.
-        with pytest.raises(GatewayError, match="disabled"):
+        with pytest.raises(GatewayError) as denied:
             prepare_lbe_work_plan(
                 svc.get("b"), cwd=".", argv=["go", "test", "./..."])
+        assert denied.value.code == "exec_disabled"
     finally:
         svc.close()
 
@@ -600,10 +601,11 @@ def test_dormant_plan_does_not_upgrade_v1_or_ungranted_workspace(scene):
         "enabled": True, "paths": ["go-project"], "runners": []}
     legacy = service(scene, cfg)
     try:
-        with pytest.raises(GatewayError, match="disabled"):
+        with pytest.raises(GatewayError) as denied:
             prepare_lbe_work_plan(
                 legacy.require_exec("a"),
                 cwd="go-project", argv=["go", "test", "./..."])
+        assert denied.value.code == "exec_disabled"
         with pytest.raises(GatewayError) as error:
             legacy.invoke_exec(
                 "a", "go-project", ["go", "test", "./..."],

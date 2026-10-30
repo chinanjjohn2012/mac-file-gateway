@@ -136,3 +136,72 @@ def test_never_creates_output_or_dirs(project):
     assert not target.exists()
     plan(project, ["go", "build", "-o", "bin/app", "./..."])
     assert not target.exists()
+
+
+@pytest.mark.parametrize("malicious_replacement", [
+    ["go", "run", "-o", "../../escape", "./cmd/server"],
+    ["go", "build", "-toolexec=/bin/sh", "./cmd/server"],
+])
+def test_input_argv_is_frozen_before_output_stat_interleaving(
+        project, monkeypatch, malicious_replacement):
+    """B100-R001-P2-01: live argv must never leak into a checked immutable plan.
+
+    Mutation is deterministic *during* the validated plan's output FD check.
+    The original r001 source returns the attacker's unchecked Go plan (RED).
+    This is source-only T0, with no process or compiler started.
+    """
+    from gateway import lbe_go_policy as policy
+
+    original = ["go", "build", "-o", "bin/app", "./cmd/server"]
+    caller_owned = list(original)
+    original_inspect = policy._inspect_output
+    check_calls = []
+
+    def interleaved_inspect(*args):
+        check_calls.append(True)
+        caller_owned[:] = malicious_replacement
+        return original_inspect(*args)
+
+    monkeypatch.setattr(policy, "_inspect_output", interleaved_inspect)
+    planned = policy.validate_go_command(
+        caller_owned, workspace_root=project, cwd="go-project",
+        exec_paths=("go-project",))
+    assert check_calls == [True]
+    assert caller_owned == malicious_replacement
+    assert planned.argv == tuple(original)
+    assert planned.output_relative_to_workspace == "go-project/bin/app"
+    assert planned.runner == "direct"
+
+
+@pytest.mark.parametrize("missing_package", [
+    ["go", "build", "-v"],
+    ["go", "test"],
+    ["go", "vet"],
+    ["go", "build", "-o=bin/app"],
+])
+def test_go_command_requires_explicit_package_operand(project, missing_package):
+    """Conservative C100-R001-P3-01 resolution: no implicit Go cwd package."""
+    with pytest.raises(GoPolicyError, match="package"):
+        plan(project, missing_package)
+
+
+def test_argv_snapshot_is_immutable_before_preflight(project, monkeypatch):
+    """No re-read of mutable caller input after a legal original snapshot."""
+    from gateway import lbe_go_policy as policy
+
+    requested = ["go", "build", "-o", "bin/app", "./..."]
+    expected = tuple(requested)
+    actual_inspect = policy._inspect_output
+
+    def mutate_before_return(*args):
+        requested.clear()
+        requested.extend(["go", "run", "./..."])
+        return actual_inspect(*args)
+
+    monkeypatch.setattr(policy, "_inspect_output", mutate_before_return)
+    checked = policy.validate_go_command(
+        requested, workspace_root=project, cwd="go-project",
+        exec_paths=("go-project",))
+    assert checked.argv == expected
+    assert checked.output_relative_to_workspace == "go-project/bin/app"
+

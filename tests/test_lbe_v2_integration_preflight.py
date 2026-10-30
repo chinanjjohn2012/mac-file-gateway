@@ -614,3 +614,33 @@ def test_dormant_plan_does_not_upgrade_v1_or_ungranted_workspace(scene):
     finally:
         legacy.close()
 
+
+
+def test_real_go_build_preview_and_future_dormant_plan_share_exact_values(scene):
+    """Plan parity is pure T0, NOT positive Exec permission or Mac acceptance."""
+    from gateway.lbe_plan import prepare_lbe_work_plan
+    a, b, private, _runtime = scene
+    (a / "go-project" / "bin").mkdir()
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        args = ["go", "build", "-o", "bin/tool", "./cmd/tool"]
+        public_preview = svc.invoke_exec("a", "go-project", args)
+        plan = prepare_lbe_work_plan(
+            svc.require_exec("a"), cwd="go-project", argv=args)
+        assert public_preview["dry_run"] is True
+        assert public_preview["executed"] is False
+        assert public_preview["cwd"] == plan.cwd
+        assert public_preview["requested_argv"] == list(plan.requested_argv)
+        assert public_preview["effective_argv"] == list(plan.effective_argv)
+        assert public_preview["runner"] == plan.runner == "direct"
+        assert public_preview["runner_project"] == plan.runner_project
+        assert public_preview["mode"] == "preview_only"
+        assert svc.info()["exec_policy"]["available"] is False
+        with pytest.raises(GatewayError) as error:
+            svc.invoke_exec("a", "go-project", args, dry_run=False)
+        assert error.value.code == "exec_cleanup_proof_required"
+        assert not (a / "go-project" / "bin" / "tool").exists()
+    finally:
+        svc.close()
+

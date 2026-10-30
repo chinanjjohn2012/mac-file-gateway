@@ -15,6 +15,7 @@ import time
 import pytest
 
 from gateway.lbe_output_capture import BoundedCapture
+from gateway.lbe_direct_owner import DirectChildOwner, LbeOwnerError
 from gateway.lbe_pipe_drain import BoundedPipeDrain, LbePipeError
 
 
@@ -87,7 +88,7 @@ class FakeSelector:
         self.registered.clear()
 
 
-def create(*, grace=0.06, fake=None, nonblocking=None):
+def create(*, grace=0.06, fake=None, nonblocking=None, on_fault=None):
     sel = fake or FakeSelector()
     capture = BoundedCapture()
     call_log = []
@@ -97,7 +98,7 @@ def create(*, grace=0.06, fake=None, nonblocking=None):
             nonblocking(fd, is_blocking)
     drain = BoundedPipeDrain(
         capture, selector_factory=lambda: sel, read_fn=sel.read,
-        set_nonblocking=set_flag, eof_grace=grace)
+        set_nonblocking=set_flag, eof_grace=grace, on_fault=on_fault)
     return drain, sel, capture, call_log
 
 
@@ -108,7 +109,6 @@ def fake_pipes():
 def test_exact_eof_is_required_for_output_complete():
     drain, sel, capture, calls = create()
     stdout, stderr = fake_pipes()
-    sel.register(71, selectors.EVENT_READ, "stdout") if False else None
     drain.attach(stdout, stderr)
     sel.put(71, b"STDOUT")
     sel.put(71, b"")
@@ -266,4 +266,132 @@ def test_pure_fake_pipe_drain_does_not_start_or_signal_native_process(monkeypatc
         assert drain.wait_finished(2)
         assert drain.snapshot()["output_complete"] is True
     assert invoked == []
+
+
+class WaitableFakeOriginal:
+    def __init__(self, code=0):
+        self.ready = threading.Event()
+        self.exit = threading.Event()
+        self.code = code
+
+    def wait(self):
+        self.ready.set()
+        if not self.exit.wait(timeout=5):
+            raise RuntimeError("T0 original fake not released")
+        return self.code
+
+
+def owner_drain_pair(owner, name="a", *, grace=0.1):
+    token = owner.reserve(name)
+    drain, sel, _cap, _setflags = create(
+        grace=grace,
+        on_fault=lambda: owner.latch_unavailable(token))
+    owner.prepare_pipe_drain(token, drain)
+    drain.attach(*fake_pipes())
+    child = WaitableFakeOriginal()
+    owner.bind(token, child)
+    assert child.ready.wait(2)
+    return token, drain, sel, child
+
+
+def test_direct_child_reaper_notifies_exact_original_exit_then_eof_grace():
+    owner = DirectChildOwner()
+    token, drain, sel, child = owner_drain_pair(owner, grace=0.04)
+    sel.put(71, b"original output")
+    deadline = time.monotonic() + 2
+    while "original output" not in drain.snapshot()["stdout"] and time.monotonic() < deadline:
+        time.sleep(0.002)
+    assert "original output" in drain.snapshot()["stdout"]
+    assert drain.snapshot()["output_complete"] is False
+    child.exit.set()
+    result = owner.observe(token, wait_seconds=2)
+    assert result.status == "exited"
+    assert result.exit_code == 0
+    assert result.full_descendant_tree_clean == "not_proven"
+    assert owner.snapshot()["reserved_slots"] == 0
+    assert drain.wait_finished(2)
+    state = drain.snapshot()
+    assert state["pipe_reader_failed"] is False
+    assert state["pipe_reader_finished"] is True
+    assert state["output_complete"] is False
+    assert owner.snapshot()["unavailable"] is False
+    owner.close()
+
+
+def test_async_read_fault_latches_service_without_signalling_orig_child():
+    owner = DirectChildOwner()
+    token, drain, sel, child = owner_drain_pair(owner)
+    sel.put(71, OSError("T0 stream error"))
+    assert drain.wait_finished(2)
+    assert drain.snapshot()["pipe_reader_failed"] is True
+    assert drain.snapshot()["output_complete"] is False
+    assert owner.snapshot()["unavailable"] is True
+    assert owner.snapshot()["running_direct_children"] == 1
+    with pytest.raises(LbeOwnerError) as exc:
+        owner.reserve("b")
+    assert exc.value.code == "exec_state_unavailable"
+    child.exit.set()
+    assert owner.observe(token, wait_seconds=2).status == "exited"
+    assert owner.snapshot()["unavailable"] is True
+    owner.close()
+
+
+def test_postspawn_pipe_attachment_failure_does_not_release_original_slot():
+    owner = DirectChildOwner()
+    token = owner.reserve("a")
+    drain, _sel, _cap, _flag = create(
+        on_fault=lambda: owner.latch_unavailable(token))
+    owner.prepare_pipe_drain(token, drain)
+    with pytest.raises(LbePipeError, match="pipe_setup_unavailable"):
+        drain.attach(FakePipe(71), FakePipe(71))
+    assert owner.snapshot()["unavailable"] is True
+    assert owner.snapshot()["reserved_slots"] == 1
+    with pytest.raises(LbeOwnerError, match="exec_state_unavailable"):
+        owner.bind(token, WaitableFakeOriginal())
+    assert owner.snapshot()["reserved_slots"] == 1
+    owner.close()
+
+
+def test_no_spawn_releases_preallocated_reader_and_original_slot():
+    owner = DirectChildOwner()
+    token = owner.reserve("a")
+    drain, sel, _cap, _calls = create()
+    owner.prepare_pipe_drain(token, drain)
+    owner.spawn_failed(token)
+    assert drain.wait_finished(0)
+    assert sel.closed
+    assert owner.snapshot()["reserved_slots"] == 0
+    owner.close()
+
+
+def test_retired_eof_grace_readers_are_separately_bounded():
+    owner = DirectChildOwner()
+    readers = []
+    for name in ("a", "b", "c", "d"):
+        token, drain, sel, child = owner_drain_pair(owner, name, grace=0.5)
+        child.exit.set()
+        assert owner.observe(token, wait_seconds=2).status == "exited"
+        readers.append(drain)
+    assert owner.snapshot()["reserved_slots"] == 0
+    with pytest.raises(LbeOwnerError, match="busy"):
+        owner.reserve("e")
+    assert all(drain.wait_finished(2) for drain in readers)
+    token = owner.reserve("e")
+    owner.spawn_failed(token)
+    assert owner.snapshot()["unavailable"] is False
+    owner.close()
+
+
+def test_read_completion_before_parent_exit_does_not_reserve_retired_reader():
+    owner = DirectChildOwner()
+    token, drain, sel, child = owner_drain_pair(owner, grace=0.2)
+    sel.put(71, b"")
+    sel.put(72, b"")
+    assert drain.wait_finished(2)
+    assert drain.snapshot()["output_complete"] is True
+    child.exit.set()
+    assert owner.observe(token, wait_seconds=2).status == "exited"
+    token2 = owner.reserve("a")
+    owner.spawn_failed(token2)
+    owner.close()
 

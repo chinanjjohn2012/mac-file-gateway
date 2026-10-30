@@ -106,14 +106,18 @@ def validate_go_command(argv: Sequence[str], *, workspace_root: Path,
     executable and trusted v2 admission. Calling this function is never an
     execution authorization or an exemption from the operative F1 denial.
     """
-    if type(argv) not in (tuple, list) or not 2 <= len(argv) <= _MAX_ARGS:
+    # Capture immutable checked arguments before any validation or filesystem IO.
+    if type(argv) not in (tuple, list):
+        raise GoPolicyError("argv must be an exact list or tuple")
+    checked_argv = tuple(argv)
+    if not 2 <= len(checked_argv) <= _MAX_ARGS:
         raise GoPolicyError("argv must have 2..64 exact string elements")
     if any(type(x) is not str or not x or len(x) > _MAX_ITEM_LENGTH
-           or any(ord(ch) < 32 for ch in x) for x in argv):
+           or any(ord(ch) < 32 for ch in x) for x in checked_argv):
         raise GoPolicyError("argv must be bounded nonempty strings without controls")
-    if sum(map(len, argv)) > _MAX_TOTAL_LENGTH:
+    if sum(map(len, checked_argv)) > _MAX_TOTAL_LENGTH:
         raise GoPolicyError("argv exceeds length limit")
-    if argv[0] != "go" or argv[1] not in {"test", "vet", "build"}:
+    if checked_argv[0] != "go" or checked_argv[1] not in {"test", "vet", "build"}:
         raise GoPolicyError("Go verb is not allowlisted")
     if type(exec_paths) not in (list, tuple) or not exec_paths:
         raise GoPolicyError("at least one explicit exec path is required")
@@ -125,19 +129,19 @@ def validate_go_command(argv: Sequence[str], *, workspace_root: Path,
     output: tuple[str, ...] | None = None
     seen_packages = False
     index = 2
-    while index < len(argv):
-        item = argv[index]
+    while index < len(checked_argv):
+        item = checked_argv[index]
         if item in _SAFE_FLAGS:
             if seen_packages:
                 raise GoPolicyError("options must precede package operands")
         elif item == "-o" or item.startswith("-o="):
-            if argv[1] != "build" or output is not None or seen_packages:
+            if checked_argv[1] != "build" or output is not None or seen_packages:
                 raise GoPolicyError("-o is only allowed once for go build before packages")
             if item == "-o":
                 index += 1
-                if index >= len(argv):
+                if index >= len(checked_argv):
                     raise GoPolicyError("-o requires an output path")
-                value = argv[index]
+                value = checked_argv[index]
             else:
                 value = item[3:]
             output = _components(value)
@@ -150,6 +154,9 @@ def validate_go_command(argv: Sequence[str], *, workspace_root: Path,
         else:
             seen_packages = True
         index += 1
+    # Require an explicit package, never implicitly use the current package.
+    if not seen_packages:
+        raise GoPolicyError("explicit Go package operand is required")
     canonical_output = None
     if output is not None:
         combined = (*cwd_parts, *output)
@@ -157,4 +164,4 @@ def validate_go_command(argv: Sequence[str], *, workspace_root: Path,
             raise GoPolicyError("output outside granted exec paths")
         _inspect_output(Path(workspace_root), cwd_parts, output)
         canonical_output = "/".join(combined)
-    return GoCommandPlan(tuple(argv), "direct", canonical_output)
+    return GoCommandPlan(checked_argv, "direct", canonical_output)

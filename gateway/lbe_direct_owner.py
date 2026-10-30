@@ -141,6 +141,13 @@ class DirectChildOwner:
             if (item.phase != "VALIDATED" or item.pipe_drain is not None
                     or type(drain) is not BoundedPipeDrain):
                 raise LbeOwnerError("invalid_reservation")
+            # Always install the owner's admission latch BEFORE future spawn,
+            # irrespective of whether a caller supplied its own callback.
+            try:
+                drain.add_fault_callback(lambda: self.latch_unavailable(item))
+            except BaseException:
+                self._unavailable = True
+                raise LbeOwnerError("exec_state_unavailable") from None
             item.pipe_drain = drain
 
     def latch_unavailable(self, item: _Reservation) -> None:

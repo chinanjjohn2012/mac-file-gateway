@@ -75,8 +75,12 @@ class PerHopOriginT0(unittest.TestCase):
                 WHEEL_NAME), "files.pythonhosted.org")
 
     def test_reject_approved_to_evil_to_approved_before_evil_contact(self):
+        intermediate = "https://evil.example.org/pass-through"
+        trusted = "https://dl.google.com/go/" + GO_NAME
         fake = FakeOpener({
-            GO_URL: "https://evil.example.org/pass-through?next=https://dl.google.com/go/" + GO_NAME,
+            GO_URL: intermediate,
+            intermediate: trusted,
+            trusted: b"never downloaded",
         })
         out = self.root / GO_NAME
         with self.assertRaisesRegex(P008Error, "unapproved"):

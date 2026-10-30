@@ -187,6 +187,59 @@ def test_real_rest_run_and_health_share_same_approved_v2_service(native_scene):
         assert client.get("/health").json()["exec_policy"]["available"] is True
 
 
+def test_real_mcp_sdk_jsonrpc_tool_uses_same_v2_worker(native_scene):
+    """Official MCP SDK through real ASGI JSON-RPC, not a mocked tool call."""
+    from starlette.testclient import TestClient
+    from gateway.http_multi import create_multi_app
+
+    svc, _root = native_scene
+    headers = {"Accept": "application/json, text/event-stream",
+               "Content-Type": "application/json"}
+    def rpc(client, method, params=None):
+        response = client.post("/mcp", headers=headers, json={
+            "jsonrpc": "2.0", "id": 2, "method": method,
+            "params": params or {},
+        })
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    with TestClient(create_multi_app(svc), base_url="http://127.0.0.1:8765") as client:
+        initialized = rpc(client, "initialize", {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": {"name": "lbe-hosted-t1", "version": "1"},
+        })
+        assert "result" in initialized
+        client.post("/mcp", headers=headers, json={
+            "jsonrpc": "2.0", "method": "notifications/initialized"})
+        names = {
+            tool["name"] for tool in rpc(client, "tools/list")["result"]["tools"]
+        }
+        assert "run_command" in names
+        good = {"workspace": "a", "cwd": "python-project",
+                "argv": ["python", "ok.py"],
+                "timeout_seconds": 5, "dry_run": False}
+        executed = rpc(client, "tools/call", {
+            "name": "run_command", "arguments": good,
+        })["result"]
+        assert executed.get("isError") is not True
+        result = executed["structuredContent"]
+        assert result["workspace"] == "a"
+        assert result["mode"] == "local_best_effort"
+        assert result["status"] == "exited"
+        assert result["executed"] is True
+        assert result["exit_code"] == 0
+        assert "T1_ORIGINAL_STDOUT" in result["stdout"]
+        assert result["cleanup_proven"] is False
+        assert result["full_descendant_tree_clean"] == "not_proven"
+        denied = rpc(client, "tools/call", {
+            "name": "run_command",
+            "arguments": {**good, "argv": ["python", "-c", "print(1)"]},
+        })["result"]
+        assert denied.get("isError") is True
+        assert denied["structuredContent"]["error"] == "command_not_allowed"
+    assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+
+
 def test_invalid_relative_script_has_zero_launch(native_scene):
     svc, root = native_scene
     ctx, _worker = _internal(svc)

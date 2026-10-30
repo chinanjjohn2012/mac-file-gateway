@@ -94,7 +94,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/lbe-native-pytest"
           python -m pytest -q -rs -p no:cacheprovider --basetemp "$RUNNER_TEMP/lbe-native-pytest" tests/test_lbe_native_t1.py | tee "$RUNNER_TEMP/lbe-native-t1-log.txt"
-          grep -E '6 passed' "$RUNNER_TEMP/lbe-native-t1-log.txt"
+          grep -E '7 passed' "$RUNNER_TEMP/lbe-native-t1-log.txt"
           echo "LBE_NATIVE_T1_REAL_PYTHON_DIRECT=PASS"
           echo "LBE_NATIVE_T1_MAX_REQUEST_SECONDS=5"
           echo "LBE_NATIVE_T1_MAX_OUTPUT_PER_STREAM_BYTES=48000"

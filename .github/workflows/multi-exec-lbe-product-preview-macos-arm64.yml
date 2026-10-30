@@ -1,0 +1,123 @@
+name: PR101 LBE macOS ARM64 schema-v2 preview T0 (nonoperative)
+
+on:
+  pull_request:
+    branches:
+      - rc/multi-exec-f1-g05-integrated-ms1-20261025
+    paths:
+      - ".github/workflows/multi-exec-lbe-product-preview-macos-arm64.yml"
+      - "gateway/lbe_*.py"
+      - "gateway/workspaces.py"
+      - "gateway/workspaces_config.py"
+      - "tests/test_lbe_*.py"
+      - "tools/ci_wheel_constraints.py"
+      - "MANIFEST.sha256"
+
+permissions:
+  contents: read
+
+jobs:
+  preview-only:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'feat/multi-exec-lbe-v2-config-preflight-r001-20261030' &&
+      github.event.pull_request.base.sha == '0fc1ae245de7cb582a69162c79c201d15bfaa258'
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONNOUSERSITE: "1"
+      PYTHONPATH: ""
+      GATEWAY_NATIVE_C_ALLOWED: "false"
+      C3B03_S3S6_FIRST_C_LOAD_AUTHORIZED: "false"
+      C3B03_S3S6_GROUP_SIGNAL_AUTHORIZED: "false"
+    steps:
+      - name: Checkout exact PR Head without stored credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Validate hosted macOS 15 ARM64 and exact G05 Head before imports
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ runner.environment }}" = github-hosted
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          [[ "$(sw_vers -productVersion)" == 15.* ]]
+          python3 -I -S tools/g05_ci_admission.py --expected-head "$G05_EXPECTED_HEAD"
+          echo "LBE_MACOS_PREVIEW_HEAD=$(git rev-parse HEAD)"
+          echo "LBE_MACOS_PREVIEW_TREE=$(git rev-parse 'HEAD^{tree}')"
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Compute constraints from exact 36 original macOS wheel versions
+        run: >-
+          python -I -S tools/ci_wheel_constraints.py
+          --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256
+          > "$RUNNER_TEMP/lbe-preview-constraints.txt"
+
+      - name: Download binary wheels only to disposable wheelhouse
+        run: >-
+          python -m pip download --disable-pip-version-check --only-binary=:all:
+          -r requirements-dev.txt --constraint "$RUNNER_TEMP/lbe-preview-constraints.txt"
+          --dest "$RUNNER_TEMP/lbe-preview-wheelhouse"
+
+      - name: Verify 36 source-locked wheel hashes BEFORE install
+        run: >-
+          python -I -S tools/ci_dependency_provenance.py wheels
+          --wheelhouse "$RUNNER_TEMP/lbe-preview-wheelhouse"
+          --wheel-record "$RUNNER_TEMP/lbe-preview-wheels.json"
+          --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256
+
+      - name: Install only from the verified wheelhouse
+        run: >-
+          python -m pip install --disable-pip-version-check --no-index
+          --find-links "$RUNNER_TEMP/lbe-preview-wheelhouse" --force-reinstall
+          --constraint "$RUNNER_TEMP/lbe-preview-constraints.txt" -r requirements-dev.txt
+
+      - name: Record installed RECORD-listed files before tests
+        run: |
+          python -m pip check
+          python -I tools/ci_dependency_provenance.py installed --wheelhouse "$RUNNER_TEMP/lbe-preview-wheelhouse" --wheel-record "$RUNNER_TEMP/lbe-preview-wheels.json" --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256 --installed-record "$RUNNER_TEMP/lbe-preview-installed.json"
+
+      - name: Run ONLY source and fake-child LBE configuration and preview T0
+        run: |
+          python -m pytest -q -rs -p no:cacheprovider \
+            tests/test_lbe_config_policy.py \
+            tests/test_lbe_go_policy.py \
+            tests/test_lbe_output_capture.py \
+            tests/test_lbe_direct_owner.py \
+            tests/test_lbe_pipe_drain.py \
+            tests/test_lbe_worker.py \
+            tests/test_lbe_v2_integration_preflight.py \
+            tests/test_ci_wheel_constraints.py
+
+      - name: Check pinned wheel source and installed RECORD-listed bytes after tests
+        run: >-
+          python -I tools/ci_dependency_provenance.py verify
+          --wheelhouse "$RUNNER_TEMP/lbe-preview-wheelhouse"
+          --wheel-record "$RUNNER_TEMP/lbe-preview-wheels.json"
+          --source-lock ci/wheel-locks/macos-15-arm64-3.13.sha256
+          --installed-record "$RUNNER_TEMP/lbe-preview-installed.json"
+
+      - name: Verify no tracked mutation, report explicit T1-T3 limits
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          git diff --cached --exit-code
+          echo "LBE_MACOS_PREVIEW_T0=PASS"
+          echo "LBE_MACOS_POSITIVE_EXEC=NOT_RUN"
+          echo "LBE_MACOS_OS_CHILD_PIPE_SIGNAL_T1_T2_T3=NOT_RUN"
+          echo "LBE_MACOS_FIRMLINK_ACCEPTANCE_T1=NOT_RUN"
+          echo "LBE_USER_MAC_TUNNEL=NOT_RUN"
+          echo "CI_UNLISTED_IMPORTABLE_FILES=NOT_ASSESSED"
+          echo "NO_MERGE_NO_DEPLOY"

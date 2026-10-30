@@ -194,6 +194,17 @@ class LbeWorker:
                 raise LbeWorkerError("exec_state_unavailable") from None
             raise LbeWorkerError("exec_state_unavailable") from None
 
+        # A disconnect can arrive while preallocating the selector/reader.
+        # Recheck before invoking the only launcher callback. This is still
+        # a proven no-child path; release its reservation and pipe resources.
+        # Never start a new command for a waiter already observed as cancelled.
+        if cancelled is not None and cancelled.is_set():
+            try:
+                self._owner.spawn_failed(reservation)
+            except BaseException:
+                raise LbeWorkerError("exec_state_unavailable") from None
+            raise LbeWorkerError("waiter_disconnected")
+
         try:
             child = self._launcher(plan)
         except LbeNoChildStarted:

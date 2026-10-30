@@ -231,6 +231,50 @@ def test_early_cancellation_never_spawns_or_admits():
     owner.close()
 
 
+def test_cancellation_during_prelaunch_preallocation_never_calls_launcher(
+    monkeypatch,
+):
+    """Cancel after initial check but before spawn; release no-child lease."""
+    owner = DirectChildOwner()
+    cancel = threading.Event()
+    selector = FakeSelector()
+    launched = []
+
+    def allocate_then_cancel(capture):
+        reader = BoundedPipeDrain(
+            capture, selector_factory=lambda: selector,
+            read_fn=selector.read,
+            set_nonblocking=lambda fd, enabled: None,
+        )
+        # The first is_set() ran before this allocation callback.
+        cancel.set()
+        return reader
+
+    def no_native(*args, **kwargs):
+        raise AssertionError("No native child or process signal is allowed")
+
+    worker = LbeWorker(
+        owner, launcher=lambda work: launched.append(work),
+        drain_factory=allocate_then_cancel,
+    )
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", no_native)
+            m.setattr(os, "kill", no_native)
+            m.setattr(os, "killpg", no_native, raising=False)
+            with pytest.raises(LbeWorkerError) as error:
+                worker.run(plan(), cancelled=cancel)
+        assert error.value.code == "waiter_disconnected"
+        assert error.value.process_may_be_running is False
+        assert launched == []
+        assert selector.closed is True
+        assert owner.snapshot()["reserved_slots"] == 0
+        assert owner.snapshot()["running_direct_children"] == 0
+        assert owner.snapshot()["unavailable"] is False
+    finally:
+        owner.close()
+
+
 def test_disconnected_caller_keeps_owner_and_cleans_only_after_child_exit():
     fake = FakeChild()
     calls = []

@@ -12,6 +12,9 @@ on:
       - "tests/test_lbe_t1_go_stager.py"
       - "tools/lbe_p007_go_source_inventory.py"
       - "tests/test_lbe_p007_go_source_inventory.py"
+      - "tools/lbe_p008_https_source_fetch.py"
+      - "tests/test_lbe_p008_https_source_fetch.py"
+      - "docs/PR101_P008_PER_HOP_SOURCE_ORIGIN.md"
       - "docs/PR101_GO_P007_NONEXEC_SOURCE_INVENTORY.md"
       - "docs/PR101_LBE_NATIVE_TOOLCHAINS_T1_PROPOSAL.md"
       - "MANIFEST.sha256"
@@ -75,38 +78,27 @@ jobs:
           python3 -I -S tests/test_lbe_t1_source_qualifier.py
           python3 -I -S tests/test_lbe_t1_go_stager.py
           python3 -I -S tests/test_lbe_p007_go_source_inventory.py
+          python3 -I -S tests/test_lbe_p008_https_source_fetch.py
+          echo "LBE_P008_SOURCE_REDIRECT_ADVERSARIAL_T0=PASS"
           echo "LBE_P001_SOURCE_QUALIFIER_UNIT_T0=PASS"
           echo "LBE_P001_GO_NONEXEC_STAGE_UNIT_T0=PASS"
 
-      - name: Download exact P001 Go candidate archive into runner-owned scratch only
+      - name: Download exact Go archive with per-hop pre-contact origin checks
         shell: bash
         run: |
           set -euo pipefail
-          url="$(curl --fail --silent --show-error --location --retry 0 \
-            --proto '=https' --proto-redir '=https' --max-time 200 \
-            --max-filesize 70000000 --write-out '%{url_effective}' \
-            --output "$RUNNER_TEMP/go1.27.3.darwin-arm64.tar.gz" \
-            'https://go.dev/dl/go1.27.3.darwin-arm64.tar.gz')"
-          python3 -I -S - "$url" <<'PY'
-          import sys
-          from urllib.parse import urlparse
-          u = urlparse(sys.argv[1])
-          if u.scheme != "https" or u.hostname not in (
-              "go.dev", "dl.google.com", "storage.googleapis.com",
-          ):
-              raise SystemExit("Go source redirect outside approved HTTPS hosts")
-          print("LBE_P001_GO_DOWNLOAD_HOST=" + str(u.hostname))
-          PY
+          python3 -I -S tools/lbe_p008_https_source_fetch.py --kind go \
+            --runner-temp "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/lbe-p008-go-fetch.json"
+          echo "LBE_P001_GO_SOURCE_HOST_POLICY=PER_HOP_PRECONTACT"
 
       - name: Retrieve only pinned Pipenv wheel URL from official PyPI metadata
         shell: bash
         run: |
           set -euo pipefail
-          curl --fail --silent --show-error --location --retry 0 \
-            --proto '=https' --proto-redir '=https' --max-time 30 \
-            --max-filesize 1000000 \
-            --output "$RUNNER_TEMP/pipenv-2026.10.4-release.json" \
-            'https://pypi.org/pypi/pipenv/2026.10.4/json'
+          python3 -I -S tools/lbe_p008_https_source_fetch.py \
+            --kind metadata --runner-temp "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/lbe-p008-metadata-fetch.json"
           python3 -I -S - "$RUNNER_TEMP/pipenv-2026.10.4-release.json" \
               "$RUNNER_TEMP/pipenv-2026.10.4-url.txt" <<'PY'
           import json
@@ -134,23 +126,14 @@ jobs:
           print("LBE_P001_PIPENV_PYPI_METADATA_MATCH=PASS")
           PY
 
-      - name: Download only matched Pipenv wheel (no dependency resolution)
+      - name: Download pinned Pipenv Wheel with pre-contact HTTPS source guard
         shell: bash
         run: |
           set -euo pipefail
-          url="$(cat "$RUNNER_TEMP/pipenv-2026.10.4-url.txt")"
-          final="$(curl --fail --silent --show-error --location --retry 0 \
-            --proto '=https' --proto-redir '=https' --max-time 90 \
-            --max-filesize 6000000 --write-out '%{url_effective}' \
-            --output "$RUNNER_TEMP/pipenv-2026.10.4-py3-none-any.whl" "$url")"
-          python3 -I -S - "$final" <<'PY'
-          import sys
-          from urllib.parse import urlparse
-          u = urlparse(sys.argv[1])
-          if u.scheme != "https" or u.hostname != "files.pythonhosted.org":
-              raise SystemExit("Pipenv wheel download redirected outside approved host")
-          print("LBE_P001_PIPENV_DOWNLOAD_HOST=files.pythonhosted.org")
-          PY
+          python3 -I -S tools/lbe_p008_https_source_fetch.py \
+            --kind wheel --runner-temp "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/lbe-p008-wheel-fetch.json"
+          echo "LBE_P001_PIPENV_WHEEL_SOURCE_POLICY=PER_HOP_PRECONTACT"
 
       - name: Verify actual archive/wheel SHA, member safety and wheel RECORD without running binaries
         shell: bash

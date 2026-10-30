@@ -87,7 +87,10 @@ def native_scene(tmp_path: Path):
     }
     svc = WorkspaceService(
         parse_workspace_config(config), config_dir=private,
-        inventory=ActiveRuntimeInventory(paths=(runtime,)))
+        inventory=ActiveRuntimeInventory(paths=(runtime,)),
+        # Owner-authorized hosted disposable Python-only T1 is an explicit
+        # server-side fixture, never a schema-v2 public config permission.
+        _approved_python_t1_fixture=True)
     try:
         assert svc.info()["exec_policy"]["durability_state"] == "healthy"
         yield svc, root

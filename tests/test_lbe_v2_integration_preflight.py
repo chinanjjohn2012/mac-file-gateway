@@ -173,8 +173,8 @@ def test_v2_existing_healthy_state_previews_and_refuses_invalid_apply(scene, mon
     try:
         policy = svc.info()["exec_policy"]
         assert policy["durability_state"] == "healthy"
-        assert policy["available"] is True
-        assert policy["completion_capability"] == "best_effort"
+        assert policy["available"] is False
+        assert policy["completion_capability"] == "none"
         assert svc.any_exec is True
         assert svc.list_workspaces()["workspaces"][1]["exec"] is False
         preview = svc.invoke_exec("a", "python-project",
@@ -192,7 +192,7 @@ def test_v2_existing_healthy_state_previews_and_refuses_invalid_apply(scene, mon
                 svc.invoke_exec("a", "python-project",
                                 ["python", "-c", "print('blocked')"],
                                 dry_run=False)
-            assert exc.value.code == "command_not_allowed"
+            assert exc.value.code == "exec_cleanup_proof_required"
 
         with TestClient(create_multi_app(svc, enable_mcp=False),
                         base_url="http://127.0.0.1:8765") as client:
@@ -205,10 +205,10 @@ def test_v2_existing_healthy_state_previews_and_refuses_invalid_apply(scene, mon
             failed = client.post("/run", json={
                 **body, "argv": ["go", "run", "./..."], "dry_run": False})
             assert failed.status_code == 403
-            assert failed.json()["error"] == "command_not_allowed"
+            assert failed.json()["error"] == "exec_cleanup_proof_required"
             info = client.get("/health").json()["exec_policy"]
             assert info["mode"] == "local_best_effort"
-            assert info["available"] is True
+            assert info["available"] is False
         assert sorted(p.name for p in state.iterdir()) == before
     finally:
         svc.close()
@@ -449,8 +449,8 @@ def test_v2_python_invalid_worker_plan_is_sanitized_at_public_boundary(
             denied = client.post("/run", json={
                 "workspace": "a", "cwd": "default-project",
                 "argv": argv, "dry_run": False})
-            assert denied.status_code == 400
-            assert denied.json()["error"] == "invalid_argument"
+            assert denied.status_code == 403
+            assert denied.json()["error"] == "exec_cleanup_proof_required"
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
@@ -492,7 +492,7 @@ def test_v2_go_preview_is_direct_and_never_spawns(scene, monkeypatch, argv):
         with pytest.raises(GatewayError) as exc:
             svc.invoke_exec("a", "go-project", ["go", "run", "./..."],
                             dry_run=False)
-        assert exc.value.code == "command_not_allowed"
+        assert exc.value.code == "exec_cleanup_proof_required"
     finally:
         svc.close()
 
@@ -595,7 +595,7 @@ def test_v2_go_build_preview_rejects_linked_output(scene):
                 "argv": ["go", "build", "-o", "alias/child", "./cmd/server"],
                 "dry_run": False})
             assert denied.status_code == 403
-            assert denied.json()["error"] == "command_not_allowed"
+            assert denied.json()["error"] == "exec_cleanup_proof_required"
     finally:
         svc.close()
 
@@ -691,7 +691,7 @@ def test_v2_owner_status_tracks_fake_child_and_refuses_busy_apply(scene):
         assert policy["capacity_exhausted"] is False
         assert policy["owner_unavailable"] is False
         assert policy["available"] is False
-        assert policy["completion_capability"] == "best_effort"
+        assert policy["completion_capability"] == "none"
         assert "pid" not in str(policy).lower()
         assert "pgid" not in str(policy).lower()
 
@@ -703,8 +703,8 @@ def test_v2_owner_status_tracks_fake_child_and_refuses_busy_apply(scene):
             refused = client.post("/run", json={
                 "workspace": "a", "cwd": "go-project",
                 "argv": ["go", "build", "./..."], "dry_run": False})
-            assert refused.status_code == 409
-            assert refused.json()["error"] == "busy"
+            assert refused.status_code == 403
+            assert refused.json()["error"] == "exec_cleanup_proof_required"
         assert svc.invoke("b", "read_file", "safe.txt", 1, 5)["workspace"] == "b"
     finally:
         # Graceful close must not wait for or signal the simulated child.
@@ -783,8 +783,8 @@ def test_dormant_prepared_plans_use_real_v2_gateway_policies(scene, monkeypatch)
                 svc.invoke_exec(
                     "a", "go-project", ["go", "run", "./..."],
                     dry_run=False)
-            assert denied.value.code == "command_not_allowed"
-        assert svc.info()["exec_policy"]["available"] is True
+            assert denied.value.code == "exec_cleanup_proof_required"
+        assert svc.info()["exec_policy"]["available"] is False
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
@@ -874,11 +874,11 @@ def test_v2_go_preview_and_future_dormant_plan_share_exact_values(scene, args):
         assert public_preview["runner"] == plan.runner == "direct"
         assert public_preview["runner_project"] == plan.runner_project
         assert public_preview["mode"] == "local_best_effort"
-        assert svc.info()["exec_policy"]["available"] is True
+        assert svc.info()["exec_policy"]["available"] is False
         with pytest.raises(GatewayError) as error:
             svc.invoke_exec("a", "go-project", ["go", "run", "./..."],
                             dry_run=False)
-        assert error.value.code == "command_not_allowed"
+        assert error.value.code == "exec_cleanup_proof_required"
         assert not (a / "go-project" / "bin" / "tool").exists()
     finally:
         svc.close()
@@ -934,24 +934,12 @@ def test_v2_trusted_launcher_revalidates_go_and_pipenv_without_native_spawn(
                 ctx, cwd=cwd, argv=argv, timeout_seconds=5)
             assert plan.runner == expected_runner
             assert plan.effective_argv == expected_effective
-            with pytest.raises(SpawnIntercepted):
+            from gateway.lbe_worker import LbeNoChildStarted
+            with pytest.raises(LbeNoChildStarted, match="Go/Pipenv"):
                 make_trusted_lbe_launcher(ctx)(plan)
-        assert len(calls) == 1
-        command, opts = calls[0]
-        assert command == expected_effective
-        assert opts["cwd"] == str(a / cwd)
-        assert opts["stdin"] == subprocess.DEVNULL
-        assert opts["stdout"] == subprocess.PIPE
-        assert opts["stderr"] == subprocess.PIPE
-        assert opts["close_fds"] is True
-        assert opts["start_new_session"] is False
-        assert opts["env"]["PYTHONUNBUFFERED"] == "1"
-        assert "OPENAI_API_KEY" not in opts["env"]
-        if expected_runner == "pipenv":
-            assert opts["env"]["PIPENV_PIPFILE"] == str(
-                a / "python-project" / "Pipfile")
-        else:
-            assert "PIPENV_PIPFILE" not in opts["env"]
+        # CI source bytes are not the running service's executable PATH.
+        # Never consult even a fake Popen for unqualified Go/Pipenv.
+        assert calls == []
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
@@ -991,7 +979,8 @@ def test_v2_pipenv_runner_respects_workspace_excluded_pipfile(
                     svc.invoke_exec(
                         "a", "python-project", ["python", "hello.py"],
                         timeout_seconds=5, dry_run=dry)
-                assert err.value.code == "runner_unavailable"
+                assert err.value.code == (
+                    "runner_unavailable" if dry else "exec_cleanup_proof_required")
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
         assert svc._lbe_owner.snapshot()["unavailable"] is False
     finally:
@@ -1021,7 +1010,8 @@ def test_v2_pipenv_hardlinked_pipfile_denied_in_preview_and_real_preflight(
                     svc.invoke_exec(
                         "a", "python-project", ["python", "hello.py"],
                         timeout_seconds=5, dry_run=dry)
-                assert error.value.code == "runner_unavailable"
+                assert error.value.code == (
+                    "runner_unavailable" if dry else "exec_cleanup_proof_required")
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
         assert svc._lbe_owner.snapshot()["unavailable"] is False
     finally:

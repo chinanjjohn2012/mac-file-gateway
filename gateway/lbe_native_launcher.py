@@ -1,8 +1,9 @@
-"""Internal, non-public LBE original-child launcher for approved isolated T1.
+"""Internal LBE original-child launcher restricted to approved Python T1.
 
-This callable is not connected to the public WorkspaceService apply path.
-Only a trusted Worker holding its bounded reservation may call it. There is
-no default launcher, no shell, OS signal, killpg, retry, or descendant proof.
+Ordinary public schema-v2 apply is fail-closed in WorkspaceService. Its
+private hosted Python-only T1 fixture can reach this launcher; unqualified
+Go/Pipenv primary executions are denied immediately before Popen even for
+an internal plan. No shell, OS signal, retry or descendant-cleanup proof.
 """
 from __future__ import annotations
 
@@ -42,6 +43,16 @@ def make_trusted_lbe_launcher(ctx: "WorkspaceContext") -> Callable[[LbeWorkPlan]
             )
             if checked != plan:
                 raise LbeNoChildStarted("no child: plan changed")
+            # P001-P007 attest *separate CI source inputs*, not this running
+            # service's PATH, installed files, module cache or Pipenv venv.
+            # Never feed an unqualified Go/Pipenv primary into Popen even if
+            # an internal plan or test-only Python Worker reaches this launcher.
+            if (checked.runner == "pipenv"
+                    or (checked.effective_argv
+                        and checked.effective_argv[0] in {"go", "pipenv"})):
+                raise LbeNoChildStarted(
+                    "no child: Go/Pipenv executable and dependency identity "
+                    "not qualified at the real launch boundary")
             executor = ctx.gateway._executor
             if executor is None:
                 raise LbeNoChildStarted("no child: executor unavailable")

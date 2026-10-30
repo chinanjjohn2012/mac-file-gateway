@@ -27,6 +27,45 @@ _READ = frozenset({"list_files", "read_file", "search_files"})
 _WRITE = frozenset({"create_directory", "delete_directory", "create_file", "write_file",
                     "replace_text", "delete_file", "remove_file", "unlink", "rename", "move"})
 
+# This is an already owner-approved, hosted macOS 15 ARM64 Python-only T1
+# fixture, NOT a config grant or a general D0 positive-Exec exception.
+# A client request cannot supply this constructor-only flag or GH job identity.
+_LBE_HOSTED_T1_GRANT = "PR101_R002_MACOS15_ARM64_DISPOSABLE_PYTHON_ONLY"
+
+
+def _approved_hosted_python_t1(settings: GatewaySettings, config_dir: str | Path,
+                               explicit_test_fixture: bool) -> bool:
+    if explicit_test_fixture is not True or settings.schema_version != 2:
+        return False
+    required = {
+        "LBE_NATIVE_T1_AUTHORIZED": _LBE_HOSTED_T1_GRANT,
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_EVENT_NAME": "pull_request",
+        "GITHUB_REPOSITORY": "chinanjjohn2012/mac-file-gateway",
+        "GITHUB_HEAD_REF": "feat/multi-exec-lbe-v2-config-preflight-r001-20261030",
+        "GITHUB_BASE_REF": "rc/multi-exec-f1-g05-integrated-ms1-20261025",
+        "GITHUB_WORKFLOW": "PR101 authorized macOS ARM64 original child T1",
+        "RUNNER_OS": "macOS",
+        "RUNNER_ARCH": "ARM64",
+    }
+    if any(os.environ.get(key) != value for key, value in required.items()):
+        return False
+    raw_temp = os.environ.get("RUNNER_TEMP", "")
+    if not raw_temp:
+        return False
+    try:
+        scratch = Path(raw_temp)
+        if not scratch.is_absolute() or scratch.is_symlink():
+            return False
+        scratch = scratch.resolve(strict=True)
+        if (not scratch.is_dir()
+                or not Path(config_dir).resolve(strict=True).is_relative_to(scratch)):
+            return False
+        return all(Path(w.root).resolve(strict=True).is_relative_to(scratch)
+                   for w in settings.workspaces)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
 
 def _intersects(a: PinnedDirectory, b: PinnedDirectory) -> bool:
     """Detect the same or a nested directory through any ancestor route.
@@ -113,8 +152,14 @@ class WorkspaceService:
     """Immutable per-root Gateway objects; no global write lock or fallback."""
     def __init__(self, settings: GatewaySettings, *, config_dir: str | Path,
                  gateway_factory: Callable[..., Gateway] = Gateway,
-                 inventory: ActiveRuntimeInventory | None = None):
+                 inventory: ActiveRuntimeInventory | None = None,
+                 _approved_python_t1_fixture: bool = False):
         self.settings = settings
+        # False for every ordinary service, regardless of schema-v2 exec.paths.
+        # The sole exception is the explicit, separately approved, disposable
+        # GitHub-hosted Python-only T1 fixture (never a client/config field).
+        self._lbe_positive_authorized = _approved_hosted_python_t1(
+            settings, config_dir, _approved_python_t1_fixture)
         self._workspaces: dict[str, WorkspaceContext] = {}
         self._lifecycle = threading.Condition()
         self._active_operations = 0
@@ -331,10 +376,10 @@ class WorkspaceService:
     def _lbe_apply(ctx: WorkspaceContext, owner: DirectChildOwner,
                    cwd: str, argv: list[str],
                    timeout_seconds: int) -> dict[str, Any]:
-        """Draft v2 real apply through one owner-bound Worker, no bypass.
+        """Worker apply, reachable only from the approved hosted Python T1.
 
-        Public activation requires the independently reviewed PR to be
-        accepted; this Draft branch has no production deployment.
+        Ordinary schema-v2 public requests are denied before this method.
+        This is not an operative production D0 exception or security signoff.
         """
         from .lbe_plan import prepare_lbe_work_plan
         from .lbe_native_launcher import make_trusted_lbe_launcher
@@ -354,12 +399,14 @@ class WorkspaceService:
 
     def invoke_exec(self, name: str, cwd: str, argv: list[str],
                     timeout_seconds: int = 60, dry_run: bool = True) -> dict[str, Any]:
-        """One synchronous source of truth for v1 and approved weaker v2.
+        """One synchronous v1 and draft v2 admission boundary.
 
-        Historic v1 F1 always denies Exec apply; explicit operator-edited
-        schema v2 paths select the accepted best-effort direct-child mode.
-        Old private state/owner-lock/UNKNOWN and all Git/File grants remain
-        independent. No cleanup proof, PID signals or rollback are claimed.
+        Ordinary schema-v2 paths authorize preview only until the exact
+        D0 weaker-mode operative exception is approved. A separate hosted
+        Python-only, disposable CI fixture uses an explicit constructor
+        capability and fixed runner identity; no client/config may mint it.
+        Old private state/owner-lock/UNKNOWN and File/Git remain independent.
+        No cleanup proof, PID signals or rollback are claimed.
         """
         with self._lifecycle:
             ctx = self.require_exec(name)
@@ -378,6 +425,15 @@ class WorkspaceService:
                 raise GatewayError(
                     "exec_cleanup_proof_required",
                     "Exec apply is unavailable without independently reviewed full-descendant cleanup proof.")
+            if (not dry_run and self.settings.schema_version == 2
+                    and not self._lbe_positive_authorized):
+                # No exact operative D0 exception was approved. A public v2
+                # paths-only grant cannot activate _lbe_apply/Popen, regardless
+                # of REST/MCP/direct caller input, capacity or runner choice.
+                raise GatewayError(
+                    "exec_cleanup_proof_required",
+                    "Schema-v2 Exec apply needs separately approved operative "
+                    "authority; configured paths permit preview only.")
             if name in self._exec_active or len(self._exec_active) >= 4:
                 raise GatewayError("busy", "A controlled command already occupies this execution slot.")
             self._exec_active.add(name)
@@ -497,7 +553,7 @@ class WorkspaceService:
                 and not lbe_state["unavailable"]
                 and not lbe_state["closing"])
             v2_available = bool(
-                v2_state_healthy and
+                v2_state_healthy and self._lbe_positive_authorized and
                 self._lbe_owner.can_admit_any(eligible_names))
             return {"name": "Mac File Gateway", "version": "2.5.0", "mode": "multi",
                     "workspace_count": len(self._workspaces),
@@ -517,7 +573,9 @@ class WorkspaceService:
                         "enabled": self.settings.exec_enabled,
                         "available": v2_available if is_v2 else False,
                         "completion_capability": (
-                            "best_effort" if v2_state_healthy else "none"),
+                            "best_effort" if (v2_state_healthy
+                                              and self._lbe_positive_authorized)
+                            else "none"),
                         "adapter_exposed": self._exec_adapter_exposed,
                         "durability_state": durability,
                         "quarantined": durability == "quarantined",

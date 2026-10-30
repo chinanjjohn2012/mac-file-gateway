@@ -1,8 +1,8 @@
-"""Consolidated LBE v2 PREVIEW-ONLY wiring and old-state fail-closed T0.
+"""Schema-v2 preview / native-launch boundary T0 and old-state denial.
 
-No native child, signal, real command, user Mac, Tunnel, or operative D0
-exception is not exercised here. V1 retains F1 DENY; V2 positive
-runs only in separately authorized real-process tests, never in this T0.
+Only mocked/fake Popen callbacks are used in this module; no real native
+child, OS signal, user Mac or Tunnel. Schema v1 retains F1 deny-only. The
+separate authorized macOS T1 job proves limited real-process paths.
 """
 from __future__ import annotations
 
@@ -779,3 +779,139 @@ def test_v2_go_preview_and_future_dormant_plan_share_exact_values(scene, args):
     finally:
         svc.close()
 
+
+
+@pytest.mark.parametrize("cwd,argv,expected_effective,expected_runner", [
+    ("python-project", ["python", "hello.py"],
+     ("pipenv", "run", "python", "hello.py"), "pipenv"),
+    ("go-project", ["go", "test", "./..."],
+     ("go", "test", "./..."), "direct"),
+    ("go-project", ["go", "vet", "-trimpath", "./..."],
+     ("go", "vet", "-trimpath", "./..."), "direct"),
+    ("go-project", ["go", "build", "./cmd/service"],
+     ("go", "build", "./cmd/service"), "direct"),
+    ("go-project", ["go", "build", "-o=bin/service", "./cmd/service"],
+     ("go", "build", "-o=bin/service", "./cmd/service"), "direct"),
+])
+def test_v2_trusted_launcher_revalidates_go_and_pipenv_without_native_spawn(
+    scene, monkeypatch, cwd, argv, expected_effective, expected_runner,
+):
+    """T0 spy inspects the exact pre-Popen contract, not a real Go/Pipenv run."""
+    from gateway.lbe_native_launcher import make_trusted_lbe_launcher
+    from gateway.lbe_plan import prepare_lbe_work_plan
+
+    a, b, _private, _runtime = scene
+    (a / "go-project" / "bin").mkdir()
+    prime_existing_state(scene)
+    # Go MUST remain Direct even with a Pipfile and configured Pipenv runner.
+    cfg = v2_config(
+        a, b, runners=["python-project=pipenv", "go-project=pipenv"])
+    svc = service(scene, cfg)
+    calls = []
+
+    class SpawnIntercepted(Exception):
+        pass
+
+    def no_spawn(command, **kwargs):
+        calls.append((tuple(command), kwargs))
+        raise SpawnIntercepted
+
+    def no_signal(*args, **kwargs):
+        raise AssertionError("T0 may not signal an operating-system process")
+
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", no_spawn)
+            m.setattr(os, "kill", no_signal)
+            m.setattr(os, "killpg", no_signal, raising=False)
+            m.setenv("OPENAI_API_KEY", "T0_FAKE_NOT_A_REAL_SECRET")
+            ctx = svc.require_exec("a")
+            plan = prepare_lbe_work_plan(
+                ctx, cwd=cwd, argv=argv, timeout_seconds=5)
+            assert plan.runner == expected_runner
+            assert plan.effective_argv == expected_effective
+            with pytest.raises(SpawnIntercepted):
+                make_trusted_lbe_launcher(ctx)(plan)
+        assert len(calls) == 1
+        command, opts = calls[0]
+        assert command == expected_effective
+        assert opts["cwd"] == str(a / cwd)
+        assert opts["stdin"] == subprocess.DEVNULL
+        assert opts["stdout"] == subprocess.PIPE
+        assert opts["stderr"] == subprocess.PIPE
+        assert opts["close_fds"] is True
+        assert opts["start_new_session"] is False
+        assert opts["env"]["PYTHONUNBUFFERED"] == "1"
+        assert "OPENAI_API_KEY" not in opts["env"]
+        if expected_runner == "pipenv":
+            assert opts["env"]["PIPENV_PIPFILE"] == str(
+                a / "python-project" / "Pipfile")
+        else:
+            assert "PIPENV_PIPFILE" not in opts["env"]
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+
+
+def test_v2_pipenv_hardlinked_pipfile_denied_in_preview_and_real_preflight(
+    scene, monkeypatch,
+):
+    """No false-success preview for an untrusted two-link Pipfile."""
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    pipfile = a / "python-project" / "Pipfile"
+    spare = a / "python-project" / "Pipfile-copy"
+    os.link(pipfile, spare)
+    assert pipfile.stat().st_nlink == 2
+
+    def no_spawn(*args, **kwargs):
+        raise AssertionError("Hardlinked Pipfile must not reach Popen")
+
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", no_spawn)
+            for dry in (True, False):
+                with pytest.raises(GatewayError) as error:
+                    svc.invoke_exec(
+                        "a", "python-project", ["python", "hello.py"],
+                        timeout_seconds=5, dry_run=dry)
+                assert error.value.code == "runner_unavailable"
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+        assert svc._lbe_owner.snapshot()["unavailable"] is False
+    finally:
+        svc.close()
+
+
+def test_v2_go_output_symlink_inserted_after_preview_blocks_launcher(
+    scene, monkeypatch,
+):
+    """A valid preview does not authorize a newly replaced Go output."""
+    from gateway.lbe_native_launcher import make_trusted_lbe_launcher
+    from gateway.lbe_plan import prepare_lbe_work_plan
+    from gateway.lbe_worker import LbeNoChildStarted
+
+    a, b, _private, _runtime = scene
+    project = a / "go-project"
+    (project / "bin").mkdir()
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+
+    def no_spawn(*args, **kwargs):
+        raise AssertionError("Unsafe output leaf must not reach Popen")
+
+    try:
+        ctx = svc.require_exec("a")
+        plan = prepare_lbe_work_plan(
+            ctx, cwd="go-project",
+            argv=["go", "build", "-o", "bin/service", "./cmd/service"],
+            timeout_seconds=5)
+        (project / "bin" / "service").symlink_to("../Pipfile")
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", no_spawn)
+            with pytest.raises(LbeNoChildStarted):
+                make_trusted_lbe_launcher(ctx)(plan)
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+        assert svc._lbe_owner.snapshot()["unavailable"] is False
+    finally:
+        svc.close()

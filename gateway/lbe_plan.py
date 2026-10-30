@@ -1,19 +1,16 @@
-"""Dormant v2 command plan preparation using the *real* Workspace policy.
+"""Shared schema-v2 command plan validation for preview AND real apply.
 
-Only creates an immutable, source-validated preview plan. This is NOT an
-Exec authorization, an alternative service entry point, or a callable real
-Popen launcher. The only public route, WorkspaceService.invoke_exec, still
-denies every dry_run=False request before any child or journal mutation.
-
-A future authorized shared service will have to repeat operative v2/D0
-owner-lock, quarantine, capacity, pinned-FD and race checks immediately
-before live spawn. The checks here are a T0 preflight, not host isolation.
+The plan itself grants no authority: WorkspaceService performs the old-state
+and per-Workspace gates before calling this validator, and the private
+launcher rechecks paths and arguments immediately before native Popen.
+No plan, path or runner validation is a host sandbox or descendant proof.
 """
 from __future__ import annotations
 
+import stat
 from typing import TYPE_CHECKING
 
-from .core import GatewayError
+from .core import GatewayError, _parts
 from .executor import _canonical, _clean_argv
 from .lbe_go_policy import GoPolicyError, validate_go_command
 from .lbe_worker import LbeWorkPlan
@@ -64,6 +61,25 @@ def prepare_lbe_work_plan(
         effective = tuple(preview["effective_argv"])
         selected_runner = preview["runner"]
         runner_project = preview["runner_project"]
+        if selected_runner == "pipenv":
+            # The private launcher requires a single-link regular Pipfile
+            # immediately before Popen. Make the public preview reject the
+            # same unsafe static input, rather than advertising a plan that
+            # apply would inevitably deny. This is V2-only; v1 is unchanged.
+            pipfile = ctx.gateway._root_path.joinpath(
+                *_parts(runner_project), "Pipfile")
+            try:
+                metadata = pipfile.stat(follow_symlinks=False)
+            except OSError:
+                raise GatewayError(
+                    "runner_unavailable",
+                    "Configured Pipenv runner requires a safe Pipfile.",
+                ) from None
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise GatewayError(
+                    "runner_unavailable",
+                    "Configured Pipenv runner requires a safe Pipfile.",
+                )
 
     plan = LbeWorkPlan(
         workspace=ctx.name,
@@ -74,8 +90,8 @@ def prepare_lbe_work_plan(
         runner_project=runner_project,
         timeout_seconds=timeout_seconds,
     )
-    # Both caller- and worker-side shape checks stay active. Neither is an
-    # authority grant; actual apply still prohibited by operative F1.
+    # Both caller- and worker-side shape checks stay active. Neither check
+    # grants Exec or bypasses the existing private state/admission gates.
     from .lbe_worker import LbeWorker, LbeWorkerError
 
     try:

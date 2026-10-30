@@ -5,6 +5,7 @@ deb25674f304104b8e41cf70e1431c1b7bdc18943f4e1aedf7610f95171f6d7c  ./.github/work
 67e5e58ee2e27b8d490299d7b96c9da52ba2c902f83a2f08bf1d581c24094140  ./.github/workflows/multi-exec-f1-rc-macos-arm64.yml
 985e64d8fe31e56947159ae051e28276e7988ad187d639eada40b1f166bad3dc  ./.github/workflows/multi-exec-g05-macos-arm64.yml
 40525a507667475cea9c93ba788ed3993b5b866e5f0ffe017c83c8f3b4214afc  ./.github/workflows/multi-exec-lbe-ci-macos-arm64.yml
+e94090d0e47592f422a893e2fd8f006f38259bc6692396c6f60c3bfd6e52f176  ./.github/workflows/multi-exec-lbe-native-t1-macos-arm64.yml
 39a893579443f680cb1bf15765e81b6edc220bfd56bebe1964479f6ff1c55cbb  ./.github/workflows/multi-exec-lbe-product-preview-macos-arm64.yml
 93a05fb6b9560073be015aae929d192781084e148887aba1ef31a3711df5cfc2  ./.github/workflows/multi-exec-macos-lifecycle.yml
 a1706a650e6f2804a1fd99187d85bae93267ca0e04744805ab7c6c28a44cd08f  ./.github/workflows/multi-exec-r1-red.yml
@@ -82,6 +83,7 @@ af26bca463fdb80608e6d36b97b15ee5498ed4db9f4666e923eca735b4bd0f6d  ./gateway/http
 53d54ea629c6710712f9b6ed3b1d914455542e449022254bd2fe36e0e076b56d  ./gateway/lbe_config_policy.py
 33f9399e21422fd55458124f37f7ed127876e28775b95f8ae5aaac9ba3985bbc  ./gateway/lbe_direct_owner.py
 3f0f8e4857b3c7447249aef935a7c4dde2c6eca45662b53eec4e7d8dc8c43b27  ./gateway/lbe_go_policy.py
+df9ab3523f0d3f2770f0543935dd8f3145078a2ebf3b4d38b1276acff309aa62  ./gateway/lbe_native_launcher.py
 c69f33bd131c00479eb34aabd77b9fd58da5abe97d761a1753d890501ff63b72  ./gateway/lbe_output_capture.py
 0f2e772da6269ed309fd21ad615f435e296ad44d317cc2a7f823e9adf6cb9be6  ./gateway/lbe_pipe_drain.py
 3e3bf44fdaa0fb42645166ae62c8c6f6d5659ac29c07fab3e3a4c47d86b395fc  ./gateway/lbe_plan.py
@@ -171,6 +173,7 @@ cc3c360f278490604beb8b57b03d7ba7e811e5b00bda65c2df684db5002af7ec  ./tests/test_h
 6814488cb2cebe02685b30fd039db68eb4679b9e68252703222a0ea6d14c8879  ./tests/test_lbe_config_policy.py
 ae0269a1bc984ab6a71f4912f9da0b105ad442049d68ead16eb542ae00e2a8f8  ./tests/test_lbe_direct_owner.py
 4d776042a48a1f5d18b73e1b8714caf4181eb9d88349c76d8f96b24d5dbd23da  ./tests/test_lbe_go_policy.py
+7fda0a12a9c15df41d22a53c7f239ba7b573a42cc48f68893f4fa96d0f2eaaaa  ./tests/test_lbe_native_t1.py
 ad29f889f60a3c998b1199b38e9ba8c2e1e56b112892961583744c387119b4ec  ./tests/test_lbe_output_capture.py
 4d3b8def79b7f17deec53c161ff72e338441f129fd0b2d61aa2595166dae9ce4  ./tests/test_lbe_pipe_drain.py
 6af6706c2c76a194485636dab3d6b1534cc7f1d9ce4e59af6bd9111bd18f6f05  ./tests/test_lbe_v2_integration_preflight.py

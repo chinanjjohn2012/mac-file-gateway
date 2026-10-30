@@ -320,7 +320,7 @@ class WorkspaceService:
             "output_limit_chars": _MAX_OUTPUT_CHARS,
             "content_trust": "untrusted_command_output",
             "status": "preview",
-            "mode": "preview_only",
+            "mode": "local_best_effort",
             "output_complete": True,
             "process_may_be_running": False,
             "cleanup_proven": False,

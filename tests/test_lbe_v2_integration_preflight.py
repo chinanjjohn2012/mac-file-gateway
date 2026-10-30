@@ -356,7 +356,7 @@ def test_v2_python_public_preview_uses_future_worker_plan(
         assert list(plan.effective_argv) == direct["effective_argv"]
         assert plan.runner == direct["runner"] == selected_runner
         assert plan.runner_project == direct["runner_project"]
-        assert direct["mode"] == "preview_only"
+        assert direct["mode"] == "local_best_effort"
         assert direct["status"] == "preview"
         assert direct["executed"] is False
         assert direct["cleanup_proven"] is False
@@ -483,7 +483,7 @@ def test_v2_go_preview_is_direct_and_never_spawns(scene, monkeypatch, argv):
         assert result["runner"] == "direct"
         assert result["executed"] is False
         assert result["status"] == "preview"
-        assert result["mode"] == "preview_only"
+        assert result["mode"] == "local_best_effort"
         assert result["process_may_be_running"] is False
         assert result["cleanup_proven"] is False
         assert result["output_complete"] is True
@@ -871,7 +871,7 @@ def test_v2_go_preview_and_future_dormant_plan_share_exact_values(scene, args):
         assert public_preview["effective_argv"] == list(plan.effective_argv)
         assert public_preview["runner"] == plan.runner == "direct"
         assert public_preview["runner_project"] == plan.runner_project
-        assert public_preview["mode"] == "preview_only"
+        assert public_preview["mode"] == "local_best_effort"
         assert svc.info()["exec_policy"]["available"] is True
         with pytest.raises(GatewayError) as error:
             svc.invoke_exec("a", "go-project", ["go", "run", "./..."],

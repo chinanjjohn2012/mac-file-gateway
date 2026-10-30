@@ -38,7 +38,9 @@ class CandidatePublicMetadataT0(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        # macOS /var may be a symlink to /private/var. The production
+        # runner-temp guard is strict; canonicalize only this fake T0 root.
+        self.root = Path(self.tmp.name).resolve(strict=True)
         self.dir = self.root / "p002-json"
         self.dir.mkdir()
         self.rows = read_lock(LOCK)

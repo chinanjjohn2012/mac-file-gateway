@@ -151,6 +151,8 @@ def inspect_release(entry: dict[str, str], data: dict) -> dict:
                 not u.path.endswith("/" + filename) or
                 ".." in u.path or "\\" in u.path):
             raise SourceMetadataError("wheel URL not official HTTPS identity")
+    except SourceMetadataError:
+        raise
     except ValueError as exc:
         raise SourceMetadataError("malformed official wheel URL") from exc
     reqs = info.get("requires_dist")

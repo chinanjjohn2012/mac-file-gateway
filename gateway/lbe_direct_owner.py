@@ -1,7 +1,8 @@
 """Dormant in-memory ownership for original direct children in proposed LBE V1.
 
-This module is *not* imported by the running Gateway and never starts or
-signals an operating-system process. An eventual authorized Worker must
+This module is initialized only as a dormant v2 service-owned ledger:
+it never starts, binds or signals a real OS process in the current Gateway.
+An eventual authorized Worker must
 separately enforce the approved operator grant, pinned Workspace/cwd and old
 private-state admission BEFORE invoking the owner. Tests inject fake children;
 a fake wait() is not native process or descendants cleanup evidence.

@@ -1,0 +1,56 @@
+{
+  "proposal_id": "PR101-PIPENV-T1-P002-METADATA-ONLY-CANDIDATE",
+  "contract": "P001 user-approved Go/Pipenv T1 test scope; unknown additional artifact bytes NOT_APPROVED",
+  "target": "GitHub-hosted macOS 15 ARM64 / CPython 3.13",
+  "status": "PUBLIC_PYPI_METADATA_CANDIDATES_ONLY_NO_ARTIFACT_DOWNLOAD_NO_INSTALL_NO_EXECUTION",
+  "existing_36_wheel_lock_reuse": [
+    "certifi==2026.10.23",
+    "packaging==26.3"
+  ],
+  "pipenv_wheel": "pipenv-2026.10.4-py3-none-any.whl",
+  "virtualenv_21_14_minimal_is_not_automatically_approved": true,
+  "additional_wheels": [
+    {
+      "name": "distlib",
+      "version": "0.4.4",
+      "filename": "distlib-0.4.4-py2.py3-none-any.whl",
+      "sha256": "cf09d55b1e85a89576b036aeb71550bfd68320f3f21761ca329eadadad918638",
+      "publication_provenance": "NOT_PRESENT_IN_PYPI_UI"
+    },
+    {
+      "name": "filelock",
+      "version": "4.2.4",
+      "filename": "filelock-4.2.4-py3-none-any.whl",
+      "sha256": "301241438c57936ef93f4243a94f2559022268bfcf9b375a9a72eb0f8db8358e",
+      "publication_provenance": "PYPI_PUBLISH_ATTESTATION_SHOWN_NOT_INDEPENDENTLY_VERIFIED"
+    },
+    {
+      "name": "platformdirs",
+      "version": "4.11.10",
+      "filename": "platformdirs-4.11.10-py3-none-any.whl",
+      "sha256": "973c4c082b964958c71588448488d2b14fb253893dfbdb82325a14c84e540e8f",
+      "publication_provenance": "PYPI_PUBLISH_ATTESTATION_SHOWN_NOT_INDEPENDENTLY_VERIFIED"
+    },
+    {
+      "name": "python-discovery",
+      "version": "1.6.1",
+      "filename": "python_discovery-1.6.1-py3-none-any.whl",
+      "sha256": "d43fcdef879fe795352bd13ccf8d185ba5a9f86f36cfcd00529f596e737442b3",
+      "publication_provenance": "PYPI_PUBLISH_ATTESTATION_SHOWN_NOT_INDEPENDENTLY_VERIFIED"
+    },
+    {
+      "name": "setuptools",
+      "version": "84.2.1",
+      "filename": "setuptools-84.2.1-py3-none-any.whl",
+      "sha256": "ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2",
+      "publication_provenance": "NOT_PRESENT_IN_PYPI_UI"
+    },
+    {
+      "name": "virtualenv",
+      "version": "21.15.0",
+      "filename": "virtualenv-21.15.0-py3-none-any.whl",
+      "sha256": "013eb9c340466186ac8923ce920ae05becfa1390fdf3565b7eae0d191a2f4a2e",
+      "publication_provenance": "PYPI_PUBLISH_ATTESTATION_SHOWN_NOT_INDEPENDENTLY_VERIFIED"
+    }
+  ]
+}

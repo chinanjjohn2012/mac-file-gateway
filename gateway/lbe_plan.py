@@ -68,8 +68,16 @@ def prepare_lbe_work_plan(
             # immediately before Popen. Make the public preview reject the
             # same unsafe static input, rather than advertising a plan that
             # apply would inevitably deny. This is V2-only; v1 is unchanged.
-            pipfile = ctx.gateway._root_path.joinpath(
-                *_parts(runner_project), "Pipfile")
+            pipfile_parts = (*_parts(runner_project), "Pipfile")
+            # This runner input must honor the Gateway path denylist and
+            # Workspace excludes, just as source scripts and Go outputs do.
+            # The subprocess remains operator-trusted code, not sandboxed.
+            if not ctx.gateway._allowed(pipfile_parts, is_file=False):
+                raise GatewayError(
+                    "runner_unavailable",
+                    "Configured Pipenv runner requires an allowed Pipfile.",
+                )
+            pipfile = ctx.gateway._root_path.joinpath(*pipfile_parts)
             try:
                 metadata = pipfile.stat(follow_symlinks=False)
             except OSError:

@@ -200,7 +200,9 @@ def test_v2_existing_healthy_state_previews_and_denies_apply(scene, monkeypatch)
             assert res.json()["runner"] == "direct"
             assert res.json()["executed"] is False
             failed = client.post("/run", json={**body, "dry_run": False})
-            assert failed.status_code == 403
+            # Preserve the existing F1 REST error mapping: proof-denial
+            # reports 503, not a newly invented v2-specific 403.
+            assert failed.status_code == 503
             assert failed.json()["error"] == "exec_cleanup_proof_required"
             info = client.get("/health").json()["exec_policy"]
             assert info["mode"] == "preview_only"

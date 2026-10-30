@@ -378,7 +378,9 @@ def test_v2_preview_mode_consistent_direct_rest_and_official_mcp(
 
     try:
         with monkeypatch.context() as m:
-            m.setattr(subprocess, "Popen", no_process)
+            # Preserve the real Popen class for MCP SDK Popen[bytes] import
+            # annotations while prohibiting every subprocess construction.
+            m.setattr(subprocess.Popen, "__init__", no_process)
             m.setattr(os, "kill", no_process)
             m.setattr(os, "killpg", no_process, raising=False)
             args = {"workspace": "a", "cwd": "python-project",

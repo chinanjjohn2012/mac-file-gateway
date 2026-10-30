@@ -395,3 +395,51 @@ def test_read_completion_before_parent_exit_does_not_reserve_retired_reader():
     owner.spawn_failed(token2)
     owner.close()
 
+
+
+@pytest.mark.parametrize("caller_callback", ["none", "raises"])
+def test_owner_fault_latch_is_mandatory_even_without_caller_callback(caller_callback):
+    owner = DirectChildOwner()
+    token = owner.reserve("a")
+
+    def caller_failure():
+        raise RuntimeError("optional observer failure")
+
+    callback = caller_failure if caller_callback == "raises" else None
+    drain, _sel, _capture, _calls = create(on_fault=callback)
+    owner.prepare_pipe_drain(token, drain)
+    # Simulated post-spawn pipe setup fault must not free the reservation,
+    # and cannot be suppressed by a missing or throwing optional callback.
+    with pytest.raises(LbePipeError, match="pipe_setup_unavailable"):
+        drain.attach(FakePipe(71), FakePipe(71))
+    assert owner.snapshot()["unavailable"] is True
+    assert owner.snapshot()["reserved_slots"] == 1
+    with pytest.raises(LbeOwnerError, match="exec_state_unavailable"):
+        owner.reserve("b")
+    owner.close()
+
+
+def test_selector_is_closed_if_preallocated_reader_thread_construction_fails(monkeypatch):
+    from gateway import lbe_pipe_drain as pipe_module
+
+    selector = FakeSelector()
+    def fail_thread(*args, **kwargs):
+        raise RuntimeError("preallocated thread failure")
+
+    with monkeypatch.context() as m:
+        m.setattr(pipe_module.threading, "Thread", fail_thread)
+        with pytest.raises(LbePipeError, match="pipe_setup_unavailable"):
+            BoundedPipeDrain(BoundedCapture(), selector_factory=lambda: selector)
+    assert selector.closed is True
+
+
+def test_fault_latch_cannot_be_registered_after_reader_started():
+    drain, sel, _capture, _calls = create()
+    drain.attach(*fake_pipes())
+    with pytest.raises(LbePipeError, match="invalid_pipe_state"):
+        drain.add_fault_callback(lambda: None)
+    sel.put(71, b"")
+    sel.put(72, b"")
+    assert drain.wait_finished(2)
+    assert drain.snapshot()["output_complete"] is True
+

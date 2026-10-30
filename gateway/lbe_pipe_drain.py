@@ -52,11 +52,14 @@ class BoundedPipeDrain:
         set_nonblocking: Callable[[int, bool], None] = os.set_blocking,
         clock: Callable[[], float] = time.monotonic,
         eof_grace: float = _EOF_GRACE_SECONDS,
+        on_fault: Callable[[], None] | None = None,
     ) -> None:
         if type(capture) is not BoundedCapture:
             raise LbePipeError("invalid_capture")
         if type(eof_grace) not in (int, float) or not 0 <= eof_grace <= 1:
             raise LbePipeError("invalid_eof_grace")
+        if on_fault is not None and not callable(on_fault):
+            raise LbePipeError("invalid_fault_callback")
         # Resource allocation before any future child can be launched.
         self._selector = selector_factory()
         self._thread = threading.Thread(
@@ -66,6 +69,7 @@ class BoundedPipeDrain:
         self._set_nonblocking = set_nonblocking
         self._clock = clock
         self._eof_grace = float(eof_grace)
+        self._on_fault = on_fault
         self._original_exited = threading.Event()
         self._done = threading.Event()
         self._mutex = threading.Lock()
@@ -103,7 +107,23 @@ class BoundedPipeDrain:
                 self._fault = True
                 self._release_resources()
                 self._done.set()
-                raise LbePipeError("pipe_setup_unavailable") from None
+        # Post-spawn attachment failures must independently latch the owner,
+        # never release a possibly live original-child slot.
+        self._signal_fault()
+        raise LbePipeError("pipe_setup_unavailable")
+
+    @property
+    def attached(self) -> bool:
+        with self._mutex:
+            return self._armed and not self._fault
+
+    def _signal_fault(self) -> None:
+        # Fault callback must be no-throw, and cannot signal OS identities.
+        if self._on_fault is not None:
+            try:
+                self._on_fault()
+            except BaseException:
+                pass
 
     def note_original_exit(self) -> None:
         """May be called by a trusted reaper only, never by a REST/MCP user."""
@@ -163,6 +183,8 @@ class BoundedPipeDrain:
             with self._mutex:
                 self._release_resources()
             self._done.set()
+            if self._fault:
+                self._signal_fault()
 
     def abandon_without_child(self) -> None:
         """Release preallocated resources when spawn did not occur."""

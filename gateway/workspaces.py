@@ -296,27 +296,23 @@ class WorkspaceService:
         This helper never calls Popen. No positive Go admission is permitted
         by F1, including through REST or the official MCP SDK.
         """
-        from .lbe_go_policy import GoPolicyError, validate_go_command
-        from .executor import _MAX_OUTPUT_CHARS, _canonical
-        if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 300:
-            raise GatewayError("invalid_argument", "Invalid timeout_seconds.")
-        try:
-            plan = validate_go_command(
-                argv, workspace_root=ctx.gateway._root_path,
-                cwd=cwd, exec_paths=ctx.settings.exec_paths,
-            )
-        except GoPolicyError:
+        from .lbe_plan import prepare_lbe_work_plan
+        from .executor import _MAX_OUTPUT_CHARS
+        # The nonoperative public preview and future *reviewed* positive
+        # Worker must use the SAME Go argv/output/cwd preparation logic.
+        # No second client-visible grant or positive process entry is added.
+        plan = prepare_lbe_work_plan(
+            ctx, cwd=cwd, argv=argv, timeout_seconds=timeout_seconds)
+        if plan.requested_argv[:2] != ("go", "build"):
             raise GatewayError("command_not_allowed",
-                               "Go command or output is not allowed.") from None
-        # Revalidate cwd through the existing no-follow Gateway permission gate.
-        cwd_parts, _ = ctx.gateway._executor._cwd(cwd)
-        requested = list(plan.argv)
+                               "Only Go build uses this preview path.")
+        requested = list(plan.requested_argv)
         return {
-            "cwd": _canonical(cwd_parts),
+            "cwd": plan.cwd,
             "requested_argv": requested,
             "effective_argv": requested.copy(),
             "runner": "direct",
-            "runner_project": _canonical(cwd_parts),
+            "runner_project": plan.runner_project,
             "dry_run": True,
             "executed": False,
             "exit_code": None,

@@ -13,6 +13,9 @@ on:
       - "tools/lbe_pipenv_p005_closure.py"
       - "tests/test_lbe_pipenv_p005_closure.py"
       - "docs/PR101_PIPENV_P005_BASE_MARKER_GRAPH.md"
+      - "tools/lbe_pipenv_p006_source_inventory.py"
+      - "tests/test_lbe_pipenv_p006_source_inventory.py"
+      - "docs/PR101_PIPENV_P006_SOURCE_INVENTORY.md"
       - "ci/lbe-pipenv-p002-metadata-candidates.json"
       - "ci/wheel-locks/macos-15-arm64-3.13.sha256"
       - "docs/PR101_PIPENV_P004_OFFLINE_IMPORT.md"
@@ -80,7 +83,8 @@ jobs:
           python3 -I -S tests/test_lbe_pipenv_p002_metadata.py
           python3 -I -S tests/test_lbe_pipenv_p003_wheel_bytes.py
           python3 -I -S tests/test_lbe_pipenv_p004_import_probe.py
-          echo "LBE_P004_OFFLINE_ADVERSARIAL_T0=PASS"
+          python3 -I -S tests/test_lbe_pipenv_p006_source_inventory.py
+          echo "LBE_P004_P006_OFFLINE_ADVERSARIAL_T0=PASS"
 
       - name: Setup Python 3.13 only after G05 and adversarial tests
         uses: actions/setup-python@v5
@@ -199,6 +203,18 @@ jobs:
           test -s "$RUNNER_TEMP/lbe-p005-base-graph-source-evidence.json"
           echo "LBE_P005_BASE_DECLARED_RUNTIME_MARKERS=EVALUATED"
           echo "LBE_P005_NO_PIPENV_INSTALL_EXEC_OR_GO_NATIVE"
+
+      - name: P006 inventory all nine source-locked Wheel byte hashes and review hints
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$RUNNER_TEMP/lbe-p005-base-graph-source-evidence.json"
+          python -I -S tools/lbe_pipenv_p006_source_inventory.py \
+            --runner-temp "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/lbe-p006-nine-wheel-review-inventory.json"
+          echo "LBE_P006_SOURCE_INVENTORY_COMPLETE=TRUE"
+          echo "LBE_P006_REVIEW_SAFETY_VERDICT=NOT_ASSESSED"
+          echo "LBE_P006_PRIMARY_PIPENV_OR_GO_EXEC=NOT_RUN"
 
       - name: Recheck source wheel SHA and exact HEAD status; no production claims
         shell: bash

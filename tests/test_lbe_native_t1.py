@@ -390,6 +390,74 @@ def test_public_timeout_retains_original_slot_but_other_workspace_can_execute(
     assert svc.info()["exec_policy"]["available"] is True
 
 
+def test_real_rest_timeout_preserves_slot_and_official_mcp_denies_repeat(
+    native_scene,
+):
+    """One original child remains owned after an HTTP timeout; no replay.
+
+    Use only the already-authorized, naturally exiting 2.8-second Python
+    fixture, a 1-second request timeout, and the already-pinned official
+    SDK over in-process ASGI. No external TCP, kill, or new toolchain.
+    """
+    from starlette.testclient import TestClient
+    from gateway.http_multi import create_multi_app
+
+    svc, _root = native_scene
+    headers = {"Accept": "application/json, text/event-stream",
+               "Content-Type": "application/json"}
+    hold = {"workspace": "a", "cwd": "python-project",
+            "argv": ["python", "hold.py"], "timeout_seconds": 1,
+            "dry_run": False}
+    with TestClient(create_multi_app(svc),
+                    base_url="http://127.0.0.1:8765") as client:
+        started = client.post("/run", json=hold)
+        assert started.status_code == 200, started.text
+        result = started.json()
+        assert result["mode"] == "local_best_effort"
+        assert result["status"] == "timed_out"
+        assert result["executed"] is True
+        assert result["timed_out"] is True
+        assert result["exit_code"] is None
+        assert result["process_may_be_running"] is True
+        assert result["cleanup_proven"] is False
+        assert result["full_descendant_tree_clean"] == "not_proven"
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 1
+
+        init = client.post("/mcp", headers=headers, json={
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-11-25",
+                       "capabilities": {},
+                       "clientInfo": {"name": "lbe-busy-t1", "version": "1"}},
+        })
+        assert init.status_code == 200, init.text
+        client.post("/mcp", headers=headers, json={
+            "jsonrpc": "2.0", "method": "notifications/initialized"})
+        duplicate = client.post("/mcp", headers=headers, json={
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "run_command", "arguments": hold},
+        })
+        assert duplicate.status_code == 200, duplicate.text
+        denied = duplicate.json()["result"]
+        assert denied.get("isError") is True
+        assert denied["structuredContent"]["error"] == "busy"
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 1
+
+        independently_granted = svc.invoke_exec(
+            "c", "python-project", ["python", "ok.py"],
+            timeout_seconds=5, dry_run=False)
+        assert independently_granted["status"] == "exited"
+        assert independently_granted["exit_code"] == 0
+        assert "T1_PEER_ORIGINAL" in independently_granted["stdout"]
+        assert independently_granted["full_descendant_tree_clean"] == "not_proven"
+
+    deadline = time.monotonic() + 5
+    while (svc._lbe_owner.snapshot()["reserved_slots"]
+           and time.monotonic() < deadline):
+        time.sleep(0.01)
+    assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    assert svc._lbe_owner.snapshot()["unavailable"] is False
+
+
 def test_invalid_relative_script_has_zero_launch(native_scene):
     svc, root = native_scene
     ctx, _worker = _internal(svc)

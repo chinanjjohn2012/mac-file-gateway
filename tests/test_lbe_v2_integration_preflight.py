@@ -498,3 +498,117 @@ def test_v1_does_not_construct_or_expose_v2_owner(scene):
     finally:
         svc.close()
 
+
+def test_dormant_prepared_plans_use_real_v2_gateway_policies(scene, monkeypatch):
+    """T0 source-only, no real process and no independent service apply route."""
+    from gateway.lbe_plan import prepare_lbe_work_plan
+    a, b, private, _runtime = scene
+    (a / "go-project" / "bin").mkdir()
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Planning must not spawn a native child")
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", forbidden)
+            m.setattr(os, "kill", forbidden)
+            m.setattr(os, "killpg", forbidden, raising=False)
+            ctx = svc.require_exec("a")
+            python_plan = prepare_lbe_work_plan(
+                ctx, cwd="python-project", argv=["python", "hello.py"])
+            assert python_plan.workspace == "a"
+            assert python_plan.runner == "pipenv"
+            assert python_plan.effective_argv == (
+                "pipenv", "run", "python", "hello.py")
+            assert python_plan.requested_argv == ("python", "hello.py")
+            assert python_plan.cwd == "python-project"
+
+            go_plan = prepare_lbe_work_plan(
+                ctx, cwd="go-project",
+                argv=["go", "build", "-o=bin/server", "./cmd/server"])
+            assert go_plan.runner == "direct"
+            assert go_plan.effective_argv == (
+                "go", "build", "-o=bin/server", "./cmd/server")
+            assert go_plan.runner_project == "go-project"
+            assert not (a / "go-project" / "bin" / "server").exists()
+
+            testing = prepare_lbe_work_plan(
+                ctx, cwd="go-project",
+                argv=["go", "test", "./..."])
+            assert testing.runner == "direct"
+            assert testing.requested_argv == ("go", "test", "./...")
+
+            default_python = prepare_lbe_work_plan(
+                ctx, cwd="default-project",
+                argv=["python", "-m", "pytest"])
+            assert default_python.runner == "direct"
+            assert default_python.effective_argv == (
+                "python", "-m", "pytest")
+
+            with pytest.raises(GatewayError, match="cleanup proof"):
+                svc.invoke_exec(
+                    "a", "go-project", ["go", "build", "./..."],
+                    dry_run=False)
+        assert svc.info()["exec_policy"]["available"] is False
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+
+
+@pytest.mark.parametrize("cwd,argv", [
+    ("default-project", ["python", "missing.py"]),
+    ("default-project", ["python", "-c", "print('unsafe')"]),
+    ("default-project", ["go", "run", "./..."]),
+    ("go-project", ["go", "build", "-o", "/tmp/executable", "./..."]),
+    ("go-project", ["go", "build", "-o=../outside", "./..."]),
+    ("go-project", ["go", "build", "-toolexec=/bin/sh", "./..."]),
+    ("outside", ["python", "-m", "pytest"]),
+])
+def test_dormant_plan_rejects_invalid_real_gateway_cwd_command_and_output(
+    scene, cwd, argv,
+):
+    from gateway.lbe_plan import prepare_lbe_work_plan
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        with pytest.raises(GatewayError):
+            prepare_lbe_work_plan(
+                svc.require_exec("a"), cwd=cwd, argv=argv)
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+
+
+def test_dormant_plan_does_not_upgrade_v1_or_ungranted_workspace(scene):
+    from gateway.lbe_plan import prepare_lbe_work_plan
+    a, b, private, _runtime = scene
+    cfg = v2_config(a, b)
+    svc = service(scene, cfg)
+    try:
+        # B has no Exec scopes; no plan or new capability can be constructed.
+        with pytest.raises(GatewayError, match="disabled"):
+            prepare_lbe_work_plan(
+                svc.get("b"), cwd=".", argv=["go", "test", "./..."])
+    finally:
+        svc.close()
+
+    cfg["schema_version"] = 1
+    cfg["server"]["exec"] = {"enabled": True}
+    cfg["workspaces"]["a"]["exec"] = {
+        "enabled": True, "paths": ["go-project"], "runners": []}
+    legacy = service(scene, cfg)
+    try:
+        with pytest.raises(GatewayError, match="disabled"):
+            prepare_lbe_work_plan(
+                legacy.require_exec("a"),
+                cwd="go-project", argv=["go", "test", "./..."])
+        with pytest.raises(GatewayError) as error:
+            legacy.invoke_exec(
+                "a", "go-project", ["go", "test", "./..."],
+                dry_run=False)
+        assert error.value.code == "exec_cleanup_proof_required"
+    finally:
+        legacy.close()
+

@@ -469,6 +469,9 @@ class WorkspaceService:
                 reason = self._exec_state.quarantine_reason_code
                 if durability == "unavailable" and reason is None:
                     reason = "state_io_unavailable"
+            # Take one coherent snapshot; never expose any PID or child object.
+            lbe_state = (self._lbe_owner.snapshot()
+                         if self._lbe_owner is not None else None)
             return {"name": "Mac File Gateway", "version": "2.5.0", "mode": "multi",
                     "workspace_count": len(self._workspaces),
                     **({"config_schema_version": 2}
@@ -481,12 +484,9 @@ class WorkspaceService:
                         # compatible; only v2 adds its NONOPERATIVE indication.
                         **({"mode": "preview_only",
                             "candidate_mode": "local_best_effort",
-                            "running_direct_children":
-                                self._lbe_owner.snapshot()["running_direct_children"],
-                            "capacity_exhausted":
-                                self._lbe_owner.snapshot()["capacity_exhausted"],
-                            "owner_unavailable":
-                                self._lbe_owner.snapshot()["unavailable"]}
+                            "running_direct_children": lbe_state["running_direct_children"],
+                            "capacity_exhausted": lbe_state["capacity_exhausted"],
+                            "owner_unavailable": lbe_state["unavailable"]}
                            if self._lbe_owner is not None else {}),
                         "enabled": self.settings.exec_enabled,
                         # No independently approved full-tree cleanup

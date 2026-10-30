@@ -1,0 +1,269 @@
+"""Pure T0 tests for the unactivated bounded original-child pipe drainer.
+
+Every descriptor and select/read operation is a fake in-memory object.
+No Popen, real child, OS pipe, native signal or user Workspace is touched.
+"""
+from __future__ import annotations
+
+from collections import deque
+import os
+import selectors
+import subprocess
+import threading
+import time
+
+import pytest
+
+from gateway.lbe_output_capture import BoundedCapture
+from gateway.lbe_pipe_drain import BoundedPipeDrain, LbePipeError
+
+
+class FakePipe:
+    def __init__(self, fd):
+        self.fd = fd
+        self.closed = False
+        self.close_count = 0
+
+    def fileno(self):
+        return self.fd
+
+    def close(self):
+        self.closed = True
+        self.close_count += 1
+
+
+class FakeKey:
+    def __init__(self, fd, data):
+        self.fd = fd
+        self.data = data
+
+
+class FakeSelector:
+    def __init__(self):
+        self.registered = {}
+        self.pending = {}
+        self.closed = False
+        self._lock = threading.Lock()
+
+    def register(self, fd, events, data):
+        assert events == selectors.EVENT_READ
+        with self._lock:
+            if fd in self.registered:
+                raise AssertionError("duplicate descriptor registration")
+            self.registered[fd] = FakeKey(fd, data)
+            self.pending[fd] = deque()
+
+    def unregister(self, fd):
+        with self._lock:
+            return self.registered.pop(fd)
+
+    def put(self, fd, chunk):
+        with self._lock:
+            self.pending[fd].append(chunk)
+
+    def select(self, timeout):
+        with self._lock:
+            hits = [(key, selectors.EVENT_READ)
+                    for fd, key in self.registered.items()
+                    if self.pending[fd]]
+        if not hits:
+            time.sleep(min(timeout, 0.002))
+        return hits
+
+    def read(self, fd, n):
+        assert n == 8192
+        with self._lock:
+            try:
+                item = self.pending[fd].popleft()
+            except IndexError:
+                raise BlockingIOError() from None
+        if isinstance(item, Exception):
+            raise item
+        assert type(item) is bytes
+        return item
+
+    def close(self):
+        self.closed = True
+        self.registered.clear()
+
+
+def create(*, grace=0.06, fake=None, nonblocking=None):
+    sel = fake or FakeSelector()
+    capture = BoundedCapture()
+    call_log = []
+    def set_flag(fd, is_blocking):
+        call_log.append((fd, is_blocking))
+        if nonblocking is not None:
+            nonblocking(fd, is_blocking)
+    drain = BoundedPipeDrain(
+        capture, selector_factory=lambda: sel, read_fn=sel.read,
+        set_nonblocking=set_flag, eof_grace=grace)
+    return drain, sel, capture, call_log
+
+
+def fake_pipes():
+    return FakePipe(71), FakePipe(72)
+
+
+def test_exact_eof_is_required_for_output_complete():
+    drain, sel, capture, calls = create()
+    stdout, stderr = fake_pipes()
+    sel.register(71, selectors.EVENT_READ, "stdout") if False else None
+    drain.attach(stdout, stderr)
+    sel.put(71, b"STDOUT")
+    sel.put(71, b"")
+    sel.put(72, b"STDERR")
+    sel.put(72, b"")
+    assert drain.wait_finished(2)
+    snapshot = drain.snapshot()
+    assert "STDOUT" in snapshot["stdout"]
+    assert "STDERR" in snapshot["stderr"]
+    assert snapshot["output_complete"] is True
+    assert snapshot["pipe_reader_failed"] is False
+    assert snapshot["pipe_reader_finished"] is True
+    assert calls == [(71, False), (72, False)]
+    assert stdout.closed and stderr.closed and sel.closed
+    assert capture.stored_bytes() == len(b"STDOUT") + len(b"STDERR")
+
+
+def test_parent_exit_with_descendant_held_fds_finishes_on_grace_not_eof():
+    drain, sel, _capture, _calls = create(grace=0.04)
+    out, err = fake_pipes()
+    drain.attach(out, err)
+    sel.put(71, b"known prefix")
+    deadline = time.monotonic() + 2
+    while "known prefix" not in drain.snapshot()["stdout"] and time.monotonic() < deadline:
+        time.sleep(0.002)
+    assert "known prefix" in drain.snapshot()["stdout"]
+    assert drain.snapshot()["output_complete"] is False
+    drain.note_original_exit()  # fake witnessed parent exit only
+    assert drain.wait_finished(2)
+    assert drain.snapshot()["output_complete"] is False
+    assert drain.snapshot()["pipe_reader_failed"] is False
+    assert out.closed and err.closed and sel.closed
+    assert not sel.registered
+
+
+def test_timeout_waiter_does_not_stop_active_reader():
+    drain, sel, capture, _calls = create()
+    out, err = fake_pipes()
+    drain.attach(out, err)
+    assert not drain.wait_finished(0.015)
+    assert drain.snapshot()["output_complete"] is False
+    sel.put(71, b"output after waiter timeout")
+    sel.put(71, b"")
+    sel.put(72, b"")
+    assert drain.wait_finished(2)
+    assert "output after waiter timeout" in drain.snapshot()["stdout"]
+    assert drain.snapshot()["output_complete"] is True
+    assert capture.stored_bytes() == len(b"output after waiter timeout")
+
+
+def test_very_large_output_is_drained_without_unbounded_retention():
+    drain, sel, capture, _calls = create()
+    out, err = fake_pipes()
+    drain.attach(out, err)
+    for _ in range(120):
+        sel.put(71, b"x" * 8192)
+        sel.put(72, b"y" * 8192)
+    sel.put(71, b"")
+    sel.put(72, b"")
+    assert drain.wait_finished(5)
+    snap = drain.snapshot()
+    assert capture.stored_bytes() == 96000
+    assert snap["stdout_truncated"] and snap["stderr_truncated"]
+    assert snap["output_complete"] is True
+    assert snap["pipe_reader_failed"] is False
+
+
+def test_broken_read_latches_fault_and_does_not_claim_eof():
+    drain, sel, _capture, _calls = create()
+    out, err = fake_pipes()
+    drain.attach(out, err)
+    sel.put(71, OSError("simulated nonblocking read failure"))
+    assert drain.wait_finished(2)
+    assert drain.snapshot()["pipe_reader_failed"] is True
+    assert drain.snapshot()["output_complete"] is False
+    assert out.closed and err.closed
+
+
+def test_both_fds_must_be_distinct_and_nonnegative():
+    for fds in [(-1, 72), (71, -1), (71, 71)]:
+        drain, _sel, _capture, _calls = create()
+        out, err = FakePipe(fds[0]), FakePipe(fds[1])
+        with pytest.raises(LbePipeError, match="pipe_setup_unavailable"):
+            drain.attach(out, err)
+        assert drain.snapshot()["pipe_reader_failed"] is True
+        assert drain.wait_finished(0)
+        assert out.closed and err.closed
+
+
+def test_registration_or_set_nonblocking_failure_closes_owned_pipes():
+    def deny(_fd, _enabled):
+        raise OSError("fake not-blocking setup failure")
+    drain, selector, _capture, _calls = create(nonblocking=deny)
+    out, err = fake_pipes()
+    with pytest.raises(LbePipeError, match="pipe_setup_unavailable"):
+        drain.attach(out, err)
+    assert drain.snapshot()["pipe_reader_failed"] is True
+    assert drain.wait_finished(0)
+    assert out.closed and err.closed and selector.closed
+
+
+def test_reuse_and_double_attach_fail_closed():
+    drain, sel, _capture, _calls = create()
+    out, err = fake_pipes()
+    drain.attach(out, err)
+    with pytest.raises(LbePipeError, match="invalid_pipe_state"):
+        drain.attach(FakePipe(81), FakePipe(82))
+    sel.put(71, b"")
+    sel.put(72, b"")
+    assert drain.wait_finished(2)
+    with pytest.raises(LbePipeError, match="invalid_pipe_state"):
+        drain.attach(out, err)
+
+
+def test_spawn_failed_preallocated_drain_has_no_reader_or_fd():
+    drain, selector, _capture, _calls = create()
+    drain.abandon_without_child()
+    assert drain.wait_finished(0)
+    assert selector.closed
+    assert drain.snapshot()["pipe_reader_finished"] is True
+    assert drain.snapshot()["output_complete"] is False
+    with pytest.raises(LbePipeError, match="invalid_pipe_state"):
+        drain.attach(*fake_pipes())
+
+
+@pytest.mark.parametrize("value", [-1, 11, "1", None, True, float("nan")])
+def test_wait_timeout_refuses_bad_types_and_nonfinite_values(value):
+    drain, _sel, _capture, _calls = create()
+    with pytest.raises(LbePipeError, match="invalid_argument"):
+        drain.wait_finished(value)
+    drain.abandon_without_child()
+
+
+@pytest.mark.parametrize("value", [-1, 1.1, None, True, float("nan")])
+def test_eof_grace_refuses_invalid_values(value):
+    with pytest.raises(LbePipeError, match="invalid_eof_grace"):
+        create(grace=value)
+
+
+def test_pure_fake_pipe_drain_does_not_start_or_signal_native_process(monkeypatch):
+    invoked = []
+    def forbidden(*_args, **_kwargs):
+        invoked.append(True)
+        raise AssertionError("physical process or OS signal forbidden")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", forbidden)
+        m.setattr(os, "killpg", forbidden, raising=False)
+        m.setattr(os, "kill", forbidden)
+        drain, sel, _capture, _calls = create()
+        out, err = fake_pipes()
+        drain.attach(out, err)
+        sel.put(71, b"plain fake output")
+        sel.put(71, b"")
+        sel.put(72, b"")
+        assert drain.wait_finished(2)
+        assert drain.snapshot()["output_complete"] is True
+    assert invoked == []
+

@@ -408,13 +408,11 @@ class WorkspaceService:
                     "file_read_only": not self.any_write, "path_base": ".",
                     "workspaces": self.list_workspaces()["workspaces"],
                     "exec_policy": {
-                        "mode": "preview_only",
-                        # A proposed v2 configuration is not an operative
-                        # D0 exception; report true current capability, not
-                        # desired best-effort execution.
-                        "candidate_mode": ("local_best_effort"
-                                           if self.settings.schema_version == 2
-                                           else None),
+                        # Strict v1 F1 public-policy keys remain byte-for-byte
+                        # compatible; only v2 adds its NONOPERATIVE indication.
+                        **({"mode": "preview_only",
+                            "candidate_mode": "local_best_effort"}
+                           if self.settings.schema_version == 2 else {}),
                         "enabled": self.settings.exec_enabled,
                         # No independently approved full-tree cleanup
                         # qualification exists in F1, even when healthy.

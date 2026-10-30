@@ -316,3 +316,111 @@ def test_v1_parser_and_legacy_state_creation_remain_unchanged(scene):
     finally:
         svc.close()
 
+
+@pytest.mark.parametrize("argv", [
+    ["go", "build", "./..."],
+    ["go", "build", "./cmd/server"],
+    ["go", "build", "-v", "-trimpath", "./cmd/server"],
+    ["go", "build", "-o", "bin/server", "./cmd/server"],
+    ["go", "build", "-o=bin/server", "./cmd/server"],
+])
+def test_v2_go_build_preview_is_direct_and_never_spawns(scene, monkeypatch, argv):
+    a, b, _private, _runtime = scene
+    (a / "go-project" / "bin").mkdir()
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        def refuse(*args, **kwargs):
+            raise AssertionError("Go build preview must never spawn a process")
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", refuse)
+            m.setattr(os, "killpg", refuse, raising=False)
+            result = svc.invoke_exec("a", "go-project", argv)
+        assert result["workspace"] == "a"
+        assert result["requested_argv"] == argv
+        assert result["effective_argv"] == argv
+        assert result["runner"] == "direct"
+        assert result["executed"] is False
+        assert result["status"] == "preview"
+        assert result["mode"] == "preview_only"
+        assert result["process_may_be_running"] is False
+        assert result["cleanup_proven"] is False
+        assert result["output_complete"] is True
+        with pytest.raises(GatewayError) as exc:
+            svc.invoke_exec("a", "go-project", argv, dry_run=False)
+        assert exc.value.code == "exec_cleanup_proof_required"
+    finally:
+        svc.close()
+
+
+@pytest.mark.parametrize("argv", [
+    ["go", "build", "-o", "/tmp/server", "./..."],
+    ["go", "build", "-o", "../other", "./..."],
+    ["go", "build", "-o=bin/missing/child", "./..."],
+    ["go", "build", "-o=bin", "./..."],
+    ["go", "build", "-toolexec=/bin/sh", "./..."],
+    ["go", "build", "-exec=/bin/sh", "./..."],
+    ["go", "build", "-ldflags=-extld=/bin/sh", "./..."],
+    ["go", "build", "-o=bin/server", "-o=bin/server2", "./..."],
+    ["go", "build", "./cmd/server", "-o=bin/server"],
+    ["go", "build", "-o=bin/server"],
+    ["go", "run", "./..."],
+])
+def test_v2_go_build_preview_rejects_unscoped_or_unsafe_args(scene, argv):
+    a, b, _private, _runtime = scene
+    (a / "go-project" / "bin").mkdir()
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        with pytest.raises(GatewayError) as exc:
+            svc.invoke_exec("a", "go-project", argv)
+        assert exc.value.code in {"command_not_allowed", "invalid_argument"}
+    finally:
+        svc.close()
+
+
+def test_v2_go_build_preview_rejects_linked_output(scene):
+    a, b, _private, _runtime = scene
+    go = a / "go-project"
+    (go / "bin").mkdir()
+    (go / "alias").symlink_to(go / "bin", target_is_directory=True)
+    (go / "bin" / "linked").symlink_to("outside")
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        for out in ("alias/child", "bin/linked"):
+            with pytest.raises(GatewayError) as exc:
+                svc.invoke_exec("a", "go-project",
+                                ["go", "build", "-o", out, "./..."])
+            assert exc.value.code == "command_not_allowed"
+        with TestClient(create_multi_app(svc, enable_mcp=False),
+                        base_url="http://127.0.0.1:8765") as client:
+            result = client.post("/run", json={
+                "workspace": "a", "cwd": "go-project",
+                "argv": ["go", "build", "-o", "bin/server", "./cmd/server"]})
+            assert result.status_code == 200
+            assert result.json()["status"] == "preview"
+            assert result.json()["runner"] == "direct"
+            denied = client.post("/run", json={
+                "workspace": "a", "cwd": "go-project",
+                "argv": ["go", "build", "-o", "bin/server", "./cmd/server"],
+                "dry_run": False})
+            assert denied.status_code == 503
+            assert denied.json()["error"] == "exec_cleanup_proof_required"
+    finally:
+        svc.close()
+
+
+def test_v1_public_policy_has_no_v2_keys(scene):
+    a, b, _private, _runtime = scene
+    cfg = v2_config(a, b, paths=[], runners=[])
+    cfg["schema_version"] = 1
+    svc = service(scene, cfg)
+    try:
+        info = svc.info()
+        assert "config_schema_version" not in info
+        assert "mode" not in info["exec_policy"]
+        assert "candidate_mode" not in info["exec_policy"]
+    finally:
+        svc.close()
+

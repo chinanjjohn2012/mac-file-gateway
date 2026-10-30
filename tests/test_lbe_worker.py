@@ -16,7 +16,7 @@ import pytest
 
 from gateway.lbe_direct_owner import DirectChildOwner, LbeOwnerError
 from gateway.lbe_pipe_drain import BoundedPipeDrain
-from gateway.lbe_worker import LbeWorkPlan, LbeWorker, LbeWorkerError
+from gateway.lbe_worker import LbeWorkPlan, LbeWorker, LbeWorkerError, LbeNoChildStarted
 
 
 class FakePipe:
@@ -264,12 +264,12 @@ def test_disconnected_caller_keeps_owner_and_cleans_only_after_child_exit():
     owner.close()
 
 
-def test_known_file_not_found_means_no_child_and_releases_reservation():
+def test_explicit_no_child_witness_releases_reservation():
     calls = []
-    def missing(_plan):
+    def rejected_before_spawn(_plan):
         calls.append(True)
-        raise FileNotFoundError("fake tool missing")
-    worker, owner, sel = driver(launch=missing)
+        raise LbeNoChildStarted("trusted witness: no original child created")
+    worker, owner, sel = driver(launch=rejected_before_spawn)
     result = worker.run(plan())
     assert result["status"] == "launch_failed"
     assert result["executed"] is False
@@ -367,4 +367,48 @@ def test_worker_has_no_default_launcher_and_never_uses_real_popen(monkeypatch):
         assert worker.run(plan())["status"] == "exited"
         owner.close()
     assert calls == []
+
+
+
+@pytest.mark.parametrize("error", [
+    FileNotFoundError("could be after a child was launched"),
+    OSError("cannot prove absence of original child"),
+    InterruptedError("interrupted after possible native spawn"),
+])
+def test_ordinary_launcher_oserror_never_proves_no_child(error):
+    def uncertain(_plan):
+        raise error
+    worker, owner, _selector = driver(launch=uncertain)
+    with pytest.raises(LbeWorkerError) as err:
+        worker.run(plan())
+    assert err.value.code == "exec_state_unavailable"
+    assert err.value.process_may_be_running is True
+    assert owner.snapshot()["unavailable"] is True
+    assert owner.snapshot()["reserved_slots"] == 1
+    with pytest.raises(LbeWorkerError, match="exec_state_unavailable"):
+        worker.run(plan())
+    owner.close()
+
+
+def test_prelaunch_owner_reject_closes_unadopted_selector(monkeypatch):
+    owner = DirectChildOwner()
+    selector = FakeSelector()
+    def make_drain(capture):
+        return BoundedPipeDrain(
+            capture, selector_factory=lambda: selector,
+            read_fn=selector.read, set_nonblocking=lambda fd, enabled: None)
+    def fail_prepare(*args, **kwargs):
+        raise RuntimeError("unavailable owner before spawn")
+    with monkeypatch.context() as m:
+        m.setattr(owner, "prepare_pipe_drain", fail_prepare)
+        launcher_called = []
+        worker = LbeWorker(
+            owner, launcher=lambda p: launcher_called.append(p),
+            drain_factory=make_drain)
+        with pytest.raises(LbeWorkerError, match="exec_state_unavailable"):
+            worker.run(plan())
+    assert launcher_called == []
+    assert selector.closed is True
+    assert owner.snapshot()["reserved_slots"] == 0
+    owner.close()
 

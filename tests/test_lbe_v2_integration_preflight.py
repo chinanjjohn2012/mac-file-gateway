@@ -365,6 +365,64 @@ def test_v2_python_public_preview_uses_future_worker_plan(
         svc.close()
 
 
+def test_v2_preview_mode_consistent_direct_rest_and_official_mcp(
+    scene, monkeypatch,
+):
+    """No native child: v2 mode is its policy, not its preview status."""
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b, runners=[]))
+
+    def no_process(*_args, **_kwargs):
+        raise AssertionError("T0 preview must not launch/signal OS processes")
+
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", no_process)
+            m.setattr(os, "kill", no_process)
+            m.setattr(os, "killpg", no_process, raising=False)
+            args = {"workspace": "a", "cwd": "python-project",
+                    "argv": ["python", "hello.py"],
+                    "timeout_seconds": 5, "dry_run": True}
+            direct = svc.invoke_exec(
+                "a", "python-project", args["argv"],
+                timeout_seconds=5, dry_run=True)
+            assert svc.info()["exec_policy"]["mode"] == "local_best_effort"
+            assert direct["mode"] == "local_best_effort"
+            assert direct["status"] == "preview"
+            assert direct["executed"] is False
+            assert direct["cleanup_proven"] is False
+            with TestClient(create_multi_app(svc),
+                            base_url="http://127.0.0.1:8765") as client:
+                rest = client.post("/run", json=args)
+                assert rest.status_code == 200, rest.text
+                assert rest.json() == direct
+                hdr = {"Accept": "application/json, text/event-stream",
+                       "Content-Type": "application/json"}
+                init = client.post("/mcp", headers=hdr, json={
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"protocolVersion": "2025-11-25",
+                               "capabilities": {},
+                               "clientInfo": {"name": "lbe-preview-mode-t0",
+                                              "version": "1"}},
+                })
+                assert init.status_code == 200, init.text
+                ready = client.post("/mcp", headers=hdr, json={
+                    "jsonrpc": "2.0", "method": "notifications/initialized"})
+                assert ready.status_code in (200, 202, 204)
+                result = client.post("/mcp", headers=hdr, json={
+                    "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": {"name": "run_command", "arguments": args},
+                })
+                assert result.status_code == 200, result.text
+                tool = result.json()["result"]
+                assert tool.get("isError") is not True
+                assert tool["structuredContent"] == direct
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+
+
 @pytest.mark.parametrize("argv", [
     ["pytest", "-k", "alpha\tbeta"],
     ["python", "-m", "pytest", "--maxfail=1\t--trace"],

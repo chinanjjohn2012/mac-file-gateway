@@ -19,6 +19,8 @@ import time
 from typing import Any, Callable, Protocol
 
 from .lbe_direct_owner import DirectChildOwner, LbeOwnerError
+from .core import GatewayError, _parts
+from .executor import _validate_command
 from .lbe_pipe_drain import BoundedPipeDrain, LbePipeError
 
 
@@ -97,6 +99,21 @@ class LbeWorker:
                            or "\x00" in s or any(ord(c) < 32 for c in s)
                            for s in argv)):
                 raise LbeWorkerError("invalid_plan")
+        try:
+            _parts(plan.cwd)
+            _parts(plan.runner_project)
+            if plan.requested_argv[0] == "go":
+                # Go build's -o and actual pinned output checks are *always*
+                # mandatory in the shared service preflight. This internal
+                # shape check is NOT a replacement for GoPolicy validation.
+                if (len(plan.requested_argv) < 3
+                        or plan.requested_argv[1] not in {"test", "vet", "build"}
+                        or plan.runner != "direct"):
+                    raise LbeWorkerError("invalid_plan")
+            else:
+                _validate_command(list(plan.requested_argv))
+        except GatewayError:
+            raise LbeWorkerError("invalid_plan") from None
         if plan.runner == "pipenv":
             if plan.effective_argv != ("pipenv", "run", *plan.requested_argv):
                 raise LbeWorkerError("invalid_plan")
@@ -128,6 +145,7 @@ class LbeWorker:
             "stdout_truncated": bool(output.get("stdout_truncated", False)),
             "stderr_truncated": bool(output.get("stderr_truncated", False)),
             "output_complete": bool(output.get("output_complete", False)),
+            "pipe_reader_failed": bool(output.get("pipe_reader_failed", False)),
             "output_limit_chars": 48000,
             "content_trust": "untrusted_command_output",
         }

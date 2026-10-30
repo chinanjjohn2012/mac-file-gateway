@@ -145,7 +145,11 @@ def _bounded_text(data: bytes) -> tuple[str, bool]:
 
 class CommandRunner:
     def __init__(self, gateway: "Gateway", *, enabled: bool = False,
-                 exec_paths: tuple[str, ...] = (), exec_runners: tuple[str, ...] = ()):
+                 exec_paths: tuple[str, ...] = (), exec_runners: tuple[str, ...] = (),
+                 auto_pipenv: bool = True):
+        if type(auto_pipenv) is not bool:
+            raise GatewayError("invalid_argument", "auto_pipenv must be boolean.")
+        self.auto_pipenv = auto_pipenv
         if type(enabled) is not bool:
             raise GatewayError("invalid_argument", "allow_exec must be a boolean.")
         self.gateway = gateway
@@ -177,7 +181,8 @@ class CommandRunner:
             "shell": False,
             "paths": [_canonical(scope) for scope in self.scopes],
             "configured_runners": {_canonical(path): runner for path, runner in self.runners.items()},
-            "runner_fallback": "nearest Pipfile => pipenv; otherwise direct",
+            "runner_fallback": ("nearest Pipfile => pipenv; otherwise direct"
+                                if self.auto_pipenv else "direct unless explicitly pipenv"),
             "allowed_commands": list(_ALLOWED_COMMANDS),
             "timeout_seconds_default": 60,
             "timeout_seconds_max": 300,
@@ -221,6 +226,10 @@ class CommandRunner:
             return "pipenv", pipfile, _canonical(configured_path or ())
 
         containing_scope = max((scope for scope in self.scopes if _inside(cwd_parts, scope)), key=len)
+        if not self.auto_pipenv:
+            # V2 explicit runner rules only: an unrelated/nearby Pipfile must
+            # never silently change the configured Direct execution policy.
+            return "direct", None, _canonical(containing_scope)
         current_parts = cwd_parts
         while True:
             candidate = self.gateway._root_path.joinpath(*current_parts, "Pipfile")
@@ -257,7 +266,12 @@ class CommandRunner:
         script = _validate_command(requested)
         cwd_parts, cwd_path = self._cwd(cwd)
         self._verify_script(cwd_parts, script)
-        runner, pipfile, runner_project = self._runner(cwd_parts, cwd_path)
+        if not self.auto_pipenv and requested[0] == "go":
+            # Go always uses Direct in V2, even if Python's scoped runner
+            # mapping chooses Pipenv for the same Workspace directory.
+            runner, pipfile, runner_project = "direct", None, _canonical(cwd_parts)
+        else:
+            runner, pipfile, runner_project = self._runner(cwd_parts, cwd_path)
         effective = list(requested)
         if runner == "pipenv":
             effective = ["pipenv", "run", *requested]

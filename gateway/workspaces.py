@@ -159,6 +159,8 @@ class WorkspaceService:
                     allow_exec=settings.exec_enabled and item.exec_enabled,
                     exec_paths=item.exec_paths if settings.exec_enabled and item.exec_enabled else (),
                     exec_runners=item.exec_runners if settings.exec_enabled and item.exec_enabled else (),
+                    **({"exec_auto_pipenv": False}
+                       if settings.schema_version == 2 else {}),
                 )
                 if (os.fstat(gateway._root_fd).st_dev, os.fstat(gateway._root_fd).st_ino) != pin.ancestor_ids[-1]:
                     gateway.close()
@@ -172,6 +174,7 @@ class WorkspaceService:
                     self._exec_state = ExecStateStore(
                         exec_path,
                         workspace_roots=tuple(w.root for w in settings.workspaces),
+                        existing_only=(settings.schema_version == 2),
                     )
                 except (PrivateFileError, GatewayError, OSError, ValueError):
                     self._exec_state_issue = "state_io_unavailable"
@@ -400,10 +403,18 @@ class WorkspaceService:
                     reason = "state_io_unavailable"
             return {"name": "Mac File Gateway", "version": "2.5.0", "mode": "multi",
                     "workspace_count": len(self._workspaces),
+                    "config_schema_version": self.settings.schema_version,
                     "read_only": not (self.any_write or self.any_git),
                     "file_read_only": not self.any_write, "path_base": ".",
                     "workspaces": self.list_workspaces()["workspaces"],
                     "exec_policy": {
+                        "mode": "preview_only",
+                        # A proposed v2 configuration is not an operative
+                        # D0 exception; report true current capability, not
+                        # desired best-effort execution.
+                        "candidate_mode": ("local_best_effort"
+                                           if self.settings.schema_version == 2
+                                           else None),
                         "enabled": self.settings.exec_enabled,
                         # No independently approved full-tree cleanup
                         # qualification exists in F1, even when healthy.

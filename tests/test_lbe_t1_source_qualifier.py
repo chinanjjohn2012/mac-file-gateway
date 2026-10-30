@@ -144,6 +144,25 @@ class SourceQualificationT0(unittest.TestCase):
             self.assertFalse(result["dependency_closure_locked"])
             self.assertFalse(result["pipenv_executed"])
 
+    def test_known_benchmark_tree_is_inspectable_but_never_authorized(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pipenv.whl"
+            data = fake_wheel(path, malicious="benchmarks/benchmark_fixture.py")
+            result = inspect_pipenv_wheel(path, sha(data), len(data))
+            self.assertTrue(result["bundled_benchmarks_present"])
+            self.assertEqual(result["bundled_benchmarks_source_review"],
+                             "NOT_ISSUED")
+            self.assertFalse(result["pipenv_installed"])
+            self.assertFalse(result["dependency_closure_locked"])
+
+    def test_unlisted_extra_top_level_remains_denied(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pipenv.whl"
+            data = fake_wheel(path, malicious="another_package/unreviewed.py")
+            with self.assertRaisesRegex(QualificationError,
+                                        "unapproved top-level tree"):
+                inspect_pipenv_wheel(path, sha(data), len(data))
+
     def test_pipenv_tampered_record_or_member_traversal_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "pipenv.whl"

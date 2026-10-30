@@ -150,13 +150,20 @@ def inspect_pipenv_wheel(path: Path, expected_digest: str = PIPENV_SHA256,
             if len(infos) > MAX_WHEEL_MEMBERS:
                 raise QualificationError("wheel member cap exceeded")
             members: set[str] = set()
+            # Extra benchmark sources in this SHA-pinned wheel may be
+            # inspected only. They remain UNREVIEWED and UNEXECUTABLE.
+            bundled_benchmarks = False
             expanded = 0
             for info in infos:
                 name = safe_member_name(info.filename)
                 if name in members:
                     raise QualificationError("duplicate wheel member")
                 members.add(name)
-                if (not name.startswith(("pipenv/", prefix,
+                is_benchmark = (name.startswith("benchmarks/") or
+                                (name == "benchmarks" and info.is_dir()))
+                if is_benchmark:
+                    bundled_benchmarks = True
+                elif (not name.startswith(("pipenv/", prefix,
                         "pipenv-2026.10.4.data/"))):
                     raise QualificationError(
                         "wheel unapproved top-level tree: " +
@@ -213,6 +220,8 @@ def inspect_pipenv_wheel(path: Path, expected_digest: str = PIPENV_SHA256,
     return {"status": "WHEEL_BYTES_AND_RECORD_VERIFIED",
             "wheel_sha256": expected_digest, "wheel_size": expected_size,
             "members": len(members), "requires_dist": sorted(requirements),
+            "bundled_benchmarks_present": bundled_benchmarks,
+            "bundled_benchmarks_source_review": "NOT_ISSUED",
             "pipenv_installed": False, "dependency_closure_locked": False,
             "pipenv_executed": False}
 
@@ -256,6 +265,10 @@ def qualification_main(argv: list[str] | None = None) -> int:
         return 2
     print("LBE_P001_GO_ARCHIVE_BYTES=SHA256_VERIFIED_AND_INSPECTED")
     print("LBE_P001_PIPENV_WHEEL_BYTES=SHA256_RECORD_VERIFIED")
+    if checked_pip["bundled_benchmarks_present"]:
+        print("LBE_P001_PIPENV_BENCHMARKS_SOURCE_REVIEW=NOT_ISSUED")
+    for dependency in checked_pip["requires_dist"]:
+        print("LBE_P001_PIPENV_REQUIRES_DIST=" + dependency)
     print("LBE_P001_PIPENV_DEPENDENCY_CLOSURE=NOT_SOURCE_LOCKED")
     print("LBE_P001_GO_COMPILER_RUNTIME=NOT_EXECUTED_NOT_ATTESTED")
     print("LBE_P001_GO_PIPENV_T1=NOT_RUN")

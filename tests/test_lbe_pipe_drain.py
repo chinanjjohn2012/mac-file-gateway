@@ -342,13 +342,21 @@ def test_postspawn_pipe_attachment_failure_does_not_release_original_slot():
     drain, _sel, _cap, _flag = create(
         on_fault=lambda: owner.latch_unavailable(token))
     owner.prepare_pipe_drain(token, drain)
+    # Bind the original child and preallocated reaper immediately after spawn;
+    # a subsequent pipe attachment failure MUST NOT stop wait()/reaping.
+    child = WaitableFakeOriginal()
+    owner.bind(token, child)
+    assert child.ready.wait(2)
     with pytest.raises(LbePipeError, match="pipe_setup_unavailable"):
         drain.attach(FakePipe(71), FakePipe(71))
     assert owner.snapshot()["unavailable"] is True
     assert owner.snapshot()["reserved_slots"] == 1
     with pytest.raises(LbeOwnerError, match="exec_state_unavailable"):
-        owner.bind(token, WaitableFakeOriginal())
-    assert owner.snapshot()["reserved_slots"] == 1
+        owner.reserve("b")
+    child.exit.set()
+    assert owner.observe(token, wait_seconds=2).status == "exited"
+    assert owner.snapshot()["reserved_slots"] == 0
+    assert owner.snapshot()["unavailable"] is True
     owner.close()
 
 

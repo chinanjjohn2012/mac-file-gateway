@@ -130,6 +130,24 @@ class CandidatePublicMetadataT0(unittest.TestCase):
         with self.assertRaisesRegex(SourceMetadataError, "size/yanked"):
             inspect_release(row, data)
 
+    def test_undeclared_python_support_remains_explicitly_unproven(self):
+        self.change("distlib", lambda r: r["info"].update(
+            {"requires_python": None}))
+        out = inspect_metadata_dir(LOCK, self.dir)
+        distlib = next(x for x in out["entries"]
+                       if x["distribution"] == "distlib")
+        self.assertEqual(distlib["requires_python_raw"], "NOT_DECLARED")
+        self.assertFalse(distlib["requires_python_declared"])
+        self.assertEqual(distlib["python313_marker_closure"], "NOT_EVALUATED")
+        self.assertFalse(out["pipenv_recursive_closure_qualified"])
+
+    def test_invalid_nonstring_requires_python_is_denied(self):
+        self.change("distlib", lambda r: r["info"].update(
+            {"requires_python": {"unexpected": "object"}}))
+        with self.assertRaisesRegex(SourceMetadataError,
+                                    "invalid requires_python"):
+            inspect_metadata_dir(LOCK, self.dir)
+
     def test_unrecognized_requires_dist_is_preserved_not_silently_allowed(self):
         self.change("python-discovery", lambda r: r["info"].update(
             {"requires_dist": [

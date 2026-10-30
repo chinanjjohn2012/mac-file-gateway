@@ -53,6 +53,12 @@ all recursively selected wheels/markers/import sources are qualified.
 - https://pypi.org/pypi/platformdirs/4.11.10/json
 - https://pypi.org/pypi/python-discovery/1.6.1/json
 
+**Missing compatibility declaration:** the actual PyPI release JSON for
+`distlib==0.4.4` has `info.requires_python=null` (no declared
+Requires-Python bound). The P002 inspector accepts this solely to record
+`requires_python_raw=NOT_DECLARED`, and it **never** infers Python
+3.13 compatibility or complete marker closure from absence of a bound.
+
 **Machine-readable companion:** `ci/lbe-pipenv-p002-metadata-candidates.json`.
 Its six filenames, versions and published SHA256 candidate strings are fixed
 from the above official PyPI release pages. The *only* proposed CI networking

@@ -164,13 +164,19 @@ def inspect_release(entry: dict[str, str], data: dict) -> dict:
                 for x in reqs)):
         raise SourceMetadataError("unsafe/unbounded Requires-Dist metadata")
     requires_python = info.get("requires_python")
-    if (not isinstance(requires_python, str) or
-            not 0 < len(requires_python) < 128):
-        raise SourceMetadataError("requires_python metadata absent")
+    # Some published wheels (including distlib 0.4.4) declare no
+    # Requires-Python. This is an UNKNOWN compatibility signal, not
+    # permission to install or proof that Python 3.13 is supported.
+    if requires_python is None or requires_python == "":
+        requires_python = "NOT_DECLARED"
+    elif (not isinstance(requires_python, str) or
+          not 0 < len(requires_python) < 128):
+        raise SourceMetadataError("invalid requires_python metadata")
     return {
         "distribution": name, "version": version, "filename": filename,
         "published_wheel_sha256_metadata": expected_sha, "published_size": size,
         "requires_python_raw": requires_python,
+        "requires_python_declared": requires_python != "NOT_DECLARED",
         "requires_dist_raw": sorted(reqs),
         "wheel_url_origin": "https://files.pythonhosted.org",
         "metadata_comparison": "MATCHED_FROZEN_CANDIDATE",

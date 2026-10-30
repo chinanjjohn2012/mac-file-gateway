@@ -69,6 +69,42 @@ class CandidatePublicMetadataT0(unittest.TestCase):
                              EXPECTED[row["name"]])
             self.assertEqual(len(row["sha256"]), 64)
 
+    def test_authorization_platform_and_primary_wheel_header_changes_rejected(self):
+        changes = (
+            ("contract", "P001 unlimited artifact installation APPROVED"),
+            ("target", "shared production macOS machine"),
+            ("pipenv_wheel", "pipenv-2026.10.5-py3-none-any.whl"),
+            ("virtualenv_21_14_minimal_is_not_automatically_approved", False),
+            ("existing_36_wheel_lock_reuse", ["certifi==2026.10.23"]),
+        )
+        for index, (field, value) in enumerate(changes):
+            with self.subTest(field=field):
+                altered = json.loads(LOCK.read_text(encoding="utf-8"))
+                altered[field] = value
+                path = self.root / ("altered-header-" + str(index) + ".json")
+                path.write_text(json.dumps(altered), encoding="utf-8")
+                with self.assertRaisesRegex(SourceMetadataError,
+                                            "header identity changed"):
+                    read_lock(path)
+
+    def test_unknown_extra_authority_field_rejected(self):
+        altered = json.loads(LOCK.read_text(encoding="utf-8"))
+        altered["native_execution_approved"] = True
+        path = self.root / "added-grant.json"
+        path.write_text(json.dumps(altered), encoding="utf-8")
+        with self.assertRaisesRegex(SourceMetadataError,
+                                    "header fields changed"):
+            read_lock(path)
+
+    def test_missing_header_field_rejected(self):
+        altered = json.loads(LOCK.read_text(encoding="utf-8"))
+        del altered["target"]
+        path = self.root / "missing-target.json"
+        path.write_text(json.dumps(altered), encoding="utf-8")
+        with self.assertRaisesRegex(SourceMetadataError,
+                                    "header fields changed"):
+            read_lock(path)
+
     def test_valid_hex_but_changed_candidate_digest_fails_closed(self):
         altered = json.loads(LOCK.read_text(encoding="utf-8"))
         row = next(x for x in altered["additional_wheels"]

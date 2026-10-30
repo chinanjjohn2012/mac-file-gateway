@@ -54,6 +54,14 @@ T0 regressions cover both changes. This is still a *declaration-consistency*
 gate, NOT downloaded-byte verification, package-source approval, installed
 RECORD attestation, transitive-closure qualification or native T1 permission.
 
+**Authorization/target header pinning (source-only T0):** the inspector
+requires the precise complete top-level schema and immutable primary
+Pipenv filename, isolated macOS 15 ARM64/Python 3.13 target, inherited
+36-wheel subset, conditional-approval limitation and explicit
+nonapproval of older virtualenv. Changing a field, adding an invented
+authorization field or omitting a field fails closed; these checks do
+not approve any additional third-party byte, installation or execution.
+
 **Primary metadata sources (public; publisher claims not independently accepted):**
 - https://pypi.org/pypi/setuptools/84.2.1/json
 - https://pypi.org/pypi/virtualenv/21.15.0/json

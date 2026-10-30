@@ -19,6 +19,21 @@ from urllib.parse import urlsplit
 
 PROPOSAL_ID = "PR101-PIPENV-T1-P002-METADATA-ONLY-CANDIDATE"
 STATUS = "PUBLIC_PYPI_METADATA_CANDIDATES_ONLY_NO_ARTIFACT_DOWNLOAD_NO_INSTALL_NO_EXECUTION"
+EXPECTED_LOCK_HEADER = {
+    "proposal_id": PROPOSAL_ID,
+    "contract": (
+        "P001 user-approved Go/Pipenv T1 test scope; "
+        "unknown additional artifact bytes NOT_APPROVED"
+    ),
+    "target": "GitHub-hosted macOS 15 ARM64 / CPython 3.13",
+    "status": STATUS,
+    "existing_36_wheel_lock_reuse": [
+        "certifi==2026.10.23", "packaging==26.3"
+    ],
+    "pipenv_wheel": "pipenv-2026.10.4-py3-none-any.whl",
+    "virtualenv_21_14_minimal_is_not_automatically_approved": True,
+}
+
 EXPECTED = {
     "distlib": ("0.4.4", "distlib-0.4.4-py2.py3-none-any.whl"),
     "filelock": ("4.2.4", "filelock-4.2.4-py3-none-any.whl"),
@@ -111,11 +126,13 @@ def _load_regular_json(path: Path, limit: int) -> dict:
 
 def read_lock(path: Path) -> list[dict[str, str]]:
     data = _load_regular_json(path, 20000)
-    if data.get("proposal_id") != PROPOSAL_ID or data.get("status") != STATUS:
-        raise SourceMetadataError("wrong candidate proposal/status")
-    if data.get("existing_36_wheel_lock_reuse") != [
-            "certifi==2026.10.23", "packaging==26.3"]:
-        raise SourceMetadataError("existing original wheel assumptions changed")
+    # A pinned wheel list is not meaningful if the surrounding authorization,
+    # target platform, primary Pipenv wheel, or inherited-wheel scope drifts.
+    if set(data) != set(EXPECTED_LOCK_HEADER) | {"additional_wheels"}:
+        raise SourceMetadataError("candidate lock header fields changed")
+    for key, expected in EXPECTED_LOCK_HEADER.items():
+        if type(data[key]) is not type(expected) or data[key] != expected:
+            raise SourceMetadataError("candidate lock header identity changed: " + key)
     rows = data.get("additional_wheels")
     if not isinstance(rows, list) or len(rows) != len(EXPECTED):
         raise SourceMetadataError("unexpected candidate count")

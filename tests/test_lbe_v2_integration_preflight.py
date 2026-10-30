@@ -204,7 +204,7 @@ def test_v2_existing_healthy_state_previews_and_refuses_invalid_apply(scene, mon
             assert res.json()["executed"] is False
             failed = client.post("/run", json={
                 **body, "argv": ["go", "run", "./..."], "dry_run": False})
-            assert failed.status_code == 400
+            assert failed.status_code == 403
             assert failed.json()["error"] == "command_not_allowed"
             info = client.get("/health").json()["exec_policy"]
             assert info["mode"] == "local_best_effort"
@@ -501,7 +501,7 @@ def test_v2_go_test_vet_rest_preview_refuses_old_flag_bypass(scene, monkeypatch)
                     assert refused.json()["error"] == "command_not_allowed"
                     still_denied = client.post(
                         "/run", json={**bad, "dry_run": False})
-                    assert still_denied.status_code == 400
+                    assert still_denied.status_code == 403
                     assert still_denied.json()["error"] == "command_not_allowed"
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
@@ -534,7 +534,7 @@ def test_v2_go_build_preview_rejects_linked_output(scene):
                 "workspace": "a", "cwd": "go-project",
                 "argv": ["go", "build", "-o", "alias/child", "./cmd/server"],
                 "dry_run": False})
-            assert denied.status_code == 400
+            assert denied.status_code == 403
             assert denied.json()["error"] == "command_not_allowed"
     finally:
         svc.close()

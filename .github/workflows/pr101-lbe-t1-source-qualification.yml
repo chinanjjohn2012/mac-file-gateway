@@ -8,6 +8,8 @@ on:
       - ".github/workflows/pr101-lbe-t1-source-qualification.yml"
       - "tools/lbe_t1_source_qualifier.py"
       - "tests/test_lbe_t1_source_qualifier.py"
+      - "tools/lbe_t1_go_stager.py"
+      - "tests/test_lbe_t1_go_stager.py"
       - "docs/PR101_LBE_NATIVE_TOOLCHAINS_T1_PROPOSAL.md"
       - "MANIFEST.sha256"
 
@@ -68,7 +70,9 @@ jobs:
         run: |
           set -euo pipefail
           python3 -I -S tests/test_lbe_t1_source_qualifier.py
+          python3 -I -S tests/test_lbe_t1_go_stager.py
           echo "LBE_P001_SOURCE_QUALIFIER_UNIT_T0=PASS"
+          echo "LBE_P001_GO_NONEXEC_STAGE_UNIT_T0=PASS"
 
       - name: Download exact P001 Go candidate archive into runner-owned scratch only
         shell: bash
@@ -155,6 +159,16 @@ jobs:
           echo "LBE_P001_PIPENV_TRANSITIVE_WHEELS=NOT_LOCKED"
           echo "LBE_P001_REAL_NATIVE_GO_AND_PIPENV=NOT_RUN"
 
+      - name: Stage verified Go archive as nonexecutable bytes in runner scratch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S tools/lbe_t1_go_stager.py --runner-temp "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/lbe-p001-go-stage-evidence.json"
+          echo "LBE_P001_GO_BYTE_STAGE=NONEXECUTABLE_ONLY"
+          echo "LBE_P001_GO_NATIVE_PROCESS=NOT_RUN"
+          echo "LBE_P001_GO_STAGED_SOURCE_REVIEW=NOT_ISSUED"
+
       - name: Recheck committed tree and never claim GO/PIPENV integration PASS
         shell: bash
         run: |
@@ -163,6 +177,7 @@ jobs:
           git diff --cached --exit-code
           echo "LBE_P001_NEW_EXTERNAL_EXECUTED=FALSE"
           echo "LBE_P001_OUTPUT_SOURCE_INSPECTION_ONLY=TRUE"
-          echo "LBE_P001_NO_INSTALL_NO_EXTRACT_NO_GO_NO_PIPENV"
+          echo "LBE_P001_NO_INSTALL_NO_GO_PIPENV_EXECUTION"
+          echo "LBE_P001_GO_EXTRACTED_BYTES_NONEXEC_ONLY"
           echo "LBE_P001_NO_OS_SIGNAL_NO_T2_T3_NO_USER_MAC"
           echo "LBE_P001_NO_MERGE_NO_DEPLOY"

@@ -9,8 +9,11 @@ from gateway.lbe_config_policy import (
 )
 
 
-def parse(*, paths=None, runners=None, server=None, raw=None, version=2):
-    if raw is None:
+_ABSENT = object()
+
+
+def parse(*, paths=None, runners=None, server=None, raw=_ABSENT, version=2):
+    if raw is _ABSENT:
         exec_obj = {}
         if paths is not None:
             exec_obj["paths"] = paths

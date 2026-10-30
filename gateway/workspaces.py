@@ -21,6 +21,7 @@ from .git_cli import GitCLIExecutor
 from .git_repository import GitRepositoryCoordinator
 from .git_state import GitStateStore
 from .exec_state import ExecStateStore
+from .lbe_direct_owner import DirectChildOwner
 
 _READ = frozenset({"list_files", "read_file", "search_files"})
 _WRITE = frozenset({"create_directory", "delete_directory", "create_file", "write_file",
@@ -128,6 +129,10 @@ class WorkspaceService:
         # Healthy no-proof admission is separately gated in B1/C.
         self._exec_state: ExecStateStore | None = None
         self._exec_state_issue: str | None = None
+        # Dormant v2 ledger for original-child capacity/observations only.
+        # NEVER mints real Exec apply permission or spawns OS children.
+        self._lbe_owner = (DirectChildOwner()
+                           if settings.schema_version == 2 else None)
         config_root: PinnedDirectory | None = None
         try:
             config_root = open_pinned_directory(config_dir, private_leaf=True)
@@ -214,6 +219,10 @@ class WorkspaceService:
         """
         with self._lifecycle:
             self._closing = True
+            if self._lbe_owner is not None:
+                # No signal/join: a future authorized direct child may outlive
+                # a dropped waiter or Gateway shutdown.
+                self._lbe_owner.close()
             while self._active_operations:
                 self._lifecycle.wait()
             if self._closed:
@@ -471,8 +480,14 @@ class WorkspaceService:
                         # Strict v1 F1 public-policy keys remain byte-for-byte
                         # compatible; only v2 adds its NONOPERATIVE indication.
                         **({"mode": "preview_only",
-                            "candidate_mode": "local_best_effort"}
-                           if self.settings.schema_version == 2 else {}),
+                            "candidate_mode": "local_best_effort",
+                            "running_direct_children":
+                                self._lbe_owner.snapshot()["running_direct_children"],
+                            "capacity_exhausted":
+                                self._lbe_owner.snapshot()["capacity_exhausted"],
+                            "owner_unavailable":
+                                self._lbe_owner.snapshot()["unavailable"]}
+                           if self._lbe_owner is not None else {}),
                         "enabled": self.settings.exec_enabled,
                         # No independently approved full-tree cleanup
                         # qualification exists in F1, even when healthy.

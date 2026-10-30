@@ -10,6 +10,9 @@ on:
       - "tools/lbe_pipenv_p003_wheel_bytes.py"
       - "tools/lbe_pipenv_p004_import_probe.py"
       - "tests/test_lbe_pipenv_p004_import_probe.py"
+      - "tools/lbe_pipenv_p005_closure.py"
+      - "tests/test_lbe_pipenv_p005_closure.py"
+      - "docs/PR101_PIPENV_P005_BASE_MARKER_GRAPH.md"
       - "ci/lbe-pipenv-p002-metadata-candidates.json"
       - "ci/wheel-locks/macos-15-arm64-3.13.sha256"
       - "docs/PR101_PIPENV_P004_OFFLINE_IMPORT.md"
@@ -182,6 +185,20 @@ jobs:
           test -s "$RUNNER_TEMP/lbe-p004-import-evidence.json"
           echo "LBE_P004_SIX_AUTHORIZED_IMPORTS_EXECUTED=TRUE"
           echo "LBE_P004_FULL_PIPENV_OR_GO_RUNTIME=NOT_RUN"
+
+      - name: P005 evaluate only nine already-source-pinned BASE runtime wheel METADATA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$RUNNER_TEMP/lbe-p004-import-evidence.json"
+          python -I -S tests/test_lbe_pipenv_p005_closure.py
+          echo "LBE_P005_OFFLINE_MARKER_GRAPH_T0=PASS"
+          python -I -S tools/lbe_pipenv_p005_closure.py \
+            --lock ci/lbe-pipenv-p002-metadata-candidates.json \
+            --runner-temp "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/lbe-p005-base-graph-source-evidence.json"
+          echo "LBE_P005_BASE_DECLARED_RUNTIME_MARKERS=EVALUATED"
+          echo "LBE_P005_NO_PIPENV_INSTALL_EXEC_OR_GO_NATIVE"
 
       - name: Recheck source wheel SHA and exact HEAD status; no production claims
         shell: bash

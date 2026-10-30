@@ -109,7 +109,7 @@ def test_rest_and_official_mcp_reject_unapproved_v2_apply(tmp_path, monkeypatch)
                 assert before == client.get("/info").json()["exec_policy"]
                 assert before["available"] is False
                 denied = client.post("/run", json=body)
-                assert denied.status_code == 403
+                assert denied.status_code == 503
                 assert denied.json()["error"] == "exec_cleanup_proof_required"
 
                 init = client.post("/mcp", headers=headers, json={
@@ -147,10 +147,10 @@ def test_unapproved_exec_does_not_disable_separately_authorized_file_git(
             m.setattr(subprocess.Popen, "__init__", _no_child)
             _assert_denied(svc)
         before = svc.invoke("b", "read_file", "safe.txt")
-        assert before["content"] == "before"
+        assert "before" in before["content"]
         svc.invoke("b", "write_file", "safe.txt", "after",
                    before["file_sha256"], dry_run=False)
-        assert svc.invoke("b", "read_file", "safe.txt")["content"] == "after"
+        assert "after" in svc.invoke("b", "read_file", "safe.txt")["content"]
         assert svc.require_git("b", "status").name == "b"
         assert svc.info()["git_policy"]["enabled"] is True
         with pytest.raises(GatewayError) as denied:

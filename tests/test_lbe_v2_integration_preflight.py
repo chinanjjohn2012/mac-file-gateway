@@ -204,7 +204,7 @@ def test_v2_existing_healthy_state_previews_and_refuses_invalid_apply(scene, mon
             assert res.json()["executed"] is False
             failed = client.post("/run", json={
                 **body, "argv": ["go", "run", "./..."], "dry_run": False})
-            assert failed.status_code == 403
+            assert failed.status_code == 503
             assert failed.json()["error"] == "exec_cleanup_proof_required"
             info = client.get("/health").json()["exec_policy"]
             assert info["mode"] == "local_best_effort"
@@ -449,7 +449,7 @@ def test_v2_python_invalid_worker_plan_is_sanitized_at_public_boundary(
             denied = client.post("/run", json={
                 "workspace": "a", "cwd": "default-project",
                 "argv": argv, "dry_run": False})
-            assert denied.status_code == 403
+            assert denied.status_code == 503
             assert denied.json()["error"] == "exec_cleanup_proof_required"
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
@@ -561,8 +561,8 @@ def test_v2_go_test_vet_rest_preview_refuses_old_flag_bypass(scene, monkeypatch)
                     assert refused.json()["error"] == "command_not_allowed"
                     still_denied = client.post(
                         "/run", json={**bad, "dry_run": False})
-                    assert still_denied.status_code == 403
-                    assert still_denied.json()["error"] == "command_not_allowed"
+                    assert still_denied.status_code == 503
+                    assert still_denied.json()["error"] == "exec_cleanup_proof_required"
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
@@ -594,7 +594,7 @@ def test_v2_go_build_preview_rejects_linked_output(scene):
                 "workspace": "a", "cwd": "go-project",
                 "argv": ["go", "build", "-o", "alias/child", "./cmd/server"],
                 "dry_run": False})
-            assert denied.status_code == 403
+            assert denied.status_code == 503
             assert denied.json()["error"] == "exec_cleanup_proof_required"
     finally:
         svc.close()
@@ -636,7 +636,8 @@ def test_v2_go_build_output_denies_gateway_blocked_names_and_excludes(
                         "a", "go-project",
                         ["go", "build", "-o", target, "./cmd/server"],
                         timeout_seconds=5, dry_run=dry)
-                assert denied.value.code == "command_not_allowed"
+                assert denied.value.code == (
+                    "command_not_allowed" if dry else "exec_cleanup_proof_required")
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
         assert svc._lbe_owner.snapshot()["unavailable"] is False
         assert not (a / "go-project" / target).exists()
@@ -703,7 +704,7 @@ def test_v2_owner_status_tracks_fake_child_and_refuses_busy_apply(scene):
             refused = client.post("/run", json={
                 "workspace": "a", "cwd": "go-project",
                 "argv": ["go", "build", "./..."], "dry_run": False})
-            assert refused.status_code == 403
+            assert refused.status_code == 503
             assert refused.json()["error"] == "exec_cleanup_proof_required"
         assert svc.invoke("b", "read_file", "safe.txt", 1, 5)["workspace"] == "b"
     finally:

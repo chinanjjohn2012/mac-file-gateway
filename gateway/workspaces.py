@@ -289,9 +289,9 @@ class WorkspaceService:
         return ctx
 
     @staticmethod
-    def _lbe_go_build_preview(ctx: WorkspaceContext, cwd: str,
+    def _lbe_go_preview(ctx: WorkspaceContext, cwd: str,
                               argv: list[str], timeout_seconds: int) -> dict[str, Any]:
-        """V2-only Go build preview after shared proof denial and slot checks.
+        """V2-only Go test/vet/build preview after proof denial and slot checks.
 
         This helper never calls Popen. No positive Go admission is permitted
         by F1, including through REST or the official MCP SDK.
@@ -299,13 +299,13 @@ class WorkspaceService:
         from .lbe_plan import prepare_lbe_work_plan
         from .executor import _MAX_OUTPUT_CHARS
         # The nonoperative public preview and future *reviewed* positive
-        # Worker must use the SAME Go argv/output/cwd preparation logic.
+        # Worker must use the SAME Go test/vet/build argv/output/cwd policy.
         # No second client-visible grant or positive process entry is added.
         plan = prepare_lbe_work_plan(
             ctx, cwd=cwd, argv=argv, timeout_seconds=timeout_seconds)
-        if plan.requested_argv[:2] != ("go", "build"):
+        if plan.requested_argv[0] != "go":
             raise GatewayError("command_not_allowed",
-                               "Only Go build uses this preview path.")
+                               "Only validated Go commands use this preview path.")
         requested = list(plan.requested_argv)
         return {
             "cwd": plan.cwd,
@@ -364,8 +364,8 @@ class WorkspaceService:
             self._active_operations += 1
         try:
             if (self.settings.schema_version == 2 and type(argv) is list
-                    and len(argv) >= 2 and argv[0:2] == ["go", "build"]):
-                result = self._lbe_go_build_preview(ctx, cwd, argv, timeout_seconds)
+                    and len(argv) >= 1 and argv[0] == "go"):
+                result = self._lbe_go_preview(ctx, cwd, argv, timeout_seconds)
             else:
                 result = ctx.gateway.run_command(cwd, argv, timeout_seconds, dry_run)
                 if self.settings.schema_version == 2:

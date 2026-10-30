@@ -318,20 +318,24 @@ def test_v1_parser_and_legacy_state_creation_remain_unchanged(scene):
 
 
 @pytest.mark.parametrize("argv", [
+    ["go", "test", "./..."],
+    ["go", "test", "-v", "./..."],
+    ["go", "vet", "./..."],
+    ["go", "vet", "-trimpath", "./..."],
     ["go", "build", "./..."],
     ["go", "build", "./cmd/server"],
     ["go", "build", "-v", "-trimpath", "./cmd/server"],
     ["go", "build", "-o", "bin/server", "./cmd/server"],
     ["go", "build", "-o=bin/server", "./cmd/server"],
 ])
-def test_v2_go_build_preview_is_direct_and_never_spawns(scene, monkeypatch, argv):
+def test_v2_go_preview_is_direct_and_never_spawns(scene, monkeypatch, argv):
     a, b, _private, _runtime = scene
     (a / "go-project" / "bin").mkdir()
     prime_existing_state(scene)
     svc = service(scene, v2_config(a, b))
     try:
         def refuse(*args, **kwargs):
-            raise AssertionError("Go build preview must never spawn a process")
+            raise AssertionError("Go preview must never spawn a process")
         with monkeypatch.context() as m:
             m.setattr(subprocess, "Popen", refuse)
             m.setattr(os, "killpg", refuse, raising=False)
@@ -364,9 +368,16 @@ def test_v2_go_build_preview_is_direct_and_never_spawns(scene, monkeypatch, argv
     ["go", "build", "-o=bin/server", "-o=bin/server2", "./..."],
     ["go", "build", "./cmd/server", "-o=bin/server"],
     ["go", "build", "-o=bin/server"],
+    ["go", "test", "-overlay=redirect.json", "./..."],
+    ["go", "test", "-ldflags=-s", "./..."],
+    ["go", "vet", "-modfile=alternate.mod", "./..."],
+    ["go", "test", "-o=bin/tool", "./..."],
+    ["go", "vet", "./...", "-v"],
+    ["go", "test"],
+    ["go", "vet"],
     ["go", "run", "./..."],
 ])
-def test_v2_go_build_preview_rejects_unscoped_or_unsafe_args(scene, argv):
+def test_v2_go_preview_rejects_unscoped_or_unsafe_args(scene, argv):
     a, b, _private, _runtime = scene
     (a / "go-project" / "bin").mkdir()
     prime_existing_state(scene)
@@ -375,6 +386,44 @@ def test_v2_go_build_preview_rejects_unscoped_or_unsafe_args(scene, argv):
         with pytest.raises(GatewayError) as exc:
             svc.invoke_exec("a", "go-project", argv)
         assert exc.value.code in {"command_not_allowed", "invalid_argument"}
+    finally:
+        svc.close()
+
+
+def test_v2_go_test_vet_rest_preview_refuses_old_flag_bypass(scene, monkeypatch):
+    """Real HTTP -> shared service preview, no real Go child or F1 bypass."""
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("No native process or signal is permitted")
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", refuse)
+            m.setattr(os, "killpg", refuse, raising=False)
+            with TestClient(create_multi_app(svc, enable_mcp=False),
+                            base_url="http://127.0.0.1:8765") as client:
+                for verb, forbidden in (
+                    ("test", "-overlay=redirect.json"),
+                    ("vet", "-modfile=alternate.mod"),
+                ):
+                    good = {"workspace": "a", "cwd": "go-project",
+                            "argv": ["go", verb, "./..."]}
+                    preview = client.post("/run", json=good)
+                    assert preview.status_code == 200
+                    assert preview.json()["requested_argv"] == good["argv"]
+                    assert preview.json()["runner"] == "direct"
+                    assert preview.json()["executed"] is False
+                    bad = {**good, "argv": ["go", verb, forbidden, "./..."]}
+                    refused = client.post("/run", json=bad)
+                    assert refused.status_code != 200
+                    assert refused.json()["error"] == "command_not_allowed"
+                    still_denied = client.post(
+                        "/run", json={**bad, "dry_run": False})
+                    assert still_denied.status_code == 503
+                    assert still_denied.json()["error"] == "exec_cleanup_proof_required"
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
 
@@ -616,7 +665,12 @@ def test_dormant_plan_does_not_upgrade_v1_or_ungranted_workspace(scene):
 
 
 
-def test_real_go_build_preview_and_future_dormant_plan_share_exact_values(scene):
+@pytest.mark.parametrize("args", [
+    ["go", "test", "-v", "./..."],
+    ["go", "vet", "./..."],
+    ["go", "build", "-o", "bin/tool", "./cmd/tool"],
+])
+def test_v2_go_preview_and_future_dormant_plan_share_exact_values(scene, args):
     """Plan parity is pure T0, NOT positive Exec permission or Mac acceptance."""
     from gateway.lbe_plan import prepare_lbe_work_plan
     a, b, private, _runtime = scene
@@ -624,7 +678,6 @@ def test_real_go_build_preview_and_future_dormant_plan_share_exact_values(scene)
     prime_existing_state(scene)
     svc = service(scene, v2_config(a, b))
     try:
-        args = ["go", "build", "-o", "bin/tool", "./cmd/tool"]
         public_preview = svc.invoke_exec("a", "go-project", args)
         plan = prepare_lbe_work_plan(
             svc.require_exec("a"), cwd="go-project", argv=args)

@@ -540,6 +540,50 @@ def test_v2_go_build_preview_rejects_linked_output(scene):
         svc.close()
 
 
+
+@pytest.mark.parametrize("target,parent,excluded", [
+    ("secrets/service", "secrets", False),
+    ("credentials/service", "credentials", False),
+    ("bin/review.key", "bin", False),
+    ("bin/excluded-artifact", "bin", True),
+])
+def test_v2_go_build_output_denies_gateway_blocked_names_and_excludes(
+    scene, monkeypatch, target, parent, excluded,
+):
+    """Go -o must obey original Gateway path exclusions on both paths.
+
+    Deterministic T0-only counterexample: original policy did not compare
+    Go output against configured File/path denylist. No Go compiler runs.
+    """
+    a, b, _private, _runtime = scene
+    (a / "go-project" / parent).mkdir()
+    prime_existing_state(scene)
+    cfg = v2_config(a, b)
+    if excluded:
+        cfg["workspaces"]["a"]["read"] = {
+            "excludes": ["go-project/bin/excluded*"]}
+    svc = service(scene, cfg)
+
+    def no_native(*args, **kwargs):
+        raise AssertionError("T0 must not start any native command")
+
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", no_native)
+            for dry in (True, False):
+                with pytest.raises(GatewayError) as denied:
+                    svc.invoke_exec(
+                        "a", "go-project",
+                        ["go", "build", "-o", target, "./cmd/server"],
+                        timeout_seconds=5, dry_run=dry)
+                assert denied.value.code == "command_not_allowed"
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+        assert svc._lbe_owner.snapshot()["unavailable"] is False
+        assert not (a / "go-project" / target).exists()
+    finally:
+        svc.close()
+
+
 def test_v1_public_policy_has_no_v2_keys(scene):
     a, b, _private, _runtime = scene
     cfg = v2_config(a, b, paths=[], runners=[])

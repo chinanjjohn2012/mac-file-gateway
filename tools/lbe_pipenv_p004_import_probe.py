@@ -110,7 +110,8 @@ def verify_installed(root: Path, expected: dict[str, str]) -> dict[str, int]:
             path = Path(name_field)
             if (path.is_absolute() or not name_field or "\\" in name_field
                     or any(part in ("", ".", "..") for part in path.parts)):
-                raise P004Error("installed RECORD traversal or ambiguity")
+                raise P004Error("installed RECORD traversal or ambiguity: " +
+                repr(name_field[:120]))
             path = root / path
             if name_field in inspected:
                 raise P004Error("duplicate installed RECORD entry")

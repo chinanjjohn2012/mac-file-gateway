@@ -76,8 +76,15 @@ def prepare_lbe_work_plan(
     )
     # Both caller- and worker-side shape checks stay active. Neither is an
     # authority grant; actual apply still prohibited by operative F1.
-    from .lbe_worker import LbeWorker
+    from .lbe_worker import LbeWorker, LbeWorkerError
 
-    LbeWorker._check_plan(plan)
+    try:
+        LbeWorker._check_plan(plan)
+    except LbeWorkerError:
+        # A dormant helper now feeds the public v2 preview. Do not turn an
+        # invalid prospective Worker plan into an uncaught REST/MCP 500 or
+        # leak its internal dependency/exception messages.
+        raise GatewayError("invalid_argument",
+                           "Command plan is not valid for this execution mode.") from None
     return plan
 

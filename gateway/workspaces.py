@@ -289,29 +289,25 @@ class WorkspaceService:
         return ctx
 
     @staticmethod
-    def _lbe_go_preview(ctx: WorkspaceContext, cwd: str,
-                              argv: list[str], timeout_seconds: int) -> dict[str, Any]:
-        """V2-only Go test/vet/build preview after proof denial and slot checks.
+    def _lbe_preview(ctx: WorkspaceContext, cwd: str,
+                     argv: list[str], timeout_seconds: int) -> dict[str, Any]:
+        """One nonoperative schema-v2 preview from the future Worker's plan.
 
-        This helper never calls Popen. No positive Go admission is permitted
-        by F1, including through REST or the official MCP SDK.
+        Python Direct/Pipenv and Go test/vet/build use the SAME source policy
+        that would prepare the future authorized Worker. This is NEVER an
+        execution permission: the shared F1 service denies dry_run=False
+        before reaching this function, REST, or the official MCP adapter.
         """
         from .lbe_plan import prepare_lbe_work_plan
         from .executor import _MAX_OUTPUT_CHARS
-        # The nonoperative public preview and future *reviewed* positive
-        # Worker must use the SAME Go test/vet/build argv/output/cwd policy.
-        # No second client-visible grant or positive process entry is added.
+
         plan = prepare_lbe_work_plan(
             ctx, cwd=cwd, argv=argv, timeout_seconds=timeout_seconds)
-        if plan.requested_argv[0] != "go":
-            raise GatewayError("command_not_allowed",
-                               "Only validated Go commands use this preview path.")
-        requested = list(plan.requested_argv)
         return {
             "cwd": plan.cwd,
-            "requested_argv": requested,
-            "effective_argv": requested.copy(),
-            "runner": "direct",
+            "requested_argv": list(plan.requested_argv),
+            "effective_argv": list(plan.effective_argv),
+            "runner": plan.runner,
             "runner_project": plan.runner_project,
             "dry_run": True,
             "executed": False,
@@ -363,19 +359,11 @@ class WorkspaceService:
             self._exec_active.add(name)
             self._active_operations += 1
         try:
-            if (self.settings.schema_version == 2 and type(argv) is list
-                    and len(argv) >= 1 and argv[0] == "go"):
-                result = self._lbe_go_preview(ctx, cwd, argv, timeout_seconds)
+            if self.settings.schema_version == 2:
+                result = self._lbe_preview(ctx, cwd, argv, timeout_seconds)
             else:
+                # Preserve the exact historic v1 preview and F1 deny-only path.
                 result = ctx.gateway.run_command(cwd, argv, timeout_seconds, dry_run)
-                if self.settings.schema_version == 2:
-                    # Report a v2 candidate *preview*, never a runnable mode.
-                    result = {**result, "status": "preview",
-                              "mode": "preview_only",
-                              "output_complete": True,
-                              "process_may_be_running": False,
-                              "cleanup_proven": False,
-                              "full_descendant_tree_clean": "not_proven"}
             return {**result, "workspace": name}
         finally:
             with self._lifecycle:

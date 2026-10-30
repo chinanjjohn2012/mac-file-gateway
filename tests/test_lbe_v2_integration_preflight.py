@@ -317,6 +317,83 @@ def test_v1_parser_and_legacy_state_creation_remain_unchanged(scene):
         svc.close()
 
 
+@pytest.mark.parametrize("cwd,argv,selected_runner", [
+    ("python-project", ["python", "hello.py"], "pipenv"),
+    ("default-project", ["python", "-m", "pytest"], "direct"),
+    ("default-project", ["pytest", "-q"], "direct"),
+    ("default-project", ["python", "-m", "compileall", "-q", "."], "direct"),
+])
+def test_v2_python_public_preview_uses_future_worker_plan(
+    scene, monkeypatch, cwd, argv, selected_runner,
+):
+    """Exact Direct/Pipenv plan parity on public service + real REST ingress."""
+    from gateway.lbe_plan import prepare_lbe_work_plan
+
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+
+    def no_native_child(*args, **kwargs):
+        raise AssertionError("No positive Exec child or signal is authorized")
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", no_native_child)
+            m.setattr(os, "killpg", no_native_child, raising=False)
+            ctx = svc.require_exec("a")
+            plan = prepare_lbe_work_plan(ctx, cwd=cwd, argv=argv)
+            direct = svc.invoke_exec("a", cwd, argv)
+            with TestClient(create_multi_app(svc, enable_mcp=False),
+                            base_url="http://127.0.0.1:8765") as client:
+                result = client.post("/run", json={
+                    "workspace": "a", "cwd": cwd, "argv": argv})
+                assert result.status_code == 200
+                assert result.json() == direct
+        assert plan.workspace == direct["workspace"] == "a"
+        assert plan.cwd == direct["cwd"] == cwd
+        assert list(plan.requested_argv) == direct["requested_argv"] == argv
+        assert list(plan.effective_argv) == direct["effective_argv"]
+        assert plan.runner == direct["runner"] == selected_runner
+        assert plan.runner_project == direct["runner_project"]
+        assert direct["mode"] == "preview_only"
+        assert direct["status"] == "preview"
+        assert direct["executed"] is False
+        assert direct["cleanup_proven"] is False
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+
+
+@pytest.mark.parametrize("argv", [
+    ["pytest", "-k", "alpha\tbeta"],
+    ["python", "-m", "pytest", "--maxfail=1\t--trace"],
+])
+def test_v2_python_invalid_worker_plan_is_sanitized_at_public_boundary(
+    scene, argv,
+):
+    """Legacy argv parser permits tabs; future Worker rejects control chars."""
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        with pytest.raises(GatewayError) as error:
+            svc.invoke_exec("a", "default-project", argv)
+        assert error.value.code == "invalid_argument"
+        with TestClient(create_multi_app(svc, enable_mcp=False),
+                        base_url="http://127.0.0.1:8765") as client:
+            rejected = client.post("/run", json={
+                "workspace": "a", "cwd": "default-project", "argv": argv})
+            assert rejected.status_code == 400
+            assert rejected.json() == {"error": "invalid_argument"}
+            denied = client.post("/run", json={
+                "workspace": "a", "cwd": "default-project",
+                "argv": argv, "dry_run": False})
+            assert denied.status_code == 503
+            assert denied.json() == {"error": "exec_cleanup_proof_required"}
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+
+
 @pytest.mark.parametrize("argv", [
     ["go", "test", "./..."],
     ["go", "test", "-v", "./..."],

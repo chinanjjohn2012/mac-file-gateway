@@ -33,6 +33,14 @@ class LbeWorkerError(RuntimeError):
         super().__init__(code)
 
 
+class LbeNoChildStarted(Exception):
+    """Trusted launcher witness: launch rejected BEFORE any child existed.
+
+    A general OSError/FileNotFoundError is never this proof. Only the future
+    reviewed launcher may emit this explicit negative launch witness.
+    """
+
+
 class OriginalChild(Protocol):
     stdout: Any
     stderr: Any
@@ -167,11 +175,19 @@ class LbeWorker:
             reservation = self._owner.reserve(plan.workspace)
         except LbeOwnerError as exc:
             raise LbeWorkerError(exc.code) from None
+        drain = None
         try:
             drain = self._drain_factory(reservation.capture)
             self._owner.prepare_pipe_drain(reservation, drain)
         except BaseException:
-            # No child has been spawned yet. Release only this pre-spawn slot.
+            # No child can exist yet. The drain factory may have returned a
+            # selector that the owner never adopted: close it explicitly.
+            if drain is not None and reservation.pipe_drain is not drain:
+                try:
+                    drain.abandon_without_child()
+                except BaseException:
+                    self._owner.latch_unavailable(reservation)
+                    raise LbeWorkerError("exec_state_unavailable") from None
             try:
                 self._owner.spawn_failed(reservation)
             except BaseException:
@@ -180,17 +196,22 @@ class LbeWorker:
 
         try:
             child = self._launcher(plan)
-        except (FileNotFoundError, OSError) as exc:
-            # A compliant launcher guarantees these exceptions mean NO child.
-            self._owner.spawn_failed(reservation)
+        except LbeNoChildStarted:
+            # Explicit, reviewed launcher-side negative witness only.
+            # Ordinary OSError/InterruptedError etc. cannot prove no child.
+            try:
+                self._owner.spawn_failed(reservation)
+            except BaseException:
+                raise LbeWorkerError("exec_state_unavailable") from None
             return self._base(
                 plan, status="launch_failed", executed=False, exit_code=None,
                 timed_out=False, may_run=False,
                 output={"output_complete": False},
             )
         except BaseException:
-            # An arbitrary launcher error cannot prove there was no child.
-            # Never release the possibly live command's reservation.
+            # No negative witness exists; even a native OSError might have
+            # occurred AFTER a child was launched and before it was returned.
+            # Preserve the uncertain slot and refuse all further admission.
             self._owner.latch_unavailable(reservation)
             raise LbeWorkerError(
                 "exec_state_unavailable", process_may_be_running=True,

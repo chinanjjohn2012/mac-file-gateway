@@ -158,7 +158,9 @@ def inspect_pipenv_wheel(path: Path, expected_digest: str = PIPENV_SHA256,
                 members.add(name)
                 if (not name.startswith(("pipenv/", prefix,
                         "pipenv-2026.10.4.data/"))):
-                    raise QualificationError("wheel contains unrelated input tree")
+                    raise QualificationError(
+                        "wheel unapproved top-level tree: " +
+                        name.split("/", 1)[0][:80])
                 mode = (info.external_attr >> 16) & 0o170000
                 if mode not in (0, stat.S_IFREG, stat.S_IFDIR):
                     raise QualificationError("unsafe wheel member type")

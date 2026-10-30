@@ -110,9 +110,23 @@ class OfflineInstalledSourceT0(unittest.TestCase):
 
     def test_undeclared_console_script_is_rejected(self):
         self._record_fake_virtualenv_script()
-        (self.files["virtualenv"][1] / "entry_points.txt").write_text(
+        distinfo = self.files["virtualenv"][1]
+        entrypoint = distinfo / "entry_points.txt"
+        entrypoint.write_text(
             "[console_scripts]\\nother = other:main\\n".replace("\\n", "\n"),
             encoding="utf-8")
+        # Keep the synthetic RECORD valid so this adversarial case reaches
+        # the distinct unauthorized-console-entrypoint check.
+        record = distinfo / "RECORD"
+        with record.open(newline="", encoding="utf-8") as fp:
+            rows = list(csv.reader(fp))
+        entrypoint_record = entrypoint.relative_to(self.site).as_posix()
+        matches = [row for row in rows if row[0] == entrypoint_record]
+        self.assertEqual(len(matches), 1)
+        matches[0][1] = "sha256=" + hash_b64(entrypoint.read_bytes())
+        matches[0][2] = str(entrypoint.stat().st_size)
+        with record.open("w", newline="", encoding="utf-8") as fp:
+            csv.writer(fp).writerows(rows)
         with self.assertRaisesRegex(P004Error, "not declared"):
             verify_installed(self.site, VERSIONS)
 

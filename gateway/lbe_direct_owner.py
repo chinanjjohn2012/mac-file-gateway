@@ -185,9 +185,9 @@ class DirectChildOwner:
             self._check(item)
             if item.phase != "VALIDATED" or item.waiter is None:
                 raise LbeOwnerError("invalid_reservation")
-            if item.pipe_drain is not None and not item.pipe_drain.attached:
-                self._unavailable = True
-                raise LbeOwnerError("exec_state_unavailable")
+            # Bind/reap the real original child BEFORE attaching its pipe FDs.
+            # If a later pipe setup fails, the child remains independently
+            # wait()-owned and further admissions still latch unavailable.
             if child is None or not callable(getattr(child, "wait", None)):
                 # Do not release: a malformed post-spawn handle cannot prove
                 # there is no original direct child to wait for.

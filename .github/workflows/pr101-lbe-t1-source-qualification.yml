@@ -10,6 +10,9 @@ on:
       - "tests/test_lbe_t1_source_qualifier.py"
       - "tools/lbe_t1_go_stager.py"
       - "tests/test_lbe_t1_go_stager.py"
+      - "tools/lbe_p007_go_source_inventory.py"
+      - "tests/test_lbe_p007_go_source_inventory.py"
+      - "docs/PR101_GO_P007_NONEXEC_SOURCE_INVENTORY.md"
       - "docs/PR101_LBE_NATIVE_TOOLCHAINS_T1_PROPOSAL.md"
       - "MANIFEST.sha256"
 
@@ -71,6 +74,7 @@ jobs:
           set -euo pipefail
           python3 -I -S tests/test_lbe_t1_source_qualifier.py
           python3 -I -S tests/test_lbe_t1_go_stager.py
+          python3 -I -S tests/test_lbe_p007_go_source_inventory.py
           echo "LBE_P001_SOURCE_QUALIFIER_UNIT_T0=PASS"
           echo "LBE_P001_GO_NONEXEC_STAGE_UNIT_T0=PASS"
 
@@ -168,6 +172,17 @@ jobs:
           echo "LBE_P001_GO_BYTE_STAGE=NONEXECUTABLE_ONLY"
           echo "LBE_P001_GO_NATIVE_PROCESS=NOT_RUN"
           echo "LBE_P001_GO_STAGED_SOURCE_REVIEW=NOT_ISSUED"
+
+      - name: P007 byte-reconcile original Go archive to nonexecuting staged source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$RUNNER_TEMP/lbe-p001-go-stage-evidence.json"
+          python3 -I -S tools/lbe_p007_go_source_inventory.py \
+            --runner-temp "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/lbe-p007-go-source-report.json"
+          echo "LBE_P007_NONEXEC_SOURCE_IDENTITY=VERIFIED"
+          echo "LBE_P007_REAL_GO_COMPILER_EXEC=NOT_RUN"
 
       - name: Recheck committed tree and never claim GO/PIPENV integration PASS
         shell: bash

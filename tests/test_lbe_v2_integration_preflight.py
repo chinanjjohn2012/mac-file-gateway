@@ -424,3 +424,77 @@ def test_v1_public_policy_has_no_v2_keys(scene):
     finally:
         svc.close()
 
+
+
+def test_dormant_v2_owner_status_tracks_fake_child_but_exec_apply_stays_denied(scene):
+    """Shared service/REST expose only direct-child counts, never grant apply.
+
+    The child is a pure T0 Event waiter, NOT a real process or native cleanup.
+    """
+    import threading
+
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    owner = svc._lbe_owner
+    assert owner is not None
+    ready = threading.Event()
+    release = threading.Event()
+
+    class FakeOnly:
+        def wait(self):
+            ready.set()
+            if not release.wait(timeout=10):
+                raise AssertionError("unreleased test fake child")
+            return 7
+
+    token = owner.reserve("a")
+    owner.bind(token, FakeOnly())
+    try:
+        assert ready.wait(2)
+        info = svc.info()
+        policy = info["exec_policy"]
+        assert policy["running_direct_children"] == 1
+        assert policy["capacity_exhausted"] is False
+        assert policy["owner_unavailable"] is False
+        assert policy["available"] is False
+        assert policy["completion_capability"] == "none"
+        assert "pid" not in str(policy).lower()
+        assert "pgid" not in str(policy).lower()
+
+        with TestClient(create_multi_app(svc, enable_mcp=False),
+                        base_url="http://127.0.0.1:8765") as client:
+            other = client.get("/health").json()["exec_policy"]
+            assert other == client.get("/info").json()["exec_policy"]
+            assert other["running_direct_children"] == 1
+            refused = client.post("/run", json={
+                "workspace": "a", "cwd": "go-project",
+                "argv": ["go", "build", "./..."], "dry_run": False})
+            assert refused.status_code == 503
+            assert refused.json()["error"] == "exec_cleanup_proof_required"
+        assert svc.invoke("b", "read_file", "safe.txt", 1, 5)["workspace"] == "b"
+    finally:
+        # Graceful close must not wait for or signal the simulated child.
+        svc.close()
+        assert owner.snapshot()["closing"] is True
+        assert owner.snapshot()["running_direct_children"] == 1
+        release.set()
+        token.waiter.join(timeout=2)
+        assert not token.waiter.is_alive()
+    assert owner.snapshot()["running_direct_children"] == 0
+
+
+def test_v1_does_not_construct_or_expose_v2_owner(scene):
+    a, b, _private, _runtime = scene
+    cfg = v2_config(a, b, paths=[], runners=[])
+    cfg["schema_version"] = 1
+    svc = service(scene, cfg)
+    try:
+        assert svc._lbe_owner is None
+        policy = svc.info()["exec_policy"]
+        for key in ("running_direct_children", "capacity_exhausted",
+                    "owner_unavailable", "candidate_mode"):
+            assert key not in policy
+    finally:
+        svc.close()
+

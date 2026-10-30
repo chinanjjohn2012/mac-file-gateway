@@ -47,21 +47,29 @@ def native_scene(tmp_path: Path):
     (work / "bounded_sleep.py").write_text(
         "import time\nprint('T1_SAFE_SLEEP')\ntime.sleep(1.5)\n"
     )
+    other = tmp_path / "project-b"
+    other.mkdir()
+    (other / "safe.txt").write_text("T1_SAFE_FILE_BEFORE\n")
+
     private = tmp_path / "private-control"
     private.mkdir(mode=0o700)
     private.chmod(0o700)
     runtime = tmp_path / "runtime-inventory"
     runtime.mkdir()
     state = ExecStateStore(private / "exec-state",
-                           workspace_roots=(str(root),))
+                           workspace_roots=(str(root), str(other)))
     assert state.durability_state == "healthy"
     state.close()
     config = {
         "schema_version": 2,
-        "server": {"port": 8765, "transport": "http"},
+        "server": {"port": 8765, "transport": "http",
+                   "git": {"enabled": True}},
         "workspaces": {
             "a": {"root": str(root),
                   "exec": {"paths": ["python-project"], "runners": []}},
+            "b": {"root": str(other),
+                  "write": {"enabled": True, "paths": ["safe.txt"]},
+                  "git": {"allowed_commands": ["status"]}},
         },
     }
     svc = WorkspaceService(
@@ -237,6 +245,60 @@ def test_real_mcp_sdk_jsonrpc_tool_uses_same_v2_worker(native_scene):
         })["result"]
         assert denied.get("isError") is True
         assert denied["structuredContent"]["error"] == "command_not_allowed"
+    assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+
+
+def test_v2_file_read_write_and_git_preview_keep_separate_grants(
+    native_scene, monkeypatch,
+):
+    """One disposable v2 service: real File writes, Git preview, Python child.
+
+    Git dry-run invokes no Git OS process (positive Git runtime remains
+    NOT_RUN here). Workspace b can read/write files and preview authorized
+    Git status but cannot borrow a's Exec permission. Conversely workspace a
+    can execute its fixed Python script but cannot borrow b's Git grant.
+    """
+    import subprocess
+
+    svc, _root = native_scene
+    before = svc.invoke("b", "read_file", "safe.txt")
+    assert before["workspace"] == "b"
+    assert "T1_SAFE_FILE_BEFORE" in before["content"]
+    svc.invoke(
+        "b", "write_file", "safe.txt", "T1_SAFE_FILE_AFTER\\n",
+        before["file_sha256"], dry_run=False,
+    )
+    after = svc.invoke("b", "read_file", "safe.txt")
+    assert "T1_SAFE_FILE_AFTER" in after["content"]
+    assert svc.any_exec is True
+    assert svc.any_git is True
+
+    def reject_git_spawn(*args, **kwargs):
+        raise AssertionError("Git preview is not a native Git positive T1")
+
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", reject_git_spawn)
+        preview = svc.invoke_git("b", "status", dry_run=True)
+    assert preview["dry_run"] is True
+    assert preview["execute_started"] is False
+    with pytest.raises(GatewayError) as bad_git:
+        svc.invoke_git("a", "status", dry_run=False)
+    assert bad_git.value.code == "git_command_not_allowed"
+    with pytest.raises(GatewayError) as bad_exec:
+        svc.invoke_exec(
+            "b", ".", ["python", "-m", "pytest"],
+            timeout_seconds=5, dry_run=False)
+    assert bad_exec.value.code == "exec_disabled"
+    assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+
+    ran = svc.invoke_exec(
+        "a", "python-project", ["python", "ok.py"],
+        timeout_seconds=5, dry_run=False)
+    assert ran["executed"] is True
+    assert ran["exit_code"] == 0
+    assert "T1_ORIGINAL_STDOUT" in ran["stdout"]
+    assert svc.invoke("b", "read_file", "safe.txt")["file_sha256"] == (
+        after["file_sha256"])
     assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
 
 

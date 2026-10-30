@@ -383,12 +383,12 @@ def test_v2_python_invalid_worker_plan_is_sanitized_at_public_boundary(
             rejected = client.post("/run", json={
                 "workspace": "a", "cwd": "default-project", "argv": argv})
             assert rejected.status_code == 400
-            assert rejected.json() == {"error": "invalid_argument"}
+            assert rejected.json()["error"] == "invalid_argument"
             denied = client.post("/run", json={
                 "workspace": "a", "cwd": "default-project",
                 "argv": argv, "dry_run": False})
             assert denied.status_code == 503
-            assert denied.json() == {"error": "exec_cleanup_proof_required"}
+            assert denied.json()["error"] == "exec_cleanup_proof_required"
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()

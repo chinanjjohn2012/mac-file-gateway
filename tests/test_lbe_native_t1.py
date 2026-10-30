@@ -47,6 +47,17 @@ def native_scene(tmp_path: Path):
     (work / "bounded_sleep.py").write_text(
         "import time\nprint('T1_SAFE_SLEEP')\ntime.sleep(1.5)\n"
     )
+    (work / "hold.py").write_text(
+        "import time\nprint('T1_HELD_ORIGINAL')\ntime.sleep(2.8)\n"
+    )
+    (work / "large_output.py").write_text(
+        "import sys\nsys.stdout.write('O' * 65000)\n"
+        "sys.stderr.write('E' * 65000)\n"
+    )
+    peer = tmp_path / "project-c"
+    peer_python = peer / "python-project"
+    peer_python.mkdir(parents=True)
+    (peer_python / "ok.py").write_text("print('T1_PEER_ORIGINAL')\n")
     other = tmp_path / "project-b"
     other.mkdir()
     (other / "safe.txt").write_text("T1_SAFE_FILE_BEFORE\n")
@@ -57,7 +68,7 @@ def native_scene(tmp_path: Path):
     runtime = tmp_path / "runtime-inventory"
     runtime.mkdir()
     state = ExecStateStore(private / "exec-state",
-                           workspace_roots=(str(root), str(other)))
+                           workspace_roots=(str(root), str(other), str(peer)))
     assert state.durability_state == "healthy"
     state.close()
     config = {
@@ -70,6 +81,8 @@ def native_scene(tmp_path: Path):
             "b": {"root": str(other),
                   "write": {"enabled": True, "paths": ["safe.txt"]},
                   "git": {"allowed_commands": ["status"]}},
+            "c": {"root": str(peer),
+                  "exec": {"paths": ["python-project"], "runners": []}},
         },
     }
     svc = WorkspaceService(
@@ -300,6 +313,81 @@ def test_v2_file_read_write_and_git_preview_keep_separate_grants(
     assert svc.invoke("b", "read_file", "safe.txt")["file_sha256"] == (
         after["file_sha256"])
     assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+
+
+
+def test_real_output_cap_reports_both_streams_truncated_without_claiming_cleanup(
+    native_scene,
+):
+    """Original child emits >48K bytes/stream; reader stores bounded prefixes."""
+    svc, _root = native_scene
+    result = svc.invoke_exec(
+        "a", "python-project", ["python", "large_output.py"],
+        timeout_seconds=5, dry_run=False,
+    )
+    assert result["status"] == "exited"
+    assert result["executed"] is True
+    assert result["exit_code"] == 0
+    assert result["stdout_truncated"] is True
+    assert result["stderr_truncated"] is True
+    assert result["stdout"].startswith("O" * 256)
+    assert result["stderr"].startswith("E" * 256)
+    assert len(result["stdout"]) <= 48_000
+    assert len(result["stderr"]) <= 48_000
+    assert result["output_complete"] is True
+    assert result["cleanup_proven"] is False
+    assert result["full_descendant_tree_clean"] == "not_proven"
+    assert result["process_may_be_running"] is True
+    assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+
+
+def test_public_timeout_retains_original_slot_but_other_workspace_can_execute(
+    native_scene,
+):
+    """Two actual Python originals: timeout never recycles a's live child.
+
+    A's fixed natural-exit child lives 2.8 seconds, while the user-facing
+    command budget is 1 second. No PID signal/kill/retry is issued. A second
+    independently granted Workspace c can run one short original child.
+    """
+    svc, _root = native_scene
+    result = svc.invoke_exec(
+        "a", "python-project", ["python", "hold.py"],
+        timeout_seconds=1, dry_run=False,
+    )
+    assert result["status"] == "timed_out"
+    assert result["executed"] is True
+    assert result["timed_out"] is True
+    assert result["exit_code"] is None
+    assert result["process_may_be_running"] is True
+    assert result["cleanup_proven"] is False
+    policy = svc.info()["exec_policy"]
+    assert policy["running_direct_children"] == 1
+    # A's unavailable capacity does not disable a separately allowed c.
+    assert policy["available"] is True
+    with pytest.raises(GatewayError) as denied:
+        svc.invoke_exec(
+            "a", "python-project", ["python", "ok.py"],
+            timeout_seconds=5, dry_run=False)
+    assert denied.value.code == "busy"
+
+    peer = svc.invoke_exec(
+        "c", "python-project", ["python", "ok.py"],
+        timeout_seconds=5, dry_run=False)
+    assert peer["status"] == "exited"
+    assert peer["executed"] is True
+    assert peer["exit_code"] == 0
+    assert "T1_PEER_ORIGINAL" in peer["stdout"]
+    assert peer["cleanup_proven"] is False
+    assert peer["full_descendant_tree_clean"] == "not_proven"
+
+    deadline = time.monotonic() + 5
+    while (svc._lbe_owner.snapshot()["reserved_slots"]
+           and time.monotonic() < deadline):
+        time.sleep(0.01)
+    assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    assert svc._lbe_owner.snapshot()["unavailable"] is False
+    assert svc.info()["exec_policy"]["available"] is True
 
 
 def test_invalid_relative_script_has_zero_launch(native_scene):

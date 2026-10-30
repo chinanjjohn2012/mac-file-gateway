@@ -19,6 +19,8 @@ import threading
 import time
 from typing import Protocol
 
+from .lbe_output_capture import BoundedCapture
+
 
 class LbeOwnerError(RuntimeError):
     """An in-memory child-owner decision. No OS process status is implied."""
@@ -47,7 +49,7 @@ class _Reservation:
     """Private reference-identity token, never an externally reusable grant."""
 
     __slots__ = ("owner", "workspace", "phase", "child", "waiter",
-                 "exit_code", "waiter_disconnected")
+                 "exit_code", "waiter_disconnected", "capture")
 
     def __init__(self, owner: "DirectChildOwner", workspace: str) -> None:
         self.owner = owner
@@ -57,6 +59,7 @@ class _Reservation:
         self.waiter: threading.Thread | None = None
         self.exit_code: int | None = None
         self.waiter_disconnected = False
+        self.capture = BoundedCapture()
 
 
 class DirectChildOwner:
@@ -96,9 +99,11 @@ class DirectChildOwner:
                 raise LbeOwnerError("workspace_required")
             if workspace in self._by_workspace or len(self._by_workspace) >= self._TOTAL:
                 raise LbeOwnerError("busy")
-            item = _Reservation(self, workspace)
             try:
-                # Preallocate the only required reaper object before any caller
+                # Allocate bounded stdout/stderr memory and thread owner
+                # before any eventual future authorized spawn.
+                item = _Reservation(self, workspace)
+                # Preallocate the reaper object before any caller
                 # has an opportunity to launch the original process.
                 item.waiter = threading.Thread(
                     target=self._reap, args=(item,),

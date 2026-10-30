@@ -20,6 +20,7 @@ import time
 from typing import Protocol
 
 from .lbe_output_capture import BoundedCapture
+from .lbe_pipe_drain import BoundedPipeDrain
 
 
 class LbeOwnerError(RuntimeError):
@@ -49,7 +50,7 @@ class _Reservation:
     """Private reference-identity token, never an externally reusable grant."""
 
     __slots__ = ("owner", "workspace", "phase", "child", "waiter",
-                 "exit_code", "waiter_disconnected", "capture")
+                 "exit_code", "waiter_disconnected", "capture", "pipe_drain")
 
     def __init__(self, owner: "DirectChildOwner", workspace: str) -> None:
         self.owner = owner
@@ -60,6 +61,7 @@ class _Reservation:
         self.exit_code: int | None = None
         self.waiter_disconnected = False
         self.capture = BoundedCapture()
+        self.pipe_drain: BoundedPipeDrain | None = None
 
 
 class DirectChildOwner:
@@ -78,6 +80,9 @@ class DirectChildOwner:
         self._condition = threading.Condition(threading.RLock())
         self._pid = os.getpid()
         self._by_workspace: dict[str, _Reservation] = {}
+        # Bound delayed output-only readers after original child exit. New
+        # reservations stop when this bounded grace backlog is saturated.
+        self._retired_drains: list[BoundedPipeDrain] = []
         self._unavailable = False
         self._closing = False
 
@@ -97,7 +102,15 @@ class DirectChildOwner:
                 raise LbeOwnerError("service_closing")
             if type(workspace) is not str or not workspace:
                 raise LbeOwnerError("workspace_required")
-            if workspace in self._by_workspace or len(self._by_workspace) >= self._TOTAL:
+            # A child exit releases its original slot, but its pipe reader
+            # may need a short bounded EOF grace. Cap stale readers separately
+            # so very fast repeated child exits cannot accumulate threads.
+            self._retired_drains = [
+                drain for drain in self._retired_drains
+                if not drain.wait_finished(0)]
+            if (workspace in self._by_workspace
+                    or len(self._by_workspace) >= self._TOTAL
+                    or len(self._retired_drains) >= self._TOTAL):
                 raise LbeOwnerError("busy")
             try:
                 # Allocate bounded stdout/stderr memory and thread owner
@@ -120,12 +133,36 @@ class DirectChildOwner:
                 or self._by_workspace.get(item.workspace) is not item):
             raise LbeOwnerError("invalid_reservation")
 
+    def prepare_pipe_drain(self, item: _Reservation,
+                           drain: BoundedPipeDrain) -> None:
+        """Associate preallocated drain resources BEFORE future child spawn."""
+        with self._condition:
+            self._check(item)
+            if (item.phase != "VALIDATED" or item.pipe_drain is not None
+                    or type(drain) is not BoundedPipeDrain):
+                raise LbeOwnerError("invalid_reservation")
+            item.pipe_drain = drain
+
+    def latch_unavailable(self, item: _Reservation) -> None:
+        """No OS signal. A known original-child reader fault blocks new work."""
+        with self._condition:
+            if type(item) is not _Reservation or item.owner is not self:
+                raise LbeOwnerError("invalid_reservation")
+            self._unavailable = True
+            self._condition.notify_all()
+
     def spawn_failed(self, item: _Reservation) -> None:
         """No child exists: release the reservation without signalling."""
         with self._condition:
             self._check(item)
             if item.phase != "VALIDATED":
                 raise LbeOwnerError("invalid_reservation")
+            if item.pipe_drain is not None:
+                try:
+                    item.pipe_drain.abandon_without_child()
+                except BaseException:
+                    self._unavailable = True
+                    raise LbeOwnerError("exec_state_unavailable") from None
             item.phase = "SPAWN_FAILED"
             del self._by_workspace[item.workspace]
             self._condition.notify_all()
@@ -141,6 +178,9 @@ class DirectChildOwner:
             self._check(item)
             if item.phase != "VALIDATED" or item.waiter is None:
                 raise LbeOwnerError("invalid_reservation")
+            if item.pipe_drain is not None and not item.pipe_drain.attached:
+                self._unavailable = True
+                raise LbeOwnerError("exec_state_unavailable")
             if child is None or not callable(getattr(child, "wait", None)):
                 # Do not release: a malformed post-spawn handle cannot prove
                 # there is no original direct child to wait for.
@@ -164,6 +204,9 @@ class DirectChildOwner:
             code = child.wait()
             if type(code) is not int:
                 raise RuntimeError("unqualified direct child exit code")
+            if item.pipe_drain is not None:
+                # Only a witnessed original-child wait may start EOF grace.
+                item.pipe_drain.note_original_exit()
         except BaseException:
             with self._condition:
                 # Do not recycle capacity or use PID signals if wait fails.
@@ -174,6 +217,11 @@ class DirectChildOwner:
         with self._condition:
             item.exit_code = code
             item.phase = "DIRECT_CHILD_REAPED"
+            # Hold only a bounded number of post-exit EOF-grace reader
+            # threads without dishonestly extending the direct-child lease.
+            if (item.pipe_drain is not None
+                    and not item.pipe_drain.wait_finished(0)):
+                self._retired_drains.append(item.pipe_drain)
             # The actual original child, not the waiter, has exited.
             if self._by_workspace.get(item.workspace) is item:
                 del self._by_workspace[item.workspace]

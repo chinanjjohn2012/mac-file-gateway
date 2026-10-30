@@ -957,6 +957,47 @@ def test_v2_trusted_launcher_revalidates_go_and_pipenv_without_native_spawn(
         svc.close()
 
 
+
+@pytest.mark.parametrize("excluded", [
+    "python-project/Pipfile",
+    "Pipfile",
+    "python-project/Pip*",
+])
+def test_v2_pipenv_runner_respects_workspace_excluded_pipfile(
+    scene, monkeypatch, excluded,
+):
+    """T0: explicit Pipenv runner must not consume an excluded Pipfile.
+
+    This is a pre-Popen path authorization check, not a claim that trusted
+    project Python code cannot read other files at its own OS privilege.
+    Both preview and apply must deny a forbidden *runner input*.
+    """
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    cfg = v2_config(a, b, runners=["python-project=pipenv"])
+    cfg["workspaces"]["a"]["read"] = {
+        "enabled": True, "excludes": [excluded],
+    }
+    svc = service(scene, cfg)
+
+    def no_child(*_args, **_kwargs):
+        raise AssertionError("Excluded runner input must never reach Popen")
+
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", no_child)
+            for dry in (True, False):
+                with pytest.raises(GatewayError) as err:
+                    svc.invoke_exec(
+                        "a", "python-project", ["python", "hello.py"],
+                        timeout_seconds=5, dry_run=dry)
+                assert err.value.code == "runner_unavailable"
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+        assert svc._lbe_owner.snapshot()["unavailable"] is False
+    finally:
+        svc.close()
+
+
 def test_v2_pipenv_hardlinked_pipfile_denied_in_preview_and_real_preflight(
     scene, monkeypatch,
 ):

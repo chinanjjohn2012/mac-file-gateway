@@ -11,6 +11,8 @@ on:
       - "gateway/workspaces_config.py"
       - "tests/test_lbe_*.py"
       - "tools/ci_wheel_constraints.py"
+      - "tools/lbe_toolchain_candidates.py"
+      - "tests/test_lbe_toolchain_candidates.py"
       - "MANIFEST.sha256"
 
 permissions:
@@ -53,6 +55,17 @@ jobs:
           echo "LBE_MACOS_PREVIEW_HEAD=$(git rev-parse HEAD)"
           echo "LBE_MACOS_PREVIEW_TREE=$(git rev-parse 'HEAD^{tree}')"
 
+      - name: Read-only toolchain candidate inventory, NOT Go/Pipenv native approval
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S tools/lbe_toolchain_candidates.py --output "$RUNNER_TEMP/lbe-toolchain-candidates.json"
+          test -s "$RUNNER_TEMP/lbe-toolchain-candidates.json"
+          echo "LBE_TOOLCHAIN_CANDIDATES_ONLY=SOURCE_DISCOVERY"
+          echo "LBE_GO_COMPILER_STDLIB_MODULES=NOT_ATTESTED"
+          echo "LBE_PIPENV_EXTRA_WHEEL_CLOSURE=NOT_ATTESTED"
+          echo "LBE_GO_PIPENV_NATIVE_T1=NOT_RUN"
+
       - name: Set up Python 3.13
         uses: actions/setup-python@v6
         with:
@@ -92,6 +105,7 @@ jobs:
         run: |
           python -m pytest -q -rs -p no:cacheprovider \
             tests/test_lbe_config_policy.py \
+            tests/test_lbe_toolchain_candidates.py \
             tests/test_lbe_go_policy.py \
             tests/test_lbe_output_capture.py \
             tests/test_lbe_direct_owner.py \

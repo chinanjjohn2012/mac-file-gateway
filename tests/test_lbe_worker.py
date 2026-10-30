@@ -48,7 +48,8 @@ class FakeSelector:
         assert events == selectors.EVENT_READ
         with self.mu:
             self.registered[fd] = FakeKey(fd, data)
-            self.queues[fd] = deque()
+            # Fake stdout can become ready before attach/register.
+            self.queues.setdefault(fd, deque())
 
     def unregister(self, fd):
         with self.mu:
@@ -56,7 +57,7 @@ class FakeSelector:
 
     def enqueue(self, fd, item):
         with self.mu:
-            self.queues[fd].append(item)
+            self.queues.setdefault(fd, deque()).append(item)
 
     def select(self, timeout):
         with self.mu:

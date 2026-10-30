@@ -1,7 +1,8 @@
 """Consolidated LBE v2 PREVIEW-ONLY wiring and old-state fail-closed T0.
 
 No native child, signal, real command, user Mac, Tunnel, or operative D0
-exception is exercised. The F1 dry_run=False hard-denial remains in place.
+exception is not exercised here. V1 retains F1 DENY; V2 positive
+runs only in separately authorized real-process tests, never in this T0.
 """
 from __future__ import annotations
 
@@ -135,8 +136,8 @@ def test_v2_missing_old_state_root_fails_without_auto_creation(scene):
         assert policy["enabled"] is True
         assert policy["available"] is False
         assert policy["completion_capability"] == "none"
-        assert policy["mode"] == "preview_only"
-        assert policy["candidate_mode"] == "local_best_effort"
+        assert policy["mode"] == "local_best_effort"
+        assert "candidate_mode" not in policy
         assert policy["durability_state"] == "unavailable"
         for dry in (True, False):
             with pytest.raises(GatewayError) as exc:
@@ -164,7 +165,7 @@ def test_v2_missing_old_owner_lock_never_recreates_lock(scene):
         svc.close()
 
 
-def test_v2_existing_healthy_state_previews_and_denies_apply(scene, monkeypatch):
+def test_v2_existing_healthy_state_previews_and_refuses_invalid_apply(scene, monkeypatch):
     a, b, _private, _runtime = scene
     state = prime_existing_state(scene)
     before = sorted(p.name for p in state.iterdir())
@@ -172,7 +173,8 @@ def test_v2_existing_healthy_state_previews_and_denies_apply(scene, monkeypatch)
     try:
         policy = svc.info()["exec_policy"]
         assert policy["durability_state"] == "healthy"
-        assert policy["available"] is False
+        assert policy["available"] is True
+        assert policy["completion_capability"] == "best_effort"
         assert svc.any_exec is True
         assert svc.list_workspaces()["workspaces"][1]["exec"] is False
         preview = svc.invoke_exec("a", "python-project",
@@ -182,14 +184,15 @@ def test_v2_existing_healthy_state_previews_and_denies_apply(scene, monkeypatch)
         assert preview["effective_argv"] == ["pipenv", "run", "python", "hello.py"]
 
         def deny(*args, **kwargs):
-            raise AssertionError("live Exec must remain F1-denied")
+            raise AssertionError("invalid request may not launch")
         with monkeypatch.context() as m:
             m.setattr(subprocess, "Popen", deny)
             m.setattr(os, "killpg", deny, raising=False)
             with pytest.raises(GatewayError) as exc:
-                svc.invoke_exec("a", "python-project", ["python", "hello.py"],
+                svc.invoke_exec("a", "python-project",
+                                ["python", "-c", "print('blocked')"],
                                 dry_run=False)
-            assert exc.value.code == "exec_cleanup_proof_required"
+            assert exc.value.code == "command_not_allowed"
 
         with TestClient(create_multi_app(svc, enable_mcp=False),
                         base_url="http://127.0.0.1:8765") as client:
@@ -199,14 +202,13 @@ def test_v2_existing_healthy_state_previews_and_denies_apply(scene, monkeypatch)
             assert res.status_code == 200
             assert res.json()["runner"] == "direct"
             assert res.json()["executed"] is False
-            failed = client.post("/run", json={**body, "dry_run": False})
-            # Preserve the existing F1 REST error mapping: proof-denial
-            # reports 503, not a newly invented v2-specific 403.
-            assert failed.status_code == 503
-            assert failed.json()["error"] == "exec_cleanup_proof_required"
+            failed = client.post("/run", json={
+                **body, "argv": ["go", "run", "./..."], "dry_run": False})
+            assert failed.status_code == 400
+            assert failed.json()["error"] == "command_not_allowed"
             info = client.get("/health").json()["exec_policy"]
-            assert info["mode"] == "preview_only"
-            assert info["available"] is False
+            assert info["mode"] == "local_best_effort"
+            assert info["available"] is True
         assert sorted(p.name for p in state.iterdir()) == before
     finally:
         svc.close()
@@ -387,8 +389,8 @@ def test_v2_python_invalid_worker_plan_is_sanitized_at_public_boundary(
             denied = client.post("/run", json={
                 "workspace": "a", "cwd": "default-project",
                 "argv": argv, "dry_run": False})
-            assert denied.status_code == 503
-            assert denied.json()["error"] == "exec_cleanup_proof_required"
+            assert denied.status_code == 400
+            assert denied.json()["error"] == "invalid_argument"
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
@@ -428,8 +430,9 @@ def test_v2_go_preview_is_direct_and_never_spawns(scene, monkeypatch, argv):
         assert result["cleanup_proven"] is False
         assert result["output_complete"] is True
         with pytest.raises(GatewayError) as exc:
-            svc.invoke_exec("a", "go-project", argv, dry_run=False)
-        assert exc.value.code == "exec_cleanup_proof_required"
+            svc.invoke_exec("a", "go-project", ["go", "run", "./..."],
+                            dry_run=False)
+        assert exc.value.code == "command_not_allowed"
     finally:
         svc.close()
 
@@ -498,8 +501,8 @@ def test_v2_go_test_vet_rest_preview_refuses_old_flag_bypass(scene, monkeypatch)
                     assert refused.json()["error"] == "command_not_allowed"
                     still_denied = client.post(
                         "/run", json={**bad, "dry_run": False})
-                    assert still_denied.status_code == 503
-                    assert still_denied.json()["error"] == "exec_cleanup_proof_required"
+                    assert still_denied.status_code == 400
+                    assert still_denied.json()["error"] == "command_not_allowed"
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
@@ -529,10 +532,10 @@ def test_v2_go_build_preview_rejects_linked_output(scene):
             assert result.json()["runner"] == "direct"
             denied = client.post("/run", json={
                 "workspace": "a", "cwd": "go-project",
-                "argv": ["go", "build", "-o", "bin/server", "./cmd/server"],
+                "argv": ["go", "build", "-o", "alias/child", "./cmd/server"],
                 "dry_run": False})
-            assert denied.status_code == 503
-            assert denied.json()["error"] == "exec_cleanup_proof_required"
+            assert denied.status_code == 400
+            assert denied.json()["error"] == "command_not_allowed"
     finally:
         svc.close()
 
@@ -552,7 +555,7 @@ def test_v1_public_policy_has_no_v2_keys(scene):
 
 
 
-def test_dormant_v2_owner_status_tracks_fake_child_but_exec_apply_stays_denied(scene):
+def test_v2_owner_status_tracks_fake_child_and_refuses_busy_apply(scene):
     """Shared service/REST expose only direct-child counts, never grant apply.
 
     The child is a pure T0 Event waiter, NOT a real process or native cleanup.
@@ -584,7 +587,7 @@ def test_dormant_v2_owner_status_tracks_fake_child_but_exec_apply_stays_denied(s
         assert policy["capacity_exhausted"] is False
         assert policy["owner_unavailable"] is False
         assert policy["available"] is False
-        assert policy["completion_capability"] == "none"
+        assert policy["completion_capability"] == "best_effort"
         assert "pid" not in str(policy).lower()
         assert "pgid" not in str(policy).lower()
 
@@ -596,8 +599,8 @@ def test_dormant_v2_owner_status_tracks_fake_child_but_exec_apply_stays_denied(s
             refused = client.post("/run", json={
                 "workspace": "a", "cwd": "go-project",
                 "argv": ["go", "build", "./..."], "dry_run": False})
-            assert refused.status_code == 503
-            assert refused.json()["error"] == "exec_cleanup_proof_required"
+            assert refused.status_code == 409
+            assert refused.json()["error"] == "busy"
         assert svc.invoke("b", "read_file", "safe.txt", 1, 5)["workspace"] == "b"
     finally:
         # Graceful close must not wait for or signal the simulated child.
@@ -672,11 +675,12 @@ def test_dormant_prepared_plans_use_real_v2_gateway_policies(scene, monkeypatch)
             assert default_python.effective_argv == (
                 "python", "-m", "pytest")
 
-            with pytest.raises(GatewayError, match="cleanup proof"):
+            with pytest.raises(GatewayError) as denied:
                 svc.invoke_exec(
-                    "a", "go-project", ["go", "build", "./..."],
+                    "a", "go-project", ["go", "run", "./..."],
                     dry_run=False)
-        assert svc.info()["exec_policy"]["available"] is False
+            assert denied.value.code == "command_not_allowed"
+        assert svc.info()["exec_policy"]["available"] is True
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
@@ -766,10 +770,11 @@ def test_v2_go_preview_and_future_dormant_plan_share_exact_values(scene, args):
         assert public_preview["runner"] == plan.runner == "direct"
         assert public_preview["runner_project"] == plan.runner_project
         assert public_preview["mode"] == "preview_only"
-        assert svc.info()["exec_policy"]["available"] is False
+        assert svc.info()["exec_policy"]["available"] is True
         with pytest.raises(GatewayError) as error:
-            svc.invoke_exec("a", "go-project", args, dry_run=False)
-        assert error.value.code == "exec_cleanup_proof_required"
+            svc.invoke_exec("a", "go-project", ["go", "run", "./..."],
+                            dry_run=False)
+        assert error.value.code == "command_not_allowed"
         assert not (a / "go-project" / "bin" / "tool").exists()
     finally:
         svc.close()

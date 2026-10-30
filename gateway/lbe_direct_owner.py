@@ -275,6 +275,29 @@ class DirectChildOwner:
             item.waiter_disconnected = True
             self._condition.notify_all()
 
+    def can_admit_any(self, workspaces: tuple[str, ...]) -> bool:
+        """Whether any currently granted Workspace has an unoccupied slot.
+
+        Private status helper, not an authorization token: reserve() repeats
+        these checks under the SAME owner lock for a real admitted command.
+        This avoids reporting available=true with the only granted Workspace
+        already occupied, even when the four-instance cap is not yet full.
+        """
+        if type(workspaces) is not tuple:
+            return False
+        with self._condition:
+            return bool(
+                self._valid_process()
+                and not self._unavailable and not self._closing
+                and len(self._by_workspace) < self._TOTAL
+                and len(self._retired_drains) < self._TOTAL
+                and any(
+                    type(name) is str and name
+                    and name not in self._by_workspace
+                    for name in workspaces
+                )
+            )
+
     def snapshot(self) -> dict[str, int | bool]:
         """Status counts only known original child handles, never PID/PGID."""
         with self._condition:

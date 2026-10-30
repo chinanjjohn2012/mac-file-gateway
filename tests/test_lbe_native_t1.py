@@ -135,6 +135,58 @@ def test_timeout_retains_slot_until_natural_direct_exit(native_scene):
     assert svc._lbe_owner.snapshot()["unavailable"] is False
 
 
+def test_real_v2_service_direct_apply_uses_single_source_gate(native_scene):
+    """Actual service positive under owner-approved v2, never v1 or a bypass."""
+    svc, _root = native_scene
+    policy = svc.info()["exec_policy"]
+    assert policy["mode"] == "local_best_effort"
+    assert policy["available"] is True
+    assert policy["completion_capability"] == "best_effort"
+    result = svc.invoke_exec(
+        "a", "python-project", ["python", "ok.py"],
+        timeout_seconds=5, dry_run=False,
+    )
+    assert result["workspace"] == "a"
+    assert result["mode"] == "local_best_effort"
+    assert result["status"] == "exited"
+    assert result["executed"] is True
+    assert result["exit_code"] == 0
+    assert "T1_ORIGINAL_STDOUT" in result["stdout"]
+    assert "T1_ORIGINAL_STDERR" in result["stderr"]
+    assert result["cleanup_proven"] is False
+    assert result["full_descendant_tree_clean"] == "not_proven"
+    assert result["output_complete"] is True
+    assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+
+
+def test_real_rest_run_and_health_share_same_approved_v2_service(native_scene):
+    """REST parsing -> actual single Worker and original child, no mocked ACK."""
+    from starlette.testclient import TestClient
+    from gateway.http_multi import create_multi_app
+
+    svc, _root = native_scene
+    body = {"workspace": "a", "cwd": "python-project",
+            "argv": ["python", "ok.py"], "timeout_seconds": 5,
+            "dry_run": False}
+    with TestClient(create_multi_app(svc, enable_mcp=False),
+                    base_url="http://127.0.0.1:8765") as client:
+        before = client.get("/health").json()["exec_policy"]
+        assert before["mode"] == "local_best_effort"
+        assert before["available"] is True
+        assert before == client.get("/info").json()["exec_policy"]
+        response = client.post("/run", json=body)
+        assert response.status_code == 200
+        result = response.json()
+        assert result["workspace"] == "a"
+        assert result["status"] == "exited"
+        assert result["executed"] is True
+        assert result["exit_code"] == 0
+        assert "T1_ORIGINAL_STDOUT" in result["stdout"]
+        assert result["cleanup_proven"] is False
+        assert result["full_descendant_tree_clean"] == "not_proven"
+        assert client.get("/health").json()["exec_policy"]["available"] is True
+
+
 def test_invalid_relative_script_has_zero_launch(native_scene):
     svc, root = native_scene
     ctx, _worker = _internal(svc)

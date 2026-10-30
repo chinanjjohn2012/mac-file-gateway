@@ -61,9 +61,21 @@ class BoundedPipeDrain:
         if on_fault is not None and not callable(on_fault):
             raise LbePipeError("invalid_fault_callback")
         # Resource allocation before any future child can be launched.
-        self._selector = selector_factory()
-        self._thread = threading.Thread(
-            target=self._drain, name="lbe-pipe-drainer", daemon=True)
+        try:
+            self._selector = selector_factory()
+        except BaseException:
+            raise LbePipeError("pipe_setup_unavailable") from None
+        try:
+            self._thread = threading.Thread(
+                target=self._drain, name="lbe-pipe-drainer", daemon=True)
+        except BaseException:
+            # The thread object must be allocated before any future spawn;
+            # do not leak a native selector if resource allocation fails.
+            try:
+                self._selector.close()
+            except Exception:
+                pass
+            raise LbePipeError("pipe_setup_unavailable") from None
         self._capture = capture
         self._read = read_fn
         self._set_nonblocking = set_nonblocking
@@ -111,6 +123,28 @@ class BoundedPipeDrain:
         # never release a possibly live original-child slot.
         self._signal_fault()
         raise LbePipeError("pipe_setup_unavailable")
+
+    def add_fault_callback(self, callback: Callable[[], None]) -> None:
+        """Install the service owner's fail-closed latch before any spawn.
+
+        An optional caller callback cannot replace the mandatory owner
+        callback; owner preparation chains them and always invokes both.
+        """
+        if not callable(callback):
+            raise LbePipeError("invalid_fault_callback")
+        with self._mutex:
+            if self._armed or self._closed:
+                raise LbePipeError("invalid_pipe_state")
+            previous = self._on_fault
+            if previous is None:
+                self._on_fault = callback
+            else:
+                def chained() -> None:
+                    try:
+                        previous()
+                    finally:
+                        callback()
+                self._on_fault = chained
 
     @property
     def attached(self) -> bool:

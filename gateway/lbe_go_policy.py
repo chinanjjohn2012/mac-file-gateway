@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import re
 import stat
-from typing import Sequence
+from typing import Callable, Sequence
 
 _MAX_ARGS = 64
 _MAX_ITEM_LENGTH = 1024
@@ -99,13 +99,21 @@ def _inspect_output(workspace_root: Path, cwd_parts: tuple[str, ...],
 
 
 def validate_go_command(argv: Sequence[str], *, workspace_root: Path,
-                        cwd: str, exec_paths: Sequence[str]) -> GoCommandPlan:
+                        cwd: str, exec_paths: Sequence[str],
+                        output_allowed: Callable[[tuple[str, ...]], bool],
+                        ) -> GoCommandPlan:
     """Produce a source-static, non-executing plan for basic Go CLI commands.
 
     The host must separately validate/pin Workspace identity, config, cwd,
     executable and trusted v2 admission. Calling this function is never an
     execution authorization or an exemption from the operative F1 denial.
     """
+    # A required callback binds output paths to the live Gateway's same
+    # denylist / excludes as all other project paths. The output leaf is
+    # an executable artifact, not necessarily a File API readable extension.
+    # Never permit a standalone plan to silently skip this admission check.
+    if not callable(output_allowed):
+        raise GoPolicyError("Go output path policy is unavailable")
     # Capture immutable checked arguments before any validation or filesystem IO.
     if type(argv) not in (tuple, list):
         raise GoPolicyError("argv must be an exact list or tuple")
@@ -162,6 +170,16 @@ def validate_go_command(argv: Sequence[str], *, workspace_root: Path,
         combined = (*cwd_parts, *output)
         if not any(_scope_contains(combined, scope) for scope in scopes):
             raise GoPolicyError("output outside granted exec paths")
+        # Crucially, check the Workspace's denylisted directories, filenames
+        # and configured excludes BEFORE opening/stating ANY output parent.
+        # The launcher recomputes this exact validation immediately before
+        # Popen; this is still a request-level check, NOT an OS sandbox.
+        try:
+            approved = output_allowed(combined)
+        except Exception:
+            raise GoPolicyError("Go output path policy unavailable") from None
+        if approved is not True:
+            raise GoPolicyError("Go output path blocked by Workspace policy")
         _inspect_output(Path(workspace_root), cwd_parts, output)
         canonical_output = "/".join(combined)
     return GoCommandPlan(checked_argv, "direct", canonical_output)

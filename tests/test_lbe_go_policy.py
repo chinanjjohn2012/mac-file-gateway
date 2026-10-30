@@ -19,7 +19,10 @@ def project(tmp_path: Path):
 
 
 def plan(root, argv, cwd="go-project", paths=("go-project",)):
-    return validate_go_command(argv, workspace_root=root, cwd=cwd, exec_paths=paths)
+    return validate_go_command(
+        argv, workspace_root=root, cwd=cwd, exec_paths=paths,
+        output_allowed=lambda _parts: True,
+    )
 
 
 @pytest.mark.parametrize("argv", [
@@ -165,7 +168,8 @@ def test_input_argv_is_frozen_before_output_stat_interleaving(
     monkeypatch.setattr(policy, "_inspect_output", interleaved_inspect)
     planned = policy.validate_go_command(
         caller_owned, workspace_root=project, cwd="go-project",
-        exec_paths=("go-project",))
+        exec_paths=("go-project",),
+        output_allowed=lambda _parts: True)
     assert check_calls == [True]
     assert caller_owned == malicious_replacement
     assert planned.argv == tuple(original)
@@ -201,7 +205,43 @@ def test_argv_snapshot_is_immutable_before_preflight(project, monkeypatch):
     monkeypatch.setattr(policy, "_inspect_output", mutate_before_return)
     checked = policy.validate_go_command(
         requested, workspace_root=project, cwd="go-project",
-        exec_paths=("go-project",))
+        exec_paths=("go-project",),
+        output_allowed=lambda _parts: True)
     assert checked.argv == expected
     assert checked.output_relative_to_workspace == "go-project/bin/app"
 
+
+def test_gateway_output_policy_denial_precedes_any_output_parent_file_io(
+    project, monkeypatch,
+):
+    """A forbidden -o leaf must not cause even a read-only output FD walk."""
+    from gateway import lbe_go_policy as policy
+
+    seen = []
+    def policy_denial(parts):
+        seen.append(parts)
+        return False
+
+    def forbidden_stat(*_args, **_kwargs):
+        raise AssertionError("Go parent output FDs must not be inspected")
+
+    monkeypatch.setattr(policy, "_inspect_output", forbidden_stat)
+    with pytest.raises(GoPolicyError, match="blocked by Workspace policy"):
+        policy.validate_go_command(
+            ["go", "build", "-o", "bin/app", "./cmd/server"],
+            workspace_root=project, cwd="go-project",
+            exec_paths=("go-project",), output_allowed=policy_denial,
+        )
+    assert seen == [("go-project", "bin", "app")]
+
+
+def test_gateway_output_policy_must_return_exact_boolean_true(project):
+    """No permissive truthy object may accidentally authorize a Go output."""
+    for answer in (None, 1, "yes"):
+        with pytest.raises(GoPolicyError, match="blocked by Workspace policy"):
+            validate_go_command(
+                ["go", "build", "-o=bin/app", "./cmd/server"],
+                workspace_root=project, cwd="go-project",
+                exec_paths=("go-project",),
+                output_allowed=lambda _parts: answer,
+            )

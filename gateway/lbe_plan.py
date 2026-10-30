@@ -46,6 +46,8 @@ def prepare_lbe_work_plan(
             validated = validate_go_command(
                 requested, workspace_root=ctx.gateway._root_path,
                 cwd=canonical_cwd, exec_paths=ctx.settings.exec_paths,
+                output_allowed=lambda parts: ctx.gateway._allowed(
+                    parts, is_file=False),
             )
         except GoPolicyError:
             raise GatewayError("command_not_allowed",

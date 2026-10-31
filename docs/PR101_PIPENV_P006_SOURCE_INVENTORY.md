@@ -8,7 +8,7 @@ CONTRACT_BLOB: 9e6622401b198138039c692efe91fba1a8d06891
 P001_INPUT_BLOB: 96bbd02cd384bd9769cd6af9f5a763442e25d61a
 P002_SIX_WHEEL_LOCK_BLOB: c39a83d001512169bf9bb2cc19a0e56b1c0d79c4
 R004_ORIGINAL_36_WHEEL_LOCK_BLOB: f6310fef4596ce20bfa8da35ae8d4883e6b714b5
-APPLICABLE_REFERENCES: ICR-V2.0 / GHRH-2.0 / ETP-V2.0 (not yet proven EFFECTIVE_FOR_NEW_ROUNDS)
+APPLICABLE_REFERENCES: ICR-V2.0 / GHRH-2.0 / ETP-V2.0. User-approved fixed PR #75 r005 governance Head 600c5c96ba89c06d0787695f0bce1cc27bcd65f7, B/C Project-source exact-version attested; the first effective NEW V2 review round was PR #90 r010 (A handoff comment 6460818725). Historic preactivation rounds remain historic.
 REVIEW_TARGET: P001+P002 nine pinned Wheel source identity and review preparation
 DYNAMIC_SNAPSHOT: exact GitHub PR #101 Head/Base/Tree and original CI jobs, not this document
 
@@ -37,11 +37,14 @@ pre-attested original R004 packaging 26.3 parser.
 - Enumerate EVERY regular archive member. Store path, actual decompressed
   byte SHA256 and byte size and a cumulative byte-hash stream digest.
 - Parse bounded UTF-8 Python source files (maximum 262,144 bytes each)
-  using standard-library `ast.parse` with Python 3.13 grammar. Report
-  syntax errors, non-UTF-8 inputs and files beyond the cap as explicit
-  manual-review hints; never import, compile, run or install Wheel code.
-  Syntax parsing is NOT proof of interpreter/runtime compatibility or
-  source safety. Larger files remain hashed and inventoried.
+  using standard-library `ast.parse` with Python 3.13 grammar. Decode with
+  strict `utf-8-sig` to accept a Python-supported leading UTF-8 BOM but
+  preserve embedded-BOM syntax errors. The size cap and invalid UTF-8 are
+  **independent flags**, so the same member can be both oversized and
+  non-UTF-8. At the exact cap, valid syntax is still parsed. Never import,
+  compile, run or install Wheel code. These manual-review hints do not prove
+  interpreter/runtime compatibility or code safety; all members remain
+  byte-hashed and inventoried, even if AST is skipped.
 - Count Python source files and flag only coarse manual-review **hints**:
   native/compiled payloads, startup hooks such as .pth, console/plugin
   entrypoint metadata, packaged script/tool files, bundled Pipenv benchmark
@@ -76,12 +79,13 @@ Remaining NOT_RUN / NOT_VERIFIED: Pipenv primary execution/virtualenv
 creation, Go test/vet/build as a real original child, real authenticated
 external REST/MCP/Tunnel and production operation, full extra/optional
 dependency graph, compatibility of distlib with no published
-Requires-Python, B/C Project V2.0 same-source and independent design
-review/approval. No T2/T3 process signals, unknown descendant cleanup,
+Requires-Python, and independent B/C FULL nine-Wheel/Go external-source code
+security reviews. The V2 governance activation and A/B/C same-source
+attestations are documented separately in PR #75/#90; they do NOT grant
+third-party source security or product approval. No T2/T3 process signals, unknown descendant cleanup,
 native C, user Mac, release, merge, deployment or production activation.
 
 R10_STATUS: INCOMPLETE/BLOCKED
-NEXT_ROLE: A to validate current P006 and full CI original logs, then
-coordinate B/C independent source/security and FULL code review only
-when governance activation, frozen exact snapshot and test evidence
-gate can be met. No automatic acceptance.
+NEXT_ROLE: Use the CURRENT GitHub PR #101 SHA-bound A handoff/B/C reviews
+for dynamic progress and next-role decisions; this static source document
+cannot assign a later review round. No automatic security acceptance.

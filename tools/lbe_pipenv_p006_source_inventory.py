@@ -137,18 +137,20 @@ def inventory_wheel(path: Path, name: str, expected: tuple[str, str, str]) -> di
                 lower = rel.lower()
                 if lower.endswith(".py"):
                     python_count += 1
-                    # Unknown codecs are still hashed and appear in manifest.
-                    # Non-UTF8 content is recorded, not interpreted as safe.
+                    # Both checks are independent hints: a file can be
+                    # simultaneously too large for AST and non-UTF8.
+                    if len(data) > MAX_AST_SOURCE_BYTES:
+                        flags.append("python313_ast_skipped_size")
+                    # Python accepts a *leading* UTF-8 BOM; utf-8-sig removes
+                    # only that marker. Embedded BOM remains invalid syntax.
+                    # Strict invalid bytes are still hashed and reported.
                     try:
-                        txt = data.decode("utf-8", "strict")
+                        txt = data.decode("utf-8-sig", "strict")
                     except UnicodeError:
                         flags.append("non_utf8_python_source")
                     else:
-                        # Static CPython 3.13 syntax visibility only. Never
-                        # import or execute a third-party Wheel's Python.
-                        if len(data) > MAX_AST_SOURCE_BYTES:
-                            flags.append("python313_ast_skipped_size")
-                        else:
+                        # Syntax visibility only, never third-party execution.
+                        if len(data) <= MAX_AST_SOURCE_BYTES:
                             try:
                                 ast.parse(txt, filename=rel,
                                           feature_version=(3, 13))

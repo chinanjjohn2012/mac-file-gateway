@@ -39,17 +39,22 @@ pre-attested original R004 packaging 26.3 parser.
 - Parse bounded UTF-8 Python source files (maximum 262,144 bytes each)
   using standard-library `ast.parse` with Python 3.13 grammar. Decode with
   strict `utf-8-sig` to accept a Python-supported leading UTF-8 BOM but
-  preserve embedded-BOM syntax errors. On bounded source, stdlib
-  `tokenize.detect_encoding` checks the ORIGINAL bytes' PEP 263 declaration
-  (first two lines) before AST, flagging conflicting BOM/cookies or unknown
-  codecs. Matching UTF-8 cookies and valid ASCII Latin-1 cookies do not
-  create false syntax hints. The check does NOT compile or execute foreign
-  code. The size cap and invalid UTF-8 are **independent flags**, so the
-  same member can be both oversized and non-UTF-8. At the exact cap,
-  valid syntax is still parsed. Never import, compile, run or install Wheel
-  code. Tokenizer and AST hints do NOT establish complete byte-source
-  compilation, interpreter compatibility or code safety. All source members
-  remain hashed and inventoried, even if AST is skipped.
+  preserve embedded-BOM syntax errors. On bounded sources (at most
+  262,144 ORIGINAL bytes), stdlib `tokenize.detect_encoding` identifies
+  the ORIGINAL bytes' PEP 263 declaration (first two lines) and the complete
+  bounded bytes are then decoded strictly under that declared codec. A
+  conflicting BOM/cookie, unknown codec, ASCII declaration with UTF-8-valid
+  non-ASCII bytes or wrong declared-byte Unicode decoding is flagged as a
+  syntax hint, independent of the separate strict UTF-8-only scan. If both
+  encodings are valid, AST parses the declared-decoded text, not a different
+  UTF-8 assumption. Valid matching UTF-8 or ASCII-only Latin-1 cookies
+  remain unflagged; legal non-UTF-8 Latin-1 source still receives the
+  explicit `non_utf8_python_source` warning and is NOT AST-scanned. Size
+  and encoding failures can each be reported together; over-cap original
+  bytes remain hashed but not scanned for syntax. This code does NOT compile,
+  import or execute foreign Wheel content. Declared-codec/AST hints still
+  do NOT prove full CPython byte compiler agreement, actual runtime
+  compatibility, safe code, publisher security or full source review.
 - Count Python source files and flag only coarse manual-review **hints**:
   native/compiled payloads, startup hooks such as .pth, console/plugin
   entrypoint metadata, packaged script/tool files, bundled Pipenv benchmark

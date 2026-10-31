@@ -143,29 +143,45 @@ def inventory_wheel(path: Path, name: str, expected: tuple[str, str, str]) -> di
                     # simultaneously too large for AST and non-UTF8.
                     if len(data) > MAX_AST_SOURCE_BYTES:
                         flags.append("python313_ast_skipped_size")
-                    # Python accepts a *leading* UTF-8 BOM; utf-8-sig removes
-                    # only that marker. Embedded BOM remains invalid syntax.
-                    # Strict invalid bytes are still hashed and reported.
+                    # PEP 263 is defined on the ORIGINAL bytes, not on
+                    # a UTF-8-decoded string. Check the declaration and
+                    # strict declared-codec bytes before any AST hint.
+                    # Only bounded source is inspected this way.
+                    declared_text = None
+                    if len(data) <= MAX_AST_SOURCE_BYTES:
+                        try:
+                            declared_encoding, _ = tokenize.detect_encoding(
+                                io.BytesIO(data).readline)
+                            declared_text = data.decode(
+                                declared_encoding, "strict")
+                        except (SyntaxError, UnicodeError, LookupError,
+                                ValueError, RecursionError, OverflowError):
+                            flags.append("python313_ast_unparseable")
+                    # Independently retain the existing UTF-8-only scan
+                    # restriction and warning even for legal Latin-1 input.
+                    # A leading BOM is accepted, an embedded one is not.
                     try:
                         txt = data.decode("utf-8-sig", "strict")
                     except UnicodeError:
                         flags.append("non_utf8_python_source")
                     else:
-                        # Syntax visibility only, never third-party execution.
-                        if len(data) <= MAX_AST_SOURCE_BYTES:
+                        # Parse only when both original-byte declaration
+                        # and strict UTF-8 scanning have succeeded; never
+                        # compile, import or execute a Wheel source file.
+                        if declared_text is not None:
                             try:
-                                # Check PEP 263 on ORIGINAL bytes (two lines).
-                                # Detect a BOM/cookie disagreement before AST.
-                                # This does not compile or run foreign source.
-                                tokenize.detect_encoding(
-                                    io.BytesIO(data).readline)
-                                ast.parse(txt, filename=rel,
+                                ast.parse(declared_text, filename=rel,
                                           feature_version=(3, 13))
                             except (SyntaxError, ValueError, RecursionError,
                                     OverflowError):
                                 flags.append("python313_ast_unparseable")
+                        # Patterns should inspect interpreter-declared text
+                        # when available, not a potentially different
+                        # guessed UTF-8 interpretation.
+                        pattern_text = (
+                            declared_text if declared_text is not None else txt)
                         for tag, pattern in PATTERNS.items():
-                            if pattern.search(txt):
+                            if pattern.search(pattern_text):
                                 flags.append(tag)
                 if lower.endswith(NATIVE_SUFFIXES):
                     flags.append("native_or_compiled_member")

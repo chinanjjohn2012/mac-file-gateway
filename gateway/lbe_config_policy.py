@@ -1,10 +1,10 @@
-"""Dormant version-2 Exec configuration fragment preflight.
+"""Live schema-v2 Exec fragment validator, without positive Exec authority.
 
-This intentionally does NOT modify parse_workspace_config (schema v1), grant
-execution, read a user's private configuration, check the v1 owner.lock, or
-start a process. No caller in the live Gateway uses this module. The complete
-version-2 configuration/Workspace identity contract still requires a separate
-approved implementation and review before any positive Exec.
+The complete Workspace config loader calls this parser for v2 paths/runners.
+It supplies scoped preview/status metadata; this pure validator never grants
+public positive Exec, reads a private config file, checks owner.lock or starts
+a process. The operative F1 shared service still denies ordinary apply before
+any launch. A separately approved D0 exception is required for product Exec.
 """
 from __future__ import annotations
 
@@ -28,7 +28,16 @@ def _record(value: Any, label: str) -> dict[str, Any]:
 
 
 def _relative_parts(value: Any, label: str) -> tuple[str, ...]:
-    if type(value) is not str or not value or len(value.encode("utf-8")) > _MAX_BYTES:
+    if type(value) is not str or not value:
+        raise LbeConfigError(label + " must be a nonempty bounded path string")
+    try:
+        byte_count = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        # JSON permits escaped lone surrogates, but path authority cannot.
+        # Preserve the same fail-closed public config error, not a raw
+        # UnicodeEncodeError escaping the complete schema-v2 loader.
+        raise LbeConfigError(label + " must be a nonempty bounded path string") from None
+    if byte_count > _MAX_BYTES:
         raise LbeConfigError(label + " must be a nonempty bounded path string")
     if value == ".":
         return ()
@@ -61,7 +70,7 @@ def _unique_paths(value: Any, label: str) -> tuple[tuple[str, ...], ...]:
 
 @dataclass(frozen=True)
 class LbeExecGrant:
-    """Immutable v2 scope/runners *proposal*, never an actual runtime grant."""
+    """Validated v2 path/runner metadata, never permission for positive Exec."""
 
     paths: tuple[tuple[str, ...], ...]
     runners: tuple[tuple[tuple[str, ...], str], ...]

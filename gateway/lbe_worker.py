@@ -1,15 +1,15 @@
-"""Dormant LBE Worker orchestration: ONE original child, pipe drain and truth.
+"""Bounded LBE Worker for original-child ownership, output and result truth.
 
-This module is NOT imported from the public WorkspaceService/REST/MCP Exec
-apply route. F1 always rejects dry_run=False before reaching any launcher.
-Its mandatory launcher is an injected callable, with NO default Popen or OS
-spawn facility. T0 tests provide fake original-child/pipe objects only.
+Public schema-v2 preview uses LbeWorker._check_plan through lbe_plan; the
+ordinary public WorkspaceService/REST/MCP apply route still F1-denies
+dry_run=False before any Worker launch. The separately owner-approved,
+disposable GitHub-hosted Python-only T1 uses an injected real launcher and
+Worker; other T0 tests inject fake children. No default Popen facility or
+caller/config-granted positive Exec exists in this module.
 
-After independent exact-version D0 exception approval, the normal synchronous
-WorkspaceService must validate operator configuration, private state, pinned
-root/cwd, command/output scope, runner and Exec capacity BEFORE constructing
-a trusted plan and supplying its separately reviewed real launcher. There
-must never be an alternative public or caller-provided Exec authorization.
+Any future normal product apply needs a separately approved D0 exception
+plus shared-service private-state, scope, origin and capacity enforcement
+before a trusted launcher is supplied. No alternate public authorization.
 """
 from __future__ import annotations
 
@@ -51,10 +51,10 @@ class OriginalChild(Protocol):
 
 @dataclass(frozen=True)
 class LbeWorkPlan:
-    """Data from a future *already-authorized* shared service decision.
+    """Trusted-context plan for preview or separately approved hosted T1.
 
-    This is not a grant or a safe command validator. The plan cannot upgrade
-    private F1/D0 authority, replace pinned-FD checks or be submitted by MCP.
+    This is NOT positive execution authorization. It cannot upgrade F1/D0
+    authority, replace pinned-FD checks or be supplied by an MCP caller.
     """
 
     workspace: str
@@ -67,11 +67,12 @@ class LbeWorkPlan:
 
 
 class LbeWorker:
-    """Source-only composition of an owned child and bounded output drain.
+    """Injected child/pipe composition; no default launcher or public grant.
 
-    No default launcher exists; this Worker is not wired to production.
-    Once a direct child exists, every error retains its owner/reaper; the
-    caller never sends PID/PGID signals or assumes rollback/recovery.
+    Used with fake T0 children and in authorized disposable Python-only T1.
+    Ordinary public positive Exec is NOT wired: F1 denies it before Worker.
+    After a child starts, owner/reaper state survives errors and the caller
+    never signals PID/PGID or assumes rollback/recovery.
     """
 
     def __init__(

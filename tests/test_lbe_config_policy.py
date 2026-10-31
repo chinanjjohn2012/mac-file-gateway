@@ -1,4 +1,4 @@
-"""T0 tests for dormant v2 Exec path/runner fragments; no real Exec."""
+"""T0 tests for the live schema-v2 path/runner validator; no real Exec."""
 from __future__ import annotations
 
 import copy

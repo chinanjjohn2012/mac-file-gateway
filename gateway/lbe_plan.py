@@ -107,8 +107,8 @@ def prepare_lbe_work_plan(
     try:
         LbeWorker._check_plan(plan)
     except LbeWorkerError:
-        # A dormant helper now feeds the public v2 preview. Do not turn an
-        # invalid prospective Worker plan into an uncaught REST/MCP 500 or
+        # An internal Worker shape check feeds public v2 preview. Do not
+        # turn an invalid plan into an uncaught REST/MCP 500 or
         # leak its internal dependency/exception messages.
         raise GatewayError("invalid_argument",
                            "Command plan is not valid for this execution mode.") from None

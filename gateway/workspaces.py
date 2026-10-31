@@ -174,8 +174,8 @@ class WorkspaceService:
         # Healthy no-proof admission is separately gated in B1/C.
         self._exec_state: ExecStateStore | None = None
         self._exec_state_issue: str | None = None
-        # Dormant v2 ledger for original-child capacity/observations only.
-        # NEVER mints real Exec apply permission or spawns OS children.
+        # V2-owned ledger, also used by approved hosted Python-only T1.
+        # Its construction alone NEVER grants public Exec apply or spawns.
         self._lbe_owner = (DirectChildOwner()
                            if settings.schema_version == 2 else None)
         config_root: PinnedDirectory | None = None

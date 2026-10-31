@@ -1,15 +1,14 @@
-"""Dormant in-memory ownership for original direct children in proposed LBE V1.
+"""Schema-v2 service-owned ledger for bounded original-child observations.
 
-This module is initialized only as a dormant v2 service-owned ledger:
-it never starts, binds or signals a real OS process in the current Gateway.
-An eventual authorized Worker must
-separately enforce the approved operator grant, pinned Workspace/cwd and old
-private-state admission BEFORE invoking the owner. Tests inject fake children;
-a fake wait() is not native process or descendants cleanup evidence.
+WorkspaceService constructs this ledger for v2; creation alone never grants
+positive execution. Public apply remains F1-denied, while the separately
+authorized disposable Python-only hosted T1 can bind and reap a real direct
+child using a trusted injected Worker/launcher. This owner itself never
+launches or signals a process. T0 fake children are not native evidence.
 
-The unit of capacity and observed completion is the original direct child,
-not the request waiter, a process group, or any descendant. There is no
-retry, durable journal, PID-based recovery, signal or force-kill facility.
+The capacity/completion unit is the original child, not a request waiter,
+process group or descendant. No retry, durable journal, PID recovery,
+signal or force-kill is provided; private-state checks precede any launch.
 """
 from __future__ import annotations
 
@@ -65,8 +64,9 @@ class _Reservation:
 
 
 class DirectChildOwner:
-    """A single service's bounded ownership ledger; currently NOT wired.
+    """A single v2 service's ledger, used only by authorized positive T1.
 
+    Constructed for v2 even when public positive Exec remains F1-denied.
     A reservation and its reaper Thread object are allocated before spawn.
     Only an explicit spawn_failed() can release a reservation with no child.
     After binding a child, *only observed wait()* completion releases capacity.

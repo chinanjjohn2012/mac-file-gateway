@@ -172,6 +172,29 @@ class SourceInventoryT0(unittest.TestCase):
         self.assertNotIn("python313_ast_skipped_size", hints)
         self.assertNotIn("python313_ast_unparseable", hints)
 
+    def test_source_bytes_encoding_cookie_conflict_is_syntax_hint(self):
+        value = self._source({
+            "distlib/bom_conflicting_cookie.py":
+                b"\xef\xbb\xbf# coding: latin-1\nx = 1\n",
+            "distlib/bom_matching_cookie.py":
+                b"\xef\xbb\xbf# coding: utf-8\nx = 1\n",
+            "distlib/unknown_cookie.py":
+                b"# coding: nonexistent-codec-name\nx = 1\n",
+            "distlib/latin1_ascii_cookie.py":
+                b"# coding: latin-1\nx = 1\n",
+        })
+        hints = {row["path"]: row["manual_review_hints"]
+                 for row in value["source_files"]}
+        for path in ("distlib/bom_conflicting_cookie.py",
+                     "distlib/unknown_cookie.py"):
+            self.assertIn("python313_ast_unparseable", hints[path], path)
+        for path in ("distlib/bom_matching_cookie.py",
+                     "distlib/latin1_ascii_cookie.py"):
+            self.assertNotIn("python313_ast_unparseable", hints[path], path)
+        self.assertEqual(value["safe_code_verdict"], "NOT_ASSESSED")
+        self.assertEqual(value["python313_runtime_compatibility"], "NOT_PROVEN")
+        self.assertFalse(value["wheel_imported_or_executed_by_P006"])
+
     def test_wrong_physical_wheel_sha_denied(self):
         expected = make_fake(self.wheel, {})
         wrong = (expected[0], expected[1], "0" * 64)

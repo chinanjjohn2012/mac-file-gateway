@@ -39,12 +39,17 @@ pre-attested original R004 packaging 26.3 parser.
 - Parse bounded UTF-8 Python source files (maximum 262,144 bytes each)
   using standard-library `ast.parse` with Python 3.13 grammar. Decode with
   strict `utf-8-sig` to accept a Python-supported leading UTF-8 BOM but
-  preserve embedded-BOM syntax errors. The size cap and invalid UTF-8 are
-  **independent flags**, so the same member can be both oversized and
-  non-UTF-8. At the exact cap, valid syntax is still parsed. Never import,
-  compile, run or install Wheel code. These manual-review hints do not prove
-  interpreter/runtime compatibility or code safety; all members remain
-  byte-hashed and inventoried, even if AST is skipped.
+  preserve embedded-BOM syntax errors. On bounded source, stdlib
+  `tokenize.detect_encoding` checks the ORIGINAL bytes' PEP 263 declaration
+  (first two lines) before AST, flagging conflicting BOM/cookies or unknown
+  codecs. Matching UTF-8 cookies and valid ASCII Latin-1 cookies do not
+  create false syntax hints. The check does NOT compile or execute foreign
+  code. The size cap and invalid UTF-8 are **independent flags**, so the
+  same member can be both oversized and non-UTF-8. At the exact cap,
+  valid syntax is still parsed. Never import, compile, run or install Wheel
+  code. Tokenizer and AST hints do NOT establish complete byte-source
+  compilation, interpreter compatibility or code safety. All source members
+  remain hashed and inventoried, even if AST is skipped.
 - Count Python source files and flag only coarse manual-review **hints**:
   native/compiled payloads, startup hooks such as .pth, console/plugin
   entrypoint metadata, packaged script/tool files, bundled Pipenv benchmark

@@ -12,12 +12,14 @@ import argparse
 import ast
 from collections import Counter, defaultdict
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import re
 import stat
 import sys
+import tokenize
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -152,6 +154,11 @@ def inventory_wheel(path: Path, name: str, expected: tuple[str, str, str]) -> di
                         # Syntax visibility only, never third-party execution.
                         if len(data) <= MAX_AST_SOURCE_BYTES:
                             try:
+                                # Check PEP 263 on ORIGINAL bytes (two lines).
+                                # Detect a BOM/cookie disagreement before AST.
+                                # This does not compile or run foreign source.
+                                tokenize.detect_encoding(
+                                    io.BytesIO(data).readline)
                                 ast.parse(txt, filename=rel,
                                           feature_version=(3, 13))
                             except (SyntaxError, ValueError, RecursionError,

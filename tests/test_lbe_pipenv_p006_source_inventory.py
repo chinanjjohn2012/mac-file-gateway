@@ -109,10 +109,10 @@ class SourceInventoryT0(unittest.TestCase):
 
     def test_python313_static_syntax_hints_are_bounded_and_never_execute(self):
         value = self._source({
-            "distlib/syntax_ok.py": b"raise RuntimeError('DO_NOT_EXECUTE')\\n",
+            "distlib/syntax_ok.py": b"raise RuntimeError('DO_NOT_EXECUTE')\n",
             "distlib/syntax_bad.py": b"def broken(:\\n",
             "distlib/oversize.py": b"#" * (MAX_AST_SOURCE_BYTES + 1),
-            "distlib/undecodable.py": b"\\xff",
+            "distlib/undecodable.py": b"\xff",
         })
         hints = {row["path"]: row["manual_review_hints"]
                  for row in value["source_files"]}

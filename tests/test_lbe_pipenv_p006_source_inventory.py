@@ -18,7 +18,7 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.lbe_pipenv_p005_closure import EXPECTED
 from tools.lbe_pipenv_p006_source_inventory import (
-    InventoryError, inventory_wheel, main, source_path,
+    InventoryError, MAX_AST_SOURCE_BYTES, inventory_wheel, main, source_path,
 )
 
 DISTLIB = EXPECTED["distlib"]
@@ -106,6 +106,31 @@ class SourceInventoryT0(unittest.TestCase):
         self.assertFalse(result["wheel_imported_or_executed_by_P006"])
         self.assertTrue(any(x["path"] == "distlib/__init__.py"
                             for x in result["source_files"]))
+
+    def test_python313_static_syntax_hints_are_bounded_and_never_execute(self):
+        value = self._source({
+            "distlib/syntax_ok.py": b"raise RuntimeError('DO_NOT_EXECUTE')\\n",
+            "distlib/syntax_bad.py": b"def broken(:\\n",
+            "distlib/oversize.py": b"#" * (MAX_AST_SOURCE_BYTES + 1),
+            "distlib/undecodable.py": b"\\xff",
+        })
+        hints = {row["path"]: row["manual_review_hints"]
+                 for row in value["source_files"]}
+        self.assertNotIn("python313_ast_unparseable",
+                         hints["distlib/syntax_ok.py"])
+        self.assertIn("python313_ast_unparseable",
+                      hints["distlib/syntax_bad.py"])
+        self.assertIn("python313_ast_skipped_size",
+                      hints["distlib/oversize.py"])
+        self.assertIn("non_utf8_python_source",
+                      hints["distlib/undecodable.py"])
+        self.assertEqual(value["python313_ast_source_byte_cap"],
+                         MAX_AST_SOURCE_BYTES)
+        self.assertTrue(value["python313_ast_is_only_static_syntax_hint"])
+        self.assertEqual(value["python313_runtime_compatibility"],
+                         "NOT_PROVEN")
+        self.assertEqual(value["safe_code_verdict"], "NOT_ASSESSED")
+        self.assertFalse(value["wheel_imported_or_executed_by_P006"])
 
     def test_wrong_physical_wheel_sha_denied(self):
         expected = make_fake(self.wheel, {})

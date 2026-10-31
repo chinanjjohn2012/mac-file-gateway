@@ -9,6 +9,7 @@ Heuristic findings are NOT proof of safety or malicious behavior.
 from __future__ import annotations
 
 import argparse
+import ast
 from collections import Counter, defaultdict
 import hashlib
 import json
@@ -32,6 +33,7 @@ MAX_ENTRY_SIZE = 50000000
 MAX_TOTAL_SIZE = 320000000
 MAX_EVIDENCE = 7000000
 ROOT_HINT_LIMIT = 48
+MAX_AST_SOURCE_BYTES = 262144
 PATTERNS = {
     "imports_process_or_network_modules": re.compile(
         r"(?m)^\s*(?:from|import)\s+"
@@ -142,6 +144,17 @@ def inventory_wheel(path: Path, name: str, expected: tuple[str, str, str]) -> di
                     except UnicodeError:
                         flags.append("non_utf8_python_source")
                     else:
+                        # Static CPython 3.13 syntax visibility only. Never
+                        # import or execute a third-party Wheel's Python.
+                        if len(data) > MAX_AST_SOURCE_BYTES:
+                            flags.append("python313_ast_skipped_size")
+                        else:
+                            try:
+                                ast.parse(txt, filename=rel,
+                                          feature_version=(3, 13))
+                            except (SyntaxError, ValueError, RecursionError,
+                                    OverflowError):
+                                flags.append("python313_ast_unparseable")
                         for tag, pattern in PATTERNS.items():
                             if pattern.search(txt):
                                 flags.append(tag)
@@ -184,6 +197,9 @@ def inventory_wheel(path: Path, name: str, expected: tuple[str, str, str]) -> di
             "review_hint_paths_bounded": dict(sorted(signal_paths.items())),
             "manual_security_source_review": "NOT_ISSUED",
             "safe_code_verdict": "NOT_ASSESSED",
+            "python313_ast_source_byte_cap": MAX_AST_SOURCE_BYTES,
+            "python313_ast_is_only_static_syntax_hint": True,
+            "python313_runtime_compatibility": "NOT_PROVEN",
             "wheel_imported_or_executed_by_P006": False,
         }
     except (OSError, ValueError, UnicodeError, RuntimeError,

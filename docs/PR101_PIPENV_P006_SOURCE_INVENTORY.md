@@ -36,6 +36,12 @@ pre-attested original R004 packaging 26.3 parser.
   entries; Pipenv uses the separately vetted P001 wheel archive qualifier.
 - Enumerate EVERY regular archive member. Store path, actual decompressed
   byte SHA256 and byte size and a cumulative byte-hash stream digest.
+- Parse bounded UTF-8 Python source files (maximum 262,144 bytes each)
+  using standard-library `ast.parse` with Python 3.13 grammar. Report
+  syntax errors, non-UTF-8 inputs and files beyond the cap as explicit
+  manual-review hints; never import, compile, run or install Wheel code.
+  Syntax parsing is NOT proof of interpreter/runtime compatibility or
+  source safety. Larger files remain hashed and inventoried.
 - Count Python source files and flag only coarse manual-review **hints**:
   native/compiled payloads, startup hooks such as .pth, console/plugin
   entrypoint metadata, packaged script/tool files, bundled Pipenv benchmark

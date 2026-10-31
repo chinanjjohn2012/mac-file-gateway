@@ -132,6 +132,46 @@ class SourceInventoryT0(unittest.TestCase):
         self.assertEqual(value["safe_code_verdict"], "NOT_ASSESSED")
         self.assertFalse(value["wheel_imported_or_executed_by_P006"])
 
+    def test_overcap_and_invalid_utf8_emit_both_independent_hints(self):
+        value = self._source({
+            "distlib/overcap_invalid.py":
+                b"\xff" + b"#" * MAX_AST_SOURCE_BYTES,
+        })
+        hints = next(row["manual_review_hints"]
+                     for row in value["source_files"]
+                     if row["path"] == "distlib/overcap_invalid.py")
+        self.assertIn("non_utf8_python_source", hints)
+        self.assertIn("python313_ast_skipped_size", hints)
+        self.assertEqual(
+            value["review_hint_counts"]["python313_ast_skipped_size"], 1)
+        self.assertEqual(value["safe_code_verdict"], "NOT_ASSESSED")
+        self.assertFalse(value["wheel_imported_or_executed_by_P006"])
+
+    def test_utf8_bom_valid_source_is_parsed_but_embedded_bom_is_invalid(self):
+        value = self._source({
+            "distlib/valid_bom.py":
+                b"\xef\xbb\xbfraise RuntimeError('NOT_EXECUTED')\n",
+            "distlib/embedded_bom.py":
+                b"print('ok')\n\xef\xbb\xbfprint('not executed')\n",
+        })
+        hints = {row["path"]: row["manual_review_hints"]
+                 for row in value["source_files"]}
+        self.assertNotIn("python313_ast_unparseable",
+                         hints["distlib/valid_bom.py"])
+        self.assertIn("python313_ast_unparseable",
+                      hints["distlib/embedded_bom.py"])
+        self.assertFalse(value["wheel_imported_or_executed_by_P006"])
+
+    def test_exact_ast_byte_cap_is_still_parsed_not_skipped(self):
+        value = self._source({
+            "distlib/exact_cap.py": b"#" * (MAX_AST_SOURCE_BYTES - 1) + b"\n",
+        })
+        hints = next(row["manual_review_hints"]
+                     for row in value["source_files"]
+                     if row["path"] == "distlib/exact_cap.py")
+        self.assertNotIn("python313_ast_skipped_size", hints)
+        self.assertNotIn("python313_ast_unparseable", hints)
+
     def test_wrong_physical_wheel_sha_denied(self):
         expected = make_fake(self.wheel, {})
         wrong = (expected[0], expected[1], "0" * 64)

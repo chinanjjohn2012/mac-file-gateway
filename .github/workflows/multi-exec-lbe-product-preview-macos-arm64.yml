@@ -10,6 +10,9 @@ on:
       - "gateway/workspaces.py"
       - "gateway/workspaces_config.py"
       - "tests/test_lbe_*.py"
+      - "tests/test_ci_firmlink_required_cases.py"
+      - "tests/test_phase1_review_identity.py"
+      - "tools/ci_firmlink_required_cases.py"
       - "tools/ci_wheel_constraints.py"
       - "tools/lbe_toolchain_candidates.py"
       - "tests/test_lbe_toolchain_candidates.py"
@@ -114,6 +117,11 @@ jobs:
             tests/test_lbe_v2_integration_preflight.py \
             tests/test_ci_wheel_constraints.py
 
+      - name: Validate six-required-case JUnit guard with isolated negative T0
+        run: >-
+          python -m pytest -q -rs -p no:cacheprovider
+          tests/test_ci_firmlink_required_cases.py
+
       - name: R004-approved physical Darwin firmlink identity T1 (disposable HOME, no Exec)
         shell: bash
         run: |
@@ -133,18 +141,11 @@ jobs:
           PY
           mkdir -p "$RUNNER_TEMP/lbe-firmlink-t1"
           python -m pytest -q -rs --color=no -p no:cacheprovider \
+            --junitxml="$RUNNER_TEMP/lbe-firmlink-required.xml" \
             --basetemp "$RUNNER_TEMP/lbe-firmlink-t1" \
             tests/test_phase1_review_identity.py | tee "$RUNNER_TEMP/lbe-firmlink-t1.log"
-          python -I -S - "$RUNNER_TEMP/lbe-firmlink-t1.log" <<'PY'
-          import re
-          import sys
-          with open(sys.argv[1], encoding="utf-8") as stream:
-              report = stream.read()
-          match = re.search(r"(?<!\d)(\d+) passed(?:[,\s]|$)", report)
-          if match is None or int(match.group(1)) < 13:
-              raise SystemExit("LBE_MACOS_FIRMLINK_T1_REQUIRED_SIX=FAIL")
-          print("LBE_MACOS_FIRMLINK_T1_REQUIRED_SIX=PASS")
-          PY
+          python -I -S tools/ci_firmlink_required_cases.py \
+            "$RUNNER_TEMP/lbe-firmlink-required.xml"
 
       - name: Check pinned wheel source and installed RECORD-listed bytes after tests
         run: >-

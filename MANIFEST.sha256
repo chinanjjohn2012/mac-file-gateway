@@ -6,7 +6,7 @@ deb25674f304104b8e41cf70e1431c1b7bdc18943f4e1aedf7610f95171f6d7c  ./.github/work
 985e64d8fe31e56947159ae051e28276e7988ad187d639eada40b1f166bad3dc  ./.github/workflows/multi-exec-g05-macos-arm64.yml
 40525a507667475cea9c93ba788ed3993b5b866e5f0ffe017c83c8f3b4214afc  ./.github/workflows/multi-exec-lbe-ci-macos-arm64.yml
 bb25f6c4c4053463033cac2fbcfd6b7a092aa9a3fab7edc51f7fe12d06cce078  ./.github/workflows/multi-exec-lbe-native-t1-macos-arm64.yml
-7d105a6488198b7c606bc6b10fbc97e69a763c85f4c7d94c47a75c49984d8e6d  ./.github/workflows/multi-exec-lbe-product-preview-macos-arm64.yml
+b6391469c69103a34d5b4ca0e3d91fb5f28060860d5c7f33492bbe113c7ea291  ./.github/workflows/multi-exec-lbe-product-preview-macos-arm64.yml
 93a05fb6b9560073be015aae929d192781084e148887aba1ef31a3711df5cfc2  ./.github/workflows/multi-exec-macos-lifecycle.yml
 a1706a650e6f2804a1fd99187d85bae93267ca0e04744805ab7c6c28a44cd08f  ./.github/workflows/multi-exec-r1-red.yml
 cbf50c5750fc83b69cbcd4e43ed116eefda12a1ef91c45f0d5706dd5df25a15a  ./.github/workflows/multi-exec-r2-t02-admission-red.yml
@@ -152,6 +152,7 @@ c9fef2eacae28b923ec43e9591f6576a241fd864b7876806f566bf97b9818257  ./tests/smoke_
 2e0c89f531deb44cc1ae17e11836c1fe92986ae274e001d82a68dc65f82e6585  ./tests/t02_contracts/contract_multi_exec_admission_t02.py
 22e551af6367fc5a4ac9c0688231cfba0696ccd84f672fe7f8133718bdb112a3  ./tests/test_backup_retention.py
 8991786181e9d503ad85cb7e6246e7b2f155dba55053be9eba10082d163b2d95  ./tests/test_ci_dependency_provenance.py
+257dac4cf39c2512ab65663428a3c4bc856831520a84a5002c9e3f054a589aab  ./tests/test_ci_firmlink_required_cases.py
 ababadd537f94c9ea01ec9febe579ccbaf9c1997fae612af4aa84eb0369ead2d  ./tests/test_ci_wheel_constraints.py
 199ec7e6958c1f21aa8ca14ac1af8b9868490621e02f67e9a3926eaf5957cef1  ./tests/test_cli.py
 599bdd040fa4fd89f1baa9a431e5fe230e6f4509938008cda22d86caccc1db37  ./tests/test_command_http.py
@@ -257,6 +258,7 @@ fca5633db78f72f7b7e340ede063418b59682aa8f12b58e6001fe5649dc28862  ./tests/test_w
 c2e91cca22bd1ecf037358a253e33504ccf929e29534a245ff91d0bab3defe67  ./tests/test_writes.py
 d4c009b8db994234522713addff672089869728d0ac81788dc27effba3168fdb  ./tools/check_local_skill_bridge.py
 dc318155aec630d67cf950386638e9e05fc671f86e2f27e445c8c774104b3822  ./tools/ci_dependency_provenance.py
+3cf4153be7b931092d34dd443a7855b1dc6232f617cb7ff22f6e62de73b088ed  ./tools/ci_firmlink_required_cases.py
 5346c34603f1ac7c3004912ee6247f37c9ca776754d2e92e189bda09a4ec2bd9  ./tools/ci_wheel_constraints.py
 9c2fe6459eed7ef8fffe08891971c25ec3d142c859fba6386c161ac97bb8c120  ./tools/collect_local_skill_policy.py
 6b0a5f1252e90d7b3479993a37bf9be265bb28680f0aff62552c6f4f863b23ab  ./tools/diagnose_lock.py

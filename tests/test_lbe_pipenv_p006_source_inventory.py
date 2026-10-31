@@ -195,6 +195,46 @@ class SourceInventoryT0(unittest.TestCase):
         self.assertEqual(value["python313_runtime_compatibility"], "NOT_PROVEN")
         self.assertFalse(value["wheel_imported_or_executed_by_P006"])
 
+    def test_declared_source_encoding_must_reject_bytes_not_decodable(self):
+        value = self._source({
+            "distlib/ascii_cookie_utf8_nonascii.py":
+                b"# coding: ascii\nx = '\xc3\xa9'\n",
+            "distlib/utf8_cookie_utf8_nonascii.py":
+                b"# coding: utf-8\nx = '\xc3\xa9'\n",
+            "distlib/latin1_utf8_identifier_drift.py":
+                b"# coding: latin-1\n\xcf\x80 = 1\n",
+            "distlib/utf8_identifier_positive.py":
+                b"# coding: utf-8\n\xcf\x80 = 1\n",
+        })
+        flags = {x["path"]: x["manual_review_hints"]
+                 for x in value["source_files"]}
+        for path in ("distlib/ascii_cookie_utf8_nonascii.py",
+                     "distlib/latin1_utf8_identifier_drift.py"):
+            self.assertIn("python313_ast_unparseable", flags[path], path)
+        for path in ("distlib/utf8_cookie_utf8_nonascii.py",
+                     "distlib/utf8_identifier_positive.py"):
+            self.assertNotIn("python313_ast_unparseable", flags[path], path)
+        self.assertFalse(value["wheel_imported_or_executed_by_P006"])
+        self.assertEqual(value["safe_code_verdict"], "NOT_ASSESSED")
+
+    def test_conflicting_bom_cookie_even_when_non_utf8_bytes(self):
+        value = self._source({
+            "distlib/bom_cookie_and_non_utf8.py":
+                b"\xef\xbb\xbf# coding: latin-1\nx = '\xff'\n",
+            "distlib/valid_nonutf8_latin1.py":
+                b"# coding: latin-1\nx = '\xe9'\n",
+        })
+        flags = {x["path"]: x["manual_review_hints"]
+                 for x in value["source_files"]}
+        both = flags["distlib/bom_cookie_and_non_utf8.py"]
+        self.assertIn("python313_ast_unparseable", both)
+        self.assertIn("non_utf8_python_source", both)
+        only = flags["distlib/valid_nonutf8_latin1.py"]
+        self.assertIn("non_utf8_python_source", only)
+        self.assertNotIn("python313_ast_unparseable", only)
+        self.assertFalse(value["wheel_imported_or_executed_by_P006"])
+        self.assertEqual(value["python313_runtime_compatibility"], "NOT_PROVEN")
+
     def test_wrong_physical_wheel_sha_denied(self):
         expected = make_fake(self.wheel, {})
         wrong = (expected[0], expected[1], "0" * 64)

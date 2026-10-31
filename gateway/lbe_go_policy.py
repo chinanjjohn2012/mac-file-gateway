@@ -1,9 +1,11 @@
-"""Dormant Go argv/output validator for proposed local_best_effort Exec.
+"""Live schema-v2 Go argv/output preview validator, not Exec authority.
 
-The existing F1 WorkspaceService hard denial and Legacy CommandRunner remain
-unchanged. This module does not start subprocesses or grant execution. Its
-path checks are PRE-SPAWN checks, not a confinement guarantee for trusted Go
-compilers, cgo tools, module downloads or later filesystem changes.
+The public dry_run=True path invokes this code through lbe_plan for Go
+test/vet/build validation. Operative F1 WorkspaceService still rejects
+ordinary dry_run=False before launching. This module creates no subprocess
+and does not qualify or authorize real Go/Pipenv primary execution. Its
+no-follow output checks are PRE-SPAWN only, not OS confinement or source
+security guarantees for Go/cgo, module downloads or later filesystem races.
 """
 from __future__ import annotations
 

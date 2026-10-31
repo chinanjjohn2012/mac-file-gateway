@@ -114,7 +114,7 @@ class DirectChildOwner:
                 raise LbeOwnerError("busy")
             try:
                 # Allocate bounded stdout/stderr memory and thread owner
-                # before any eventual future authorized spawn.
+                # before any separately authorized child can launch.
                 item = _Reservation(self, workspace)
                 # Preallocate the reaper object before any caller
                 # has an opportunity to launch the original process.
@@ -135,13 +135,13 @@ class DirectChildOwner:
 
     def prepare_pipe_drain(self, item: _Reservation,
                            drain: BoundedPipeDrain) -> None:
-        """Associate preallocated drain resources BEFORE future child spawn."""
+        """Associate preallocated drain resources BEFORE permitted child spawn."""
         with self._condition:
             self._check(item)
             if (item.phase != "VALIDATED" or item.pipe_drain is not None
                     or type(drain) is not BoundedPipeDrain):
                 raise LbeOwnerError("invalid_reservation")
-            # Always install the owner's admission latch BEFORE future spawn,
+            # Always install the owner's admission latch BEFORE permitted spawn,
             # irrespective of whether a caller supplied its own callback.
             try:
                 drain.add_fault_callback(lambda: self.latch_unavailable(item))

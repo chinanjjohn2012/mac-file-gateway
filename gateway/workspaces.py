@@ -265,8 +265,8 @@ class WorkspaceService:
         with self._lifecycle:
             self._closing = True
             if self._lbe_owner is not None:
-                # No signal/join: a future authorized direct child may outlive
-                # a dropped waiter or Gateway shutdown.
+                # No signal/join: a separately authorized direct child may
+                # outlive a dropped waiter or Gateway shutdown.
                 self._lbe_owner.close()
             while self._active_operations:
                 self._lifecycle.wait()
@@ -336,12 +336,12 @@ class WorkspaceService:
     @staticmethod
     def _lbe_preview(ctx: WorkspaceContext, cwd: str,
                      argv: list[str], timeout_seconds: int) -> dict[str, Any]:
-        """One nonoperative schema-v2 preview from the future Worker's plan.
+        """Live schema-v2 preview of a Worker-compatible nonspawning plan.
 
-        Python Direct/Pipenv and Go test/vet/build use the SAME source policy
-        that would prepare the future authorized Worker. This is NEVER an
-        execution permission: the shared F1 service denies dry_run=False
-        before reaching this function, REST, or the official MCP adapter.
+        Python Direct/Pipenv and Go test/vet/build reuse source policy used
+        for separately authorized Worker preparation. This preview NEVER
+        grants positive Exec: shared F1 denies ordinary dry_run=False
+        before this route, REST or the official MCP adapter can launch it.
         """
         from .lbe_plan import prepare_lbe_work_plan
         from .executor import _MAX_OUTPUT_CHARS

@@ -1,15 +1,15 @@
-"""Dormant LBE original-child stdout/stderr nonblocking reader.
+"""Bounded original-child stdout/stderr nonblocking pipe reader.
 
-A future *separately approved* Worker may attach the two original-child PIPE
-objects to a single preallocated selector/thread, then signal observed direct
-exit with note_original_exit(). The reader keeps draining past a timed-out
-waiter without retaining unbounded output. After witnessed direct-child exit,
-the reader waits only a bounded EOF grace before closing parent-side pipes.
-EOF is only marked on an actual zero-length read, never on exit/closure.
+Used by LbeWorker with fake T0 children and the separately owner-authorized,
+disposable GitHub-hosted macOS Python-only original-child T1. The trusted
+Worker attaches original-child pipes to a preallocated selector/thread,
+notifies observed direct-child exit and drains with a bounded EOF grace.
+EOF is marked only on actual zero-length reads, never inferred from exit.
 
-This source is NOT imported into a live positive Exec path; construction does
-not spawn a process or send signals. T0 tests inject fake selectors/readers
-rather than claiming an actual macOS/Linux native-pipe integration.
+This component never launches or signals a process itself. Ordinary public
+schema-v2 positive Exec is F1-denied; native Go/Pipenv primary, full
+descendant cleanup and external TCP/Tunnel remain unqualified. Fake T0
+readers do not substitute for separate physical Python-only T1 evidence.
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ class LbePipeError(RuntimeError):
 class BoundedPipeDrain:
     """At most two read FDs and ONE reader thread per attached direct child.
 
-    Callers must construct this BEFORE future child launch and guarantee that
+    Callers must construct this BEFORE separately permitted child launch and guarantee that
     the reaper notifies observed direct exit. If an attachment fails AFTER a
     child launched, the owner MUST latch admission unavailable; it cannot
     signal an unqualified process or free a live child's slot.
@@ -60,7 +60,7 @@ class BoundedPipeDrain:
             raise LbePipeError("invalid_eof_grace")
         if on_fault is not None and not callable(on_fault):
             raise LbePipeError("invalid_fault_callback")
-        # Resource allocation before any future child can be launched.
+        # Allocate resources before any separately authorized child launch.
         try:
             self._selector = selector_factory()
         except BaseException:
@@ -69,7 +69,7 @@ class BoundedPipeDrain:
             self._thread = threading.Thread(
                 target=self._drain, name="lbe-pipe-drainer", daemon=True)
         except BaseException:
-            # The thread object must be allocated before any future spawn;
+            # Allocate the reader thread before any permitted child spawn;
             # do not leak a native selector if resource allocation fails.
             try:
                 self._selector.close()
@@ -111,8 +111,8 @@ class BoundedPipeDrain:
                 for name, fd in fds.items():
                     self._set_nonblocking(fd, False)
                     self._selector.register(fd, selectors.EVENT_READ, name)
-                # The OS-Popen path is NOT wired yet; source-only T0 fakes test
-                # this preallocated reader thread's complete state machine.
+                # Fake T0 tests and the authorized hosted Python-only T1 use
+                # this reader; public positive Exec remains F1 denied.
                 self._thread.start()
                 return
             except BaseException:

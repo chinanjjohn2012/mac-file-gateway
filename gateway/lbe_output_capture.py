@@ -1,14 +1,14 @@
-"""Dormant bounded byte capture for proposed LBE direct-child output.
+"""Bounded in-memory capture for LBE original-child stdout and stderr.
 
-Pure in-memory T0 component: no process, pipe reader, PID, OS selector or
-signal is created here. A future authorized Worker must allocate and own
-bounded/nonblocking pipe-drain resources *before* launching a real child,
-continue draining while the child survives timeout/disconnect, and enforce a
-bounded EOF grace after original-child exit. Buffer tests do NOT establish
-those physical lifecycle properties.
+This buffer creates no process, pipe reader, PID, selector or signal.
+It is used by fake T0 tests and separately owner-authorized disposable
+hosted Python-only original-child T1 via BoundedPipeDrain. The Worker owns
+real pipe/child lifecycle and bounded EOF grace; buffer-only tests do not
+establish these physical facts.
 
-Output uses the existing best-effort Gateway redactor. A truncated prefix
-is not proof that the complete subprocess output was observed or safe.
+Ordinary public positive Exec remains F1-denied. Output uses the existing
+best-effort Gateway redactor; a truncated prefix does not prove the complete
+subprocess output was observed, safe or complete.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ _KEEP_PER_STREAM = 48_000
 
 
 class LbeCaptureError(ValueError):
-    """Invalid source-only output-stream operation."""
+    """Invalid bounded output-capture operation, not a child-status witness."""
 
 
 class BoundedCapture:

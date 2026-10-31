@@ -59,8 +59,17 @@ def _bool_field(obj: dict[str, Any], key: str, default: bool) -> bool:
 
 
 def _bounded_tuple(value: Any, label: str, *, count: int = 128) -> tuple[str, ...]:
-    if type(value) is not list or len(value) > count or any(type(item) is not str or not item
-                                                         or len(item.encode("utf-8")) > 2048 for item in value):
+    # JSON accepts escaped isolated surrogates, but path authority needs UTF-8.
+    # Keep a sanitized bounded-field error for every malformed list entry.
+    try:
+        invalid = (
+            type(value) is not list or len(value) > count
+            or any(type(item) is not str or not item
+                   or len(item.encode("utf-8")) > 2048 for item in value)
+        )
+    except UnicodeEncodeError:
+        raise PrivateFileError("Invalid configuration string list: " + label) from None
+    if invalid:
         raise PrivateFileError("Invalid configuration string list: " + label)
     if len(set(value)) != len(value):
         raise PrivateFileError("Duplicate configuration string list: " + label)
@@ -81,7 +90,13 @@ def _relative(value: str, label: str, *, allow_glob: bool = False) -> None:
 
 
 def _absolute_root(root: Any) -> str:
-    if type(root) is not str or len(root.encode("utf-8")) > 4096 or not root.startswith("/"):
+    if type(root) is not str:
+        raise PrivateFileError("Workspace root must be an absolute directory.")
+    try:
+        root_bytes = len(root.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise PrivateFileError("Workspace root must be an absolute directory.") from None
+    if root_bytes > 4096 or not root.startswith("/"):
         raise PrivateFileError("Workspace root must be an absolute directory.")
     parts = root.split("/")[1:]
     if (not parts or any(not p or p in (".", "..") or p.startswith(".") or

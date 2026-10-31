@@ -161,11 +161,13 @@ class LbeWorker:
 
     def run(self, plan: LbeWorkPlan, *,
             cancelled: threading.Event | None = None) -> dict[str, Any]:
-        """Run with an injected launcher; no OS process is created by tests.
+        """Run via a trusted injected launcher, never public Exec authority.
 
-        Once a child is returned, bind the preallocated original-child reaper
-        BEFORE attaching pipes; if pipe registration fails, the reaper keeps
-        wait() ownership and admission becomes unavailable.
+        Fake T0 tests create no real child. The separately owner-approved
+        hosted Python-only T1 does launch a real original child through this
+        Worker; Go/Pipenv primary and ordinary product apply remain denied.
+        Bind the preallocated reaper BEFORE attaching returned child pipes;
+        an attachment failure retains wait() ownership and latches admission.
         """
         self._check_plan(plan)
         if cancelled is not None and type(cancelled) is not threading.Event:

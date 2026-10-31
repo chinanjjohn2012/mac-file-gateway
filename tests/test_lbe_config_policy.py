@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import pytest
 
 from gateway.lbe_config_policy import (
@@ -226,6 +227,28 @@ def test_return_is_immutable_and_not_aliased_to_input_lists():
     assert grant.runner_for("go-project", "python") == "direct"
     with pytest.raises((AttributeError, TypeError)):
         grant.paths = ()
+
+
+@pytest.mark.parametrize("raw_json", [
+    r'{"exec":{"paths":["\ud800"]}}',
+    r'{"exec":{"paths":["\udfff"]}}',
+    r'{"exec":{"paths":["project"],"runners":["project/\ud800=pipenv"]}}',
+    r'{"exec":{"paths":["project"],"runners":["project/\udfff=direct"]}}',
+])
+def test_json_escaped_lone_surrogate_is_bounded_config_error(raw_json):
+    # json.loads legitimately decodes these escapes to lone-surrogate str.
+    # The pure v2 parser must fail closed with its own sanitized error,
+    # never leak a raw UnicodeEncodeError from str.encode.
+    payload = json.loads(raw_json)
+    with pytest.raises(LbeConfigError, match="path string"):
+        parse(raw=payload)
+
+
+def test_runtime_selector_rejects_lone_surrogate_without_encoding_error():
+    grant = parse(paths=["project"])
+    with pytest.raises(LbeConfigError, match="path string"):
+        grant.runner_for("project/\ud800", "python")
+    assert grant.runner_for("project", "go") == "direct"
 
 
 def test_no_file_operation_or_subprocess_required(monkeypatch):

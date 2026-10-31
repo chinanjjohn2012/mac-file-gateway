@@ -7,6 +7,7 @@ separate authorized macOS T1 job proves limited real-process paths.
 from __future__ import annotations
 
 import copy
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -125,6 +126,23 @@ def test_v2_cannot_bypass_other_full_config_grants(scene, bad):
     with pytest.raises(PrivateFileError):
         parse_workspace_config(c)
     assert before["schema_version"] == 2
+
+
+@pytest.mark.parametrize("fragment_json", [
+    r'{"paths":["\ud800"]}',
+    r'{"paths":["\udfff"]}',
+    r'{"paths":["python-project"],"runners":["python-project/\ud800=pipenv"]}',
+    r'{"paths":["python-project"],"runners":["python-project/\udfff=direct"]}',
+])
+def test_full_v2_json_config_normalizes_lone_surrogate_error(
+    scene, fragment_json,
+):
+    a, b, _private, _runtime = scene
+    config = v2_config(a, b)
+    config["workspaces"]["a"]["exec"] = json.loads(fragment_json)
+    with pytest.raises(PrivateFileError, match="Invalid v2 Exec fragment"):
+        parse_workspace_config(config)
+    # Pure validation: no Gateway/Worker, subprocess or state created.
 
 
 def test_v2_missing_old_state_root_fails_without_auto_creation(scene):

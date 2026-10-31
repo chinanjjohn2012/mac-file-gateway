@@ -1,0 +1,121 @@
+name: PR101 Pipenv P002 metadata-only candidate lock (NO wheel download)
+
+on:
+  pull_request:
+    branches:
+      - rc/multi-exec-f1-g05-integrated-ms1-20261025
+    paths:
+      - ".github/workflows/pr101-lbe-pipenv-p002-metadata.yml"
+      - "ci/lbe-pipenv-p002-metadata-candidates.json"
+      - "tools/lbe_pipenv_p002_metadata.py"
+      - "tests/test_lbe_pipenv_p002_metadata.py"
+      - "MANIFEST.sha256"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr101-p002-public-metadata-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  p002-public-metadata-only:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'feat/multi-exec-lbe-v2-config-preflight-r001-20261030' &&
+      github.event.pull_request.base.sha == '0fc1ae245de7cb582a69162c79c201d15bfaa258'
+    runs-on: macos-15
+    timeout-minutes: 12
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONNOUSERSITE: "1"
+      PYTHONPATH: ""
+      PIP_NO_INDEX: "1"
+      GOTOOLCHAIN: "local"
+      GOPROXY: "off"
+      GOSUMDB: "off"
+      CGO_ENABLED: "0"
+      GATEWAY_NATIVE_C_ALLOWED: "false"
+      C3B03_S3S6_GROUP_SIGNAL_AUTHORIZED: "false"
+      LBE_P002_WHEEL_DOWNLOAD_INSTALL_EXEC_AUTHORIZED: "false"
+    steps:
+      - name: Checkout actual PR HEAD with no persistent credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: G05 Head Tree source admission BEFORE any PyPI metadata request
+        shell: bash
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "${{ runner.environment }}" = github-hosted
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          [[ "$(sw_vers -productVersion)" == 15.* ]]
+          python3 -I -S tools/g05_ci_admission.py --expected-head "$G05_EXPECTED_HEAD"
+          test "$(git rev-parse HEAD)" = "$G05_EXPECTED_HEAD"
+          test "$(git rev-parse HEAD:ci/lbe-pipenv-p002-metadata-candidates.json)" = "c39a83d001512169bf9bb2cc19a0e56b1c0d79c4"
+          test "$(git rev-parse HEAD:docs/PR101_LBE_NATIVE_TOOLCHAINS_T1_PROPOSAL.md)" = "96bbd02cd384bd9769cd6af9f5a763442e25d61a"
+          echo "LBE_P002_EXECUTED_HEAD=$(git rev-parse HEAD)"
+          echo "LBE_P002_EXECUTED_TREE=$(git rev-parse 'HEAD^{tree}')"
+          echo "LBE_P002_BASE=0fc1ae245de7cb582a69162c79c201d15bfaa258"
+          echo "LBE_P002_LOCK_BLOB=c39a83d001512169bf9bb2cc19a0e56b1c0d79c4"
+
+      - name: Run source-only offline adversarial metadata tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S tests/test_lbe_pipenv_p002_metadata.py
+          echo "LBE_P002_OFFLINE_ADVERSARIAL_T0=PASS"
+          echo "LBE_P002_THIRD_PARTY_WHEEL_BYTES=NOT_DOWNLOADED"
+
+      - name: Retrieve six official PyPI RELEASE JSON documents only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -m 700 "$RUNNER_TEMP/lbe-p002-json"
+          for release in \
+              distlib/0.4.4 \
+              filelock/4.2.4 \
+              platformdirs/4.11.10 \
+              python-discovery/1.6.1 \
+              setuptools/84.2.1 \
+              virtualenv/21.15.0; do
+            project="${release%%/*}"
+            version="${release##*/}"
+            curl --fail --silent --show-error --retry 0 \
+              --proto '=https' --max-time 35 --max-filesize 4000000 \
+              --output "$RUNNER_TEMP/lbe-p002-json/$project-$version.json" \
+              "https://pypi.org/pypi/$project/$version/json"
+          done
+          echo "LBE_P002_PYPI_RELEASE_JSON_COUNT=6"
+          echo "LBE_P002_NO_PYTHON_WHEEL_DOWNLOAD=TRUE"
+
+      - name: Compare all public metadata identities/hashes to committed candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S tools/lbe_pipenv_p002_metadata.py \
+            --lock ci/lbe-pipenv-p002-metadata-candidates.json \
+            --metadata-dir "$RUNNER_TEMP/lbe-p002-json" \
+            --runner-temp "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/lbe-p002-public-pypi-metadata-only.json"
+          echo "LBE_P002_METADATA_MATCH=PUBLIC_METADATA_CANDIDATE_ONLY"
+          echo "LBE_P002_NEW_WHEEL_SHA_CHECK_ON_REAL_BYTES=NOT_RUN"
+          echo "LBE_P002_PIPENV_TRANSITIVE_RUNTIME_CLOSURE=NOT_QUALIFIED"
+
+      - name: Recheck repository snapshot and report scope limitations
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          git diff --cached --exit-code
+          echo "LBE_P002_NO_PACKAGE_IMPORT_OR_INSTALL=TRUE"
+          echo "LBE_P002_NO_GO_PIPENV_OR_OTHER_NEW_NATIVE_EXEC=TRUE"
+          echo "LBE_P002_NO_PID_PGID_OS_SIGNAL_OR_T2_T3=TRUE"
+          echo "LBE_P002_NO_USER_MAC_TUNNEL_PRODUCTION_MERGE_DEPLOY=TRUE"
+          echo "LBE_P002_FULL_CODE_REVIEW_PASS=NOT_ISSUED"

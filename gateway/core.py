@@ -201,6 +201,7 @@ class Gateway:
                  backup_retention_days: int = 15,
                  allow_exec: bool = False, exec_paths: tuple[str, ...] = (),
                  exec_runners: tuple[str, ...] = (),
+                 exec_auto_pipenv: bool = True,
                  protected_content_paths: tuple[str, ...] = (),
                  allow_git: bool = False, git_allowed_commands: tuple[str, ...] = (),
                  git_state_dir: str | Path | None = None,
@@ -238,6 +239,8 @@ class Gateway:
             paths=sensitive_content_audit_paths, expires_at=sensitive_content_audit_until,
             write_paths=write_paths,
         )
+        if type(exec_auto_pipenv) is not bool:
+            raise GatewayError("invalid_argument", "exec_auto_pipenv must be boolean.")
         self.allow_exec = allow_exec
         self.limits = limits or Limits()
         from .visibility import SensitiveContentPolicy
@@ -281,7 +284,10 @@ class Gateway:
         from .executor import CommandRunner
         try:
             self._writer = FileWriter(self, write_paths)
-            self._executor = CommandRunner(self, enabled=allow_exec, exec_paths=exec_paths, exec_runners=exec_runners)
+            self._executor = CommandRunner(
+                self, enabled=allow_exec, exec_paths=exec_paths,
+                exec_runners=exec_runners, auto_pipenv=exec_auto_pipenv,
+            )
             if self.allow_git:
                 from .git_state import GitStateStore
                 from .git_cli import GitCLIExecutor

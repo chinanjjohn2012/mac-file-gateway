@@ -8,6 +8,7 @@ from typing import Any
 
 from .private_fs import PrivateFileError, read_private_json
 from .git_policy import GIT_V1_COMMANDS
+from .lbe_config_policy import LbeConfigError, parse_lbe_exec_fragment
 
 _ID = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _DENIED_ROOT_PARTS = frozenset({
@@ -41,6 +42,7 @@ class GatewaySettings:
     workspaces: tuple[WorkspaceSettings, ...]
     git_enabled: bool = False
     exec_enabled: bool = False
+    schema_version: int = 1
 
 
 def _keys(obj: Any, allowed: set[str], context: str) -> dict[str, Any]:
@@ -57,8 +59,17 @@ def _bool_field(obj: dict[str, Any], key: str, default: bool) -> bool:
 
 
 def _bounded_tuple(value: Any, label: str, *, count: int = 128) -> tuple[str, ...]:
-    if type(value) is not list or len(value) > count or any(type(item) is not str or not item
-                                                         or len(item.encode("utf-8")) > 2048 for item in value):
+    # JSON accepts escaped isolated surrogates, but path authority needs UTF-8.
+    # Keep a sanitized bounded-field error for every malformed list entry.
+    try:
+        invalid = (
+            type(value) is not list or len(value) > count
+            or any(type(item) is not str or not item
+                   or len(item.encode("utf-8")) > 2048 for item in value)
+        )
+    except UnicodeEncodeError:
+        raise PrivateFileError("Invalid configuration string list: " + label) from None
+    if invalid:
         raise PrivateFileError("Invalid configuration string list: " + label)
     if len(set(value)) != len(value):
         raise PrivateFileError("Duplicate configuration string list: " + label)
@@ -79,7 +90,13 @@ def _relative(value: str, label: str, *, allow_glob: bool = False) -> None:
 
 
 def _absolute_root(root: Any) -> str:
-    if type(root) is not str or len(root.encode("utf-8")) > 4096 or not root.startswith("/"):
+    if type(root) is not str:
+        raise PrivateFileError("Workspace root must be an absolute directory.")
+    try:
+        root_bytes = len(root.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise PrivateFileError("Workspace root must be an absolute directory.") from None
+    if root_bytes > 4096 or not root.startswith("/"):
         raise PrivateFileError("Workspace root must be an absolute directory.")
     parts = root.split("/")[1:]
     if (not parts or any(not p or p in (".", "..") or p.startswith(".") or
@@ -92,13 +109,19 @@ def _absolute_root(root: Any) -> str:
 
 def parse_workspace_config(config: dict[str, Any]) -> GatewaySettings:
     obj = _keys(config, {"schema_version", "server", "workspaces"}, "top-level")
-    if type(obj.get("schema_version")) is not int or obj["schema_version"] != 1:
+    schema_version = obj.get("schema_version")
+    if type(schema_version) is not int or schema_version not in (1, 2):
         raise PrivateFileError("Unsupported workspace schema version.")
     server = _keys(obj.get("server", {}), {"port", "transport", "git", "exec"}, "server")
     git = _keys(server.get("git", {}), {"enabled"}, "server.git")
     git_enabled = _bool_field(git, "enabled", False)
-    server_exec = _keys(server.get("exec", {}), {"enabled"}, "server.exec")
-    exec_enabled = _bool_field(server_exec, "enabled", False)
+    if schema_version == 1:
+        server_exec = _keys(server.get("exec", {}), {"enabled"}, "server.exec")
+        exec_enabled = _bool_field(server_exec, "enabled", False)
+    else:
+        # V2 has no server-level Exec authority. The shared service remains
+        # F1 deny-only for positive execution until the contract is approved.
+        exec_enabled = False
     port = server.get("port", 8765)
     if type(port) is not int or not 1024 <= port <= 65535:
         raise PrivateFileError("Invalid Gateway port.")
@@ -151,25 +174,43 @@ def parse_workspace_config(config: dict[str, Any]) -> GatewaySettings:
                 raise PrivateFileError("Sensitive audit requires writable scope, paths and expiry.")
         elif audit_paths or audit_until is not None:
             raise PrivateFileError("Sensitive audit paths/expiry require mode=audit.")
-        exec_config = _keys(item.get("exec", {}), {"enabled", "paths", "runners"}, "workspace.exec")
-        workspace_exec = _bool_field(exec_config, "enabled", False)
-        exec_paths = _bounded_tuple(exec_config.get("paths", []), "exec.paths", count=32)
-        exec_runners = _bounded_tuple(exec_config.get("runners", []), "exec.runners", count=32)
-        if workspace_exec and not exec_enabled:
-            raise PrivateFileError("Workspace exec requires server.exec.enabled=true.")
-        if workspace_exec and not exec_paths:
-            raise PrivateFileError("Workspace exec requires an explicit nonempty path scope.")
-        if not workspace_exec and (exec_paths or exec_runners):
-            raise PrivateFileError("Exec paths/runners require workspace.exec.enabled=true.")
-        for value in exec_paths:
-            _relative(value, "exec.paths")
-        for value in exec_runners:
-            if value.count("=") != 1:
-                raise PrivateFileError("Exec runner must be PATH=direct or PATH=pipenv.")
-            path, runner = value.split("=", 1)
-            _relative(path, "exec.runners")
-            if runner not in {"direct", "pipenv"}:
-                raise PrivateFileError("Unsupported exec runner.")
+        if schema_version == 1:
+            # Preserve every legacy v1 two-switch and validation rule.
+            exec_config = _keys(item.get("exec", {}), {"enabled", "paths", "runners"}, "workspace.exec")
+            workspace_exec = _bool_field(exec_config, "enabled", False)
+            exec_paths = _bounded_tuple(exec_config.get("paths", []), "exec.paths", count=32)
+            exec_runners = _bounded_tuple(exec_config.get("runners", []), "exec.runners", count=32)
+            if workspace_exec and not exec_enabled:
+                raise PrivateFileError("Workspace exec requires server.exec.enabled=true.")
+            if workspace_exec and not exec_paths:
+                raise PrivateFileError("Workspace exec requires an explicit nonempty path scope.")
+            if not workspace_exec and (exec_paths or exec_runners):
+                raise PrivateFileError("Exec paths/runners require workspace.exec.enabled=true.")
+            for value in exec_paths:
+                _relative(value, "exec.paths")
+            for value in exec_runners:
+                if value.count("=") != 1:
+                    raise PrivateFileError("Exec runner must be PATH=direct or PATH=pipenv.")
+                path, runner = value.split("=", 1)
+                _relative(path, "exec.runners")
+                if runner not in {"direct", "pipenv"}:
+                    raise PrivateFileError("Unsupported exec runner.")
+        else:
+            # Validate the v2 scope-only grant with the same reviewed T0
+            # fragment, but also retain strict validation of every other
+            # root/read/write/Git/transport field in this complete loader.
+            try:
+                fragment = parse_lbe_exec_fragment(
+                    schema_version=2, server={"exec": server.get("exec", {})},
+                    workspace={"exec": item.get("exec", {})},
+                )
+            except LbeConfigError as exc:
+                raise PrivateFileError("Invalid v2 Exec fragment: " + str(exc)) from None
+            workspace_exec = fragment.enabled
+            exec_paths = tuple("/".join(p) or "." for p in fragment.paths)
+            exec_runners = tuple((("/".join(p) or ".") + "=" + runner)
+                                 for p, runner in fragment.runners)
+            exec_enabled = exec_enabled or workspace_exec
         skills = _keys(item.get("local_skills", {}), {"enabled"}, "local_skills")
         if _bool_field(skills, "enabled", False):
             raise PrivateFileError("Local Skills are not supported in Multi-Workspace.")
@@ -184,7 +225,8 @@ def parse_workspace_config(config: dict[str, Any]) -> GatewaySettings:
                                         write_paths, retention, commands,
                                         audit_paths, audit_until,
                                         workspace_exec, exec_paths, exec_runners))
-    return GatewaySettings(port, tuple(result), git_enabled, exec_enabled)
+    return GatewaySettings(port, tuple(result), git_enabled, exec_enabled,
+                           schema_version)
 
 
 def read_workspace_config(path: str) -> GatewaySettings:

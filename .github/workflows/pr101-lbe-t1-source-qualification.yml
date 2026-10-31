@@ -1,0 +1,181 @@
+name: PR101 P001 source-byte qualification only (no Go/Pipenv native)
+
+on:
+  pull_request:
+    branches:
+      - rc/multi-exec-f1-g05-integrated-ms1-20261025
+    paths:
+      - ".github/workflows/pr101-lbe-t1-source-qualification.yml"
+      - "tools/lbe_t1_source_qualifier.py"
+      - "tests/test_lbe_t1_source_qualifier.py"
+      - "tools/lbe_t1_go_stager.py"
+      - "tests/test_lbe_t1_go_stager.py"
+      - "tools/lbe_p007_go_source_inventory.py"
+      - "tests/test_lbe_p007_go_source_inventory.py"
+      - "tools/lbe_p008_https_source_fetch.py"
+      - "tests/test_lbe_p008_https_source_fetch.py"
+      - "docs/PR101_P008_PER_HOP_SOURCE_ORIGIN.md"
+      - "docs/PR101_GO_P007_NONEXEC_SOURCE_INVENTORY.md"
+      - "docs/PR101_LBE_NATIVE_TOOLCHAINS_T1_PROPOSAL.md"
+      - "MANIFEST.sha256"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr101-p001-sources-only-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  p001-source-preflight:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'feat/multi-exec-lbe-v2-config-preflight-r001-20261030' &&
+      github.event.pull_request.base.sha == '0fc1ae245de7cb582a69162c79c201d15bfaa258'
+    runs-on: macos-15
+    timeout-minutes: 12
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONNOUSERSITE: "1"
+      PYTHONPATH: ""
+      PIP_NO_INDEX: "1"
+      GOPROXY: "off"
+      GOSUMDB: "off"
+      GOTOOLCHAIN: "local"
+      CGO_ENABLED: "0"
+      GATEWAY_NATIVE_C_ALLOWED: "false"
+      C3B03_S3S6_GROUP_SIGNAL_AUTHORIZED: "false"
+      LBE_P001_REAL_GO_PIPENV_EXECUTION: "NOT_AUTHORIZED_UNTIL_LOCKED"
+    steps:
+      - name: Checkout actual PR Head without credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: G05 and disposable hosted macOS 15 ARM64 identity BEFORE downloads
+        shell: bash
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "${{ runner.environment }}" = github-hosted
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          [[ "$(sw_vers -productVersion)" == 15.* ]]
+          python3 -I -S tools/g05_ci_admission.py --expected-head "$G05_EXPECTED_HEAD"
+          test "$(git rev-parse HEAD)" = "$G05_EXPECTED_HEAD"
+          test "$(git rev-parse HEAD:docs/PR101_LBE_NATIVE_TOOLCHAINS_T1_PROPOSAL.md)" = "96bbd02cd384bd9769cd6af9f5a763442e25d61a"
+          echo "LBE_P001_EXECUTED_HEAD=$(git rev-parse HEAD)"
+          echo "LBE_P001_EXECUTED_TREE=$(git rev-parse 'HEAD^{tree}')"
+          echo "LBE_P001_EXACT_BASE=0fc1ae245de7cb582a69162c79c201d15bfaa258"
+
+      - name: Run pure stdlib malicious-archive/RECORD T0 before network
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S tests/test_lbe_t1_source_qualifier.py
+          python3 -I -S tests/test_lbe_t1_go_stager.py
+          python3 -I -S tests/test_lbe_p007_go_source_inventory.py
+          python3 -I -S tests/test_lbe_p008_https_source_fetch.py
+          echo "LBE_P008_SOURCE_REDIRECT_ADVERSARIAL_T0=PASS"
+          echo "LBE_P001_SOURCE_QUALIFIER_UNIT_T0=PASS"
+          echo "LBE_P001_GO_NONEXEC_STAGE_UNIT_T0=PASS"
+
+      - name: Download exact Go archive with per-hop pre-contact origin checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S tools/lbe_p008_https_source_fetch.py --kind go \
+            --runner-temp "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/lbe-p008-go-fetch.json"
+          echo "LBE_P001_GO_SOURCE_HOST_POLICY=PER_HOP_PRECONTACT"
+
+      - name: Retrieve only pinned Pipenv wheel URL from official PyPI metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S tools/lbe_p008_https_source_fetch.py \
+            --kind metadata --runner-temp "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/lbe-p008-metadata-fetch.json"
+          python3 -I -S - "$RUNNER_TEMP/pipenv-2026.10.4-release.json" \
+              "$RUNNER_TEMP/pipenv-2026.10.4-url.txt" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          from urllib.parse import urlparse
+          release = json.loads(Path(sys.argv[1]).read_text("utf-8"))
+          name = "pipenv-2026.10.4-py3-none-any.whl"
+          digest = "308125623e4d08dfe32936f7259a9ed33c5480baa2c9a291a1ff8a9328eeeb1f"
+          wheels = [
+              obj for obj in release.get("urls", [])
+              if obj.get("filename") == name and obj.get("packagetype") == "bdist_wheel"
+          ]
+          if release.get("info", {}).get("version") != "2026.10.4" or len(wheels) != 1:
+              raise SystemExit("Pipenv metadata did not match P001 version/wheel")
+          entry = wheels[0]
+          url = entry.get("url", "")
+          parsed = urlparse(url)
+          if (entry.get("digests", {}).get("sha256") != digest or
+                  parsed.scheme != "https" or parsed.hostname != "files.pythonhosted.org"
+                  or not parsed.path.endswith("/" + name) or
+                  not 0 < entry.get("size", 0) <= 6000000):
+              raise SystemExit("Pipenv metadata/hash/URL outside P001 lock")
+          Path(sys.argv[2]).write_text(url, encoding="utf-8")
+          print("LBE_P001_PIPENV_PYPI_METADATA_MATCH=PASS")
+          PY
+
+      - name: Download pinned Pipenv Wheel with pre-contact HTTPS source guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S tools/lbe_p008_https_source_fetch.py \
+            --kind wheel --runner-temp "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/lbe-p008-wheel-fetch.json"
+          echo "LBE_P001_PIPENV_WHEEL_SOURCE_POLICY=PER_HOP_PRECONTACT"
+
+      - name: Verify actual archive/wheel SHA, member safety and wheel RECORD without running binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S tools/lbe_t1_source_qualifier.py --runner-temp "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/lbe-p001-source-evidence.json"
+          echo "LBE_P001_SOURCE_BYTES_AND_ARCHIVE_INSPECTION=PASS"
+          echo "LBE_P001_GO_EXTRACTED_COMPILER=NOT_ATTESTED"
+          echo "LBE_P001_PIPENV_TRANSITIVE_WHEELS=NOT_LOCKED"
+          echo "LBE_P001_REAL_NATIVE_GO_AND_PIPENV=NOT_RUN"
+
+      - name: Stage verified Go archive as nonexecutable bytes in runner scratch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S tools/lbe_t1_go_stager.py --runner-temp "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/lbe-p001-go-stage-evidence.json"
+          echo "LBE_P001_GO_BYTE_STAGE=NONEXECUTABLE_ONLY"
+          echo "LBE_P001_GO_NATIVE_PROCESS=NOT_RUN"
+          echo "LBE_P001_GO_STAGED_SOURCE_REVIEW=NOT_ISSUED"
+
+      - name: P007 byte-reconcile original Go archive to nonexecuting staged source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$RUNNER_TEMP/lbe-p001-go-stage-evidence.json"
+          python3 -I -S tools/lbe_p007_go_source_inventory.py \
+            --runner-temp "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/lbe-p007-go-source-report.json"
+          echo "LBE_P007_NONEXEC_SOURCE_IDENTITY=VERIFIED"
+          echo "LBE_P007_REAL_GO_COMPILER_EXEC=NOT_RUN"
+
+      - name: Recheck committed tree and never claim GO/PIPENV integration PASS
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          git diff --cached --exit-code
+          echo "LBE_P001_NEW_EXTERNAL_EXECUTED=FALSE"
+          echo "LBE_P001_OUTPUT_SOURCE_INSPECTION_ONLY=TRUE"
+          echo "LBE_P001_NO_INSTALL_NO_GO_PIPENV_EXECUTION"
+          echo "LBE_P001_GO_EXTRACTED_BYTES_NONEXEC_ONLY"
+          echo "LBE_P001_NO_OS_SIGNAL_NO_T2_T3_NO_USER_MAC"
+          echo "LBE_P001_NO_MERGE_NO_DEPLOY"

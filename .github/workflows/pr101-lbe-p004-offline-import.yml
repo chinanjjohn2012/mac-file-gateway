@@ -1,0 +1,238 @@
+name: PR101 P004 six pinned Wheel offline install and import T1 (NO Go/Pipenv)
+
+on:
+  pull_request:
+    branches:
+      - rc/multi-exec-f1-g05-integrated-ms1-20261025
+    paths:
+      - ".github/workflows/pr101-lbe-p004-offline-import.yml"
+      - ".github/workflows/pr101-lbe-p003-wheel-bytes.yml"
+      - "tools/lbe_pipenv_p003_wheel_bytes.py"
+      - "tools/lbe_pipenv_p004_import_probe.py"
+      - "tests/test_lbe_pipenv_p004_import_probe.py"
+      - "tools/lbe_pipenv_p005_closure.py"
+      - "tests/test_lbe_pipenv_p005_closure.py"
+      - "docs/PR101_PIPENV_P005_BASE_MARKER_GRAPH.md"
+      - "tools/lbe_pipenv_p006_source_inventory.py"
+      - "tests/test_lbe_pipenv_p006_source_inventory.py"
+      - "docs/PR101_PIPENV_P006_SOURCE_INVENTORY.md"
+      - "ci/lbe-pipenv-p002-metadata-candidates.json"
+      - "ci/wheel-locks/macos-15-arm64-3.13.sha256"
+      - "docs/PR101_PIPENV_P004_OFFLINE_IMPORT.md"
+      - "MANIFEST.sha256"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr101-p004-offline-six-import-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  isolated-six-imports:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'feat/multi-exec-lbe-v2-config-preflight-r001-20261030' &&
+      github.event.pull_request.base.sha == '0fc1ae245de7cb582a69162c79c201d15bfaa258'
+    runs-on: macos-15
+    timeout-minutes: 12
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONNOUSERSITE: "1"
+      PYTHONPATH: ""
+      PIP_NO_INDEX: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      GOPROXY: "off"
+      GOSUMDB: "off"
+      GOTOOLCHAIN: "local"
+      CGO_ENABLED: "0"
+      GATEWAY_NATIVE_C_ALLOWED: "false"
+      C3B03_S3S6_GROUP_SIGNAL_AUTHORIZED: "false"
+      LBE_P004_OWNER_APPROVED_SIX_ONLY: "true"
+      LBE_P004_GO_PIPENV_NATIVE_APPROVED: "false"
+    steps:
+      - name: Checkout exact PR Head without persistence
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: G05 and isolated macOS 15 ARM64 before package sourcing
+        shell: bash
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "${{ runner.environment }}" = github-hosted
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          [[ "$(sw_vers -productVersion)" == 15.* ]]
+          python3 -I -S tools/g05_ci_admission.py --expected-head "$G05_EXPECTED_HEAD"
+          test "$(git rev-parse HEAD)" = "$G05_EXPECTED_HEAD"
+          test "$(git rev-parse HEAD:ci/lbe-pipenv-p002-metadata-candidates.json)" = "c39a83d001512169bf9bb2cc19a0e56b1c0d79c4"
+          test "$(git rev-parse HEAD:ci/wheel-locks/macos-15-arm64-3.13.sha256)" = "f6310fef4596ce20bfa8da35ae8d4883e6b714b5"
+          echo "LBE_P004_EXECUTED_HEAD=$(git rev-parse HEAD)"
+          echo "LBE_P004_EXECUTED_TREE=$(git rev-parse 'HEAD^{tree}')"
+          echo "LBE_P004_BASE=0fc1ae245de7cb582a69162c79c201d15bfaa258"
+
+      - name: Fail-closed offline P002 P003 and P004 source/readback T0 before network
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S tests/test_lbe_pipenv_p002_metadata.py
+          python3 -I -S tests/test_lbe_pipenv_p003_wheel_bytes.py
+          python3 -I -S tests/test_lbe_pipenv_p004_import_probe.py
+          python3 -I -S tests/test_lbe_pipenv_p006_source_inventory.py
+          echo "LBE_P004_P006_OFFLINE_ADVERSARIAL_T0=PASS"
+
+      - name: Setup Python 3.13 only after G05 and adversarial tests
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Fetch only exact six pinned PyPI release JSON files
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(python --version | cut -d' ' -f2 | cut -d. -f1,2)" = "3.13"
+          mkdir -m 700 "$RUNNER_TEMP/lbe-p003-release-json"
+          for release in \
+              distlib/0.4.4 \
+              filelock/4.2.4 \
+              platformdirs/4.11.10 \
+              python-discovery/1.6.1 \
+              setuptools/84.2.1 \
+              virtualenv/21.15.0; do
+            project="${release%%/*}"
+            version="${release##*/}"
+            curl --fail --silent --show-error --retry 0 \
+              --proto '=https' --max-time 35 --max-filesize 4000000 \
+              --output "$RUNNER_TEMP/lbe-p003-release-json/$project-$version.json" \
+              "https://pypi.org/pypi/$project/$version/json"
+          done
+          echo "LBE_P004_PYPI_RELEASE_METADATA_ONLY_COUNT=6"
+
+      - name: Download six exact Wheel payloads and verify all SHA256 and internal RECORD
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -I -S tools/lbe_pipenv_p003_wheel_bytes.py \
+            --lock ci/lbe-pipenv-p002-metadata-candidates.json \
+            --runner-temp "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/lbe-p003-wheel-byte-evidence.json"
+          echo "LBE_P004_SIX_REAL_INPUTS_SHA_RECORD=PASS"
+
+      - name: Fetch ONLY preapproved packaging 26.3 from original 36-wheel input lock
+        shell: bash
+        env:
+          PIP_NO_INDEX: "0"
+        run: |
+          set -euo pipefail
+          mkdir -m 700 "$RUNNER_TEMP/lbe-p004-packaging"
+          python -m pip download --only-binary=:all: --no-deps --no-cache-dir \
+            --dest "$RUNNER_TEMP/lbe-p004-packaging" packaging==26.3
+          python -I -S - "$RUNNER_TEMP" <<'PY'
+          import hashlib
+          from pathlib import Path
+          import sys
+          root = Path(sys.argv[1])
+          lines = (Path("ci/wheel-locks/macos-15-arm64-3.13.sha256")
+                   .read_text("ascii").splitlines())
+          filename = "packaging-26.3-py3-none-any.whl"
+          match = [row[:64] for row in lines if row.endswith("  " + filename)]
+          wheels = list((root / "lbe-p004-packaging").glob("*.whl"))
+          if len(match) != 1 or len(wheels) != 1 or wheels[0].name != filename:
+              raise SystemExit("unexpected original-36 packaging source input")
+          data = wheels[0].read_bytes()
+          if hashlib.sha256(data).hexdigest() != match[0]:
+              raise SystemExit("original-36 packaging actual byte SHA mismatch")
+          sys.path.insert(0, str(Path.cwd()))
+          from tools.lbe_pipenv_p003_wheel_bytes import _audit_wheel
+          row = {"name": "packaging", "version": "26.3",
+                 "filename": filename, "sha256": match[0]}
+          proof = _audit_wheel(wheels[0], row, len(data))
+          if proof["actual_sha256"] != match[0]:
+              raise SystemExit("packaging original-36 RECORD mismatch")
+          print("LBE_P004_PACKAGING_ORIGINAL_R004_BYTE_RECORD=PASS")
+          PY
+
+      - name: Offline install only seven SHA-verified wheels into private runner target
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e "$RUNNER_TEMP/lbe-p004-private-site"
+          test -s "$RUNNER_TEMP/lbe-p003-wheel-byte-evidence.json"
+          python -m pip install --no-index --no-deps --no-compile \
+            --no-warn-script-location \
+            --target "$RUNNER_TEMP/lbe-p004-private-site" \
+            "$RUNNER_TEMP/lbe-p004-packaging/packaging-26.3-py3-none-any.whl" \
+            "$RUNNER_TEMP/lbe-p003-six-wheel-bytes/"*.whl
+          echo "LBE_P004_OFFLINE_INSTALLED_SEVEN=TRUE"
+
+      - name: Independently verify installed RECORD-listed bytes BEFORE any new module import
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -I -S tools/lbe_pipenv_p004_import_probe.py \
+            --lock ci/lbe-pipenv-p002-metadata-candidates.json \
+            --runner-temp "$RUNNER_TEMP" --source-only
+          echo "LBE_P004_PRE_IMPORT_INSTALLED_RECORD=PASS"
+
+      - name: Execute only six short isolated import probes; no shell or Go/Pipenv toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -I -S tools/lbe_pipenv_p004_import_probe.py \
+            --lock ci/lbe-pipenv-p002-metadata-candidates.json \
+            --runner-temp "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/lbe-p004-import-evidence.json"
+          echo "LBE_P004_SIX_AUTHORIZED_IMPORTS_EXECUTED=TRUE"
+          echo "LBE_P004_FULL_PIPENV_OR_GO_RUNTIME=NOT_RUN"
+
+      - name: P005 evaluate only nine already-source-pinned BASE runtime wheel METADATA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$RUNNER_TEMP/lbe-p004-import-evidence.json"
+          python -I -S tests/test_lbe_pipenv_p005_closure.py
+          echo "LBE_P005_OFFLINE_MARKER_GRAPH_T0=PASS"
+          python -I -S tools/lbe_pipenv_p005_closure.py \
+            --lock ci/lbe-pipenv-p002-metadata-candidates.json \
+            --runner-temp "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/lbe-p005-base-graph-source-evidence.json"
+          echo "LBE_P005_BASE_DECLARED_RUNTIME_MARKERS=EVALUATED"
+          echo "LBE_P005_NO_PIPENV_INSTALL_EXEC_OR_GO_NATIVE"
+
+      - name: P006 inventory all nine source-locked Wheel byte hashes and review hints
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$RUNNER_TEMP/lbe-p005-base-graph-source-evidence.json"
+          python -I -S tools/lbe_pipenv_p006_source_inventory.py \
+            --runner-temp "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/lbe-p006-nine-wheel-review-inventory.json"
+          echo "LBE_P006_SOURCE_INVENTORY_COMPLETE=TRUE"
+          echo "LBE_P006_REVIEW_SAFETY_VERDICT=NOT_ASSESSED"
+          echo "LBE_P006_PRIMARY_PIPENV_OR_GO_EXEC=NOT_RUN"
+
+      - name: Recheck source wheel SHA and exact HEAD status; no production claims
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -I -S - "$RUNNER_TEMP" <<'PY'
+          import hashlib, json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          report = json.loads((root / "lbe-p003-wheel-byte-evidence.json").read_text())
+          for entry in report["entries"]:
+              path = root / "lbe-p003-six-wheel-bytes" / entry["filename"]
+              if hashlib.sha256(path.read_bytes()).hexdigest() != entry["actual_sha256"]:
+                  raise SystemExit("P004 source wheel changed after import")
+          print("LBE_P004_SOURCE_WHEEL_REHASH=PASS count=6")
+          PY
+          git diff --exit-code
+          git diff --cached --exit-code
+          echo "LBE_P004_GO_PIPENV_NATIVE=NOT_RUN"
+          echo "LBE_P004_INDEPENDENT_BC_SECURITY_REVIEW=NOT_ISSUED"
+          echo "LBE_P004_PYTHON313_RECURSIVE_CLOSURE=NOT_QUALIFIED"
+          echo "LBE_P004_NO_SIGNAL_NO_T2_T3_NO_PRODUCTION_NO_MERGE_NO_DEPLOY"

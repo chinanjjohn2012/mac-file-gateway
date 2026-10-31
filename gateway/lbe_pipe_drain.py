@@ -1,0 +1,245 @@
+"""Bounded original-child stdout/stderr nonblocking pipe reader.
+
+Used by LbeWorker with fake T0 children and the separately owner-authorized,
+disposable GitHub-hosted macOS Python-only original-child T1. The trusted
+Worker attaches original-child pipes to a preallocated selector/thread,
+notifies observed direct-child exit and drains with a bounded EOF grace.
+EOF is marked only on actual zero-length reads, never inferred from exit.
+
+This component never launches or signals a process itself. Ordinary public
+schema-v2 positive Exec is F1-denied; native Go/Pipenv primary, full
+descendant cleanup and external TCP/Tunnel remain unqualified. Fake T0
+readers do not substitute for separate physical Python-only T1 evidence.
+"""
+from __future__ import annotations
+
+import os
+import selectors
+import threading
+import time
+from typing import Any, Callable
+
+from .lbe_output_capture import BoundedCapture
+
+_READ_SIZE = 8192
+_POLL_SECONDS = 0.04
+_EOF_GRACE_SECONDS = 0.25
+
+
+class LbePipeError(RuntimeError):
+    """A pipe-reader resource/setup/error state, without raw OS details."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+class BoundedPipeDrain:
+    """At most two read FDs and ONE reader thread per attached direct child.
+
+    Callers must construct this BEFORE separately permitted child launch and guarantee that
+    the reaper notifies observed direct exit. If an attachment fails AFTER a
+    child launched, the owner MUST latch admission unavailable; it cannot
+    signal an unqualified process or free a live child's slot.
+    """
+
+    def __init__(
+        self,
+        capture: BoundedCapture,
+        *,
+        selector_factory: Callable[[], Any] = selectors.DefaultSelector,
+        read_fn: Callable[[int, int], bytes] = os.read,
+        set_nonblocking: Callable[[int, bool], None] = os.set_blocking,
+        clock: Callable[[], float] = time.monotonic,
+        eof_grace: float = _EOF_GRACE_SECONDS,
+        on_fault: Callable[[], None] | None = None,
+    ) -> None:
+        if type(capture) is not BoundedCapture:
+            raise LbePipeError("invalid_capture")
+        if type(eof_grace) not in (int, float) or not 0 <= eof_grace <= 1:
+            raise LbePipeError("invalid_eof_grace")
+        if on_fault is not None and not callable(on_fault):
+            raise LbePipeError("invalid_fault_callback")
+        # Allocate resources before any separately authorized child launch.
+        try:
+            self._selector = selector_factory()
+        except BaseException:
+            raise LbePipeError("pipe_setup_unavailable") from None
+        try:
+            self._thread = threading.Thread(
+                target=self._drain, name="lbe-pipe-drainer", daemon=True)
+        except BaseException:
+            # Allocate the reader thread before any permitted child spawn;
+            # do not leak a native selector if resource allocation fails.
+            try:
+                self._selector.close()
+            except Exception:
+                pass
+            raise LbePipeError("pipe_setup_unavailable") from None
+        self._capture = capture
+        self._read = read_fn
+        self._set_nonblocking = set_nonblocking
+        self._clock = clock
+        self._eof_grace = float(eof_grace)
+        self._on_fault = on_fault
+        self._original_exited = threading.Event()
+        self._done = threading.Event()
+        self._mutex = threading.Lock()
+        self._pipes: dict[str, Any] = {}
+        self._armed = False
+        self._closed = False
+        self._fault = False
+
+    def attach(self, stdout: Any, stderr: Any) -> None:
+        """Adopt both PIPE objects; register no-follow FD read interest.
+
+        Post-launch failure is *not* proof of child absence. Close only
+        parent-side output resources and surface the error to the owner.
+        """
+        with self._mutex:
+            if self._armed or self._closed:
+                raise LbePipeError("invalid_pipe_state")
+            self._armed = True
+            self._pipes = {"stdout": stdout, "stderr": stderr}
+            try:
+                fds = {}
+                for name, pipe in self._pipes.items():
+                    fd = pipe.fileno()
+                    if type(fd) is not int or fd < 0 or fd in fds.values():
+                        raise ValueError("invalid or duplicate pipe FD")
+                    fds[name] = fd
+                for name, fd in fds.items():
+                    self._set_nonblocking(fd, False)
+                    self._selector.register(fd, selectors.EVENT_READ, name)
+                # Fake T0 tests and the authorized hosted Python-only T1 use
+                # this reader; public positive Exec remains F1 denied.
+                self._thread.start()
+                return
+            except BaseException:
+                self._fault = True
+                self._release_resources()
+                self._done.set()
+        # Post-spawn attachment failures must independently latch the owner,
+        # never release a possibly live original-child slot.
+        self._signal_fault()
+        raise LbePipeError("pipe_setup_unavailable")
+
+    def add_fault_callback(self, callback: Callable[[], None]) -> None:
+        """Install the service owner's fail-closed latch before any spawn.
+
+        An optional caller callback cannot replace the mandatory owner
+        callback; owner preparation chains them and always invokes both.
+        """
+        if not callable(callback):
+            raise LbePipeError("invalid_fault_callback")
+        with self._mutex:
+            if self._armed or self._closed:
+                raise LbePipeError("invalid_pipe_state")
+            previous = self._on_fault
+            if previous is None:
+                self._on_fault = callback
+            else:
+                def chained() -> None:
+                    try:
+                        previous()
+                    finally:
+                        callback()
+                self._on_fault = chained
+
+    @property
+    def attached(self) -> bool:
+        with self._mutex:
+            return self._armed and not self._fault
+
+    def _signal_fault(self) -> None:
+        # Fault callback must be no-throw, and cannot signal OS identities.
+        if self._on_fault is not None:
+            try:
+                self._on_fault()
+            except BaseException:
+                pass
+
+    def note_original_exit(self) -> None:
+        """May be called by a trusted reaper only, never by a REST/MCP user."""
+        self._original_exited.set()
+
+    def _release_resources(self) -> None:
+        # Called with _mutex held at setup or from the lone reader on finish.
+        try:
+            self._selector.close()
+        except Exception:
+            self._fault = True
+        for pipe in self._pipes.values():
+            try:
+                pipe.close()
+            except Exception:
+                self._fault = True
+        self._pipes.clear()
+        self._closed = True
+
+    def _drain(self) -> None:
+        open_streams = set(self._pipes)
+        deadline = None
+        try:
+            while open_streams:
+                if self._original_exited.is_set():
+                    if deadline is None:
+                        deadline = self._clock() + self._eof_grace
+                    if self._clock() >= deadline:
+                        break
+                    timeout = min(_POLL_SECONDS, max(0.0, deadline - self._clock()))
+                else:
+                    timeout = _POLL_SECONDS
+                ready = self._selector.select(timeout)
+                for key, _mask in ready:
+                    name = key.data
+                    if name not in open_streams:
+                        continue
+                    try:
+                        chunk = self._read(key.fd, _READ_SIZE)
+                    except BlockingIOError:
+                        continue
+                    if type(chunk) is not bytes:
+                        raise LbePipeError("invalid_pipe_read")
+                    if chunk:
+                        self._capture.feed(name, chunk)
+                    else:
+                        # Only zero-length os.read proves EOF for THIS pipe.
+                        self._capture.eof(name)
+                        open_streams.remove(name)
+                        self._selector.unregister(key.fd)
+                        self._pipes[name].close()
+                # A descendant may hold pipe FDs after the direct child
+                # exited; the deadline closes them without inferring EOF.
+        except BaseException:
+            self._fault = True
+        finally:
+            with self._mutex:
+                self._release_resources()
+            self._done.set()
+            if self._fault:
+                self._signal_fault()
+
+    def abandon_without_child(self) -> None:
+        """Release preallocated resources when spawn did not occur."""
+        with self._mutex:
+            if self._armed or self._closed:
+                raise LbePipeError("invalid_pipe_state")
+            self._release_resources()
+            self._done.set()
+
+    def snapshot(self) -> dict[str, Any]:
+        """A bounded/redacted snapshot; completion and errors remain separate."""
+        output = self._capture.snapshot()
+        with self._mutex:
+            return {
+                **output,
+                "pipe_reader_failed": self._fault,
+                "pipe_reader_finished": self._done.is_set(),
+            }
+
+    def wait_finished(self, timeout: float = 1.0) -> bool:
+        if type(timeout) not in (int, float) or not 0 <= timeout <= 10:
+            raise LbePipeError("invalid_argument")
+        return self._done.wait(timeout)
+

@@ -1,0 +1,36 @@
+# PR101 r005 — Same-service v2 REST/MCP Exec-denial and legal real Git/File with physical intent witness
+
+ROLE: A / DEVELOPER. This document is **a proposed review/evidence locator, not an independent B/C verdict**.
+TASK_ID: MULTI-EXEC-LBE-V1-CONSOLIDATED-20261030
+REVIEW_ROUND: r005 (a NEW Head after BOTH r004 role TARGETED_REVIEW_PASS, never a silent edit of their reviewed Head)
+REVIEW_SCOPE: TARGETED, bounded remaining F1 source+transport evidence and C r004 P3 scope metadata
+REVIEW_TARGET: One actual schema-v2 WorkspaceService, single authorized Workspace A, real in-process REST + official SDK MCP request path, F1 ordinary no-proof Exec rejection before transient PREPARED/Worker/Popen, real separately authorized Git status native subprocess plus real File read/write after denial; repeat REST/MCP refusal and Git/File success with original private ExecStateStore persisted UNKNOWN/quarantine and original byte-preservation; unauthorized Workspace B denied. No real positive Exec, external TCP/Tunnel or product authorization change.
+RULESET_ID: ICR-V2.0; HANDOFF_PROTOCOL_ID: GHRH-2.0; EVIDENCE_PROFILE_ID: ETP-V2.0, governed by PR75 approved same-version B/C Project sources, PR90 first-effective r010 and each r005 independently verified current Project source.
+CONTRACT_SCOPE:
+- OPERATIVE D0 §0.1–0.3 original F1 fail-closed and real Git/File independence: Git Blob 6e25904aed9a62bb0f472b732021c2a7ca3b3bb0
+- F1 production-first plan (mandatory same-service mixed Git/File behavior): Git Blob 76baeb820c6f8a9b067e45e2dcc42e76453fe5b1
+- Phase 1 trust: Git Blob b3f2383f292a59fd234269389e5338cd50e334a2
+- Early G05 repository SHA, native mode and Manifest: Git Blob 76c1c2b8a7947e0b305d55c5f550ab59c638b6d1
+- R004 owner-scoped original 36 locked Wheels and installed RECORD-only dependency proof: Git Blob 2ffe5341288e428be5ee5d0fa8d52aea3e9efc93
+- PR #98 r002 user-accepted weaker local_best_effort candidate design: Git Blob 9e6622401b198138039c692efe91fba1a8d06891; design acceptance is NOT a separate operative D0 positive Exec amendment.
+PRIOR_REVIEWS: PR #101 frozen r004 Head 34a66aaee1b1536f587e8feeb49487b385e957e9, Tree d2f18499dfa5c329ca2ddecb25acbeba0b0225a6. B Standards native Review PRR_kwDOU5v3IM8AAAABVPau4g TARGETED_REVIEW_PASS and C Spec native Review PRR_kwDOU5v3IM8AAAABVPa78Q TARGETED_REVIEW_PASS, both bound to same r004 Base/Head/Tree. They are NOT full-source/code/security reviews and cannot be inherited as r005 PASS.
+
+## Original independent findings leading to r005
+
+- C r004 nonblocking P3 C101-R004-P3-01: historical r004 doc says 'Full 65-file' although actual frozen r004 Base..Head effective PR has 66 changed paths. A corrects text to **r004's historic 66** and requires future exact live Base..Head recount; do not invent a fixed count for future rounds.
+- C r004 **FULL F1 evidence gap**, not a confirmed runtime P1 defect: r004 separate service v2 in-process REST/official SDK MCP denials and v2 same-service real Git/UNKNOWN Test + frozen F1 physical intent traps existed, but not ONE unified v2 service with combined REST/MCP refusal, transient PREPARED detector and real Git/File under healthy and UNKNOWN. This is a NEW original regression, not RED→GREEN of a previously observed exploit.
+- B r004 TARGETED PASS covers the previously missing same-service real Git/File under healthy and UNKNOWN and documents full external Go/Pipenv security still BLOCKED. The new test must NOT broaden ordinary v2 positive Exec access.
+
+## Developer r005 evidence-only changes (to independently assess)
+
+1. Add tests/test_lbe_v2_transport_git_unknown.py, a single native pytest test discovered by the Linux controlled-exec-tests suite, NOT a new runtime/third-party dependency.
+2. The test constructs one real schema-v2 WorkspaceService; workspace 'a' independently grants Exec preview, Git 'status' and File Write; workspace 'b' grants none. Test roots, Git repo, config, runtime, private ExecStateStore owner.lock all live under pytest-owned disposable temporary directory, not a user Mac/Tunnel.
+3. Use actual Starlette TestClient and real MCP SDK tools/call in the SAME initialized service. Preview succeeds, while direct Invoke/REST /run/MCP run_command dry_run=false must return exec_cleanup_proof_required and HTTP503/structured isError. During EACH denial window, load the already-fixed B1-B1-A _IntentWitness + _records snapshot from tests/b1b1_contracts/contract_multi_exec_default_deny_b1b1.py (same implementation already used by F1), observe ExecStateStore.prepare and intermediate file open/create/rename/link/unlink, trap subprocess.Popen.__init__, os.kill/killpg and Gateway.run_command. All Exec attempt records, root identity and original bytes remain EXACT unchanged; zero reserved slots. No kernel-level audit or full descendant cleanup asserted.
+4. After removing ALL traps, REST /git/run status dry_run=false must execute a REAL Git binary via its own Git state protocol, exit0 and return execute_started=true; File Write via REST /write must physically change src/safe.txt with correct CAS SHA and readback.
+5. Seed UNKNOWN using original ExecStateStore.prepare + mark_unknown in the disposable private root, without starting any Exec child, and snapshot raw marker bytes. Repeat the SAME service's direct/REST/official MCP Exec refusal: now exec_quarantined has priority; no transient new Exec intent/Runner/Popen or signals; then real REST Git and MCP Git through the same instance and File Write/readback still succeed, marker bytes unchanged and quarantined latch intact. Wrong Workspace B Git/File/Exec requests still deny, no granted permissions borrowed.
+6. Correct historic r004 documentation stale 65->66 changed files (without editing the already-frozen r004 commit); update the current Head MANIFEST SHA256 path closure. Product runtime/Exec/Git/HTTP/MCP/third-party dependency source code UNCHANGED.
+
+## Evidence and safety boundaries
+
+At publication time A must independently collect NEW immutable GitHub Base/Head/Tree, complete diff, actual manifest and 7 original GitHub Actions original Run/Job/Log outcomes from the r005 Head. All tests FAILED/SKIPPED/NOT_RUN reported as such, no historical r004 CI green inherited; also verify synthetic Merge SHA and actual Tree separately. Linux original full pytest must demonstrate discovery and PASS of this additional test (compare 1977 prior r004 to new count if no other changes), bounded real native Git ONLY in temporary repository. Current macOS PREVIEW-only workflow deliberately excludes real Git acceptance; macOS-specific same-instance combined case is NOT_RUN unless separately approved and added to an applicable non-preview T1 workflow. Authorized Python-only isolated macOS T1 remains unchanged.
+UNAUTHORIZED: Go test/vet/build/-o, Pipenv primary run, new Wheel packages/extension imports or source egress, descendant cleanup/OS signal/T2/T3, Native C, actual external TCP REST/MCP/Tunnel/user Mac, live/shared/production config, merge/tag/release/deploy. No new grant for positive ordinary schema-v2 Exec. Full 66+ cumulative PR code B/C reviews and nine-wheel/Go compiler source/publisher security remain INCOMPLETE/BLOCKED independently of this r005 targeted evidence; R10 remains BLOCKED.

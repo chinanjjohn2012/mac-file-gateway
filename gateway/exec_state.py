@@ -122,7 +122,12 @@ class ExecStateStore:
     """
 
     def __init__(self, state_dir: str | Path, *,
-                 workspace_roots: tuple[str, ...] = ()) -> None:
+                 workspace_roots: tuple[str, ...] = (),
+                 existing_only: bool = False) -> None:
+        # V2 must not silently recreate missing v1 history.
+        # The old v1 call sites keep their existing bootstrap behavior.
+        if type(existing_only) is not bool:
+            raise ValueError("existing_only must be boolean")
         self._fd = -1
         self._lock_fd = -1
         self._gate = threading.RLock()
@@ -147,11 +152,12 @@ class ExecStateStore:
                     raise PrivateFileError("Exec state intersects a Workspace.")
             parent = open_pinned_directory(os.path.dirname(raw), private_leaf=True)
             try:
-                try:
-                    os.mkdir("exec-state", 0o700, dir_fd=parent.fd)
-                    os.fsync(parent.fd)
-                except FileExistsError:
-                    pass
+                if not existing_only:
+                    try:
+                        os.mkdir("exec-state", 0o700, dir_fd=parent.fd)
+                        os.fsync(parent.fd)
+                    except FileExistsError:
+                        pass
                 self._fd = os.open("exec-state", _DIR, dir_fd=parent.fd)
             finally:
                 parent.close()
@@ -159,7 +165,10 @@ class ExecStateStore:
             if (not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid()
                     or stat.S_IMODE(st.st_mode) != 0o700):
                 raise PrivateFileError("Exec state root is not private.")
-            self._lock_fd = os.open(_LOCK_NAME, _LOCK, 0o600, dir_fd=self._fd)
+            # Existing-only admission demands the original owner.lock.
+            # Neither missing state nor a missing lock may be reconstructed.
+            lock_flags = (_LOCK & ~os.O_CREAT) if existing_only else _LOCK
+            self._lock_fd = os.open(_LOCK_NAME, lock_flags, 0o600, dir_fd=self._fd)
             lock = os.fstat(self._lock_fd)
             if (not stat.S_ISREG(lock.st_mode) or lock.st_nlink != 1 or
                     lock.st_uid != os.geteuid() or

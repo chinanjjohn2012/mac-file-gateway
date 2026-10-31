@@ -1,4 +1,4 @@
-name: PR101 LBE macOS ARM64 schema-v2 preview T0 (nonoperative)
+name: PR101 LBE macOS ARM64 preview T0 + firmlink physical T1 (no Exec apply)
 
 on:
   pull_request:
@@ -114,6 +114,38 @@ jobs:
             tests/test_lbe_v2_integration_preflight.py \
             tests/test_ci_wheel_constraints.py
 
+      - name: R004-approved physical Darwin firmlink identity T1 (disposable HOME, no Exec)
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ runner.environment }}" = github-hosted
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          python -I -S - <<'PY'
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+          with TemporaryDirectory(prefix="mfg-firmlink-", dir=Path.home()) as name:
+              root = Path(name).resolve()
+              alias = Path("/System/Volumes/Data") / root.relative_to("/")
+              if not alias.exists() or not root.samefile(alias):
+                  raise SystemExit("LBE_MACOS_FIRMLINK_REAL_ALIAS=FAIL")
+              print("LBE_MACOS_FIRMLINK_REAL_ALIAS=PASS")
+          PY
+          mkdir -p "$RUNNER_TEMP/lbe-firmlink-t1"
+          python -m pytest -q -rs --color=no -p no:cacheprovider \
+            --basetemp "$RUNNER_TEMP/lbe-firmlink-t1" \
+            tests/test_phase1_review_identity.py | tee "$RUNNER_TEMP/lbe-firmlink-t1.log"
+          python -I -S - "$RUNNER_TEMP/lbe-firmlink-t1.log" <<'PY'
+          import re
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              report = stream.read()
+          match = re.search(r"(?<!\d)(\d+) passed(?:[,\s]|$)", report)
+          if match is None or int(match.group(1)) < 13:
+              raise SystemExit("LBE_MACOS_FIRMLINK_T1_REQUIRED_SIX=FAIL")
+          print("LBE_MACOS_FIRMLINK_T1_REQUIRED_SIX=PASS")
+          PY
+
       - name: Check pinned wheel source and installed RECORD-listed bytes after tests
         run: >-
           python -I tools/ci_dependency_provenance.py verify
@@ -131,7 +163,7 @@ jobs:
           echo "LBE_MACOS_PREVIEW_T0=PASS"
           echo "LBE_MACOS_POSITIVE_EXEC=NOT_RUN"
           echo "LBE_MACOS_OS_CHILD_PIPE_SIGNAL_T1_T2_T3=NOT_RUN"
-          echo "LBE_MACOS_FIRMLINK_ACCEPTANCE_T1=NOT_RUN"
+          echo "LBE_MACOS_FIRMLINK_ACCEPTANCE_T1=PASS_6_REQUIRED_CASES"
           echo "LBE_USER_MAC_TUNNEL=NOT_RUN"
           echo "CI_UNLISTED_IMPORTABLE_FILES=NOT_ASSESSED"
           echo "NO_MERGE_NO_DEPLOY"

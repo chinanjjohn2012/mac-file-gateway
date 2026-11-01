@@ -89,11 +89,11 @@ def _stage_binding(scene, kind):
             bind_pipenv_prelaunch_t0)(**args)
 
 
-def _proposal(scene, kind, **overrides):
-    binding = _stage_binding(scene, kind)
+def _proposal(scene, source_kind, **overrides):
+    binding = _stage_binding(scene, source_kind)
     members = dict(binding.checked_member_sha256)
     extras = scene[3]
-    if kind == "go":
+    if source_kind == "go":
         members.update({k: extras[k] for k in (
             "fixture/go.mod", "fixture/cmd/service/main.go")})
         argv = ("go", "test", "./...")
@@ -101,8 +101,8 @@ def _proposal(scene, kind, **overrides):
         members["project/ok.py"] = extras["project/ok.py"]
         argv = ("pipenv", "run", "python", "ok.py")
     request = dict(
-        kind=kind, argv=argv, candidate=binding,
-        m1_recheck_inputs=_stage_inputs(scene, kind),
+        kind=source_kind, argv=argv, candidate=binding,
+        m1_recheck_inputs=_stage_inputs(scene, source_kind),
         proposed_head="a" * 40, proposed_tree="b" * 40,
         source_lock=members,
         runner=dict(

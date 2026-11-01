@@ -103,10 +103,17 @@ remain immutable and cannot confer a verdict on this new Head.
 Test-before-fix RED on new test-only Head 5dbb1b0d3e217de275f408d56358af9ec145761d,
 Tree 79a086487a9ae6d5b3271d04c61b291d0120952e,
 original Linux CI https://github.com/chinanjjohn2012/mac-file-gateway/actions/runs/41329122678/job/124915301592:
-20 expected new failing cases, 2317 other passed, 19 skipped,
-one warning. The failed pytest step terminates downstream smoke/final CI
-steps; they must NOT be counted PASS on RED. This preceding RED is historical
-evidence, NOT an r002 GREEN result.
+20 failing tests overall: 13 tests exercise actual in-scope
+source/policy/budget counterexamples, and seven malformed-kind tests initially
+hit a mistaken test-helper call (_proposal passed kind twice) rather than
+the production function. The helper defect is corrected before final GREEN
+without changing the production kind validation. This distinction must be
+preserved in review evidence; the seven test-helper errors do NOT demonstrate
+a production RED result. The actual source's unhashable-kind TypeError was
+separately reproduced by B's original independent source-equivalent T0.
+2317 other tests passed, 19 skipped, one warning. Failed pytest meant
+downstream smoke/final CI steps were NOT_RUN on RED. Neither RED nor prior
+historical PASS is the r002 final GREEN evidence.
 
 For the r002 GREEN snapshot, independent B and C MUST re-read exact new
 Head/Base/Tree, effective diff, actual original CI/skip reasons and separately

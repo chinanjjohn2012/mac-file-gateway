@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 from pathlib import Path
 import subprocess
 
@@ -208,3 +209,41 @@ def test_source_probe_exception_fails_closed(scene, kind, monkeypatch):
 def test_untrusted_source_manifest_type_denied(scene, kind):
     with pytest.raises(LbePrelaunchBindingT0Error):
         _call(scene, kind, expected_members={"unexpected": "bad"})
+
+
+@pytest.mark.parametrize("shadow_kind", [
+    "executable", "symlink", "nonexecutable",
+])
+def test_pipenv_first_path_shadow_rejected_before_candidate_or_child(
+        scene, shadow_kind, monkeypatch):
+    """C107-R001-SPEC-01: PATH selection must not outrun verified Pipenv."""
+    root = scene[0]
+    legal = _call(scene, "pipenv")
+    pinned = root / "pipenv-env/bin/pipenv"
+    assert shutil.which("pipenv", path=legal.child_env["PATH"]) == str(pinned)
+    shadow = root / "project/.venv/bin/pipenv"
+    if shadow_kind == "symlink":
+        shadow.symlink_to(pinned)
+    else:
+        _file(root, "project/.venv/bin/pipenv", b"unreviewed fake pipenv",
+              executable=shadow_kind == "executable")
+    selected = shutil.which("pipenv", path=legal.child_env["PATH"])
+    assert selected == (str(pinned) if shadow_kind == "nonexecutable"
+                        else str(shadow))
+
+    def forbid_child(*_args, **_kwargs):
+        raise AssertionError("unexpected T0 subprocess")
+    monkeypatch.setattr(subprocess.Popen, "__init__", forbid_child)
+    with pytest.raises(LbePrelaunchBindingT0Error):
+        _call(scene, "pipenv")
+
+
+@pytest.mark.parametrize("bad_members", [None, 17])
+def test_pipenv_invalid_nonmapping_manifest_normalizes_to_binding_error(
+        scene, bad_members, monkeypatch):
+    """C107-R001-SPEC-02: no raw TypeError on malformed input."""
+    def forbid_child(*_args, **_kwargs):
+        raise AssertionError("unexpected T0 subprocess")
+    monkeypatch.setattr(subprocess.Popen, "__init__", forbid_child)
+    with pytest.raises(LbePrelaunchBindingT0Error):
+        _call(scene, "pipenv", expected_members=bad_members)

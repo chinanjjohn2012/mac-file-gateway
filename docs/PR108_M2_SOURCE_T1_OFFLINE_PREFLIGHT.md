@@ -121,3 +121,59 @@ design meaningful counterexamples; neither C's old r001 targeted PASS nor
 A's CI results prove new r002 role acceptance. The default disabled launch,
 absence of native Go/Pipenv, absence of enforceable OFFLINE_ONLY attached
 domain/canary, F1 deny and other Gate B/C blockers remain unchanged.
+
+
+## 7. r003 P2-108-R002-01: mappingproxy dict-subclass boundary (T0 only)
+
+B Standards r002 reviewed actual Head d32d46c74e15d1f2db1b7cf999771406abd8a775
+and reported FAIL with exactly one new in-scope P2-108-R002-01:
+MappingProxyType can wrap a custom dict subclass whose overridden items()
+returns SANITIZED source/environment pairs even when the true map holds
+unreviewed GOFLAGS/PATH/LD_PRELOAD, or whose items() raises AssertionError.
+Calling proxy.items() on this untrusted wrapper is not a trustworthy
+comparison to a fresh first-party M1 stage.
+
+An additional committed test-first r003 RED Head
+760203b5af6332a2ee9fc733d6e0ffd30203ed41 / Git Tree
+0f0364506ca924a31a3493d41e4045a0d60b1509 exercised the actual
+project test module with both Go/Pipenv fake stages. The raw Linux job
+https://github.com/chinanjjohn2012/mac-file-gateway/actions/runs/41331607659/job/124922718175
+reports 10 NEW failed counterexamples (2 lying child_env, 2 lying checked
+source SHA maps, 4 exploding items/iterator hooks, 2 MappingProxyType
+wrapping UserDict); 2351 other passed, 19 skipped and 1 pytest warning.
+G05 tracked Blob+mode 291 and SHA Manifest 290 passed before the failed
+pytest. Downstream smoke and final checks on this RED attempt are NOT_RUN.
+These ten failures are real tests against the actual old M2 module,
+different from seven r002 test-helper wiring errors previously documented.
+
+The candidate r003 source-only repair strictly rejects a
+MappingProxyType backed by ANY non-plain built-in dict object (including a
+dict subclass or UserDict). It uses CPython gc.get_referents on the exact
+MappingProxyType object solely to CHECK the wrapped backing type and
+requires precisely one referent of EXACT built-in dict type, rejecting
+unsupported representations. For the exact dict only it obtains true
+key/value pairs through dict.items(the_exact_dict), never through
+potentially overridable proxy.items(), .copy(), .__iter__() or a hostile
+dict-subclass method. Plain exact str keys/values and complete equality
+to the newly rehashed/closed-env first-party M1 stage remain required.
+Actual unchanged first-party M1 binder constructs
+MappingProxyType(dict(...)) for legitimate candidates, so a legal
+snapshot should still be accepted as a NONOPERATIVE preview.
+
+This introspection is a deliberately bounded CPython-3.13-oriented T0
+representation check. Python runtimes where the GC referent cannot be
+proved MUST refuse the proposal rather than silently accept a wrapper.
+It is NOT a general OS security property, never creates an unforgeable
+constructor token, cannot guarantee source immutability after the
+inspection, and proves neither loaded Go/Pipenv code nor an attached
+OFFLINE_ONLY egress policy. The only permitted outcome remains
+launch_allowed=False, workspace_service_exec_authorized=False,
+native_t1=NOT_RUN and actual loaded source/runner/CPU-RAM/isolation
+NOT_ATTESTED. This review does not approve an executable native profile.
+
+B and C must independently assess the actual r003 Head and complete
+four-file diff, fresh source and its direct tests, original RED and
+GREEN raw CI including skips, r002 historical review content and
+remaining separately gated Gate A/B/C boundaries. Any new P0-P2
+finding or drift requires a NEW Head/round; no r002 role PASS or
+r003 developer CI success is inherited as reviewer PASS.

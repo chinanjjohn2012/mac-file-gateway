@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import gc
 import re
 from types import MappingProxyType
 from typing import Mapping
@@ -131,11 +132,31 @@ def _validate_candidate(candidate: PrelaunchBindingT0, kind: str) -> None:
 
 
 def _plain_immutable_strings(view: Mapping[str, str]) -> dict[str, str]:
-    """Copy only exact str pairs; reject disguised Mapping methods/values."""
+    """Only accept an exact built-in dict behind a mappingproxy.
+
+    MappingProxyType can wrap a user-defined dict subclass, not just a plain
+    dict. Calling proxy.items(), proxy.copy(), or iter(proxy) could execute
+    overridden methods that lie about actual GOFLAGS/PATH/member identities
+    or raise arbitrary exceptions. Inspect ONLY the CPython GC referent type
+    before accessing contents through unoverrideable dict.items. If a Python
+    runtime cannot expose exactly one plain-dict backing referent, fail
+    closed. This T0 structural defense is NOT unforgeable provenance,
+    loaded-source verification, or a race-free native executor authorization.
+    """
     if type(view) is not MappingProxyType:
         raise LbeM2T1PreflightError("expected immutable M1 snapshot")
     try:
-        pairs = tuple(view.items())
+        referents = gc.get_referents(view)
+    except (TypeError, ValueError, RuntimeError, OSError) as exc:
+        raise LbeM2T1PreflightError("M1 mapping backing not inspectable") from exc
+    if len(referents) != 1 or type(referents[0]) is not dict:
+        raise LbeM2T1PreflightError(
+            "M1 snapshot is not backed by a canonical plain dict")
+    # Use the exact built-in dict.items descriptor on an exact built-in dict.
+    # No caller-provided MappingProxyType.items / subclass .items / .__iter__
+    # hook is invoked. The first-party M1 binder makes these plain dicts.
+    try:
+        pairs = tuple(dict.items(referents[0]))
         if (not pairs or
                 any(type(k) is not str or type(v) is not str
                     for k, v in pairs)):
@@ -146,7 +167,6 @@ def _plain_immutable_strings(view: Mapping[str, str]) -> dict[str, str]:
     if len(copied) != len(pairs):
         raise LbeM2T1PreflightError("duplicate M1 snapshot source")
     return copied
-
 
 def _recheck_actual_m1_stage(
     kind: str, candidate: PrelaunchBindingT0,

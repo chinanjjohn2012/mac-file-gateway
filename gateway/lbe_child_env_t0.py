@@ -9,6 +9,7 @@ Parent selector auditing is mandatory even though the child env is fresh.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
@@ -59,7 +60,9 @@ def _absolute_private(path: Path, *, parent: Path | None = None) -> str:
         raise LbeChildEnvT0Error("expected absolute private Path")
     parts = path.parts
     if (len(parts) < 3 or ".." in parts or
-            any("\x00" in part for part in parts) or len(str(path)) > 2048):
+            any(os.pathsep in part or any(ord(ch) < 32 or ord(ch) == 127
+                                        for ch in part) for part in parts)
+            or len(str(path)) > 2048):
         raise LbeChildEnvT0Error("unbounded or unsafe private path")
     if parent is not None:
         if (not isinstance(parent, Path) or not parent.is_absolute()
@@ -68,6 +71,22 @@ def _absolute_private(path: Path, *, parent: Path | None = None) -> str:
                 or parts[:len(parent.parts)] != parent.parts):
             raise LbeChildEnvT0Error("path outside approved private root")
     return str(path)
+
+
+def _closed_search_path(*staged_dirs: Path) -> str:
+    """Pin the exact candidate PATH tokens; NO filesystem/source proof."""
+    expected = tuple(str(part) for part in staged_dirs) + tuple(
+        _HOST_PATH.split(os.pathsep))
+    if (not staged_dirs or any(
+            not part or os.pathsep in part or not Path(part).is_absolute()
+            or ".." in Path(part).parts
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in part)
+            for part in expected)):
+        raise LbeChildEnvT0Error("unreviewed child PATH search component")
+    candidate = os.pathsep.join(expected)
+    if tuple(candidate.split(os.pathsep)) != expected:
+        raise LbeChildEnvT0Error("child PATH tokenization changed")
+    return candidate
 
 
 def _check_parent(parent_env: Mapping[str, str], *, kind: str) -> None:
@@ -133,7 +152,7 @@ def make_go_child_env_t0(*, private_root: Path, go_root: Path,
     if len({go, gp, mc, gc, str(temp), str(home)}) != 6:
         raise LbeChildEnvT0Error("Go private roots must be distinct")
     values.update({
-        "PATH": str(go_root / "bin") + ":" + _HOST_PATH,
+        "PATH": _closed_search_path(go_root / "bin"),
         "GOROOT": go,
         "GOTOOLCHAIN": "local",
         "GOPROXY": "off",
@@ -170,8 +189,8 @@ def make_pipenv_child_env_t0(*, private_root: Path,
     if project_root == pipenv_bin.parent.parent:
         raise LbeChildEnvT0Error("project and Pipenv installation overlap")
     values.update({
-        "PATH": str(project_root / ".venv/bin") + ":"
-                + str(pipenv_bin.parent) + ":" + _HOST_PATH,
+        "PATH": _closed_search_path(project_root / ".venv/bin",
+                                   pipenv_bin.parent),
         "PIPENV_PIPFILE": str(project_root / "Pipfile"),
         "PIPENV_VENV_IN_PROJECT": "1",
         "PIPENV_DONT_LOAD_ENV": "1",

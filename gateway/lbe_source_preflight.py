@@ -3,7 +3,8 @@
 No import/install, subprocess, egress enforcement, product grant or runtime T1.
 These functions can report only SOURCE_CANDIDATE, NEVER execution permission.
 The ordinary F1 WorkspaceService and lbe_native_launcher denial are unchanged.
-A trusted caller must supply an independently approved private base path,\nsource digest map and parent PATH. No approval or runtime source identity is granted.
+A trusted caller must supply an independently approved private base path,
+source digest map and parent PATH. No approval or runtime source identity is granted.
 The same-UID race and actual loaded runtime still require separate review.
 """
 from __future__ import annotations
@@ -37,7 +38,10 @@ _PIPENV_SELECTORS = frozenset({
     "PIPENV_PYTHON", "PIPENV_VIRTUALENV",
 })
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-_FILE_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC\n_MAX_SOURCE_MEMBER_BYTES = 128 * 1024 * 1024\n_MAX_SOURCE_TOTAL_BYTES = 2 * 1024 * 1024 * 1024\n_MAX_SOURCE_MEMBERS = 20000
+_FILE_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
+_MAX_SOURCE_MEMBER_BYTES = 128 * 1024 * 1024
+_MAX_SOURCE_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
+_MAX_SOURCE_MEMBERS = 20000
 
 
 class LbeSourcePreflightError(ValueError):

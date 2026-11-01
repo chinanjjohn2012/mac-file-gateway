@@ -5,13 +5,16 @@ Deliberately exercise fail-closed GOFLAGS, private .venv and network claim.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
+import time
 from pathlib import Path
 import subprocess
 
 import pytest
 
+import gateway.lbe_source_preflight as preflight
 from gateway.lbe_source_preflight import (
     LbeSourcePreflightError,
     inspect_go_source_t0,
@@ -231,3 +234,196 @@ def test_pipenv_hardlinked_lock_fails(pipenv_candidate):
 def test_client_claim_cannot_self_authorize_egress_or_native_T1(fake):
     with pytest.raises(LbeSourcePreflightError, match="T1=NOT_RUN"):
         require_real_egress_witness_t0(fake)
+
+
+def test_go_fifo_immediately_denied(go_candidate, monkeypatch):
+    root, _ = go_candidate
+    (root / "go/bin/go").unlink()
+    os.mkfifo(root / "go/bin/go", 0o600)
+    original_open = os.open
+    seen = []
+
+    def protected_open(name, flags, *args, **kwargs):
+        if name == "go" and not flags & os.O_DIRECTORY:
+            assert flags & os.O_NONBLOCK, "FIFO open must not block"
+            seen.append(flags)
+        return original_open(name, flags, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(preflight.os, "open", protected_open)
+        started = time.monotonic()
+        with pytest.raises(LbeSourcePreflightError):
+            _go(go_candidate)
+        assert time.monotonic() - started < 2.0
+    assert len(seen) == 1
+
+
+def test_pipenv_fifo_immediately_denied(pipenv_candidate, monkeypatch):
+    root, _ = pipenv_candidate
+    (root / "project/.venv/bin/python").unlink()
+    os.mkfifo(root / "project/.venv/bin/python", 0o600)
+    original_open = os.open
+
+    def protected_open(name, flags, *args, **kwargs):
+        if name == "python" and not flags & os.O_DIRECTORY:
+            assert flags & os.O_NONBLOCK, "interpreter FIFO open must not block"
+        return original_open(name, flags, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(preflight.os, "open", protected_open)
+        started = time.monotonic()
+        with pytest.raises(LbeSourcePreflightError):
+            _pipenv(pipenv_candidate)
+        assert time.monotonic() - started < 2.0
+
+
+def test_go_symlink_root_ancestor_denied_and_canonical_allowed(go_candidate):
+    root, members = go_candidate
+    base = root.parent
+    actual = base / "actual"
+    actual.mkdir(mode=0o700)
+    root.rename(actual / root.name)
+    alias = base / "alias"
+    alias.symlink_to(actual, target_is_directory=True)
+    with pytest.raises(LbeSourcePreflightError):
+        inspect_go_source_t0(
+            private_root=alias / root.name, trusted_base=base,
+            expected_members=members, parent_env={"PATH": "/trusted/bin"},
+            expected_parent_path="/trusted/bin")
+    assert inspect_go_source_t0(
+        private_root=actual / root.name, trusted_base=base,
+        expected_members=members, parent_env={"PATH": "/trusted/bin"},
+        expected_parent_path="/trusted/bin")["exec_authorized"] is False
+
+
+def test_pipenv_symlink_root_ancestor_denied(pipenv_candidate):
+    root, members = pipenv_candidate
+    base = root.parent
+    actual = base / "actual"
+    actual.mkdir(mode=0o700)
+    root.rename(actual / root.name)
+    alias = base / "alias"
+    alias.symlink_to(actual, target_is_directory=True)
+    with pytest.raises(LbeSourcePreflightError):
+        inspect_pipenv_source_t0(
+            private_root=alias / root.name, trusted_base=base,
+            expected_members=members, parent_env={"PATH": "/trusted/bin"},
+            expected_parent_path="/trusted/bin")
+
+
+def test_symlink_approved_base_and_unrelated_base_denied(go_candidate):
+    root, members = go_candidate
+    base = root.parent
+    approved = base / "approved"
+    approved.mkdir(mode=0o700)
+    root.rename(approved / root.name)
+    alias = base / "approved-link"
+    alias.symlink_to(approved, target_is_directory=True)
+    for candidate_root, base_path in (
+        (alias / root.name, alias),
+        (approved / root.name, base / "other"),
+        (approved / root.name, Path("/")),
+    ):
+        with pytest.raises(LbeSourcePreflightError):
+            inspect_go_source_t0(
+                private_root=candidate_root, trusted_base=base_path,
+                expected_members=members, parent_env={"PATH": "/trusted/bin"},
+                expected_parent_path="/trusted/bin")
+    assert inspect_go_source_t0(
+        private_root=approved / root.name, trusted_base=approved,
+        expected_members=members, parent_env={"PATH": "/trusted/bin"},
+        expected_parent_path="/trusted/bin")["native_t1"] == "NOT_RUN"
+
+
+def test_oversize_sparse_regular_file_rejects_without_read(go_candidate):
+    root, _ = go_candidate
+    with (root / "go/bin/go").open("r+b") as stream:
+        stream.truncate(preflight._MAX_SOURCE_MEMBER_BYTES + 1)
+    started = time.monotonic()
+    with pytest.raises(LbeSourcePreflightError, match="byte budget"):
+        _go(go_candidate)
+    assert time.monotonic() - started < 2.0
+
+
+def test_total_source_resource_budgets(go_candidate, monkeypatch):
+    with monkeypatch.context() as patch:
+        patch.setattr(preflight, "_MAX_SOURCE_MEMBERS", 4)
+        with pytest.raises(LbeSourcePreflightError, match="oversized"):
+            _go(go_candidate)
+    with monkeypatch.context() as patch:
+        patch.setattr(preflight, "_MAX_SOURCE_TOTAL_BYTES", 4)
+        with pytest.raises(LbeSourcePreflightError, match="byte budget"):
+            _go(go_candidate)
+
+
+def test_directory_fstat_exception_closes_new_fd(tmp_path, monkeypatch):
+    (tmp_path / "child").mkdir()
+    parent = os.open(tmp_path, os.O_DIRECTORY | os.O_RDONLY)
+    original_open, original_fstat = os.open, os.fstat
+    opened = []
+
+    def tracking_open(name, flags, *args, **kwargs):
+        fd = original_open(name, flags, *args, **kwargs)
+        if name == "child":
+            opened.append(fd)
+        return fd
+
+    def injected_fstat(fd):
+        if fd in opened:
+            raise OSError(errno.EIO, "injected failure")
+        return original_fstat(fd)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(preflight.os, "open", tracking_open)
+            patch.setattr(preflight.os, "fstat", injected_fstat)
+            with pytest.raises(LbeSourcePreflightError):
+                preflight._check_directory(parent, "child")
+        assert len(opened) == 1
+        with pytest.raises(OSError) as closed:
+            original_fstat(opened[0])
+        assert closed.value.errno == errno.EBADF
+    finally:
+        os.close(parent)
+
+
+def test_root_fstat_exception_closes_all_ancestor_fds(go_candidate, monkeypatch):
+    root, _ = go_candidate
+    original_open, original_fstat = os.open, os.fstat
+    opened, fail_fds = [], []
+
+    def tracking_open(name, flags, *args, **kwargs):
+        fd = original_open(name, flags, *args, **kwargs)
+        opened.append(fd)
+        if name == root.name:
+            fail_fds.append(fd)
+        return fd
+
+    def injected_fstat(fd):
+        if fd in fail_fds:
+            raise OSError(errno.EIO, "injected root failure")
+        return original_fstat(fd)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(preflight.os, "open", tracking_open)
+        patch.setattr(preflight.os, "fstat", injected_fstat)
+        with pytest.raises(LbeSourcePreflightError):
+            _go(go_candidate)
+    assert len(opened) > 2 and len(fail_fds) == 1
+    for fd in opened:
+        with pytest.raises(OSError) as closed:
+            original_fstat(fd)
+        assert closed.value.errno == errno.EBADF
+
+
+def test_no_native_child_on_new_negative_paths(go_candidate, monkeypatch):
+    def prohibited(*_a, **_kwargs):
+        raise AssertionError("native Go/Pipenv process forbidden in T0")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess.Popen, "__init__", prohibited)
+        root, _ = go_candidate
+        (root / "go/bin/go").unlink()
+        os.mkfifo(root / "go/bin/go", 0o600)
+        with pytest.raises(LbeSourcePreflightError):
+            _go(go_candidate)

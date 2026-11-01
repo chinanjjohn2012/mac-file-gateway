@@ -80,7 +80,7 @@ def _check_parent(parent_env: Mapping[str, str], *, kind: str) -> None:
                 or "\x00" in name or "\x00" in value):
             raise LbeChildEnvT0Error("unbounded parent environment value")
         if (name in _EXTRA_PARENT_SELECTORS
-                or name.startswith(("LD_", "DYLD_"))
+                or name.startswith(("LD_", "DYLD_", "CGO_"))
                 or (kind == "go" and name.startswith(("PIPENV_", "PIP_")))
                 or (kind == "pipenv" and name.startswith("GO"))):
             raise LbeChildEnvT0Error("unreviewed inherited runtime selector")

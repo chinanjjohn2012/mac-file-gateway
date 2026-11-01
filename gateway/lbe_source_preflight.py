@@ -3,7 +3,7 @@
 No import/install, subprocess, egress enforcement, product grant or runtime T1.
 These functions can report only SOURCE_CANDIDATE, NEVER execution permission.
 The ordinary F1 WorkspaceService and lbe_native_launcher denial are unchanged.
-A trusted caller must bind the root, digest map and parent PATH independently.
+A trusted caller must supply an independently approved private base path,\nsource digest map and parent PATH. No approval or runtime source identity is granted.
 The same-UID race and actual loaded runtime still require separate review.
 """
 from __future__ import annotations
@@ -37,7 +37,7 @@ _PIPENV_SELECTORS = frozenset({
     "PIPENV_PYTHON", "PIPENV_VIRTUALENV",
 })
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-_FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+_FILE_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC\n_MAX_SOURCE_MEMBER_BYTES = 128 * 1024 * 1024\n_MAX_SOURCE_TOTAL_BYTES = 2 * 1024 * 1024 * 1024\n_MAX_SOURCE_MEMBERS = 20000
 
 
 class LbeSourcePreflightError(ValueError):
@@ -55,39 +55,105 @@ def _relative_parts(value: str) -> tuple[str, ...]:
     return parts
 
 
-def _check_private_root(root: Path) -> int:
-    if not isinstance(root, Path) or not root.is_absolute():
-        raise LbeSourcePreflightError("private root must be an absolute Path")
+def _open_checked_dir(parent_fd: int, part: str, *, role: str) -> int:
+    """Pin one no-follow component; close on even an injected fstat failure.
+
+    Untrusted ancestors above the approved base need only be directories with
+    no symlink. The approved base/root must be private and exclusively owned;
+    intermediate descendants must be owned and not writable by group/other.
+    """
+    child = -1
+    accepted = False
     try:
-        before = root.lstat()
-        fd = os.open(root, _DIR_FLAGS)
-        after = os.fstat(fd)
+        child = os.open(part, _DIR_FLAGS, dir_fd=parent_fd)
+        before = os.fstat(child)
+        entry = os.stat(part, dir_fd=parent_fd, follow_symlinks=False)
+        if (not stat.S_ISDIR(before.st_mode)
+                or not stat.S_ISDIR(entry.st_mode)
+                or before.st_dev != entry.st_dev or before.st_ino != entry.st_ino
+                or before.st_mode != entry.st_mode or before.st_uid != entry.st_uid):
+            raise LbeSourcePreflightError("source directory identity changed")
+        if role in {"private", "owned"}:
+            if before.st_uid != os.getuid() or before.st_mode & 0o022:
+                raise LbeSourcePreflightError("source directory owner/mode denied")
+        if role == "private" and before.st_mode & 0o077:
+            raise LbeSourcePreflightError("private source directory is not private")
+        accepted = True
+        return child
     except OSError as exc:
-        raise LbeSourcePreflightError("private root not accessible without links") from exc
-    if (not stat.S_ISDIR(before.st_mode) or not stat.S_ISDIR(after.st_mode)
-            or before.st_dev != after.st_dev or before.st_ino != after.st_ino
-            or before.st_uid != os.getuid() or after.st_uid != os.getuid()
-            or (before.st_mode & 0o077) or (after.st_mode & 0o077)):
-        os.close(fd)
-        raise LbeSourcePreflightError("private root not exclusively owned or pinned")
-    return fd
+        raise LbeSourcePreflightError("source directory absent or unsafe") from exc
+    finally:
+        if child >= 0 and not accepted:
+            os.close(child)
+
+
+def _check_private_root(root: Path, *, trusted_base: Path) -> int:
+    """Open every absolute ancestor from '/' without following any symlink.
+
+    trusted_base must be an independently selected private staging directory,
+    never a value supplied by an HTTP/MCP request or inferred from an argv.
+    The same-UID path replacement risk remains outside this T0-only proof.
+    """
+    if (not isinstance(root, Path) or not isinstance(trusted_base, Path)
+            or not root.is_absolute() or not trusted_base.is_absolute()):
+        raise LbeSourcePreflightError("absolute root and trusted base required")
+    root_parts, base_parts = root.parts, trusted_base.parts
+    if (".." in root_parts or ".." in base_parts
+            or len(base_parts) < 2
+            or len(root_parts) <= len(base_parts)
+            or root_parts[:len(base_parts)] != base_parts):
+        raise LbeSourcePreflightError("root must be below an approved canonical base")
+    held: list[int] = []
+    try:
+        held.append(os.open("/", _DIR_FLAGS))
+        for index, part in enumerate(root_parts[1:], start=1):
+            last_root = index == len(root_parts) - 1
+            last_base = index == len(base_parts) - 1
+            role = ("private" if last_base or last_root
+                    else "ancestor" if index < len(base_parts) - 1
+                    else "owned")
+            held.append(_open_checked_dir(held[-1], part, role=role))
+        return held.pop()
+    except OSError as exc:
+        raise LbeSourcePreflightError("private root not accessible") from exc
+    finally:
+        for fd in reversed(held):
+            os.close(fd)
 
 
 def _check_directory(fd: int, part: str) -> int:
-    try:
-        child = os.open(part, _DIR_FLAGS, dir_fd=fd)
-        meta = os.fstat(child)
-    except OSError as exc:
-        raise LbeSourcePreflightError("source directory absent or unsafe") from exc
-    if (not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid()
-            or meta.st_mode & 0o022):
-        os.close(child)
-        raise LbeSourcePreflightError("source directory is writable or not owned")
-    return child
+    return _open_checked_dir(fd, part, role="owned")
+
+
+def _validate_source_manifest(manifest: Mapping[str, str],
+                              critical: frozenset[str]) -> None:
+    if (not isinstance(manifest, Mapping)
+            or len(manifest) < len(critical)
+            or len(manifest) > _MAX_SOURCE_MEMBERS
+            or not critical.issubset(manifest)):
+        raise LbeSourcePreflightError("critical source manifest incomplete or oversized")
+    for name, digest in manifest.items():
+        _relative_parts(name)
+        if type(digest) is not str or not _SHA.fullmatch(digest):
+            raise LbeSourcePreflightError("invalid source digest")
+
+
+def _inspect_members(root: int, expected_members: Mapping[str, str],
+                     *, executables: frozenset[str]) -> dict[str, str]:
+    checked: dict[str, str] = {}
+    remaining = _MAX_SOURCE_TOTAL_BYTES
+    for name in sorted(expected_members):
+        digest, size = _verified_member(
+            root, name, expected_members[name], executable=name in executables,
+            max_bytes=min(_MAX_SOURCE_MEMBER_BYTES, remaining))
+        checked[name] = digest
+        remaining -= size
+    return checked
 
 
 def _verified_member(root_fd: int, name: str, expected_sha: str,
-                     *, executable: bool = False) -> str:
+                     *, executable: bool = False,
+                     max_bytes: int = _MAX_SOURCE_MEMBER_BYTES) -> tuple[str, int]:
     if type(expected_sha) is not str or not _SHA.fullmatch(expected_sha):
         raise LbeSourcePreflightError("missing exact source SHA256")
     parts = _relative_parts(name)
@@ -98,6 +164,8 @@ def _verified_member(root_fd: int, name: str, expected_sha: str,
             fd = _check_directory(fd, part)
             held.append(fd)
         try:
+            # O_NONBLOCK is required before fstat: a FIFO without a writer
+            # must be rejected promptly, never hang while os.open waits.
             member = os.open(parts[-1], _FILE_FLAGS, dir_fd=fd)
             held.append(member)
             before = os.fstat(member)
@@ -106,12 +174,18 @@ def _verified_member(root_fd: int, name: str, expected_sha: str,
                     or before.st_mode & 0o022
                     or (executable and not before.st_mode & 0o111)):
                 raise LbeSourcePreflightError("member type, owner or mode denied")
+            if max_bytes < 0 or before.st_size > max_bytes:
+                raise LbeSourcePreflightError("source member exceeds byte budget")
             hash_state = hashlib.sha256()
-            while True:
-                data = os.read(member, 1024 * 1024)
+            left = before.st_size
+            while left:
+                data = os.read(member, min(left, 1024 * 1024))
                 if not data:
-                    break
+                    raise LbeSourcePreflightError("source member truncated during hash")
                 hash_state.update(data)
+                left -= len(data)
+            if os.read(member, 1):
+                raise LbeSourcePreflightError("source member grew during hash")
             after = os.fstat(member)
             leaf = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False)
             def identity(st: os.stat_result) -> tuple[int, ...]:
@@ -122,7 +196,7 @@ def _verified_member(root_fd: int, name: str, expected_sha: str,
             actual = hash_state.hexdigest()
             if actual != expected_sha:
                 raise LbeSourcePreflightError("source byte identity mismatch")
-            return actual
+            return actual, before.st_size
         except OSError as exc:
             raise LbeSourcePreflightError("member unavailable without links") from exc
     finally:
@@ -157,26 +231,20 @@ def _check_parent_env(parent_env: Mapping[str, str], *, kind: str,
             raise LbeSourcePreflightError("unknown source kind")
 
 
-def inspect_go_source_t0(*, private_root: Path,
+def inspect_go_source_t0(*, private_root: Path, trusted_base: Path,
                          expected_members: Mapping[str, str],
                          parent_env: Mapping[str, str],
                          expected_parent_path: str) -> dict[str, object]:
     """Static SHA+env candidate only. Explicitly cannot grant real native Go."""
     _check_parent_env(parent_env, kind="go",
                       expected_parent_path=expected_parent_path)
-    if not isinstance(expected_members, Mapping) or not _GO_CRITICAL.issubset(expected_members):
-        raise LbeSourcePreflightError("Go critical member manifest incomplete")
-    root = _check_private_root(private_root)
+    _validate_source_manifest(expected_members, _GO_CRITICAL)
+    root = _check_private_root(private_root, trusted_base=trusted_base)
     try:
-        checked = {
-            name: _verified_member(root, name, expected_members[name],
-                                   executable=name in {
-                                       "go/bin/go",
-                                       "go/pkg/tool/darwin_arm64/compile",
-                                       "go/pkg/tool/darwin_arm64/link",
-                                   })
-            for name in sorted(expected_members)
-        }
+        checked = _inspect_members(root, expected_members, executables=frozenset({
+            "go/bin/go", "go/pkg/tool/darwin_arm64/compile",
+            "go/pkg/tool/darwin_arm64/link",
+        }))
     finally:
         os.close(root)
     return {
@@ -189,17 +257,15 @@ def inspect_go_source_t0(*, private_root: Path,
     }
 
 
-def inspect_pipenv_source_t0(*, private_root: Path,
+def inspect_pipenv_source_t0(*, private_root: Path, trusted_base: Path,
                              expected_members: Mapping[str, str],
                              parent_env: Mapping[str, str],
                              expected_parent_path: str) -> dict[str, object]:
     """No-follow .venv directory and pinned files; never invokes Pipenv."""
     _check_parent_env(parent_env, kind="pipenv",
                       expected_parent_path=expected_parent_path)
-    if (not isinstance(expected_members, Mapping)
-            or not _PIPENV_CRITICAL.issubset(expected_members)):
-        raise LbeSourcePreflightError("Pipenv private venv manifest incomplete")
-    root = _check_private_root(private_root)
+    _validate_source_manifest(expected_members, _PIPENV_CRITICAL)
+    root = _check_private_root(private_root, trusted_base=trusted_base)
     try:
         # Explicitly traverse .venv before foreign import/entrypoint. A normal
         # Pipenv .venv *file* redirect or symlink MUST fail, even if it points
@@ -213,11 +279,9 @@ def inspect_pipenv_source_t0(*, private_root: Path,
         finally:
             for item in reversed(dirs):
                 os.close(item)
-        checked = {
-            name: _verified_member(root, name, expected_members[name],
-                                   executable=name == "project/.venv/bin/python")
-            for name in sorted(expected_members)
-        }
+        checked = _inspect_members(
+            root, expected_members,
+            executables=frozenset({"project/.venv/bin/python"}))
     finally:
         os.close(root)
     return {

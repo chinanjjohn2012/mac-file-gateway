@@ -111,10 +111,10 @@ def _freeze(kind: str, mapping: dict[str, str],
             expected_keys: frozenset[str]) -> ChildEnvCandidate:
     if set(mapping) != expected_keys:
         raise LbeChildEnvT0Error("unexpected or missing effective env key")
-    if any(type(v) is not str or not v or "\x00" in v for v in mapping.values()):
-        if mapping.get("GOFLAGS", None) != "":
-            raise LbeChildEnvT0Error("invalid effective environment value")
-        if any(not v for k, v in mapping.items() if k != "GOFLAGS"):
+    for key, value in mapping.items():
+        if (type(value) is not str or "\x00" in value
+                or (not value and key != "GOFLAGS")
+                or (key == "GOFLAGS" and value != "")):
             raise LbeChildEnvT0Error("invalid effective environment value")
     return ChildEnvCandidate(kind=kind, values=MappingProxyType(dict(mapping)))
 

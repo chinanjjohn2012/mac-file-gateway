@@ -243,4 +243,9 @@ def test_parent_env_input_is_not_mutated_and_no_subprocess_starts(monkeypatch):
 
 def test_non_dict_parent_environment_is_not_accepted_as_trusted():
     with pytest.raises(LbeChildEnvT0Error):
-        _go(MappingProxyType({"PATH": HOST_PATH}))
+        make_go_child_env_t0(
+            private_root=BASE, go_root=GO, home=HOME, temp=TMP,
+            go_path=BASE / "gopath", mod_cache=BASE / "gomodcache",
+            build_cache=BASE / "gocache",
+            parent_env=MappingProxyType({"PATH": HOST_PATH}),
+        )

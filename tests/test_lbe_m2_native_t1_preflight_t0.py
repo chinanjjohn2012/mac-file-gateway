@@ -481,3 +481,115 @@ def test_review_untrusted_runner_comparisons_rejected_before_execution(
     invalid["provider"] = HostileComparison()
     with pytest.raises(LbeM2T1PreflightError):
         _proposal(synthetic_stage, "go", runner=invalid)
+
+
+
+# B independent r002 P2-108-R002-01: mappingproxy of a dict SUBCLASS can
+# lie through overridden .items() even though type(proxy) is mappingproxy.
+# This is a real source-module T0 regression, not a native toolchain probe.
+@pytest.mark.parametrize("kind,poison", [
+    ("go", {
+        "PATH": "/outside/attacker/bin",
+        "GOFLAGS": "-toolexec=/unreviewed/wrapper",
+        "LD_PRELOAD": "/outside/inject.so",
+    }),
+    ("pipenv", {
+        "PATH": "/outside/attacker/bin",
+        "PIPENV_PYTHON": "/outside/python",
+        "LD_PRELOAD": "/outside/inject.so",
+    }),
+])
+def test_r003_p2_dict_subclass_items_lie_on_m1_env_rejected_without_spawn(
+        synthetic_stage, kind, poison, monkeypatch):
+    real = _stage_binding(synthetic_stage, kind)
+    clean = dict(real.child_env)
+    actual = dict(clean, **poison)
+    calls = []
+
+    class LyingItemsDict(dict):
+        def items(self):
+            calls.append("untrusted_items")
+            return clean.items()
+
+    forged = replace(real, child_env=MappingProxyType(LyingItemsDict(actual)))
+    assert forged.child_env["PATH"] == "/outside/attacker/bin"
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("native subprocess/network must never be invoked")
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(socket, "socket", forbidden)
+    with pytest.raises(LbeM2T1PreflightError):
+        _proposal(synthetic_stage, kind, candidate=forged)
+    # The M2 gate must not invoke any overridden dict-subclass method.
+    assert calls == []
+
+
+@pytest.mark.parametrize("kind,member", [
+    ("go", "go/VERSION"),
+    ("pipenv", "project/Pipfile"),
+])
+def test_r003_p2_dict_subclass_items_lie_on_m1_sha_map_denied(
+        synthetic_stage, kind, member, monkeypatch):
+    real = _stage_binding(synthetic_stage, kind)
+    clean = dict(real.checked_member_sha256)
+    fake = dict(clean)
+    fake[member] = "f" * 64
+    calls = []
+
+    class LyingItemsDict(dict):
+        def items(self):
+            calls.append("untrusted_items")
+            return clean.items()
+
+    forged = replace(
+        real, checked_member_sha256=MappingProxyType(LyingItemsDict(fake)))
+    assert forged.checked_member_sha256[member] != clean[member]
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("nonoperative T0 must not launch a foreign child")
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(socket, "socket", forbidden)
+    with pytest.raises(LbeM2T1PreflightError):
+        _proposal(synthetic_stage, kind, candidate=forged)
+    assert calls == []
+
+
+@pytest.mark.parametrize("kind,field", [
+    ("go", "child_env"), ("go", "checked_member_sha256"),
+    ("pipenv", "child_env"), ("pipenv", "checked_member_sha256"),
+])
+def test_r003_p2_dict_subclass_items_raising_assertion_normalized_without_call(
+        synthetic_stage, kind, field, monkeypatch):
+    real = _stage_binding(synthetic_stage, kind)
+    calls = []
+
+    class ExplodingItemsDict(dict):
+        def items(self):
+            calls.append("untrusted_items")
+            raise AssertionError("untrusted dict items() must never run")
+        def __iter__(self):
+            calls.append("untrusted_iter")
+            raise AssertionError("untrusted dict iterator must never run")
+
+    forged_map = MappingProxyType(
+        ExplodingItemsDict(dict(getattr(real, field))))
+    forged = replace(real, **{field: forged_map})
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("no native child or network is allowed by this T0")
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(socket, "socket", forbidden)
+    with pytest.raises(LbeM2T1PreflightError):
+        _proposal(synthetic_stage, kind, candidate=forged)
+    assert calls == []
+
+
+@pytest.mark.parametrize("kind", ["go", "pipenv"])
+def test_r003_p2_direct_mappingproxy_of_non_dict_mapping_is_denied(
+        synthetic_stage, kind):
+    from collections import UserDict
+    real = _stage_binding(synthetic_stage, kind)
+    unsafe = MappingProxyType(UserDict(dict(real.child_env)))
+    with pytest.raises(LbeM2T1PreflightError):
+        _proposal(synthetic_stage, kind,
+                  candidate=replace(real, child_env=unsafe))

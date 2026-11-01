@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import replace
 import hashlib
 from pathlib import Path
+from types import MappingProxyType
 import socket
 import subprocess
 
@@ -322,3 +323,91 @@ def test_parent_runtime_shadow_denied_before_any_m2_plan(
     with pytest.raises(LbePrelaunchBindingT0Error):
         (bind_go_prelaunch_t0 if kind == "go" else
          bind_pipenv_prelaunch_t0)(**args)
+
+
+# Independent B/C r001 review cases: actual module negative tests, not mock
+# replacements for review, not real foreign native execution.
+
+
+@pytest.mark.parametrize("kind,poison", [
+    ("go", {"GOFLAGS": "-toolexec=/outside/unreviewed-tool"}),
+    ("go", {"PATH": "/outside/attacker/bin"}),
+    ("go", {"LD_PRELOAD": "/outside/attacker.so"}),
+    ("pipenv", {"PATH": "/outside/attacker/bin"}),
+    ("pipenv", {"PIPENV_PYTHON": "/outside/python"}),
+    ("pipenv", {"PIPENV_PIPFILE": "/outside/attacker/Pipfile"}),
+])
+def test_review_p2_108_01_forged_m1_closed_env_is_denied(
+        synthetic_stage, kind, poison, monkeypatch):
+    """A public frozen dataclass's status must not qualify forged env bytes."""
+    real = _stage_binding(synthetic_stage, kind)
+    altered = dict(real.child_env)
+    altered.update(poison)
+    forged = replace(real, child_env=MappingProxyType(altered))
+
+    def no_child(*_args, **_kwargs):
+        raise AssertionError("nonoperative T0 must never spawn")
+    monkeypatch.setattr(subprocess, "Popen", no_child)
+    monkeypatch.setattr(socket, "socket", no_child)
+    with pytest.raises(LbeM2T1PreflightError):
+        _proposal(synthetic_stage, kind, candidate=forged)
+
+
+@pytest.mark.parametrize("kind", ["go", "pipenv"])
+def test_review_p2_108_01_forged_m1_sha_map_denied_even_when_lock_matches(
+        synthetic_stage, kind, monkeypatch):
+    """Caller-provided equal fake candidate/source_lock is not FD evidence."""
+    real = _stage_binding(synthetic_stage, kind)
+    original = _proposal(synthetic_stage, kind)
+    member = "go/VERSION" if kind == "go" else "project/Pipfile"
+    altered = dict(real.checked_member_sha256)
+    altered[member] = "f" * 64
+    forged = replace(real, checked_member_sha256=MappingProxyType(altered))
+    matching_fake_lock = dict(original.source_lock)
+    matching_fake_lock[member] = "f" * 64
+
+    def no_child(*_args, **_kwargs):
+        raise AssertionError("nonoperative T0 must never spawn")
+    monkeypatch.setattr(subprocess, "Popen", no_child)
+    with pytest.raises(LbeM2T1PreflightError):
+        _proposal(synthetic_stage, kind, candidate=forged,
+                  source_lock=matching_fake_lock)
+
+
+@pytest.mark.parametrize("bad_kind", [
+    [], {}, set(), None, 7, ["go"], {"go": True},
+])
+def test_review_p2_108_02_unhashable_kind_is_normalized(
+        synthetic_stage, bad_kind, monkeypatch):
+    def no_child(*_args, **_kwargs):
+        raise AssertionError("nonoperative T0 must never spawn")
+    monkeypatch.setattr(subprocess, "Popen", no_child)
+    with pytest.raises(LbeM2T1PreflightError):
+        _proposal(synthetic_stage, "go", kind=bad_kind)
+
+
+@pytest.mark.parametrize("field", ["mode", "mechanism", "tcp", "canary"])
+def test_review_p2_108_02_hostile_policy_comparison_is_never_invoked(
+        synthetic_stage, field, monkeypatch):
+    class HostileEquality:
+        def __eq__(self, _other):
+            raise AssertionError("dangerous comparison was called")
+        def __ne__(self, _other):
+            raise AssertionError("dangerous comparison was called")
+
+    policy = dict(_proposal(synthetic_stage, "pipenv").egress_proposal)
+    policy[field] = HostileEquality()
+
+    def no_child(*_args, **_kwargs):
+        raise AssertionError("nonoperative T0 must never spawn")
+    monkeypatch.setattr(subprocess, "Popen", no_child)
+    with pytest.raises(LbeM2T1PreflightError):
+        _proposal(synthetic_stage, "pipenv", offline_policy=policy)
+
+
+def test_review_p3_108_01_child_budget_must_fit_inside_job(synthetic_stage):
+    budget = dict(_proposal(synthetic_stage, "go").budget_proposal)
+    budget["job_seconds"] = 60
+    budget["child_seconds"] = 120
+    with pytest.raises(LbeM2T1PreflightError):
+        _proposal(synthetic_stage, "go", budget=budget)

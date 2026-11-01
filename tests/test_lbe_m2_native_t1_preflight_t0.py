@@ -70,18 +70,23 @@ def synthetic_stage(tmp_path):
     return root, go, pip, fixtures
 
 
-def _stage_binding(scene, kind):
+def _stage_inputs(scene, kind):
     root, go, pip, _ = scene
     shared = dict(private_root=root, trusted_base=root.parent,
                   expected_members=go if kind == "go" else pip,
                   parent_env={"PATH": _HOST}, expected_parent_path=_HOST,
                   home=root / "home", temp=root / "tmp")
     if kind == "go":
-        return bind_go_prelaunch_t0(
-            **shared, go_path=root / "gopath",
-            mod_cache=root / "gomodcache",
-            build_cache=root / "gocache")
-    return bind_pipenv_prelaunch_t0(**shared)
+        shared.update(go_path=root / "gopath",
+                      mod_cache=root / "gomodcache",
+                      build_cache=root / "gocache")
+    return shared
+
+
+def _stage_binding(scene, kind):
+    args = _stage_inputs(scene, kind)
+    return (bind_go_prelaunch_t0 if kind == "go" else
+            bind_pipenv_prelaunch_t0)(**args)
 
 
 def _proposal(scene, kind, **overrides):
@@ -97,6 +102,7 @@ def _proposal(scene, kind, **overrides):
         argv = ("pipenv", "run", "python", "ok.py")
     request = dict(
         kind=kind, argv=argv, candidate=binding,
+        m1_recheck_inputs=_stage_inputs(scene, kind),
         proposed_head="a" * 40, proposed_tree="b" * 40,
         source_lock=members,
         runner=dict(
@@ -411,3 +417,67 @@ def test_review_p3_108_01_child_budget_must_fit_inside_job(synthetic_stage):
     budget["child_seconds"] = 120
     with pytest.raises(LbeM2T1PreflightError):
         _proposal(synthetic_stage, "go", budget=budget)
+
+
+
+@pytest.mark.parametrize("kind,relative", [
+    ("go", "go/VERSION"),
+    ("pipenv", "project/Pipfile"),
+])
+def test_review_m1_rehash_rejects_stage_changed_after_original_check(
+        synthetic_stage, kind, relative, monkeypatch):
+    """Original M1 candidate checked, then underlying file is changed at M2."""
+    actual = prepare_m2_source_t1_plan_t0
+    root = synthetic_stage[0]
+
+    def modify_after_m1_binding_before_m2(**kwargs):
+        (root / relative).write_bytes(b"changed after the M1 source-only pass")
+        return actual(**kwargs)
+
+    # This only simulates checked-source drift and never spawns a child.
+    monkeypatch.setitem(globals(), "prepare_m2_source_t1_plan_t0",
+                        modify_after_m1_binding_before_m2)
+    with pytest.raises(LbeM2T1PreflightError):
+        _proposal(synthetic_stage, kind)
+
+
+@pytest.mark.parametrize("kind", ["go", "pipenv"])
+def test_review_recheck_cannot_use_other_trusted_base(synthetic_stage, kind):
+    original = _stage_inputs(synthetic_stage, kind)
+    altered = dict(original)
+    altered["trusted_base"] = synthetic_stage[0]
+    with pytest.raises(LbeM2T1PreflightError):
+        _proposal(synthetic_stage, kind, m1_recheck_inputs=altered)
+
+
+@pytest.mark.parametrize("kind", ["go", "pipenv"])
+@pytest.mark.parametrize("malformed", [None, [], {}, {"PATH": "wrong"}])
+def test_review_recheck_requires_complete_exact_source_env_args(
+        synthetic_stage, kind, malformed):
+    with pytest.raises(LbeM2T1PreflightError):
+        _proposal(synthetic_stage, kind, m1_recheck_inputs=malformed)
+
+
+def test_review_budget_has_safe_job_child_margin_boundary(synthetic_stage):
+    valid = dict(_proposal(synthetic_stage, "go").budget_proposal)
+    valid["job_seconds"] = 180
+    valid["child_seconds"] = 120
+    plan = _proposal(synthetic_stage, "go", budget=valid)
+    assert plan.native_t1 == "NOT_RUN"
+    assert plan.launch_allowed is False
+    valid["job_seconds"] = 179
+    with pytest.raises(LbeM2T1PreflightError):
+        _proposal(synthetic_stage, "go", budget=valid)
+
+
+def test_review_untrusted_runner_comparisons_rejected_before_execution(
+        synthetic_stage):
+    class HostileComparison:
+        def __ne__(self, _other):
+            raise AssertionError("runner comparison must not run")
+
+    good = _proposal(synthetic_stage, "go")
+    invalid = dict(good.runner_proposal)
+    invalid["provider"] = HostileComparison()
+    with pytest.raises(LbeM2T1PreflightError):
+        _proposal(synthetic_stage, "go", runner=invalid)

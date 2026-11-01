@@ -63,3 +63,54 @@ Actual T1-SOURCE would need a separate reviewed executable test snapshot, exact 
 T1-PRODUCT remains NOT_AUTHORIZED. It needs a separately granted actual WorkspaceService/Worker/Launcher original-child fixture after exact Gate A and Gate B, and cannot use Python-only hosted fixture, a monkeypatch, env flag or direct bypass. Full Gate C/R10 and same-instance Direct/REST/official MCP/Git/File integration remain BLOCKED. Neither a SOURCE-only test, nor B/C TARGETED T0 pass, nor CI GREEN authorizes release.
 
 CURRENT REQUIRED RESULT: NONOPERATIVE_M2_TEST_PLAN_T0 / SOURCE_TOOLCHAIN_T1_NOT_RUN / PRECONTACT_NETWORK_ISOLATION_NOT_ATTESTED / NO_NATIVE_CHILD.
+
+
+## 6. Review r001 targeted defect closure candidate - T0 only (r002)
+
+After the first original PR #108 r001 Head, B Standards native review on that
+fixed Head reported **FAIL** with two in-scope P2 findings, and C Spec
+independently reported a bounded TARGETED PASS with P3 notes. Both old Reviews
+remain immutable and cannot confer a verdict on this new Head.
+
+- P2-108-01 (forged M1 candidate): the public frozen PrelaunchBindingT0
+  dataclass can be constructed/replaced; checking its declared status,
+  nonempty maps and self-reported matching SHA map is NOT proof of genuine M1
+  source/env checks. The r002 preflight therefore requires
+  m1_recheck_inputs, an exact kind-specific set of original privately staged
+  roots and expected source digests/parent selectors, calls the actual M1
+  Go/Pipenv no-follow original-file SHA inspection and closed-env constructor
+  **again immediately at M2 T0 planning**, compares every candidate SHA
+  entry and every effective environment key/value against the reconstructed
+  result and validates the proposed source lock against freshly inspected
+  bytes. A supplied M1 dataclass is never an unforgeable identity token.
+  Forged GOFLAGS/toolhooks, LD_PRELOAD, PATH, Pipenv interpreter/Pipfile
+  selectors and matching fake candidate+source_lock digests must deny.
+  This is a bounded on-disk T0 recheck, NOT an actual loaded-source or
+  immutable FD-to-Popen attestation, and does not remove same-UID TOCTOU.
+- P2-108-02 (malformed kind/policy values): validate exact primitive kind
+  type BEFORE any dictionary-membership operation, validate the exact
+  primitive type of every proposed offline and runner value BEFORE semantic
+  comparisons. Reject hostile equality methods or unhashable/nonstring
+  kinds with LbeM2T1PreflightError without executing their methods or
+  launching any child. Source/parent map inputs must also have exact
+  first-party shapes and fail closed if M1 re-inspection fails.
+- P3-108-01 (cross-field budget consistency): require candidate total
+  job_seconds >= child_seconds + 60, reserving at least 60 seconds for
+  setup/verification/cleanup in the proposed profile; numerical limits are
+  still NOT approved as final executable CPU/RAM budgets and NOT OS-enforced.
+  This margin is only a static candidate check.
+
+Test-before-fix RED on new test-only Head 5dbb1b0d3e217de275f408d56358af9ec145761d,
+Tree 79a086487a9ae6d5b3271d04c61b291d0120952e,
+original Linux CI https://github.com/chinanjjohn2012/mac-file-gateway/actions/runs/41329122678/job/124915301592:
+20 expected new failing cases, 2317 other passed, 19 skipped,
+one warning. The failed pytest step terminates downstream smoke/final CI
+steps; they must NOT be counted PASS on RED. This preceding RED is historical
+evidence, NOT an r002 GREEN result.
+
+For the r002 GREEN snapshot, independent B and C MUST re-read exact new
+Head/Base/Tree, effective diff, actual original CI/skip reasons and separately
+design meaningful counterexamples; neither C's old r001 targeted PASS nor
+A's CI results prove new r002 role acceptance. The default disabled launch,
+absence of native Go/Pipenv, absence of enforceable OFFLINE_ONLY attached
+domain/canary, F1 deny and other Gate B/C blockers remain unchanged.

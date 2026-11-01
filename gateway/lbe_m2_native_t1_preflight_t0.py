@@ -9,11 +9,15 @@ A successful plan is still HARD BLOCKED from launching native executables.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 import re
 from types import MappingProxyType
 from typing import Mapping
 
-from .lbe_prelaunch_binding_t0 import PrelaunchBindingT0
+from .lbe_prelaunch_binding_t0 import (
+    PrelaunchBindingT0, LbePrelaunchBindingT0Error,
+    bind_go_prelaunch_t0, bind_pipenv_prelaunch_t0,
+)
 
 
 class LbeM2T1PreflightError(ValueError):
@@ -45,6 +49,16 @@ _REQUIRED_MEMBERS = {
         "project/.venv/pyvenv.cfg", "project/.venv/bin/python",
         "pipenv-env/bin/pipenv", "project/ok.py",
     }),
+}
+_M1_COMMON_INPUTS = frozenset({
+    "private_root", "trusted_base", "expected_members",
+    "parent_env", "expected_parent_path", "home", "temp",
+})
+_M1_INPUTS = {
+    "go": _M1_COMMON_INPUTS | frozenset({
+        "go_path", "mod_cache", "build_cache",
+    }),
+    "pipenv": _M1_COMMON_INPUTS,
 }
 _RUNNER_KEYS = frozenset({
     "provider", "os", "os_major", "arch", "python", "image_id",
@@ -96,27 +110,93 @@ class M2SourceT1PlanT0:
 
 
 def _validate_candidate(candidate: PrelaunchBindingT0, kind: str) -> None:
-    if (type(candidate) is not PrelaunchBindingT0
-            or candidate.kind != kind
+    """A mutable-by-reconstruction dataclass is NOT an attested source."""
+    if type(candidate) is not PrelaunchBindingT0:
+        raise LbeM2T1PreflightError("unqualified M1 source/env candidate")
+    if (type(candidate.kind) is not str
+            or type(candidate.status) is not str
+            or type(candidate.source_loaded_identity) is not str
+            or type(candidate.network_precontact_isolation) is not str
+            or type(candidate.original_child_native_t1) is not str
+            or type(candidate.checked_member_sha256) is not MappingProxyType
+            or type(candidate.child_env) is not MappingProxyType):
+        raise LbeM2T1PreflightError("untrusted M1 candidate fields")
+    if (candidate.kind != kind
             or candidate.status != "NONOPERATIVE_PRELAUNCH_CANDIDATE_ONLY"
             or candidate.exec_authorized is not False
             or candidate.source_loaded_identity != "NOT_ATTESTED"
             or candidate.network_precontact_isolation != "NOT_ATTESTED"
-            or candidate.original_child_native_t1 != "NOT_RUN"
-            or not isinstance(candidate.checked_member_sha256, Mapping)
-            or not isinstance(candidate.child_env, Mapping)
-            or not candidate.checked_member_sha256
-            or not candidate.child_env):
+            or candidate.original_child_native_t1 != "NOT_RUN"):
         raise LbeM2T1PreflightError("unqualified M1 source/env candidate")
+
+
+def _plain_immutable_strings(view: Mapping[str, str]) -> dict[str, str]:
+    """Copy only exact str pairs; reject disguised Mapping methods/values."""
+    if type(view) is not MappingProxyType:
+        raise LbeM2T1PreflightError("expected immutable M1 snapshot")
+    try:
+        pairs = tuple(view.items())
+        if (not pairs or
+                any(type(k) is not str or type(v) is not str
+                    for k, v in pairs)):
+            raise LbeM2T1PreflightError("untrusted M1 snapshot members")
+        copied = dict(pairs)
+    except (TypeError, ValueError, RuntimeError, OSError, KeyError) as exc:
+        raise LbeM2T1PreflightError("unreadable M1 snapshot") from exc
+    if len(copied) != len(pairs):
+        raise LbeM2T1PreflightError("duplicate M1 snapshot source")
+    return copied
+
+
+def _recheck_actual_m1_stage(
+    kind: str, candidate: PrelaunchBindingT0,
+    inputs: dict[str, object],
+) -> PrelaunchBindingT0:
+    """Rehash original staged members and reconstruct exact closed env.
+
+    A caller can manufacture dataclass instances or claim SHA values.
+    We never use their status/map as proof: re-run M1's FD/no-follow source
+    admission against caller-supplied approved private roots and verify
+    that the input snapshot equals the newly reconstructed result.
+    Even this is T0-only; same-UID TOCTOU and true loaded source unproved.
+    """
+    if type(inputs) is not dict or set(inputs) != _M1_INPUTS[kind]:
+        raise LbeM2T1PreflightError("M1 revalidation inputs missing")
+    members = inputs["expected_members"]
+    parent = inputs["parent_env"]
+    if (type(members) is not dict or type(parent) is not dict
+            or any(type(key) is not str or type(value) is not str
+                   for key, value in members.items())
+            or any(type(key) is not str or type(value) is not str
+                   for key, value in parent.items())
+            or type(inputs["expected_parent_path"]) is not str
+            or any(not isinstance(inputs[key], Path) for key in (
+                "private_root", "trusted_base", "home", "temp"))
+            or (kind == "go" and any(
+                not isinstance(inputs[key], Path) for key in (
+                    "go_path", "mod_cache", "build_cache")))):
+        raise LbeM2T1PreflightError("untrusted M1 source/env recheck input")
+    try:
+        if kind == "go":
+            fresh = bind_go_prelaunch_t0(**inputs)
+        else:
+            fresh = bind_pipenv_prelaunch_t0(**inputs)
+    except (LbePrelaunchBindingT0Error, TypeError, ValueError,
+            KeyError, OSError) as exc:
+        raise LbeM2T1PreflightError(
+            "M1 source/env stage identity no longer verified") from exc
+    if (_plain_immutable_strings(candidate.checked_member_sha256)
+            != _plain_immutable_strings(fresh.checked_member_sha256)
+            or _plain_immutable_strings(candidate.child_env)
+            != _plain_immutable_strings(fresh.child_env)):
+        raise LbeM2T1PreflightError("forged or drifted M1 source/env snapshot")
+    return fresh
 
 
 def _validate_source_lock(
     kind: str, proposal: dict[str, str], candidate: PrelaunchBindingT0,
 ) -> None:
-    if (type(proposal) is not dict
-            or len(proposal) > 20000
-            or not _REQUIRED_MEMBERS[kind].issubset(proposal)
-            or set(candidate.checked_member_sha256) - set(proposal)):
+    if type(proposal) is not dict or len(proposal) > 20000:
         raise LbeM2T1PreflightError("incomplete or untrusted T1 source lock")
     for name, digest in proposal.items():
         if (type(name) is not str
@@ -126,7 +206,11 @@ def _validate_source_lock(
                 or type(digest) is not str
                 or not _HEX64.fullmatch(digest)):
             raise LbeM2T1PreflightError("invalid source lock member or digest")
-    for name, digest in candidate.checked_member_sha256.items():
+    verified = _plain_immutable_strings(candidate.checked_member_sha256)
+    if (not _REQUIRED_MEMBERS[kind].issubset(proposal)
+            or set(verified) - set(proposal)):
+        raise LbeM2T1PreflightError("incomplete or untrusted T1 source lock")
+    for name, digest in verified.items():
         if type(digest) is not str or proposal[name] != digest:
             raise LbeM2T1PreflightError("M1/T1 source identity drift")
 
@@ -134,6 +218,7 @@ def _validate_source_lock(
 def _validate_runner(proposal: dict[str, str]) -> None:
     if (type(proposal) is not dict
             or set(proposal) != _RUNNER_KEYS
+            or any(type(value) is not str for value in proposal.values())
             or proposal.get("provider") != "GITHUB_HOSTED_DISPOSABLE"
             or proposal.get("os") != "macOS"
             or proposal.get("os_major") != "15"
@@ -152,6 +237,7 @@ def _validate_budget(proposal: dict[str, int]) -> None:
         raise LbeM2T1PreflightError("budget values must be plain integers")
     if (not 60 <= proposal["job_seconds"] <= 1200
             or not 1 <= proposal["child_seconds"] <= 120
+            or proposal["job_seconds"] < proposal["child_seconds"] + 60
             or not 1 <= proposal["cpu_seconds"] <= 120
             or not 256 <= proposal["memory_mib"] <= 2048
             or proposal["active_source_children"] != 1
@@ -163,7 +249,8 @@ def _validate_budget(proposal: dict[str, int]) -> None:
 
 
 def _validate_offline_proposal(proposal: dict[str, str]) -> None:
-    if type(proposal) is not dict or set(proposal) != _EGRESS_KEYS:
+    if (type(proposal) is not dict or set(proposal) != _EGRESS_KEYS
+            or any(type(value) is not str for value in proposal.values())):
         raise LbeM2T1PreflightError("offline precontact policy is incomplete")
     if (proposal.get("mode") != "OFFLINE_ONLY"
             or proposal.get("mechanism") not in (
@@ -174,8 +261,6 @@ def _validate_offline_proposal(proposal: dict[str, str]) -> None:
             or proposal.get("attachment") != "BEFORE_ANY_NATIVE_INSTRUCTION"
             or proposal.get("canary") != "SAME_DOMAIN_DENIAL_REQUIRED"):
         raise LbeM2T1PreflightError("unacceptable precontact egress proposal")
-    if any(type(value) is not str for value in proposal.values()):
-        raise LbeM2T1PreflightError("untrusted offline policy input")
     # These are requested policy characteristics, NOT attached OS policy
     # evidence. A boolean from CI, user data, or env cannot prove isolation.
 
@@ -183,6 +268,7 @@ def _validate_offline_proposal(proposal: dict[str, str]) -> None:
 def prepare_m2_source_t1_plan_t0(
     *, kind: str, argv: tuple[str, ...],
     candidate: PrelaunchBindingT0,
+    m1_recheck_inputs: dict[str, object],
     proposed_head: str, proposed_tree: str,
     source_lock: dict[str, str], runner: dict[str, str],
     budget: dict[str, int], offline_policy: dict[str, str],
@@ -192,7 +278,7 @@ def prepare_m2_source_t1_plan_t0(
     Native Go/Pipenv T1 needs a SEPARATELY REVIEWED executable attester and
     enforceable isolation domain, neither present in this file or this PR.
     """
-    if kind not in _REQUIRED_MEMBERS:
+    if type(kind) is not str or kind not in _REQUIRED_MEMBERS:
         raise LbeM2T1PreflightError("unsupported SOURCE_TOOLCHAIN_T1 kind")
     if (type(argv) is not tuple
             or any(type(item) is not str for item in argv)
@@ -204,7 +290,10 @@ def prepare_m2_source_t1_plan_t0(
             or proposed_head == proposed_tree):
         raise LbeM2T1PreflightError("invalid test-code identity proposal")
     _validate_candidate(candidate, kind)
-    _validate_source_lock(kind, source_lock, candidate)
+    # This is a fresh M1 no-follow SHA and closed-env recheck, not a
+    # cryptographic constructor token or a real native loaded-source proof.
+    checked = _recheck_actual_m1_stage(kind, candidate, m1_recheck_inputs)
+    _validate_source_lock(kind, source_lock, checked)
     _validate_runner(runner)
     _validate_budget(budget)
     _validate_offline_proposal(offline_policy)

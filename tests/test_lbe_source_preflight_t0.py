@@ -64,7 +64,7 @@ def pipenv_candidate(tmp_path: Path):
 def _go(scene, env=None):
     root, members = scene
     return inspect_go_source_t0(
-        private_root=root, expected_members=members,
+        private_root=root, trusted_base=root.parent, expected_members=members,
         parent_env={"PATH": "/trusted/bin", **(env or {})},
         expected_parent_path="/trusted/bin")
 
@@ -72,7 +72,7 @@ def _go(scene, env=None):
 def _pipenv(scene, env=None):
     root, members = scene
     return inspect_pipenv_source_t0(
-        private_root=root, expected_members=members,
+        private_root=root, trusted_base=root.parent, expected_members=members,
         parent_env={"PATH": "/trusted/bin", **(env or {})},
         expected_parent_path="/trusted/bin")
 
@@ -118,7 +118,8 @@ def test_go_missing_or_tampered_critical_source_fails(go_candidate):
     root, members = go_candidate
     with pytest.raises(LbeSourcePreflightError):
         inspect_go_source_t0(
-            private_root=root, expected_members={"go/bin/go": members["go/bin/go"]},
+            private_root=root, trusted_base=root.parent,
+            expected_members={"go/bin/go": members["go/bin/go"]},
             parent_env={"PATH": "/trusted/bin"}, expected_parent_path="/trusted/bin")
     (root / "go/bin/go").write_bytes(b"replaced")
     with pytest.raises(LbeSourcePreflightError):

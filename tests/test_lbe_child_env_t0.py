@@ -1,11 +1,13 @@
 """T0 for nonoperative effective child env; NEVER Go/Pipenv native tests."""
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+import os
 import subprocess
 from types import MappingProxyType
 
 import pytest
 
+import gateway.lbe_child_env_t0 as child_env
 from gateway.lbe_child_env_t0 import (
     LbeChildEnvT0Error,
     make_go_child_env_t0,
@@ -253,3 +255,117 @@ def test_non_dict_parent_environment_is_not_accepted_as_trusted():
             build_cache=BASE / "gocache",
             parent_env=MappingProxyType({"PATH": HOST_PATH}),
         )
+
+
+@pytest.mark.parametrize("change", [
+    {"go_root": BASE / "go:/unapproved"},
+    {"go_root": BASE / "go:."},
+    {"go_root": BASE / "go::shadow"},
+    {"go_root": BASE / "go:"},
+    {"go_root": BASE / "go:/outside/bin"},
+    {"go_path": BASE / "gopath:/outside"},
+    {"mod_cache": BASE / "gomodcache::shadow"},
+    {"build_cache": BASE / "gocache:../unexpected"},
+    {"home": BASE / "home:/unapproved"},
+    {"temp": BASE / "temp::shadow"},
+    {"private_root": BASE / "stage:unreviewed"},
+])
+def test_go_colon_derived_path_denied_before_env_candidate(change):
+    """B106 CE-01/02/03: an allowed private PATH MUST remain one token."""
+    with pytest.raises(LbeChildEnvT0Error):
+        _go(**change)
+
+
+@pytest.mark.parametrize("change", [
+    {"project_root": BASE / "project:/outside/site"},
+    {"project_root": BASE / "project::shadow"},
+    {"project_root": BASE / "project:."},
+    {"pipenv_bin": BASE / "pipenv-env/bin:/unapproved/bin/pipenv"},
+    {"pipenv_bin": BASE / "pipenv-env::shadow/bin/pipenv"},
+    {"pipenv_bin": BASE / "pipenv-env:../outside/bin/pipenv"},
+    {"home": BASE / "home:outside"},
+    {"temp": BASE / "temp::shadow"},
+    {"private_root": BASE / "stage:unreviewed"},
+])
+def test_pipenv_colon_derived_path_denied_before_env_candidate(change):
+    """B106 CE-04/05: no extra Pipenv interpreter or entrypoint PATH hit."""
+    with pytest.raises(LbeChildEnvT0Error):
+        _pipenv(**change)
+
+
+@pytest.mark.parametrize("control", ["\n", "\r", "\t", "\x7f"])
+def test_control_chars_in_private_go_or_pipenv_path_denied(control):
+    for input_value in (BASE / ("go" + control + "bin"),):
+        with pytest.raises(LbeChildEnvT0Error):
+            _go(go_root=input_value)
+    with pytest.raises(LbeChildEnvT0Error):
+        _pipenv(project_root=BASE / ("project" + control + "dir"))
+
+
+def test_exact_legal_go_pipenv_path_tokens_no_empty_or_relative():
+    """Use the *OS PATH parser*, not just equality of a string literal."""
+    base = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+    for actual, expected in (
+        (_go(), (str(GO / "bin"), *base)),
+        (_pipenv(), (str(PROJECT / ".venv/bin"),
+                     str(BASE / "pipenv-env/bin"), *base)),
+    ):
+        tokens = tuple(actual.values["PATH"].split(os.pathsep))
+        assert tokens == expected
+        assert tuple(os.get_exec_path(dict(actual.values))) == expected
+        assert all(token and Path(token).is_absolute()
+                   and os.pathsep not in token
+                   and ".." not in Path(token).parts for token in tokens)
+        assert actual.status == "NONOPERATIVE_ENV_CANDIDATE_ONLY"
+        assert actual.exec_authorized is False
+        assert actual.source_loaded_identity == "NOT_ATTESTED"
+        assert actual.network_precontact_isolation == "NOT_ATTESTED"
+        assert actual.original_child_native_t1 == "NOT_RUN"
+        with pytest.raises(TypeError):
+            actual.values["PATH"] = "/unreviewed"
+
+
+@pytest.mark.parametrize("bad_baseline", [
+    "/usr/bin::/sbin", "/usr/bin:/bin:relative",
+    "/usr/bin:/bin:/sbin\nunexpected",
+])
+def test_final_child_path_rejects_tampered_baseline_even_if_parent_matches(
+        bad_baseline, monkeypatch):
+    """The final PATH check is independent of the parent PATH check."""
+    with monkeypatch.context() as patch:
+        patch.setattr(child_env, "_HOST_PATH", bad_baseline)
+        with pytest.raises(LbeChildEnvT0Error):
+            _go({"PATH": bad_baseline})
+        with pytest.raises(LbeChildEnvT0Error):
+            _pipenv({"PATH": bad_baseline})
+
+
+def test_colon_path_negatives_never_create_native_child(monkeypatch):
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("T0 must never invoke any child")
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess.Popen, "__init__", forbidden)
+        for action in (
+            lambda: _go(go_root=BASE / "go::relative"),
+            lambda: _go(go_root=BASE / "go:/unapproved"),
+            lambda: _pipenv(project_root=BASE / "project:/unapproved"),
+            lambda: _pipenv(pipenv_bin=BASE / "bin:/outside/bin/pipenv"),
+        ):
+            with pytest.raises(LbeChildEnvT0Error):
+                action()
+
+
+def test_colon_in_staging_root_denied_even_with_consistent_children():
+    base = Path("/test-owned/private:shadow")
+    with pytest.raises(LbeChildEnvT0Error):
+        make_go_child_env_t0(
+            private_root=base, go_root=base / "go",
+            home=base / "home", temp=base / "temp",
+            go_path=base / "gopath", mod_cache=base / "gomodcache",
+            build_cache=base / "gocache", parent_env={"PATH": HOST_PATH})
+    with pytest.raises(LbeChildEnvT0Error):
+        make_pipenv_child_env_t0(
+            private_root=base, project_root=base / "project",
+            pipenv_bin=base / "pipenv-env/bin/pipenv",
+            home=base / "home", temp=base / "temp",
+            parent_env={"PATH": HOST_PATH})

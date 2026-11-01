@@ -56,7 +56,7 @@ def _relative_parts(value: str) -> tuple[str, ...]:
 
 
 def _check_private_root(root: Path) -> int:
-    if type(root) is not Path or not root.is_absolute():
+    if not isinstance(root, Path) or not root.is_absolute():
         raise LbeSourcePreflightError("private root must be an absolute Path")
     try:
         before = root.lstat()

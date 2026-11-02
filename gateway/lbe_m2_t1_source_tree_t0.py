@@ -87,6 +87,15 @@ def inspect_t1_private_source_tree_t0(
     only a later reviewed isolated executor can attest actual loaded sources.
     """
     lock, executables = _validate_lock(source_lock, executable_members)
+    # M1 allowed deeper descendants of an approved private base for its T0
+    # source candidate. This T1 test fixture is intentionally narrower:
+    # the exact stage must be a DIRECT child of the caller-reviewed base.
+    # This is a lexical restriction in addition to the no-follow FD walk,
+    # not a claim that caller-supplied base provenance is authenticated.
+    if (not isinstance(private_root, Path)
+            or not isinstance(trusted_base, Path)
+            or private_root.parent != trusted_base):
+        raise LbeT1SourceTreeError("source stage is not direct child of trusted base")
     root = -1
     visited: set[str] = set()
     seen_dirs = 0

@@ -13,7 +13,7 @@ Owner Gate A exact-version risk consent recorded via A on PR #102 comment 655961
 
 ## 2. Actual new code and observable boundaries
 
-- gateway/lbe_m2_t1_source_tree_t0.py is an actual first-party SHA256 checker of ALL files in the operator-approved private staged source tree. It uses the reviewed M1 no-follow descriptor traversal, owner and mode checks, before/after inode and content hashing and rejects unlisted importables (including .pth), hardlinks, symlinks, FIFO/socket/device files, unexpected executables, altered digests or casefold-colliding names. Bounds: 20000 listed files, 30000 directories, 128 MiB max per member and 2 GiB aggregate. A matching caller-provided manifest is evidence of the inspected T0 bytes ONLY, not upstream source authenticity or the source ultimately selected by a native child.
+- gateway/lbe_m2_t1_source_tree_t0.py is an actual first-party SHA256 checker of ALL files in the operator-approved private staged source tree. The source staging root must be the DIRECT lexical child of its explicitly chosen private trusted base, in addition to M1 no-follow traversal; a caller-provided ancestor alone does not prove owner provenance. It uses the reviewed M1 no-follow descriptor traversal, owner and mode checks, before/after inode and content hashing and rejects unlisted importables (including .pth), hardlinks, symlinks, FIFO/socket/device files, unexpected executables, altered digests or casefold-colliding names. Bounds: 20000 listed files, 30000 directories, 128 MiB max per member and 2 GiB aggregate. A matching caller-provided manifest is evidence of the inspected T0 bytes ONLY, not upstream source authenticity or the source ultimately selected by a native child.
 - gateway/lbe_m2_t1_source_execution_gate_t0.py provides a test execution admission control. It requires a previously verified NONOPERATIVE M2 plan, rechecks the staged source closure and records inspected source bytes, proposed Git Head/Tree and diagnostic local platform. The result is ALWAYS BLOCKED_PRECONTACT_EXECUTION_GATE_T0 and has execution_allowed=False, product_exec_authorized=False, native_t1=NOT_RUN, actual loaded source/runner/CPU-RAM/egress NOT_ATTESTED and same-domain canary NOT_RUN. Its execute_source_toolchain_t1 entrypoint is deliberately HARD-DENIED for EVERY receipt or caller-provided approval claim. It cannot spawn any native child.
 - tests/test_lbe_m2_t1_source_execution_gate_t0.py constructs only synthetic fake Go/Pipenv trees and uses ACTUAL predecessor M1/M2 T0 source APIs, with subprocess/socket spies, to verify legal source closure and unsafe source/manifest, linked shadow, special file, changed bytes, modes, base path, budget, claims and forged receipt rejection. No real Go/Pipenv binary or live networking is used.
 - This PR does not modify existing F1, WorkspaceService, Native Launcher, Worker, public Direct/REST/MCP/Git/File, production config or CI workflows; the existing Linux Head CI executes only ordinary T0 plus existing deny-only/live adjacent regression. A future independently reviewed actual runnable provider is required to turn the test control surface into a native executor. Calling this code a real launched or isolated T1 would be a false claim.
@@ -37,3 +37,21 @@ No actual Popen, native Go/Pipenv import or compiler, network or firewall, unrel
 The existing ordinary F1 dry_run=false Exec stays denied before Popen (exec_cleanup_proof_required), and unapproved Go/Pipenv launcher selection stays denied. Legacy/v1/UNKNOWN and distinct Git/File grants are unchanged. T1_PRODUCT and positive WorkspaceService/Direct/REST/official MCP/native integration require separate product-origin authorization, new source code, independent B/C FULL reviews and actual integration proof; standalone SOURCE_T1 PASS is never enough for Gate C/R10.
 
 For this new Head, require B Standards and C Spec to independently review the complete effective changed file set and actual Head+Tree, original Linux T0 CI/skip reasons, T0 pass/fail/edge/exception tests and nearby F1 regression. All 19 historical Linux skips and unrun current native/egress/source-loaded tests must remain explicitly NOT_RUN/INSUFFICIENT for claims depending on them. Freeze current Head after an accurate A GH_HANDOFF_V2 READY_FOR_REVIEW. Changing Head/Base/Tree, source, rule or contract versions needs a new review round; no historical PASS transfer.
+
+
+## 6. Initial Linux CI T0 red and narrow baseline correction
+
+The new Draft PR initial Head 3e8d990213f10c302a8578ef90a11a78749683c7
+and Tree 7f5678f944a2d79b1fe09b510eb596ea8bb6eb44 was exercised by
+https://github.com/chinanjjohn2012/mac-file-gateway/actions/runs/41365741602/job/125025403368.
+Original G05 verified 295 Blob/mode identities and 294 SHA Manifest entries;
+pytest produced 2423 passed, 2 failed, 19 skipped, 1 warning.
+Both new red failures were test_wrong_trusted_base_or_root_does_not_become_a_grant:
+the older M1 preflight accepted an ancestor private base in the valid path
+lineage; the new standalone T1 staging contract must instead require
+private_root.parent == trusted_base. The rejected ancestor is a T0 path
+qualification issue, NOT a proved native Go/Pipenv escape. The failed pytest
+prevented all later smoke and posttest final steps from running on this RED
+snapshot. A has changed the T1-only source tree checker to require the
+direct lexical private base child, and must verify it on a new exact Head.
+No historical RED or CI badge is represented as a new GREEN result.

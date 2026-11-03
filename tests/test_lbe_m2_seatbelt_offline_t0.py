@@ -25,11 +25,13 @@ from gateway.lbe_m2_t1_source_execution_gate_t0 import (
 _ROOT = Path(__file__).resolve().parents[1]
 _HELPER = _ROOT / "tools" / "lbe_m2_seatbelt_canary_only.c"
 _FD_SCRUB = _ROOT / "tools" / "lbe_m2_fd_scrub_t0.h"
+_WAIT_SOURCE = _ROOT / "tools" / "lbe_m2_canary_bounded_wait_t0.h"
 
 
 def _candidate(**overrides):
     inputs = {"native_helper_bytes": _HELPER.read_bytes(),
-              "fd_scrub_header_bytes": _FD_SCRUB.read_bytes()}
+              "fd_scrub_header_bytes": _FD_SCRUB.read_bytes(),
+              "bounded_wait_header_bytes": _WAIT_SOURCE.read_bytes()}
     inputs.update(overrides)
     return prepare_seatbelt_offline_backend_t0(**inputs)
 
@@ -52,6 +54,8 @@ def test_first_party_helper_digest_and_policy_t0_are_still_nonoperative(
     assert result.policy_source == SEATBELT_CANARY_PROFILE
     assert len(result.policy_sha256) == 64
     assert len(result.native_helper_source_sha256) == 64
+    assert len(result.bounded_wait_header_sha256) == 64
+    assert result.bounded_wait_header_path == "tools/lbe_m2_canary_bounded_wait_t0.h"
     assert result.native_helper_source_path == (
         "tools/lbe_m2_seatbelt_canary_only.c")
     assert result.kernel_attachment == "NOT_ATTESTED"
@@ -85,7 +89,9 @@ def test_native_canary_must_sandbox_before_any_socket_and_child_fork():
     assert "sandbox_init(kSeatbeltPolicy, 0, &errorbuf)" in main
     assert "deny_loopback_canaries()" in main
     assert "child = fork()" in main
-    assert "waitpid(child, &status, 0)" in main
+    assert "lbe_canary_wait_bounded(child)" in main
+    assert "waitpid(child, &status, 0)" not in main
+    assert "return 69;" in main
     assert main.index("reject_inherited_socket_descriptors()") < (
         main.index("sandbox_init(kSeatbeltPolicy, 0, &errorbuf)"))
     assert main.index("sandbox_init(kSeatbeltPolicy, 0, &errorbuf)") < (
@@ -105,6 +111,7 @@ def test_native_canary_must_sandbox_before_any_socket_and_child_fork():
                          no_comments)
     assert "#if !defined(__APPLE__)" in source
     assert "#include \"lbe_m2_fd_scrub_t0.h\"" in source
+    assert "#include \"lbe_m2_canary_bounded_wait_t0.h\"" in source
     assert "lbe_scrub_inherited_fds()" in source
     assert "getrlimit(RLIMIT_NOFILE" not in source
     fd_scrub = _FD_SCRUB.read_text(encoding="ascii")
@@ -246,3 +253,34 @@ def test_unreviewed_close_fd_header_logic_mutation_denied():
         assert changed != source
         with pytest.raises(LbeM2SeatbeltT0Error):
             _candidate(fd_scrub_header_bytes=changed)
+
+
+@pytest.mark.parametrize("bad", [
+    b"", b"unreviewed-wait-header", b"\0", "not bytes",
+    bytearray(b"bad"), None, True, 1, {}, [],
+])
+def test_bad_or_missing_bounded_wait_source_is_denied(bad):
+    with pytest.raises(LbeM2SeatbeltT0Error):
+        _candidate(bounded_wait_header_bytes=bad)
+
+
+def test_mutated_bounded_wait_header_and_unbounded_wait_risk_rejected():
+    original = _WAIT_SOURCE.read_bytes()
+    for changed in (
+        original + b"\n",
+        original.replace(b"WNOHANG", b"0", 1),
+        original.replace(b"CLOCK_MONOTONIC", b"CLOCK_REALTIME", 1),
+        original.replace(b"LBE_CANARY_MAX_POLLS 256U",
+                         b"LBE_CANARY_MAX_POLLS 999999U", 1),
+    ):
+        assert changed != original
+        with pytest.raises(LbeM2SeatbeltT0Error):
+            _candidate(bounded_wait_header_bytes=changed)
+    header = original.decode("ascii")
+    assert "WNOHANG" in header
+    assert "CLOCK_MONOTONIC" in header
+    assert "LBE_CANARY_CHILD_UNVERIFIED_TIMEOUT" in header
+    assert "LBE_CANARY_MAX_POLLS" in header
+    assert "kill(" not in header
+    assert "killpg(" not in header
+    assert "posix_spawn(" not in header

@@ -35,12 +35,16 @@ SEATBELT_CANARY_PROFILE: Final[str] = (
     "(allow sysctl-read)\n"
 )
 _CANARY_SOURCE_SHA256: Final[str] = (
-    "65bc6f567502d8ff5f76da2118c37f61c2e890a78c195500fa04ad290d164376"
+    "f66b9382c32775ff14952debe94f6d20ebc45ad1a8173146c64eeee57db8bf4b"
 )
 _CANARY_SOURCE_PATH: Final[str] = "tools/lbe_m2_seatbelt_canary_only.c"
 _FD_SCRUB_SOURCE_PATH: Final[str] = "tools/lbe_m2_fd_scrub_t0.h"
 _FD_SCRUB_SOURCE_SHA256: Final[str] = (
     "af545c5da23f0b87bd90a0ce7bf5b70b28d30d82cd7cb71ecda4d886880bc435"
+)
+_WAIT_SOURCE_PATH: Final[str] = "tools/lbe_m2_canary_bounded_wait_t0.h"
+_WAIT_SOURCE_SHA256: Final[str] = (
+    "77461d52470c5cff31d4dcf7283a399abcb799360e8c5f7cb0aac51a38f81cca"
 )
 _MAX_NATIVE_SOURCE_BYTES: Final[int] = 65536
 _BLOCKERS: Final[tuple[str, ...]] = (
@@ -54,6 +58,8 @@ _BLOCKERS: Final[tuple[str, ...]] = (
     "ACTUAL_LOADED_GO_PIPENV_SOURCE_NOT_ATTESTED",
     "OS_CPU_RAM_WALL_AND_OUTPUT_CAPS_NOT_ENFORCED",
     "CURRENT_EXECUTABLE_TEST_CODE_BC_REVIEW_NOT_ISSUED",
+    "CANARY_BOUNDED_WAIT_OS_NOT_ATTESTED_AND_CHILD_SURVIVOR_RISK",
+    "NO_APPROVED_CHILD_REAP_OR_RETIREMENT_ON_DEADLINE",
     "T1_SOURCE_AND_T1_PRODUCT_NOT_RUN",
 )
 
@@ -69,6 +75,8 @@ class SeatbeltOfflineBackendT0:
     native_helper_source_sha256: str
     fd_scrub_header_path: str
     fd_scrub_header_sha256: str
+    bounded_wait_header_path: str
+    bounded_wait_header_sha256: str
     observed_platform: str
     observed_machine: str
     status: str = "NONOPERATIVE_SEATBELT_CANARY_SOURCE_T0"
@@ -85,6 +93,7 @@ class SeatbeltOfflineBackendT0:
 
 def prepare_seatbelt_offline_backend_t0(
     *, native_helper_bytes: bytes, fd_scrub_header_bytes: bytes,
+    bounded_wait_header_bytes: bytes,
     proposed_policy: str = SEATBELT_CANARY_PROFILE,
 ) -> SeatbeltOfflineBackendT0:
     """Admit EXACT checked C source/profile bytes for static review only.
@@ -102,6 +111,12 @@ def prepare_seatbelt_offline_backend_t0(
     checked_fd = hashlib.sha256(fd_scrub_header_bytes).hexdigest()
     if checked_fd != _FD_SCRUB_SOURCE_SHA256:
         raise LbeM2SeatbeltT0Error("inherited-FD scrub source identity drift")
+    if (type(bounded_wait_header_bytes) is not bytes or
+            not 1 <= len(bounded_wait_header_bytes) <= _MAX_NATIVE_SOURCE_BYTES):
+        raise LbeM2SeatbeltT0Error("unreviewed bounded wait source input")
+    checked_wait = hashlib.sha256(bounded_wait_header_bytes).hexdigest()
+    if checked_wait != _WAIT_SOURCE_SHA256:
+        raise LbeM2SeatbeltT0Error("bounded wait source identity drift")
     if type(proposed_policy) is not str or proposed_policy != SEATBELT_CANARY_PROFILE:
         raise LbeM2SeatbeltT0Error("policy must equal immutable OFFLINE_ONLY canary")
     checked = hashlib.sha256(native_helper_bytes).hexdigest()
@@ -116,6 +131,8 @@ def prepare_seatbelt_offline_backend_t0(
         native_helper_source_sha256=checked,
         fd_scrub_header_path=_FD_SCRUB_SOURCE_PATH,
         fd_scrub_header_sha256=checked_fd,
+        bounded_wait_header_path=_WAIT_SOURCE_PATH,
+        bounded_wait_header_sha256=checked_wait,
         observed_platform=platform.system(),
         observed_machine=platform.machine(),
     )
@@ -130,7 +147,9 @@ def require_verified_offline_domain_before_native_t1(
     """No user-constructible Python receipt can grant real Go/Pipenv T1.
 
     The native C candidate only tests a *subset* of loopback socket denial
-    in its own process and forked descendant. It does not perform an exec of
+    in its own process and forked descendant. Bounded WNOHANG polling
+    does NOT retire an unknown child or prove a safe timeout. It does not
+    perform an exec of
     the target Go/Pipenv child in that same context, does not attest remote
     egress or DNS/proxy, and has never been executed on an approved macOS
     runner in this revision. Unconditionally reject until a new exact reviewed

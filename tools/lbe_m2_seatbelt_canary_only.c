@@ -10,6 +10,7 @@
  * Uses deprecated sandbox_init; success on one macOS version is not proof
  * of another. No host-wide firewall, pf, VM or root operations.
  */
+#define _POSIX_C_SOURCE 200809L
 #if !defined(__APPLE__)
 #error "macOS Seatbelt canary may only be compiled on a reviewed macOS host"
 #endif
@@ -24,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "lbe_m2_fd_scrub_t0.h"
+#include "lbe_m2_canary_bounded_wait_t0.h"
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -147,12 +149,14 @@ int main(int argc, char **argv) {
     if (child == 0) {
         _exit(deny_loopback_canaries() ? 0 : 1);
     }
-    int status = 0;
-    pid_t waited;
-    do {
-        waited = waitpid(child, &status, 0);
-    } while (waited < 0 && errno == EINTR);
-    if (waited != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    /*
+     * FINITE wait using WNOHANG + CLOCK_MONOTONIC (2s proposed maximum).
+     * A timeout/unknown CHILD IS NOT RETIRED: no kill, no retry, no
+     * admission. A future native-run supervisor must prove safe ownership
+     * of a possibly live child before this canary is ever run on macOS.
+     * This is a source-only T0 proposal, not a cleanup guarantee.
+     */
+    if (lbe_canary_wait_bounded(child) != LBE_CANARY_CHILD_EXIT_0) {
         return 69;
     }
     /*

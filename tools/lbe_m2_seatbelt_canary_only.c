@@ -23,7 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/resource.h>
+#include "lbe_m2_fd_scrub_t0.h"
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -105,28 +105,12 @@ static bool deny_loopback_canaries(void) {
 
 static bool reject_inherited_socket_descriptors(void) {
     /*
-     * The kernel sandbox cannot revoke already-open sockets. Reject socket
-     * stdio and CLOSE every other inherited fd BEFORE sandbox_init.
-     * The audited parent must also independently prove no dynamic FD
-     * injection, privileged file handles or unsandboxed relay.
+     * r002 P2-110-01 / C110-R001-SPEC-01: enumerate ACTUAL open FDs
+     * through /dev/fd, never assume fd < current RLIMIT_NOFILE soft/hard
+     * limit. The isolated, single-thread canary must reject incomplete
+     * enumeration or any FD remaining >=3 before Seatbelt attachment.
      */
-    for (int fd = 0; fd <= 2; fd++) {
-        struct stat st;
-        if (fstat(fd, &st) != 0 || S_ISSOCK(st.st_mode)) {
-            return false;
-        }
-    }
-    struct rlimit rlim;
-    if (getrlimit(RLIMIT_NOFILE, &rlim) != 0 ||
-        rlim.rlim_cur < 3 || rlim.rlim_cur > 65536) {
-        return false;
-    }
-    for (int fd = 3; (rlim_t)fd < rlim.rlim_cur; fd++) {
-        if (close(fd) < 0 && errno != EBADF) {
-            return false;
-        }
-    }
-    return true;
+    return lbe_scrub_inherited_fds();
 }
 
 int main(int argc, char **argv) {

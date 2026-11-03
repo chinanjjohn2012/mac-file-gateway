@@ -80,9 +80,18 @@ sysctl-read. It never grants network-outbound, network-inbound,
 network-bind, process-exec, broad host-write or proxy extension.
 
 Before calling sandbox_init, it rejects socket-based stdin/out/err
-and closes ALL other inherited file descriptors within a bounded
-RLIMIT_NOFILE; failure refuses the canary. Existing open FDs can
-otherwise survive sandbox application and undermine network denial.
+and delegates a complete enumeration-and-verification FD scrub to the
+NEW fixed first-party tools/lbe_m2_fd_scrub_t0.h. The implementation
+uses macOS /dev/fd (Linux T0 uses /proc/self/fd) to enumerate numeric
+CURRENTLY OPEN descriptors, closes every inherited nonstdio FD except
+its own enumeration directory, then independently re-enumerates and
+DENIES if any other FD remains >=3. It never uses current soft/hard
+RLIMIT_NOFILE as a range boundary. Unknown directory entries,
+unsupported/enumeration/close/readdir errors, or an inaccessible FD
+directory all DENY before sandbox_init. An inherited FD opened at a
+high number before lowering RLIMIT_NOFILE is no longer silently skipped.
+No source-only check proves actual macOS /dev/fd or kernel policy behavior;
+separate native macOS B/C review and original evidence remain necessary.
 It calls sandbox_init(profile, 0, &errorbuf), fails on a nonzero result,
 then attempts nonblocking IPv4/IPv6 TCP and UDP to LOOPBACK port 9
 inside its own context. Only an OS permission rejection EPERM/EACCES
@@ -120,9 +129,11 @@ canary PASS, fake runner label, or a dataclasses.replace "verified"
 receipt. It contains NO ctypes, socket, process launcher or dynamic
 native bridge.
 
-C. tests/test_lbe_m2_seatbelt_offline_t0.py
+C. tests/test_lbe_m2_seatbelt_offline_t0.py and
+tests/test_lbe_m2_seatbelt_fd_scrub_t0.py
 
-Real Python T0 tests with exact committed first-party C source bytes,
+Real Python T0 tests with exact committed first-party C AND shared
+FD-header source bytes,
 G05-controlled artifact identity and synthetic policy/attestation
 counterexamples: legal source/profile receipt remains blocked;
 helper SHA tamper / C policy patch / unsafe or malformed custom
@@ -203,3 +214,71 @@ FULL_CODE_REVIEW_PASS. Neither A nor a GitHub comment may write or
 sign B/C verdicts. A publishes one exact GH_HANDOFF_V2
 READY_FOR_REVIEW with original CI, skips, failure evidence and
 the known missing OS/native isolation evidence. Keep PR Draft.
+
+
+## 6. PR110 r002: independent P2 on high inherited FD / safe T0 repair
+
+The previous r001 freeze was PR110 Base
+c6535e6dd937d938ad4ccfcdfde0f1e391fc597a / Head
+09bed929b4fecd103ba807b92374391b5322686e / Tree
+bc5773173a445fceb271e28aac9f7171c9b54347. Both distinct native
+GitHub SHA-bound reviews independently concluded TARGETED FAIL:
+- B Standards: P2-110-01, https://github.com/chinanjjohn2012/mac-file-gateway/pull/110#pullrequestreview-5731440660
+- C Spec: C110-R001-SPEC-01, https://github.com/chinanjjohn2012/mac-file-gateway/pull/110#pullrequestreview-5731432858
+
+Both found that old C function reject_inherited_socket_descriptors
+closed ONLY descriptor numbers 3..current RLIMIT_NOFILE.SOFT-1; a
+descriptor (including AF_UNIX/socket) opened at number >=128 BEFORE
+lowering soft rlimit to 64 would survive this loop and allow
+sandbox_init to proceed despite a preopened inherited FD, violating
+this PR's explicit all-FD pre-sandbox contract.
+
+A's first-party TEST-FIRST RED Head
+332f072dd5a604d7db7f20cf84816710145e2288 / Tree
+5155a75a73559fe82d1db0a7fb18f0598931531a
+https://github.com/chinanjjohn2012/mac-file-gateway/actions/runs/41661699545/job/126006265508
+actually ran hosted Linux first-party T0 and gave 2 FAILED,
+2469 PASSED, 19 SKIPPED, one warning. The two fails were direct source
+assertions rejecting the old soft-RLIMIT bounded loop and requiring
+a new C source verified enumeration path. A separate harmless Python
+AF_UNIX high-FD reproducer passed in a disposable interpreter and
+observed old loop still left fd128 open. RED G05 checked 300 Blob/mode
+and 299 Manifest entries before tests; subsequent HTTP/MCP/Git smoke
+not run on RED due pytest failure. These are not an actual macOS
+Seatbelt C execution or kernel escape experiment.
+
+The proposed r002 fix is an auditable new first-party header
+tools/lbe_m2_fd_scrub_t0.h directly included by the unchanged-design
+Seatbelt C helper. It performs full current-open-FD enumeration from
+the platform-native FD filesystem directory, closes ALL >=3 except
+the enumerator's own FD, and independently enumerates a second time
+to verify no other open descriptor remains. It checks socket stdio,
+rejects nonnumeric unexpected entries, closers raising unexpected errno,
+missing/incomplete FD directories, enumeration overflow/errors and
+surviving handles. Its count limit bounds listing WORK, not the FD
+NUMBER; soft and hard RLIMIT_NOFILE are NOT used as bounds. A
+multithreaded or externally FD-injecting parent, non-working /dev/fd
+on hosted macOS, or FDs opened afterward remain separate precontact
+safety risks; this is a single-thread, no-exec canary-only helper,
+NOT a production sandbox.
+
+The updated pure-Python T0 identity checker pins BOTH C helper source
+SHA256 and the exact included FD-scrub HEADER SHA256, rejects any
+injected old or modified header, and STILL RETURNS T1=NOT_RUN. A new
+safe Linux standalone C FD-algorithm fixture compiles only this exact
+header via disposable compiler/source into a one-shot local test
+executable, covering normal no-extra-FD, high AF_UNIX fd128 after
+soft64, injected close failure, missing FD directory and socket stdio.
+No Seatbelt sandbox_init or Go/Pipenv code is compiled, loaded or run
+by this Linux fixture. Its OS/libc/compiler identity is a TEST input,
+not Mac-native proof or locked Go/Pipenv source. Source and tests
+must be revalidated against NEW r002 Head and original CI.
+
+Known unresolved P3 from C: canary future blocking waitpid has NO
+independent OS wall budget; without separately reviewed/native verified
+canary runner and bounded natural-exit policy remain NOT_RUN. Even a
+full r002 first-party GREEN plus independent B/C TARGETED PASS cannot
+replace real macOS C binary/SDK, OS Seatbelt policy/descendant
+attachment, DNS/proxy/remote egress, loaded Go/Pipenv provenance,
+resource caps or R10 full integration. No native T1, host firewall,
+signals, production, merge or deployment is authorized by r002.

@@ -35,9 +35,13 @@ SEATBELT_CANARY_PROFILE: Final[str] = (
     "(allow sysctl-read)\n"
 )
 _CANARY_SOURCE_SHA256: Final[str] = (
-    "0c8ce1f48f7b6a87f89a2e71b2c0f6d4d63765bb0934beb52d90f5ae540e8785"
+    "65bc6f567502d8ff5f76da2118c37f61c2e890a78c195500fa04ad290d164376"
 )
 _CANARY_SOURCE_PATH: Final[str] = "tools/lbe_m2_seatbelt_canary_only.c"
+_FD_SCRUB_SOURCE_PATH: Final[str] = "tools/lbe_m2_fd_scrub_t0.h"
+_FD_SCRUB_SOURCE_SHA256: Final[str] = (
+    "af545c5da23f0b87bd90a0ce7bf5b70b28d30d82cd7cb71ecda4d886880bc435"
+)
 _MAX_NATIVE_SOURCE_BYTES: Final[int] = 65536
 _BLOCKERS: Final[tuple[str, ...]] = (
     "MACOS_SEATBELT_SANDBOX_INIT_DEPRECATED_AND_NOT_HOST_VALIDATED",
@@ -63,6 +67,8 @@ class SeatbeltOfflineBackendT0:
     policy_sha256: str
     native_helper_source_path: str
     native_helper_source_sha256: str
+    fd_scrub_header_path: str
+    fd_scrub_header_sha256: str
     observed_platform: str
     observed_machine: str
     status: str = "NONOPERATIVE_SEATBELT_CANARY_SOURCE_T0"
@@ -78,7 +84,7 @@ class SeatbeltOfflineBackendT0:
 
 
 def prepare_seatbelt_offline_backend_t0(
-    *, native_helper_bytes: bytes,
+    *, native_helper_bytes: bytes, fd_scrub_header_bytes: bytes,
     proposed_policy: str = SEATBELT_CANARY_PROFILE,
 ) -> SeatbeltOfflineBackendT0:
     """Admit EXACT checked C source/profile bytes for static review only.
@@ -90,6 +96,12 @@ def prepare_seatbelt_offline_backend_t0(
     if (type(native_helper_bytes) is not bytes or
             not 1 <= len(native_helper_bytes) <= _MAX_NATIVE_SOURCE_BYTES):
         raise LbeM2SeatbeltT0Error("unreviewed native canary source input")
+    if (type(fd_scrub_header_bytes) is not bytes or
+            not 1 <= len(fd_scrub_header_bytes) <= _MAX_NATIVE_SOURCE_BYTES):
+        raise LbeM2SeatbeltT0Error("unreviewed inherited-FD scrub source input")
+    checked_fd = hashlib.sha256(fd_scrub_header_bytes).hexdigest()
+    if checked_fd != _FD_SCRUB_SOURCE_SHA256:
+        raise LbeM2SeatbeltT0Error("inherited-FD scrub source identity drift")
     if type(proposed_policy) is not str or proposed_policy != SEATBELT_CANARY_PROFILE:
         raise LbeM2SeatbeltT0Error("policy must equal immutable OFFLINE_ONLY canary")
     checked = hashlib.sha256(native_helper_bytes).hexdigest()
@@ -102,6 +114,8 @@ def prepare_seatbelt_offline_backend_t0(
             SEATBELT_CANARY_PROFILE.encode("ascii")).hexdigest(),
         native_helper_source_path=_CANARY_SOURCE_PATH,
         native_helper_source_sha256=checked,
+        fd_scrub_header_path=_FD_SCRUB_SOURCE_PATH,
+        fd_scrub_header_sha256=checked_fd,
         observed_platform=platform.system(),
         observed_machine=platform.machine(),
     )

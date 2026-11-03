@@ -24,10 +24,12 @@ from gateway.lbe_m2_t1_source_execution_gate_t0 import (
 
 _ROOT = Path(__file__).resolve().parents[1]
 _HELPER = _ROOT / "tools" / "lbe_m2_seatbelt_canary_only.c"
+_FD_SCRUB = _ROOT / "tools" / "lbe_m2_fd_scrub_t0.h"
 
 
 def _candidate(**overrides):
-    inputs = {"native_helper_bytes": _HELPER.read_bytes()}
+    inputs = {"native_helper_bytes": _HELPER.read_bytes(),
+              "fd_scrub_header_bytes": _FD_SCRUB.read_bytes()}
     inputs.update(overrides)
     return prepare_seatbelt_offline_backend_t0(**inputs)
 
@@ -102,8 +104,13 @@ def test_native_canary_must_sandbox_before_any_socket_and_child_fork():
     assert not re.search(r"\b(?:kill|killpg|setpgid|alarm)\s*\(",
                          no_comments)
     assert "#if !defined(__APPLE__)" in source
-    assert "S_ISSOCK" in source
-    assert "getrlimit(RLIMIT_NOFILE" in source
+    assert "#include \"lbe_m2_fd_scrub_t0.h\"" in source
+    assert "lbe_scrub_inherited_fds()" in source
+    assert "getrlimit(RLIMIT_NOFILE" not in source
+    fd_scrub = _FD_SCRUB.read_text(encoding="ascii")
+    assert "S_ISSOCK" in fd_scrub
+    assert "opendir(directory)" in fd_scrub
+    assert "lbe_verify_no_remaining_fds" in fd_scrub
 
 
 @pytest.mark.parametrize("bad", [
@@ -215,3 +222,27 @@ def test_no_new_host_firewall_or_native_workflow_is_executed():
     assert "import subprocess" not in text
     assert "import socket" not in text
     assert "import ctypes" not in text
+
+
+
+@pytest.mark.parametrize("bad", [
+    b"", b"fake header", b"\0", "not bytes", bytearray(b"wrong"),
+    None, True, 7, [], {},
+])
+def test_changed_or_forged_fd_scrub_header_is_rejected(bad):
+    with pytest.raises(LbeM2SeatbeltT0Error):
+        _candidate(fd_scrub_header_bytes=bad)
+
+
+def test_unreviewed_close_fd_header_logic_mutation_denied():
+    source = _FD_SCRUB.read_bytes()
+    alterations = (
+        source + b"\n",
+        source.replace(b"lbe_verify_no_remaining_fds", b"do_not_verify_fd", 1),
+        source.replace(b"opendir(directory)", b"opendir(\"/tmp\")", 1),
+        source.replace(b"if (closer(fd) != 0", b"if (0 /* ignore close */", 1),
+    )
+    for changed in alterations:
+        assert changed != source
+        with pytest.raises(LbeM2SeatbeltT0Error):
+            _candidate(fd_scrub_header_bytes=changed)

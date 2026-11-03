@@ -37,6 +37,17 @@ static pid_t fake_wait(pid_t child, int *status, int flags) {
         return -1;
     }
     wait_count++;
+    if (strcmp(case_name, "late_exit") == 0) {
+        /* The selected child exits after spending 2500ms in waitpid. */
+        fake_ns = 2500000000LL;
+        *status = 0;
+        return child;
+    }
+    if (strcmp(case_name, "midstream_rollback") == 0 &&
+        wait_count >= 3) {
+        *status = 0;
+        return child;
+    }
     if (strcmp(case_name, "exit0") == 0) {
         *status = 0;
         return child;
@@ -81,6 +92,13 @@ static int fake_clock(clockid_t clk, struct timespec *now) {
     if (strcmp(case_name, "clock_error") == 0) {
         errno = EIO;
         return -1;
+    }
+    if (strcmp(case_name, "midstream_rollback") == 0) {
+        /* 0 at start/poll1 -> 1500ms at poll2 -> 100ms at poll3. */
+        now->tv_sec = clock_count == 3 ? 1 : 0;
+        now->tv_nsec = clock_count == 3 ? 500000000L :
+            (clock_count >= 4 ? 100000000L : 0L);
+        return 0;
     }
     if (strcmp(case_name, "clock_reverse") == 0) {
         now->tv_sec = clock_count == 1 ? 3 : 2;
@@ -163,8 +181,11 @@ int main(int argc, char **argv) {
             expected = LBE_CANARY_CHILD_UNVERIFIED_WAIT_ERROR;
         } else if (strcmp(case_name, "clock_error") == 0 ||
                    strcmp(case_name, "clock_reverse") == 0 ||
-                   strcmp(case_name, "clock_invalid_nsec") == 0) {
+                   strcmp(case_name, "clock_invalid_nsec") == 0 ||
+                   strcmp(case_name, "midstream_rollback") == 0) {
             expected = LBE_CANARY_CHILD_UNVERIFIED_CLOCK_ERROR;
+        } else if (strcmp(case_name, "late_exit") == 0) {
+            expected = LBE_CANARY_CHILD_UNVERIFIED_TIMEOUT;
         } else if (strcmp(case_name, "sleep_error") == 0) {
             expected = LBE_CANARY_CHILD_UNVERIFIED_SLEEP_ERROR;
         } else {
@@ -217,6 +238,7 @@ def fake_wait_binary(tmp_path_factory):
     "clock_error", "clock_reverse", "clock_invalid_nsec", "clock_jump",
     "sleep_error", "sleep_eintr", "stuck_clock", "timeout",
     "invalid_child", "invalid_budget", "missing_callback",
+    "late_exit", "midstream_rollback",
 ))
 def test_bounded_wait_first_party_compiled_header_with_fake_os(
     fake_wait_binary, case,

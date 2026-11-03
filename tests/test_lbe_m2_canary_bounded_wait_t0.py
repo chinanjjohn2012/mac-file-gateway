@@ -37,6 +37,16 @@ static pid_t fake_wait(pid_t child, int *status, int flags) {
         return -1;
     }
     wait_count++;
+    if (strcmp(case_name, "exit_at_deadline") == 0 ||
+        strcmp(case_name, "exit_just_before_deadline") == 0 ||
+        strcmp(case_name, "postwait_clock_error") == 0 ||
+        strcmp(case_name, "postwait_clock_rollback") == 0 ||
+        strcmp(case_name, "postwait_clock_bad_nsec") == 0) {
+        fake_ns = strcmp(case_name, "exit_at_deadline") == 0 ?
+            2000000000LL : 1999999999LL;
+        *status = 0;
+        return child;
+    }
     if (strcmp(case_name, "late_exit") == 0) {
         /* The selected child exits after spending 2500ms in waitpid. */
         fake_ns = 2500000000LL;
@@ -89,6 +99,24 @@ static pid_t fake_wait(pid_t child, int *status, int flags) {
 static int fake_clock(clockid_t clk, struct timespec *now) {
     if (clk != CLOCK_MONOTONIC) return -1;
     clock_count++;
+    if (strcmp(case_name, "postwait_clock_error") == 0 &&
+        clock_count >= 3) {
+        errno = EIO;
+        return -1;
+    }
+    if (strcmp(case_name, "postwait_clock_bad_nsec") == 0 &&
+        clock_count >= 3) {
+        now->tv_sec = 1;
+        now->tv_nsec = 1000000000L;
+        return 0;
+    }
+    if (strcmp(case_name, "postwait_clock_rollback") == 0) {
+        const long long sample = clock_count >= 3 ?
+            1400000000LL : (clock_count == 2 ? 1500000000LL : 0LL);
+        now->tv_sec = (time_t)(sample / 1000000000LL);
+        now->tv_nsec = (long)(sample % 1000000000LL);
+        return 0;
+    }
     if (strcmp(case_name, "clock_error") == 0) {
         errno = EIO;
         return -1;
@@ -170,7 +198,8 @@ int main(int argc, char **argv) {
             12345, 2000U, fake_wait, fake_clock, fake_sleep);
         if (strcmp(case_name, "exit0") == 0 ||
             strcmp(case_name, "exit_later") == 0 ||
-            strcmp(case_name, "eintr_then_exit") == 0) {
+            strcmp(case_name, "eintr_then_exit") == 0 ||
+            strcmp(case_name, "exit_just_before_deadline") == 0) {
             expected = LBE_CANARY_CHILD_EXIT_0;
         } else if (strcmp(case_name, "exit_nonzero") == 0 ||
                    strcmp(case_name, "signaled") == 0) {
@@ -182,9 +211,13 @@ int main(int argc, char **argv) {
         } else if (strcmp(case_name, "clock_error") == 0 ||
                    strcmp(case_name, "clock_reverse") == 0 ||
                    strcmp(case_name, "clock_invalid_nsec") == 0 ||
-                   strcmp(case_name, "midstream_rollback") == 0) {
+                   strcmp(case_name, "midstream_rollback") == 0 ||
+                   strcmp(case_name, "postwait_clock_error") == 0 ||
+                   strcmp(case_name, "postwait_clock_rollback") == 0 ||
+                   strcmp(case_name, "postwait_clock_bad_nsec") == 0) {
             expected = LBE_CANARY_CHILD_UNVERIFIED_CLOCK_ERROR;
-        } else if (strcmp(case_name, "late_exit") == 0) {
+        } else if (strcmp(case_name, "late_exit") == 0 ||
+                   strcmp(case_name, "exit_at_deadline") == 0) {
             expected = LBE_CANARY_CHILD_UNVERIFIED_TIMEOUT;
         } else if (strcmp(case_name, "sleep_error") == 0) {
             expected = LBE_CANARY_CHILD_UNVERIFIED_SLEEP_ERROR;
@@ -239,6 +272,9 @@ def fake_wait_binary(tmp_path_factory):
     "sleep_error", "sleep_eintr", "stuck_clock", "timeout",
     "invalid_child", "invalid_budget", "missing_callback",
     "late_exit", "midstream_rollback",
+    "exit_at_deadline", "exit_just_before_deadline",
+    "postwait_clock_error", "postwait_clock_rollback",
+    "postwait_clock_bad_nsec",
 ))
 def test_bounded_wait_first_party_compiled_header_with_fake_os(
     fake_wait_binary, case,
@@ -267,3 +303,15 @@ def test_canary_helper_has_no_blocking_waitpid_and_no_os_kill_path():
     assert "kill(" not in header and "killpg(" not in header
     assert "posix_spawn(" not in header and "execve(" not in header
     assert "return 69;" in helper
+
+
+
+def test_r002_source_contract_for_success_rechecks_and_prior_samples():
+    """No source-only success without both post-wait and monotonic oracles."""
+    header = _HEADER.read_text(encoding="ascii")
+    assert "lbe_canary_clock_not_reversed" in header
+    assert "after_wait" in header
+    assert "expired_after_wait" in header
+    assert "previous = now;" in header
+    assert "waitpid(child, &status, 0)" not in header
+    assert "kill(" not in header

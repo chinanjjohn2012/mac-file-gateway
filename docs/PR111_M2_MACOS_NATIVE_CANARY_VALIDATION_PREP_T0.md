@@ -57,3 +57,73 @@ Official technical context (not project CI evidence):
 Review ALL new Base..Head changed files, plus unchanged actual PR110 FD scrub, PR109 hard-deny source launcher, F1 default deny and native product launcher. Independently inspect helper C source control flow, profile and FD/clock/wait ordering; challenge frozen-clock infinite loops, EINTR storms, fake PID, errno-as-success, child survival after deadline, true CLOCK_MONOTONIC availability, source hash locks, fake runner OS claims and malicious dataclass mutation. Do not equate fake callback C tests or Linux G05 GREEN with actual macOS C program compilation or Seatbelt kernel deny. Do not claim P3 fully closed for native testing merely because source now has finite polling.
 
 T0 current independent B/C reviews: NOT_ISSUED until current exact Head is frozen and A has published GH_HANDOFF_V2 READY_FOR_REVIEW. Native macOS Seatbelt, all-channel offline isolation, actual Go/Pipenv and product positive paths: NOT_RUN/NOT_ATTESTED. R10_STATUS: BLOCKED. FULL_CODE_REVIEW_PASS: NOT_ISSUED. INTEGRATION_STATUS: NOT_TESTED. No PR merge/tag/deploy/config change authorized.
+
+
+## 6. PR111 r002: independent B temporal-oracle FAIL and T0 repair
+
+The old r001 snapshot remained immutable for review: Base
+437da2b75d1e5a1b488ecad05453fe73487d5f32, Head
+efbb34488806ee105d8051598f2133403214f372, Tree
+02cfe3e83a038a280f737a3f501f4bb1023d52cb.
+The two independent SHA-bound original GitHub Reviews disagree and MUST
+not be collapsed into an automatic dual PASS:
+- B Standards r001 TARGETED FAIL:
+  https://github.com/chinanjjohn2012/mac-file-gateway/pull/111#pullrequestreview-5755930369
+  identified P2-111-01 (exit0 accepted even if wait callback consumes past
+  2000ms), P2-111-02 (clock 0 -> 1500ms -> 100ms accepted because each
+  observation is compared with START only). B compiled exact source-derived
+  bounded-wait header with safe deterministic callbacks, no actual child.
+- C Spec r001 TARGETED PASS:
+  https://github.com/chinanjjohn2012/mac-file-gateway/pull/111#pullrequestreview-5755901178
+  for previous nonoperative scope only, leaving real macOS child-survivor
+  P3 C111-R001-SPEC-01 open. C PASS does not supersede B's confirmed P2.
+
+A first-party TEST-FIRST RED Head
+205fb6d000ff12aa5f53318b953c18cb96b54c0d, Tree
+fd346264c596d2451b48db4be273b5c31bff2df0,
+original hosted Linux job
+https://github.com/chinanjjohn2012/mac-file-gateway/actions/runs/41678950327/job/126067087519
+returned 2 FAILED, 2548 PASSED, 19 SKIPPED, 1 warning.
+The added safe callback cases are "late_exit" (fake WNOHANG selected-child
+exit0 at elapsed 2500ms) and "midstream_rollback" (fake monotonic samples
+0ms -> 1500ms -> 100ms, with selected-child exit0 afterward).
+Both SHOULD DENY but the old exact first-party C source returned EXIT_0.
+Original G05 Head/Tree, 306 Blob/mode, 305 SHA Manifest PASS. Downstream
+smoke/final manifest NOT_RUN on this RED after pytest failure. This is
+NO evidence of a real macOS Seatbelt or physical child experiment.
+
+The r002 C-source repair in tools/lbe_m2_canary_bounded_wait_t0.h:
+- Adds explicit previous-sample chronological validation for EACH
+  successful monotonic clock observation. A timestamp behind the previous
+  sample, even if still after START, is CLOCK_ERROR before any next
+  selected-child wait succeeds.
+- When waitpid(WNOHANG) reports the exact selected child, samples
+  CLOCK_MONOTONIC AGAIN before accepting EXIT_0 or any observed exit,
+  rejects invalid/backwards timestamps and rejects a time >= deadline.
+  Exact deadline 2000ms is non-PASS, under-deadline exit0 is allowed.
+- Retains finite 256 polling attempts, existing no-kill/no-retry/no-shell
+  helper and source-only hard stop. This source algorithm cannot stop
+  an OS scheduler stall, safely retire a timed-out child, or prove an
+  OS-enforced wall budget.
+- Extends the safe Linux-only compiled first-party C callback fixture
+  with both original independent P2 cases plus before/at-deadline,
+  post-wait clock failure, post-wait rollback and invalid timestamp
+  boundary controls. No true fork, real waitpid, Seatbelt/native Mac
+  compilation, TCP/UDP/network or real Go/Pipenv execution.
+- Updates gateway/lbe_m2_seatbelt_offline_t0.py SHA256 lock for the
+  exact new C wait header and recomputes MANIFEST.sha256. The Python
+  execute_macos_seatbelt_native_canary() and SOURCE_T1 entrypoints
+  remain UNCONDITIONALLY hard-denied, and no live CI macOS canary job
+  or product Exec patch is introduced.
+
+R002 review status must come only from NEW B/C original native GitHub
+Reviews independently bound to actual new Head/Base/Tree, with original
+full HEAD T0 CI, all RED/GREEN/skips explicitly recorded. Old C PASS
+is not automatically inherited; old B FAIL cannot be retrospectively
+rewritten. Even if r002 receives two TARGETED PASS verdicts, actual
+macOS C binary/source provenance, sandbox_init policy, all TCP/UDP/DNS/
+AF_UNIX/proxy routes and descendants, same-context native Go/Pipenv,
+OS resource enforcement and safe child-survivor retirement are
+NOT_RUN/NOT_ATTESTED. Do not run an actual canary or Go/Pipenv until
+a separately owner-authorized exact runnable Head, B/C reviews and
+original OS safety evidence satisfy all Gate B and R10 requirements.

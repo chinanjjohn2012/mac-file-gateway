@@ -65,6 +65,24 @@ static bool lbe_canary_deadline_reached(
 }
 
 /*
+ * A CLOCK_MONOTONIC fault-injection observer must NEVER accept a timestamp
+ * earlier than the PREVIOUS observation. Comparison against the initial
+ * start alone misses start=0 -> 1500ms -> 100ms rollback. This guard is
+ * an algorithmic T0 oracle, NOT independent OS clock attestation.
+ */
+static bool lbe_canary_clock_not_reversed(
+    const struct timespec *previous, const struct timespec *now
+) {
+    return previous != NULL && now != NULL &&
+        previous->tv_sec >= 0 && now->tv_sec >= 0 &&
+        previous->tv_nsec >= 0 && previous->tv_nsec < 1000000000L &&
+        now->tv_nsec >= 0 && now->tv_nsec < 1000000000L &&
+        (now->tv_sec > previous->tv_sec ||
+         (now->tv_sec == previous->tv_sec &&
+          now->tv_nsec >= previous->tv_nsec));
+}
+
+/*
  * _with injects deterministic first-party T0 callbacks ONLY. Native helper
  * always binds exact libc waitpid/clock_gettime/nanosleep functions.
  * There is deliberately no POSIX kill/killpg/signal/escalation path.
@@ -86,14 +104,17 @@ static lbe_canary_wait_result lbe_canary_wait_bounded_with(
         start.tv_nsec >= 1000000000L) {
         return LBE_CANARY_CHILD_UNVERIFIED_CLOCK_ERROR;
     }
+    struct timespec previous = start;
     for (unsigned int poll = 0; poll < LBE_CANARY_MAX_POLLS; ++poll) {
         struct timespec now = {0, 0};
         bool timed_out = false;
         if (clock_call(CLOCK_MONOTONIC, &now) != 0 ||
+            !lbe_canary_clock_not_reversed(&previous, &now) ||
             !lbe_canary_deadline_reached(
                 &start, &now, max_wait_ms, &timed_out)) {
             return LBE_CANARY_CHILD_UNVERIFIED_CLOCK_ERROR;
         }
+        previous = now;
         if (timed_out) {
             return LBE_CANARY_CHILD_UNVERIFIED_TIMEOUT;
         }
@@ -101,6 +122,23 @@ static lbe_canary_wait_result lbe_canary_wait_bounded_with(
         errno = 0;
         const pid_t observed = wait_call(child, &status, WNOHANG);
         if (observed == child) {
+            /*
+             * Do not accept an exit after a potentially delayed waitpid or
+             * scheduler preemption. At exactly the deadline, refuse success.
+             * This is still not a physical OS-enforced wall-time guarantee.
+             */
+            struct timespec after_wait = {0, 0};
+            bool expired_after_wait = false;
+            if (clock_call(CLOCK_MONOTONIC, &after_wait) != 0 ||
+                !lbe_canary_clock_not_reversed(&previous, &after_wait) ||
+                !lbe_canary_deadline_reached(
+                    &start, &after_wait, max_wait_ms,
+                    &expired_after_wait)) {
+                return LBE_CANARY_CHILD_UNVERIFIED_CLOCK_ERROR;
+            }
+            if (expired_after_wait) {
+                return LBE_CANARY_CHILD_UNVERIFIED_TIMEOUT;
+            }
             if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
                 return LBE_CANARY_CHILD_EXIT_0;
             }

@@ -44,7 +44,7 @@ _FD_SCRUB_SOURCE_SHA256: Final[str] = (
 )
 _WAIT_SOURCE_PATH: Final[str] = "tools/lbe_m2_canary_bounded_wait_t0.h"
 _WAIT_SOURCE_SHA256: Final[str] = (
-    "77461d52470c5cff31d4dcf7283a399abcb799360e8c5f7cb0aac51a38f81cca"
+    "65cffa3dc3c778d06dd88cd1636dbef021bc537ea69260c46b14816b39502b1f"
 )
 _MAX_NATIVE_SOURCE_BYTES: Final[int] = 65536
 _BLOCKERS: Final[tuple[str, ...]] = (

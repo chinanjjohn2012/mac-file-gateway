@@ -1,7 +1,7 @@
 # M2 macOS Seatbelt Runner Security Gate (T0-only)
 
 TASK_ID: MULTI-EXEC-LBE-M2-SEATBELT-RUNNER-SAFETY-T0-20261104
-REVIEW_ROUND: r001
+REVIEW_ROUND: r002
 REVIEW_SCOPE: TARGETED
 STATUS: NONOPERATIVE_T0_ONLY / NATIVE_MACOS_CANARY_NOT_RUN / GO_PIPENV_NOT_RUN
 USER_AUTHORIZATION: Independent Draft PR; design and run only safe T0; submit B/C independently. No live macOS canary or Go/Pipenv.
@@ -41,3 +41,53 @@ User may consider a later new, independently reviewed exact runnable Head only a
 B Standards: independently verify source/Runner SHA cannot be inferred from string checks, monotonic survivor latch after TIMEOUT+fake EXIT_ZERO, boundaries and effective nofile/CPU/memory/output caps; challenge forged all-green dataclass and accidental changes in existing native hard stops; inspect full Base..Head diff and original source-bound T0 Job log.
 
 C Spec: independently challenge true precontact sequencing (before *first* foreign instruction), same Seatbelt domain and descendant policy, all egress/IPC channels, OS-enforceable limits vs static budget syntax, restarted unknown child cleanup/never retry, Head and Merge execution identity and actual Mac NOT_RUN; verify no product positive Exec, no native canary or Go/Pipenv was invoked. Both reviews target this T0 code only, not future OS evidence.
+
+## 6. r002 grouped security-preflight P2 repair and test-first original RED
+
+Current PR112 r001 exact Base bc25207ed4d8b6e74c23af4d8939e7f4f544a518,
+old reviewed HEAD 68296277cee47457630070908c056dc4b82a35c7,
+Tree bf3662fe6e643d46608346db3265f3be0b566e10:
+- B Standards independent native r001 FAIL:
+  https://github.com/chinanjjohn2012/mac-file-gateway/pull/112#pullrequestreview-5761154460
+  P2-112-01: untyped five runner identity fields accept hostile __eq__/__ne__.
+  P2-112-02: nine precontact tuple elements accept hostile __eq__.
+- C Spec independent native r001 FAIL:
+  https://github.com/chinanjjohn2012/mac-file-gateway/pull/112#pullrequestreview-5761162968
+  C112-R001-SPEC-01: non-string element injection accepted by tuple equality.
+  Both old Reviews remain immutable. No live macOS launch was evidenced.
+
+A added FIRST-PARTY TEST-FIRST RED on distinct intermediate commit
+aee1b818d04ec228b3a43c897d1d842a042e58b8,
+Tree 69064cc650ba34be1cfb66b1882c9087f3aef5a3.
+Original Linux x86_64 Python3.13 hosted GitHub Run
+https://github.com/chinanjjohn2012/mac-file-gateway/actions/runs/41744752274
+original Job
+https://github.com/chinanjjohn2012/mac-file-gateway/actions/runs/41744752274/job/126294830559
+G05 correct HEAD/Tree, Blob/mode 309 PASS, Manifest 308 PASS,
+no ignored/untracked source-shadow inputs, but pytest intentionally FAILED:
+42 failed, 2624 passed, 19 skipped, 1 warning, 52 subtests passed;
+smoke/final manifest NOT_RUN due to pytest RED. These are safe Python T0
+in-source negative cases, NOT Apple C helper or process/OS experiments.
+
+The grouped r002 source repair has exactly two validator changes:
+1. Before equality, require exact primitive str for all five runner identity
+   fields. Do not allow custom objects, bool or str subclasses to run user
+   comparison logic or masquerade as canonical runner identity.
+2. Before tuple equality, require exact tuple AND type(step) is str for EVERY
+   precontact element. A crafted __eq__/__ne__ object must be rejected before
+   any method callback; no "ORDERED" receipt is created for injected steps.
+
+First-party direct tests cover all 5 identity slots and all 9 ordered steps
+across always-equal, throwing-comparison and custom str-subclass variations;
+any comparison callback MUST remain uncalled, and clean literal-only source,
+budget, lifecycle and unconditional native-deny cases must still work.
+
+r002 current original HEAD GREEN CI must be obtained and independently read
+before A publishes GH_HANDOFF_V2 FIX_READY; neither old RED nor old r001
+GREEN is a new-HEAD PASS. Synthetic Merge and developer Mac worktree are
+not independently tested/observed. Still NONOPERATIVE T0: actual macOS
+runner/compiler/SDK/MachO/OS Seatbelt network/process isolation and real
+resource limits/survivor retirement NOT_ATTESTED; Go/Pipenv and product
+Exec NOT_RUN; no global firewall, OS signals, merge, release or deployment.
+TARGETED r002 B and C independently review the new Head/Base/Tree, entire
+four-file effective diff and both fixed P2 counterexamples; R10 BLOCKED.

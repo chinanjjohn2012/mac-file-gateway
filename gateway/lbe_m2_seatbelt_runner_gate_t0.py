@@ -117,6 +117,16 @@ def _validate_identity(
 ) -> None:
     if type(claim) is not MacOSRunnerIdentityProposalT0:
         raise LbeM2RunnerGateT0Denied("unqualified runner identity type")
+    # Reject BEFORE comparing any untrusted values: dataclass type hints do
+    # not prevent caller-created objects or str subclasses with executable
+    # __eq__/__ne__ hooks from occupying these fields.
+    identity_fields = (
+        claim.proposed_head_sha, claim.proposed_tree_sha,
+        claim.runner_os, claim.runner_label, claim.runner_arch,
+    )
+    if any(type(value) is not str for value in identity_fields):
+        raise LbeM2RunnerGateT0Denied(
+            "runner identity fields must be exact primitive strings")
     if (claim.proposed_head_sha != head or claim.proposed_tree_sha != tree
             or claim.runner_os != "macOS"
             or claim.runner_label != "macos-15"
@@ -227,7 +237,11 @@ def prepare_seatbelt_runner_gate_t0(
     _validate_identity(runner_identity, source.proposed_head_sha,
                        source.proposed_tree_sha)
     _validate_budget(budget)
+    # Validate the exact element type before tuple equality. A plain tuple
+    # can otherwise embed arbitrary objects whose __eq__ returns True or
+    # raises, falsely approving omitted/injected precontact steps.
     if (type(proposed_precontact_sequence) is not tuple or
+            any(type(step) is not str for step in proposed_precontact_sequence) or
             proposed_precontact_sequence != _PRECONTACT_SEQUENCE):
         raise LbeM2RunnerGateT0Denied(
             "missing, reordered or injected precontact isolation step")

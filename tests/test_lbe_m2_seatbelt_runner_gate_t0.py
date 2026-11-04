@@ -254,3 +254,94 @@ def test_four_part_gate_is_explicitly_nonoperative():
         "native_canary_launch_allowed",
     }
     assert len(fields(type(p))) > 10
+
+
+# PR #112 r001 independent B/C FAIL: test-first malicious comparison RED.
+# These must reject BEFORE invoking any caller-controlled __eq__/__ne__.
+class _UntrustedEqualityT0:
+    def __init__(self, calls, crash=False):
+        self.calls = calls
+        self.crash = crash
+
+    def __eq__(self, other):
+        self.calls.append("eq")
+        if self.crash:
+            raise RuntimeError("untrusted equality reached")
+        return True
+
+    def __ne__(self, other):
+        self.calls.append("ne")
+        if self.crash:
+            raise RuntimeError("untrusted inequality reached")
+        return False
+
+
+class _UntrustedStrSubclassT0(str):
+    def __new__(cls, calls):
+        obj = super().__new__(cls, "not-an-approved-literal")
+        obj.calls = calls
+        return obj
+
+    def __eq__(self, other):
+        self.calls.append("eq")
+        return True
+
+    def __ne__(self, other):
+        self.calls.append("ne")
+        return False
+
+
+def _spoof_t0(mode, calls):
+    if mode == "str_subclass":
+        return _UntrustedStrSubclassT0(calls)
+    return _UntrustedEqualityT0(calls, crash=(mode == "throw"))
+
+
+@pytest.mark.parametrize("field", (
+    "proposed_head_sha", "proposed_tree_sha",
+    "runner_os", "runner_label", "runner_arch",
+))
+@pytest.mark.parametrize("mode", ("always_equal", "throw", "str_subclass"))
+def test_strict_runner_identity_rejects_untrusted_comparison_without_callback(
+    field, mode,
+):
+    calls = []
+    identity = replace(
+        _input()["runner_identity"],
+        **{field: _spoof_t0(mode, calls)},
+    )
+    with pytest.raises(LbeM2RunnerGateT0Denied):
+        _make(runner_identity=identity)
+    assert calls == [], "untrusted identity equality code was executed"
+
+
+@pytest.mark.parametrize("position", range(9))
+@pytest.mark.parametrize("mode", ("always_equal", "throw", "str_subclass"))
+def test_precontact_step_rejects_untrusted_equality_before_any_comparison(
+    position, mode,
+):
+    calls = []
+    sequence = list(_make().proposed_precontact_sequence)
+    sequence[position] = _spoof_t0(mode, calls)
+    with pytest.raises(LbeM2RunnerGateT0Denied):
+        _make(proposed_precontact_sequence=tuple(sequence))
+    assert calls == [], "untrusted precontact equality code was executed"
+
+
+def test_tuple_subclass_and_strict_plain_string_sequence_still_deny():
+    class ExtendedTuple(tuple):
+        pass
+    with pytest.raises(LbeM2RunnerGateT0Denied):
+        _make(proposed_precontact_sequence=ExtendedTuple(
+            _make().proposed_precontact_sequence,
+        ))
+
+
+def test_plain_good_identity_and_sequence_still_nonoperative():
+    p = _make()
+    assert p.status == "NONOPERATIVE_RUNNER_SECURITY_GATE_T0"
+    assert p.proposed_runner_label == "macos-15"
+    assert p.proposed_precontact_sequence[0] == "G05_HEAD_TREE_AND_SOURCE"
+    assert not p.native_canary_launch_allowed
+    assert not p.source_t1_launch_allowed
+    assert not p.product_t1_launch_allowed

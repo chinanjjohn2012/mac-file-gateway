@@ -255,3 +255,25 @@ def test_good_candidate_record_cannot_be_upgraded_to_native_authority():
 def test_only_plain_clean_parent_hint_can_be_used_for_nonoperative_proposal():
     assert _go(parent_environment={"GOFLAGS": "", "PATH": _GO["PATH"]}).kind == "go"
     assert _pipenv(parent_environment={"WORKON_HOME": ""}).kind == "pipenv"
+
+
+
+# D4 test-first RED: a proposed Go binary/toolchain cannot sit OUTSIDE the
+# explicit private staging root even when caller matches every SHA-shaped
+# string and the final effective environment is internally consistent.
+@pytest.mark.parametrize("goroot", [
+    "/outside/go",
+    "/private/job2/go",
+    "/locked/go",
+])
+def test_go_consistent_external_toolchain_root_denied_before_any_authority(goroot):
+    env = dict(_GO)
+    env["GOROOT"] = goroot
+    env["PATH"] = goroot + "/bin:/usr/bin:/bin"
+    with pytest.raises(LbePrelaunchT0Denied):
+        _go(
+            goroot=goroot,
+            go_entrypoint=goroot + "/bin/go",
+            effective_environment=env,
+            parent_environment={"PATH": env["PATH"]},
+        )

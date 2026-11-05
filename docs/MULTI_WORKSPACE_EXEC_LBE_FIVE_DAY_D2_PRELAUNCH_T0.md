@@ -80,3 +80,31 @@ FULL_CODE_REVIEW_PASS: NOT_ISSUED
 GO_PIPENV_NATIVE: NOT_RUN
 PENDING_CONTRACT: NEW B/C + owner review of the precise trusted-network-risk
 and test envelope; existing Gate B OFFLINE_ONLY is not replaced.
+
+
+## D3 safe file-selection adjunct (in same concentrated development PR)
+
+New gateway/lbe_pipenv_fixture_t0.py provides actual READ-ONLY FILE
+observation from an independently supplied absolute fixture directory.
+It walks each ancestor using O_DIRECTORY/O_NOFOLLOW file descriptors;
+opens each required file with O_NOFOLLOW|O_NONBLOCK, checks regular file,
+one link, same UID, non-group/world-writable mode, bounded byte size,
+no changed inode metadata during read and pinned SHA256 for Pipfile,
+Pipfile.lock, .venv/pyvenv.cfg and .venv/bin/python; the latter must be
+owner-executable. It requires a real .venv DIRECTORY and a minimally
+well-formed Pipfile.lock hash metadata entry.
+
+This is not physical selected-Python execution or installed site-source
+qualification. It does NOT check all site, wheel/seed/record members,
+network, loader, process resources, publisher or OS-domain confinement.
+An external owner may still race trusted-path changes after descriptors
+close. Any future real native Pipenv launch still needs new profile
+authorization, actual loaded source verification, reviewed Head and
+fresh pre-Popen safety checks; even a forged snapshot cannot permit launch.
+
+New tests/test_lbe_pipenv_fixture_t0.py uses disposable fake bytes,
+NOT an actual Python binary. It checks harmless valid read-only snapshot
+and rejection of .venv pointer-file, symlink, symlinked ancestor,
+hardlinked leaf, mutated content, insufficient mode, malformed lock and
+invalid fixed digests. No Go/Pipenv/Python interpreter/OS processes run,
+no signals/kill, no native Canary, and no product positive apply.

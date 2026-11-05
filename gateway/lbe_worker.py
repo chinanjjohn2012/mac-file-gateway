@@ -97,6 +97,9 @@ class LbeWorker:
         if (type(plan.workspace) is not str or not plan.workspace
                 or type(plan.cwd) is not str or not plan.cwd
                 or type(plan.runner_project) is not str or not plan.runner_project
+                # Reject hostile comparator/hasher objects before membership.
+                # A frozen dataclass does not enforce its field annotations.
+                or type(plan.runner) is not str
                 or plan.runner not in {"direct", "pipenv"}
                 or type(plan.timeout_seconds) is not int
                 or not 1 <= plan.timeout_seconds <= 300):

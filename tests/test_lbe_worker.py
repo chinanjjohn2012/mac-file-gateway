@@ -456,3 +456,75 @@ def test_prelaunch_owner_reject_closes_unadopted_selector(monkeypatch):
     assert owner.snapshot()["reserved_slots"] == 0
     owner.close()
 
+# Five-day D1: Worker plan fields are not public permissions. Test the shape
+# before custom hash/equality callbacks; no real child, socket or OS signal.
+@pytest.mark.parametrize("kind", [
+    "equal", "throws_on_hash", "throws_on_eq", "str_subclass", "unhashable",
+])
+def test_worker_runner_field_denies_custom_comparator_without_invoking_it(kind):
+    from dataclasses import replace
+
+    hooks = []
+
+    class FakeRunner:
+        def __hash__(self):
+            hooks.append("hash")
+            if kind == "throws_on_hash":
+                raise RuntimeError("custom hash reached")
+            return hash("direct")
+
+        def __eq__(self, other):
+            hooks.append("eq")
+            if kind == "throws_on_eq":
+                raise RuntimeError("custom equality reached")
+            return True
+
+    class CustomStr(str):
+        def __new__(cls):
+            return str.__new__(cls, "direct")
+
+        def __hash__(self):
+            hooks.append("str hash")
+            return hash("direct")
+
+        def __eq__(self, other):
+            hooks.append("str eq")
+            return True
+
+    class Unhashable:
+        def __eq__(self, other):
+            hooks.append("unhashable eq")
+            return True
+
+    runner = CustomStr() if kind == "str_subclass" else (
+        Unhashable() if kind == "unhashable" else FakeRunner())
+    forged = replace(plan(), runner=runner)
+    seen = []
+    owner = DirectChildOwner()
+    worker = LbeWorker(owner, launcher=lambda _plan: seen.append("launch"))
+    try:
+        with pytest.raises(LbeWorkerError, match="invalid_plan"):
+            worker.run(forged)
+        assert hooks == [], "no user comparison/hash callback on rejected plan"
+        assert seen == [], "no launcher reached"
+        assert owner.snapshot()["reserved_slots"] == 0
+    finally:
+        owner.close()
+
+
+def test_worker_plain_go_python_pipenv_plan_shapes_do_not_grant_exec():
+    from dataclasses import replace
+
+    good_go = plan()
+    LbeWorker._check_plan(good_go)
+    good_py = replace(
+        good_go, runner="direct", cwd="python-project",
+        runner_project="python-project",
+        requested_argv=("python", "-m", "pytest"),
+        effective_argv=("python", "-m", "pytest"),
+    )
+    LbeWorker._check_plan(good_py)
+    pipenv = replace(good_py, runner="pipenv",
+                     effective_argv=("pipenv", "run", "python", "-m", "pytest"))
+    LbeWorker._check_plan(pipenv)
+    assert good_go.runner == "direct" and pipenv.runner == "pipenv"

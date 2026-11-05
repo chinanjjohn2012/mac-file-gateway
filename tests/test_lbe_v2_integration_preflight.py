@@ -1069,3 +1069,97 @@ def test_v2_go_output_symlink_inserted_after_preview_blocks_launcher(
         assert svc._lbe_owner.snapshot()["unavailable"] is False
     finally:
         svc.close()
+
+
+# D4: same live WorkspaceService, three entry surfaces, no actual Go/Pipenv
+# or other Exec child. Exact public preview and positive-denial truth table.
+@pytest.mark.parametrize("cwd,argv,selected_runner", [
+    ("python-project", ["python", "hello.py"], "pipenv"),
+    ("default-project", ["python", "-m", "pytest"], "direct"),
+    ("go-project", ["go", "test", "./..."], "direct"),
+    ("go-project", ["go", "vet", "./..."], "direct"),
+    ("go-project", ["go", "build", "-o=bin/app", "./cmd/app"], "direct"),
+])
+def test_d4_all_three_ingresses_same_plan_and_f1_denial_no_native(
+    scene, monkeypatch, cwd, argv, selected_runner,
+):
+    pytest.importorskip("mcp")
+    a, b, _private, _runtime = scene
+    (a / "go-project" / "bin").mkdir(exist_ok=True)
+    state = prime_existing_state(scene)
+    originals = sorted(p.name for p in state.iterdir())
+    svc = service(scene, v2_config(a, b))
+    def forbid(*_args, **_kwargs):
+        raise AssertionError("D4 nonoperative preflight must not Popen/signal")
+    args = {
+        "workspace": "a", "cwd": cwd, "argv": argv,
+        "timeout_seconds": 5, "dry_run": True,
+    }
+    hdr = {
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+    }
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(subprocess.Popen, "__init__", forbid)
+            m.setattr(os, "kill", forbid)
+            m.setattr(os, "killpg", forbid, raising=False)
+            direct = svc.invoke_exec("a", cwd, argv, timeout_seconds=5)
+            assert direct["status"] == "preview"
+            assert direct["executed"] is False
+            assert direct["runner"] == selected_runner
+            assert direct["cleanup_proven"] is False
+            assert direct["full_descendant_tree_clean"] == "not_proven"
+            with TestClient(create_multi_app(svc),
+                            base_url="http://127.0.0.1:8765") as client:
+                rest = client.post("/run", json=args)
+                assert rest.status_code == 200, rest.text
+                assert rest.json() == direct
+                init = client.post("/mcp", headers=hdr, json={
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": {},
+                        "clientInfo": {"name": "d4-lbe-t0", "version": "1"},
+                    },
+                })
+                assert init.status_code == 200, init.text
+                note = client.post("/mcp", headers=hdr, json={
+                    "jsonrpc": "2.0", "method": "notifications/initialized",
+                })
+                assert note.status_code in (200, 202, 204)
+                preview = client.post("/mcp", headers=hdr, json={
+                    "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": {"name": "run_command", "arguments": args},
+                })
+                assert preview.status_code == 200, preview.text
+                assert preview.json()["result"]["structuredContent"] == direct
+                with pytest.raises(GatewayError) as error:
+                    svc.invoke_exec("a", cwd, argv, timeout_seconds=5,
+                                    dry_run=False)
+                assert error.value.code == "exec_cleanup_proof_required"
+                blocked = {**args, "dry_run": False}
+                rest_block = client.post("/run", json=blocked)
+                assert rest_block.status_code == 503
+                assert rest_block.json()["error"] == "exec_cleanup_proof_required"
+                mcp_block = client.post("/mcp", headers=hdr, json={
+                    "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                    "params": {"name": "run_command", "arguments": blocked},
+                })
+                assert mcp_block.status_code == 200, mcp_block.text
+                failed = mcp_block.json()["result"]
+                assert failed["isError"] is True
+                assert (failed["structuredContent"]["error"] ==
+                        "exec_cleanup_proof_required")
+                policies = [
+                    client.get("/info").json()["exec_policy"],
+                    client.get("/health").json()["exec_policy"],
+                ]
+                assert policies[0] == policies[1]
+                assert policies[0]["available"] is False
+                assert policies[0]["completion_capability"] == "none"
+            assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+        assert sorted(p.name for p in state.iterdir()) == originals
+        assert not (a / "go-project" / "bin" / "app").exists()
+    finally:
+        svc.close()

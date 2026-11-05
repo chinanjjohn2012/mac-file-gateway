@@ -16,8 +16,8 @@ _GO = {
     "GOENV": "off", "GOFLAGS": "", "GOPROXY": "off",
     "GOSUMDB": "off", "GOWORK": "off", "GO111MODULE": "on",
     "CGO_ENABLED": "0",
-    "GOROOT": "/locked/go",
-    "PATH": "/locked/go/bin:/usr/bin:/bin",
+    "GOROOT": "/private/job/go",
+    "PATH": "/private/job/go/bin:/usr/bin:/bin",
     "HOME": "/private/job/home", "TMPDIR": "/private/job/tmp",
     "GOPATH": "/private/job/gopath",
     "GOMODCACHE": "/private/job/modcache",
@@ -38,8 +38,8 @@ _PIPENV = {
 
 def _go(**kw):
     data = {
-        "goroot": "/locked/go",
-        "go_entrypoint": "/locked/go/bin/go",
+        "goroot": "/private/job/go",
+        "go_entrypoint": "/private/job/go/bin/go",
         "private_root": "/private/job",
         "home": "/private/job/home",
         "temporary": "/private/job/tmp",
@@ -229,7 +229,7 @@ def test_custom_environment_mapping_and_value_hooks_rejected_without_call():
 
     class StrImpostor(str):
         def __new__(cls):
-            return super().__new__(cls, "/locked/go/bin:/usr/bin:/bin")
+            return super().__new__(cls, "/private/job/go/bin:/usr/bin:/bin")
 
         def __eq__(self, other):
             observed.append("str_eq")
@@ -277,3 +277,11 @@ def test_go_consistent_external_toolchain_root_denied_before_any_authority(goroo
             effective_environment=env,
             parent_environment={"PATH": env["PATH"]},
         )
+
+
+def test_proposed_private_go_root_valid_remains_structural_only():
+    candidate = _go()
+    assert candidate.selected_entrypoint == "/private/job/go/bin/go"
+    assert candidate.actual_loader_qualified is False
+    assert candidate.actual_os_limits_enforced is False
+    assert candidate.native_launch_allowed is False

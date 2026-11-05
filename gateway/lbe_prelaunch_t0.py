@@ -135,8 +135,12 @@ def check_go_environment_t0(
     root = _path(goroot, label="goroot")
     private = _path(private_root, label="private_root")
     entry = _path(go_entrypoint, label="go_entrypoint")
-    if entry != root + "/bin/go" or root == private:
-        raise LbePrelaunchT0Denied("Go entrypoint is not the proposed staged bin")
+    # Prevent a self-consistent but outside-private GOROOT, Go binary and
+    # final PATH from becoming a structurally qualified runner proposal.
+    # Still not a real no-follow/loaded-source/OS execution attestation.
+    if entry != root + "/bin/go" or not _within(root, private):
+        raise LbePrelaunchT0Denied(
+            "Go entrypoint must reside below the proposed private root")
     _sha(staged_go_sha256, "go")
     _sha(staged_compiler_sha256, "compiler")
     if staged_go_sha256 == staged_compiler_sha256:

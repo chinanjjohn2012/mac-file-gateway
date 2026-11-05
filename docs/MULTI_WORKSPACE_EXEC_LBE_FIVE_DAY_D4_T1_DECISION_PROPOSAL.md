@@ -1,7 +1,7 @@
 # D4 candidate: trusted local_best_effort product test permission profile (PROPOSED)
 
 TASK_ID: MULTI-EXEC-LBE-FIVE-DAY-CANDIDATE-20261105
-CONTRACT_ID: MWE-LBE-TRUSTED-PRODUCT-T1-PROFILE-R001
+CONTRACT_ID: MWE-LBE-TRUSTED-PRODUCT-T1-PROFILE-R002
 REVIEW_STAGE: D4_CONTRACT_PROPOSAL
 REVIEW_SCOPE: TARGETED DESIGN (not live native T1, not full product)
 STATUS: NONOPERATIVE_PROPOSAL / NOT_EFFECTIVE / NATIVE_NOT_AUTHORIZED
@@ -47,8 +47,15 @@ No prior PASS or prior Gate A/B approval grants this new profile.
   python -m pytest -q; python -m compileall;
   pipenv run python -m pytest -q; go test ./...; go vet ./...;
   go build -o bin/app ./cmd/app.
-  No go run, shell, arbitrary executables, network fetching,
-  shell-derived hooks or user-selected Python -c.
+  No go run, shell, arbitrary executables, intentionally network-
+  fetching fixture commands, shell-derived hooks or user-selected
+  Python -c. This is a TEST INPUT CHOICE, NOT AN OS SECURITY BOUNDARY.
+  Even if approved fixture commands do not intend to fetch, trusted
+  code and descendants can still initiate outbound contacts, access
+  same-UID host resources and duplicate effects after unknown failure.
+  No GOPROXY/PIP_NO_INDEX setting or passive log enforces no egress.
+  The owner must expressly accept this residual exposure before any
+  new network-capable PRODUCT_T1 authorization.
   First-party preview must match the selected real command contract.
 - Proposed limits: at most one product test job concurrently, total
   job <=20 minutes, each planned original child <=120 seconds,

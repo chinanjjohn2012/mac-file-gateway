@@ -1334,3 +1334,102 @@ def test_r006_untrusted_pipfile_refused_by_rest_and_official_mcp(scene):
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
+
+
+@pytest.mark.parametrize("cwd,runner", [
+    ("go-project", "direct"),
+    ("python-project", "pipenv"),
+])
+def test_r006_python_script_plan_pins_source_bytes_in_shared_preview(
+    scene, cwd, runner,
+):
+    import hashlib
+    from gateway.lbe_plan import prepare_lbe_work_plan
+
+    a, b, _private, _runtime = scene
+    file = a / cwd / "hello.py"
+    file.write_text("print('trusted candidate')\n")
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    argv = ["python", "hello.py"]
+    try:
+        ctx = svc.require_exec("a")
+        plan = prepare_lbe_work_plan(
+            ctx, cwd=cwd, argv=argv, timeout_seconds=5)
+        source_sha = hashlib.sha256(file.read_bytes()).hexdigest()
+        assert plan.planned_script_sha256 == source_sha
+        pipfile = a / cwd / "Pipfile"
+        expected_pipfile = (hashlib.sha256(pipfile.read_bytes()).hexdigest()
+                            if runner == "pipenv" else None)
+        assert plan.planned_pipfile_sha256 == expected_pipfile
+        preview = svc.invoke_exec("a", cwd, argv, timeout_seconds=5)
+        assert preview["runner"] == runner
+        assert preview["planned_script_sha256"] == source_sha
+        assert preview["planned_pipfile_sha256"] == expected_pipfile
+        assert preview["executed"] is False
+        with TestClient(create_multi_app(svc, enable_mcp=False),
+                        base_url="http://127.0.0.1:8765") as client:
+            rest = client.post("/run", json={"workspace": "a",
+                "cwd": cwd, "argv": argv, "timeout_seconds": 5})
+            assert rest.status_code == 200
+            assert rest.json() == preview
+    finally:
+        svc.close()
+
+
+def test_r006_python_source_changed_after_plan_refused_before_spawn(
+    scene, monkeypatch,
+):
+    from gateway.lbe_native_launcher import make_trusted_lbe_launcher
+    from gateway.lbe_plan import prepare_lbe_work_plan
+    from gateway.lbe_worker import LbeNoChildStarted
+
+    a, b, _private, _runtime = scene
+    file = a / "go-project" / "hello.py"
+    file.write_text("print('old')\n")
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    launches = []
+    try:
+        ctx = svc.require_exec("a")
+        plan = prepare_lbe_work_plan(
+            ctx, cwd="go-project",
+            argv=["python", "hello.py"], timeout_seconds=5)
+        file.write_text("print('new')\n")
+
+        def forbidden(*_args, **_kwargs):
+            launches.append(True)
+            raise AssertionError("stale source must not launch")
+
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", forbidden)
+            with pytest.raises(LbeNoChildStarted):
+                make_trusted_lbe_launcher(ctx)(plan)
+        assert launches == []
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+
+
+def test_r006_pipfile_content_change_invalidates_earlier_plan(
+    scene,
+):
+    from gateway.lbe_plan import prepare_lbe_work_plan
+
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        ctx = svc.require_exec("a")
+        argv = ["python", "hello.py"]
+        first = prepare_lbe_work_plan(ctx, cwd="python-project",
+                                      argv=argv, timeout_seconds=5)
+        (a / "python-project" / "Pipfile").write_text(
+            "[packages]\nnew_dependency='changed'\n")
+        changed = prepare_lbe_work_plan(ctx, cwd="python-project",
+                                        argv=argv, timeout_seconds=5)
+        assert first.planned_pipfile_sha256 != changed.planned_pipfile_sha256
+        assert first.planned_script_sha256 == changed.planned_script_sha256
+        assert first != changed
+    finally:
+        svc.close()

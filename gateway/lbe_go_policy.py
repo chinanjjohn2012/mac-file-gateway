@@ -81,11 +81,22 @@ def _inspect_output(workspace_root: Path, cwd_parts: tuple[str, ...],
     try:
         fd = os.open(workspace_root, flags)
         held.append(fd)
-        if not stat.S_ISDIR(os.fstat(fd).st_mode):
-            raise GoPolicyError("workspace root is not a directory")
+        def require_controlled_directory(directory_fd: int) -> None:
+            # Check the actual descriptor rather than a pathname. Source-
+            # only validation: after returning a trusted local operator can
+            # still change the directory, so this is NOT an OS sandbox.
+            metadata = os.fstat(directory_fd)
+            if (not stat.S_ISDIR(metadata.st_mode)
+                    or metadata.st_uid != os.getuid()
+                    or metadata.st_mode & 0o022):
+                raise GoPolicyError(
+                    "Go output parent is not owner-controlled")
+
+        require_controlled_directory(fd)
         for name in (*cwd_parts, *output_parts[:-1]):
             fd = os.open(name, flags, dir_fd=fd)
             held.append(fd)
+            require_controlled_directory(fd)
         leaf = output_parts[-1]
         try:
             metadata = os.stat(leaf, dir_fd=fd, follow_symlinks=False)

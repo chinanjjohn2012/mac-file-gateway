@@ -111,8 +111,9 @@ def _file(parent: int, name: str, *, executable: bool = False) -> bytes:
                 raise LbePipenvFixtureT0Denied("fixture file changed during read")
             data.extend(chunk)
         after = os.fstat(fd)
-        if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
+        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns",
+                  "st_ctime_ns", "st_mode", "st_uid", "st_nlink")
+        if any(getattr(before, key) != getattr(after, key) for key in fields):
             raise LbePipenvFixtureT0Denied("fixture inode changed during read")
         return bytes(data)
     finally:

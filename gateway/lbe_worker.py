@@ -67,6 +67,8 @@ class LbeWorkPlan:
     timeout_seconds: int
     # Informational canonical Go -o target, not a write receipt or grant.
     planned_go_output: str | None = None
+    planned_script_sha256: str | None = None
+    planned_pipfile_sha256: str | None = None
 
 
 class LbeWorker:
@@ -111,6 +113,17 @@ class LbeWorker:
                 and (type(plan.planned_go_output) is not str
                      or not plan.planned_go_output)):
             raise LbeWorkerError("invalid_plan")
+        # Exact lowercase SHA-256 of bounded selected source bytes.
+        # An untrusted caller object must never reach equality or hashing.
+        for source_digest in (
+            plan.planned_script_sha256, plan.planned_pipfile_sha256
+        ):
+            if (source_digest is not None
+                    and (type(source_digest) is not str
+                         or len(source_digest) != 64
+                         or any(ch not in "0123456789abcdef"
+                                for ch in source_digest))):
+                raise LbeWorkerError("invalid_plan")
         for argv in (plan.requested_argv, plan.effective_argv):
             if (type(argv) is not tuple or not 1 <= len(argv) <= 64
                     or sum(len(s) for s in argv if type(s) is str) > 8192
@@ -128,6 +141,9 @@ class LbeWorker:
                         != plan.planned_go_output):
                     raise LbeWorkerError("invalid_plan")
             if plan.requested_argv[0] == "go":
+                if (plan.planned_script_sha256 is not None
+                        or plan.planned_pipfile_sha256 is not None):
+                    raise LbeWorkerError("invalid_plan")
                 # Go build's -o and actual pinned output checks are *always*
                 # mandatory in the shared service preflight. This internal
                 # shape check is NOT a replacement for GoPolicy validation.
@@ -162,14 +178,21 @@ class LbeWorker:
             else:
                 if plan.planned_go_output is not None:
                     raise LbeWorkerError("invalid_plan")
-                _validate_command(list(plan.requested_argv))
+                script = _validate_command(list(plan.requested_argv))
+                if (script is None) != (plan.planned_script_sha256 is None):
+                    raise LbeWorkerError("invalid_plan")
         except (GatewayError, GoPolicyError):
             raise LbeWorkerError("invalid_plan") from None
         if plan.runner == "pipenv":
+            if plan.planned_pipfile_sha256 is None:
+                raise LbeWorkerError("invalid_plan")
             if plan.effective_argv != ("pipenv", "run", *plan.requested_argv):
                 raise LbeWorkerError("invalid_plan")
-        elif plan.effective_argv != plan.requested_argv:
-            raise LbeWorkerError("invalid_plan")
+        else:
+            if plan.planned_pipfile_sha256 is not None:
+                raise LbeWorkerError("invalid_plan")
+            if plan.effective_argv != plan.requested_argv:
+                raise LbeWorkerError("invalid_plan")
 
     @staticmethod
     def _base(plan: LbeWorkPlan, *, status: str, executed: bool,
@@ -183,6 +206,8 @@ class LbeWorker:
             "runner": plan.runner,
             "runner_project": plan.runner_project,
             "planned_go_output": plan.planned_go_output,
+            "planned_script_sha256": plan.planned_script_sha256,
+            "planned_pipfile_sha256": plan.planned_pipfile_sha256,
             "dry_run": False,
             "mode": "local_best_effort",
             "status": status,

@@ -356,6 +356,9 @@ class WorkspaceService:
             "runner_project": plan.runner_project,
             # Informational normalized Go build output; never a write claim.
             "planned_go_output": plan.planned_go_output,
+            # Content snapshots only; no loaded source or native authority.
+            "planned_script_sha256": plan.planned_script_sha256,
+            "planned_pipfile_sha256": plan.planned_pipfile_sha256,
             "dry_run": True,
             "executed": False,
             "exit_code": None,

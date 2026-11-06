@@ -12,7 +12,7 @@ import stat
 from typing import TYPE_CHECKING
 
 from .core import GatewayError, _parts
-from .executor import _canonical, _clean_argv
+from .executor import _canonical, _clean_argv, _validate_command
 from .lbe_go_policy import GoPolicyError, validate_go_command
 from .lbe_worker import LbeWorkPlan
 
@@ -43,6 +43,8 @@ def prepare_lbe_work_plan(
     canonical_cwd = _canonical(cwd_parts)
 
     planned_go_output = None
+    planned_script_sha256 = None
+    planned_pipfile_sha256 = None
     if requested[0] == "go":
         try:
             validated = validate_go_command(
@@ -69,6 +71,16 @@ def prepare_lbe_work_plan(
         effective = tuple(preview["effective_argv"])
         selected_runner = preview["runner"]
         runner_project = preview["runner_project"]
+        # Record only a bounded, permission-checked FIRST-PARTY script's
+        # bytes from a pinned nofollow FD. This is not a claim about the
+        # interpreter, imports, runtime loader or later path identity.
+        script = _validate_command(requested)
+        if script is not None:
+            source_parts = (*_parts(canonical_cwd), *_parts(script))
+            if not ctx.gateway._allowed(source_parts, is_file=True):
+                raise GatewayError("blocked_path",
+                                   "Python source path is not allowed.")
+            planned_script_sha256 = ctx.gateway._snapshot(source_parts).sha256
         if selected_runner == "pipenv":
             # The private launcher requires a single-link regular Pipfile
             # immediately before Popen. Make the public preview reject the
@@ -89,8 +101,8 @@ def prepare_lbe_work_plan(
                 # CommandRunner preview and this check must not make a
                 # linked/foreign Pipfile look like the trusted source.
                 with ctx.gateway._directory(_parts(runner_project)) as parent:
-                    metadata = os.stat(
-                        "Pipfile", dir_fd=parent, follow_symlinks=False)
+                    pipfile_snapshot = ctx.gateway._snapshot_at(parent, "Pipfile")
+                    metadata = pipfile_snapshot.metadata
             except (OSError, GatewayError):
                 raise GatewayError(
                     "runner_unavailable",
@@ -104,6 +116,7 @@ def prepare_lbe_work_plan(
                     "runner_unavailable",
                     "Configured Pipenv runner requires a safe Pipfile.",
                 )
+            planned_pipfile_sha256 = pipfile_snapshot.sha256
 
     plan = LbeWorkPlan(
         workspace=ctx.name,
@@ -114,6 +127,8 @@ def prepare_lbe_work_plan(
         runner_project=runner_project,
         timeout_seconds=timeout_seconds,
         planned_go_output=planned_go_output,
+        planned_script_sha256=planned_script_sha256,
+        planned_pipfile_sha256=planned_pipfile_sha256,
     )
     # Both caller- and worker-side shape checks stay active. Neither check
     # grants Exec or bypasses the existing private state/admission gates.

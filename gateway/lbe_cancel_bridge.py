@@ -34,9 +34,14 @@ async def invoke_exec_with_cancel(
         assert is_disconnected is not None
         try:
             while not finished.is_set():
-                if await is_disconnected():
-                    cancelled.set()
-                    return
+                # The ASGI disconnect probe itself can stall while the
+                # sync Worker has already finished. Bound each observation
+                # so the original success/error response is never held by
+                # a blocked receive. Probe timeout is NOT disconnection.
+                with anyio.move_on_after(0.1):
+                    if await is_disconnected():
+                        cancelled.set()
+                        return
                 with anyio.move_on_after(0.05):
                     await finished.wait()
         except Exception:

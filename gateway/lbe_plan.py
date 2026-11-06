@@ -7,6 +7,7 @@ No plan, path or runner validation is a host sandbox or descendant proof.
 """
 from __future__ import annotations
 
+import os
 import stat
 from typing import TYPE_CHECKING
 
@@ -82,15 +83,23 @@ def prepare_lbe_work_plan(
                     "runner_unavailable",
                     "Configured Pipenv runner requires an allowed Pipfile.",
                 )
-            pipfile = ctx.gateway._root_path.joinpath(*pipfile_parts)
             try:
-                metadata = pipfile.stat(follow_symlinks=False)
-            except OSError:
+                # Re-open the entire runner project using Gateway's pinned
+                # no-follow directory traversal. A path swap between the
+                # CommandRunner preview and this check must not make a
+                # linked/foreign Pipfile look like the trusted source.
+                with ctx.gateway._directory(_parts(runner_project)) as parent:
+                    metadata = os.stat(
+                        "Pipfile", dir_fd=parent, follow_symlinks=False)
+            except (OSError, GatewayError):
                 raise GatewayError(
                     "runner_unavailable",
                     "Configured Pipenv runner requires a safe Pipfile.",
                 ) from None
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            if (not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_nlink != 1
+                    or metadata.st_uid != os.getuid()
+                    or metadata.st_mode & 0o022):
                 raise GatewayError(
                     "runner_unavailable",
                     "Configured Pipenv runner requires a safe Pipfile.",

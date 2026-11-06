@@ -1288,3 +1288,42 @@ def test_r006_pipenv_writable_pipfile_denied_as_source(scene):
         assert exc.value.code == "runner_unavailable"
     finally:
         svc.close()
+
+
+def test_r006_untrusted_pipfile_refused_by_rest_and_official_mcp(scene):
+    pytest.importorskip("mcp")
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    (a / "python-project" / "Pipfile").chmod(0o666)
+    args = {"workspace": "a", "cwd": "python-project",
+            "argv": ["python", "hello.py"], "timeout_seconds": 5,
+            "dry_run": True}
+    headers = {"Accept": "application/json, text/event-stream",
+               "Content-Type": "application/json"}
+    try:
+        with TestClient(create_multi_app(svc),
+                        base_url="http://127.0.0.1:8765") as client:
+            rest = client.post("/run", json=args)
+            assert rest.status_code != 200
+            assert rest.json()["error"] == "runner_unavailable"
+            init = client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25",
+                           "capabilities": {},
+                           "clientInfo": {"name": "r006-test", "version": "1"}},
+            })
+            assert init.status_code == 200
+            client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "method": "notifications/initialized"})
+            blocked = client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "run_command", "arguments": args},
+            })
+            assert blocked.status_code == 200
+            response = blocked.json()["result"]
+            assert response["isError"] is True
+            assert response["structuredContent"]["error"] == "runner_unavailable"
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()

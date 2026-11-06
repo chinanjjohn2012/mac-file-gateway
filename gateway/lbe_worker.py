@@ -21,6 +21,7 @@ from typing import Any, Callable, Protocol
 from .lbe_direct_owner import DirectChildOwner, LbeOwnerError
 from .core import GatewayError, _parts
 from .executor import _validate_command
+from .lbe_go_policy import GoPolicyError, _components
 from .lbe_pipe_drain import BoundedPipeDrain, LbePipeError
 
 
@@ -134,16 +135,35 @@ class LbeWorker:
                         or plan.requested_argv[1] not in {"test", "vet", "build"}
                         or plan.runner != "direct"):
                     raise LbeWorkerError("invalid_plan")
-                if (plan.planned_go_output is not None
-                        and (plan.requested_argv[1] != "build"
-                             or not any(x == "-o" or x.startswith("-o=")
-                                        for x in plan.requested_argv[2:]))):
+                # Bind any Go -o preview target to the actual argv,
+                # regardless of separated versus = syntax. This is a
+                # shape check, NOT a substitute for the OS/path-policy
+                # preflight in the trusted WorkspaceService.
+                selected_output = None
+                index = 2
+                while index < len(plan.requested_argv):
+                    token = plan.requested_argv[index]
+                    if token == "-o" or token.startswith("-o="):
+                        if (plan.requested_argv[1] != "build"
+                                or selected_output is not None):
+                            raise LbeWorkerError("invalid_plan")
+                        if token == "-o":
+                            index += 1
+                            if index >= len(plan.requested_argv):
+                                raise LbeWorkerError("invalid_plan")
+                            output = plan.requested_argv[index]
+                        else:
+                            output = token[3:]
+                        selected_output = "/".join((
+                            *_parts(plan.cwd), *_components(output)))
+                    index += 1
+                if plan.planned_go_output != selected_output:
                     raise LbeWorkerError("invalid_plan")
             else:
                 if plan.planned_go_output is not None:
                     raise LbeWorkerError("invalid_plan")
                 _validate_command(list(plan.requested_argv))
-        except GatewayError:
+        except (GatewayError, GoPolicyError):
             raise LbeWorkerError("invalid_plan") from None
         if plan.runner == "pipenv":
             if plan.effective_argv != ("pipenv", "run", *plan.requested_argv):

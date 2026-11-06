@@ -1444,3 +1444,113 @@ def test_r006_pipfile_content_change_invalidates_earlier_plan(
         assert first != changed
     finally:
         svc.close()
+
+
+# r006 cancellation is a waiter notification, never child termination.
+def test_r006_transport_task_cancellation_reaches_worker():
+    import anyio
+    import threading
+    from gateway.lbe_cancel_bridge import invoke_exec_with_cancel
+
+    started = threading.Event()
+    noticed = threading.Event()
+
+    class FakeService:
+        def invoke_exec(self, workspace, cwd, argv, timeout_seconds=60,
+                        dry_run=True, *, cancelled=None):
+            assert type(cancelled) is threading.Event
+            started.set()
+            assert cancelled.wait(3)
+            noticed.set()
+            return {"cleanup_proven": False}
+
+    async def scenario():
+        async def request():
+            await invoke_exec_with_cancel(
+                FakeService(), "a", "go-project", ["go", "test", "./..."],
+                timeout_seconds=5, dry_run=False)
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(request)
+            with anyio.fail_after(3):
+                assert await anyio.to_thread.run_sync(started.wait, 2)
+            tasks.cancel_scope.cancel()
+
+    anyio.run(scenario)
+    assert noticed.wait(2)
+
+
+def test_r006_rest_disconnect_notifies_sync_worker():
+    import anyio
+    import threading
+    from gateway.lbe_cancel_bridge import invoke_exec_with_cancel
+
+    started = threading.Event()
+    seen = threading.Event()
+    disconnected = [False]
+
+    class FakeService:
+        def invoke_exec(self, workspace, cwd, argv, timeout_seconds=60,
+                        dry_run=True, *, cancelled=None):
+            assert type(cancelled) is threading.Event
+            started.set()
+            assert cancelled.wait(3)
+            seen.set()
+            return {"cleanup_proven": False,
+                    "process_may_be_running": True}
+
+    async def poll():
+        return disconnected[0]
+
+    async def scenario():
+        async def request():
+            result = await invoke_exec_with_cancel(
+                FakeService(), "a", "go-project", ["go", "test", "./..."],
+                timeout_seconds=5, dry_run=False,
+                is_disconnected=poll)
+            assert result["cleanup_proven"] is False
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(request)
+            with anyio.fail_after(3):
+                assert await anyio.to_thread.run_sync(started.wait, 2)
+            disconnected[0] = True
+
+    anyio.run(scenario)
+    assert seen.is_set()
+
+
+def test_r006_private_apply_passes_cancel_token_and_public_f1_stays_denied(
+    scene, monkeypatch,
+):
+    import threading
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    token = threading.Event()
+    token.set()
+    observed = []
+
+    def fake_run(_worker, plan, *, cancelled=None):
+        observed.append((plan.workspace, cancelled))
+        raise LbeWorkerError("waiter_disconnected")
+
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(LbeWorker, "run", fake_run)
+            with pytest.raises(GatewayError) as err:
+                svc._lbe_apply(
+                    svc.require_exec("a"), svc._lbe_owner, "go-project",
+                    ["go", "test", "./..."], 5, cancelled=token)
+        assert err.value.code == "waiter_disconnected"
+        assert observed == [("a", token)]
+        with pytest.raises(GatewayError) as denied:
+            svc.invoke_exec(
+                "a", "go-project", ["go", "test", "./..."], 5,
+                dry_run=False, cancelled=token)
+        assert denied.value.code == "exec_cleanup_proof_required"
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()

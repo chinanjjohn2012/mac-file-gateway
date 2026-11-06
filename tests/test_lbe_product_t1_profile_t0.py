@@ -1,4 +1,4 @@
-"""D4 R002 declaration-only PRODUCT_T1 tests. Never run native children."""
+"""D4 R003 declaration-only PRODUCT_T1 tests. Never run native children."""
 from dataclasses import replace
 import os
 import socket
@@ -285,3 +285,52 @@ def test_d4_input_mutation_cannot_mutate_returned_declaration():
     assert dict(result.runner_declarations)["image_id"] == "macos-15-arm64-candidate"
     assert result.proposed_commands == _COMMANDS
     assert result.native_launch_allowed is False
+
+@pytest.mark.parametrize("unsafe_compileall", [
+    ["python", "-m", "compileall"],
+    ["python", "-m", "compileall", "-q"],
+    ["python", "-m", "compileall", "-q", "../outside"],
+    ["python", "-m", "compileall", "-q", "/tmp/outside"],
+    ["python", "-m", "compileall", "-q", "./src", "../outside"],
+    ["python", "-m", "compileall", "-b", "-q", "./src"],
+    ["python", "-m", "compileall", "-q", "./other"],
+])
+def test_d4_r003_compileall_must_have_exact_scoped_fixture_operand(unsafe_compileall):
+    commands = candidate()["commands"]
+    commands[1] = unsafe_compileall
+    with pytest.raises(D4ProductT1T0Denied, match="unapproved D4 fixture command"):
+        prepare(commands=commands)
+    assert _COMMANDS[1] == ("python", "-m", "compileall", "-q", "./src")
+
+
+@pytest.mark.parametrize("name,wrong", [
+    ("cpu_millicores", 2001),
+    ("cpu_millicores", 3000),
+    ("memory_mib", 4097),
+    ("memory_mib", 8192),
+    ("job_seconds", 1199),
+    ("child_seconds", 119),
+    ("worker_timeout_seconds", 299),
+    ("raw_output_bytes_per_stream", 47999),
+    ("returned_chars_per_stream", 47999),
+])
+def test_d4_r003_exact_candidate_budget_not_just_large_ceiling(name, wrong):
+    limits = candidate()["limits"]
+    limits[name] = wrong
+    with pytest.raises(D4ProductT1T0Denied, match="invalid proposed exact budget"):
+        prepare(limits=limits)
+
+
+def test_d4_r003_t0_packet_cannot_assert_owner_or_runtime_grants():
+    packet = prepare()
+    assert dict(packet.proposed_resource_limits)["cpu_millicores"] == 2000
+    assert dict(packet.proposed_resource_limits)["memory_mib"] == 4096
+    assert packet.proposed_commands[1][-1] == "./src"
+    assert packet.runner_identity_observed is False
+    assert packet.credential_isolation_proven is False
+    assert packet.os_resource_enforcement_proven is False
+    assert packet.loaded_source_observed is False
+    assert packet.risk_acceptance_by_owner_observed is False
+    assert packet.native_launch_allowed is False
+    with pytest.raises(D4ProductT1T0Denied, match="NOT_AUTHORIZED"):
+        authorize_native_product_t1_from_t0(packet, owner_risk_consent=True)

@@ -4,8 +4,8 @@ TASK_ID: MULTI-EXEC-LBE-FIVE-DAY-CANDIDATE-20261105
 MILESTONE_ID: LBE-FIVE-DAY-CORE-PRODUCT-CANDIDATE
 SUBSTAGE: D4_PRODUCT_T1_EXECUTION_QUALIFICATION_PREPARATION
 REVIEW_ROUND: r006 (DEVELOPING, UNFROZEN)
-CONTRACT_ID: MWE-LBE-TRUSTED-PRODUCT-T1-PROFILE-R002
-CONTRACT_GIT_BLOB: a31e4517bbd4d2c3d2d0f4370619e3043cd973bb
+CONTRACT_ID: MWE-LBE-TRUSTED-PRODUCT-T1-PROFILE-R003
+CONTRACT_GIT_BLOB: f8556b48ab5f4af7390fb015092862a8a87768fb
 RULESET_ID: ICR-V2.0
 HANDOFF_PROTOCOL_ID: GHRH-2.0
 EVIDENCE_PROFILE_ID: ETP-V2.0
@@ -17,7 +17,7 @@ R10_STATUS: BLOCKED
 
 ## 1. Why this code exists
 
-The existing D4 R002 design is a **proposed**, network-capable,
+The new D4 R003 design is a **proposed**, network-capable,
 operator-trusted product test distinct from the independently reviewed
 PR102 r002 **OFFLINE_ONLY SOURCE_TOOLCHAIN_T1**. The owner accepted the
 separately fixed PR98/PR102 Gate A *risk model* (recorded by A in PR102),
@@ -49,7 +49,7 @@ Candidate **test input selection**, restricted to fresh disposable
 first-party project fixtures, is precisely:
 
 - python -m pytest -q
-- python -m compileall
+- python -m compileall -q ./src (only the prechecked private fixture tree)
 - pipenv run python -m pytest -q
 - go test ./...
 - go vet ./...
@@ -69,7 +69,7 @@ execution environment. A future actual job must independently observe
 OS/image/arch, checkout/config/token isolation and boundary before
 any untrusted Go/Pipenv import or process.
 
-Candidate bounds (upper limits, not enforcement evidence):
+Exact R003 candidate tuple (not physical enforcement evidence):
 
 | Proposed field | Candidate value | Actual enforcement |
 | --- | ---: | --- |
@@ -84,7 +84,7 @@ Candidate bounds (upper limits, not enforcement evidence):
 | Original children per Workspace | 1 | Native NOT_RUN |
 | Original children per service | 4 | Native NOT_RUN |
 
-The CPU/RAM quantities above are **A's proposed T0 input values only**,
+The CPU/RAM quantities above are **A's exact R003 T0 input tuple only**,
 not the missing reviewed enforceable macOS quotas, and not additional
 permission to run any task. If no verifiable applicable resource
 boundary is available, actual PRODUCT_T1 remains BLOCKED. In
@@ -164,3 +164,39 @@ or claim full descendant cleanup, sandbox or network isolation.
 NEXT_ROLE: A DEVELOPER for remaining authorized source qualification;
 B/C only at a real applicable freeze or blocking design change.
 NEXT_COMMAND: 继续开发 (SAFE_T0_ONLY); real PRODUCT_T1 remains NOT_RUN.
+
+## 6. D4 R003 design repair boundary (not effective)
+
+D4-DESIGN-001 independently produced B BLOCKED (4 P2, 1 P3) and
+C FAIL (2 P2, 2 P3). Exact new R003 normative contract is
+docs/MULTI_WORKSPACE_EXEC_LBE_D4_PRODUCT_T1_EXECUTABLE_CONTRACT_R003.md
+(GitBlob f8556b48ab5f4af7390fb015092862a8a87768fb); the historical R002 is unmodified.
+
+The D4 R003 T0-only parser now accepts compileall only with the
+literal, first-party relative operand ./src, and requires the entire
+exact proposed budget tuple including 2000m CPU/4096MiB RAM rather
+than permitting larger unapproved declarations. The parser is still
+ONLY a structural check; it neither inspects the ./src filesystem
+nor proves real CPU/memory enforcement, runtime runner identity,
+owner consent, actual interpreter/source or actual network controls.
+The future service MUST prove and enforce every referenced gate BEFORE
+foreign Popen; no T0 proof unlocks an execution path.
+
+R003 proposes a distinct, reviewable PRODUCT trusted-egress exception
+without amending the existing PR102 OFFLINE_ONLY SOURCE_TOOLCHAIN_T1
+requirements. The default remains PR102 product extended Gate B plus
+public F1 and NativeLauncher denial until both independent design
+reviews, a separate exact owner approval, source/resource/runner
+attestation, and independently reviewed runnable Head are present.
+
+A public request containing pipenv as argv is NOT a legal substitute:
+the selected py-pipenv Workspace receives requested python -m pytest -q
+and derives effective pipenv run python -m pytest -q inside the single
+WorkspaceService gate. A command parser's static acceptance cannot
+prove compileall filesystem scoping; actual source/target walk is an
+additional future pre-Popen requirement.
+
+NATIVE_PRODUCT_T1: NOT_RUN / NOT_AUTHORIZED
+INTEGRATION_STATUS: NOT_TESTED
+R10_STATUS: BLOCKED
+FREEZE_READY: NO (entire r006 product milestone)

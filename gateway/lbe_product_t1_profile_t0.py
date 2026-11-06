@@ -1,4 +1,4 @@
-"""D4 PRODUCT_T1 nonoperative qualification *declaration* for review.
+"""D4 R003 PRODUCT_T1 nonoperative qualification *declaration* for review.
 
 This T0 checker inspects plain proposed input shapes only. It performs no
 filesystem reads, network contact, subprocess, runner discovery or credential
@@ -16,14 +16,14 @@ class D4ProductT1T0Denied(ValueError):
     """The proposed, untrusted D4 qualification packet is malformed."""
 
 
-PROFILE_ID = "MWE-LBE-TRUSTED-PRODUCT-T1-PROFILE-R002"
-PROFILE_GIT_BLOB = "a31e4517bbd4d2c3d2d0f4370619e3043cd973bb"
+PROFILE_ID = "MWE-LBE-TRUSTED-PRODUCT-T1-PROFILE-R003"
+PROFILE_GIT_BLOB = "f8556b48ab5f4af7390fb015092862a8a87768fb"
 NETWORK_PROFILE = "TRUSTED_HOST_EGRESS_POSSIBLE_NOT_OFFLINE_ONLY"
 
 # These are proposed first-party TEST vectors, not executable grants.
 _COMMANDS = (
     ("python", "-m", "pytest", "-q"),
-    ("python", "-m", "compileall"),
+    ("python", "-m", "compileall", "-q", "./src"),
     ("pipenv", "run", "python", "-m", "pytest", "-q"),
     ("go", "test", "./..."),
     ("go", "vet", "./..."),
@@ -54,11 +54,8 @@ _LIMIT_CEILINGS = {
     "children_per_workspace": 1,
     "children_per_service": 4,
 }
-_EXACT_LIMITS = {
-    "concurrent_jobs": 1,
-    "children_per_workspace": 1,
-    "children_per_service": 4,
-}
+# Exact draft tuple for R003; numeric claims alone are never enforcement.
+_EXACT_LIMITS = dict(_LIMIT_CEILINGS)
 _RISK_DISCLOSURES = (
     "SAME_UID_HOST_ACCESS_POSSIBLE",
     "OUTBOUND_NETWORK_ACCESS_POSSIBLE",
@@ -68,9 +65,9 @@ _RISK_DISCLOSURES = (
     "NO_OS_SANDBOX_OR_F3_GUARANTEE",
 )
 _BLOCKERS = (
-    "D4_PROFILE_R002_PROPOSED_NOT_EFFECTIVE",
+    "D4_PROFILE_R003_PROPOSED_NOT_EFFECTIVE",
     "NEW_D4_PRODUCT_T1_OWNER_NETWORK_AND_HOST_CONSENT_NOT_GRANTED",
-    "NEW_D4_PRODUCT_T1_B_C_EXECUTABLE_REVIEW_NOT_ISSUED",
+    "NEW_D4_R003_B_C_EXECUTABLE_REVIEW_NOT_ISSUED",
     "RUNNER_IMAGE_AND_CREDENTIAL_ISOLATION_NOT_OBSERVED",
     "CPU_RAM_PROCESS_TREE_ENFORCEMENT_NOT_OBSERVED",
     "REAL_GO_PIPENV_PYTHON_LOADED_SOURCE_NOT_OBSERVED",
@@ -180,7 +177,7 @@ def prepare_d4_product_t1_packet_t0(
             raise D4ProductT1T0Denied("invalid proposed budget: " + name)
     for name, expected in _EXACT_LIMITS.items():
         if budget[name] != expected:
-            raise D4ProductT1T0Denied("invalid proposed capacity: " + name)
+            raise D4ProductT1T0Denied("invalid proposed exact budget: " + name)
     if (budget["child_seconds"] > budget["worker_timeout_seconds"]
             or budget["child_seconds"] > budget["job_seconds"]):
         raise D4ProductT1T0Denied("inconsistent proposed time ceilings")

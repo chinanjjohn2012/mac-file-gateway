@@ -80,7 +80,19 @@ def prepare_lbe_work_plan(
             if not ctx.gateway._allowed(source_parts, is_file=True):
                 raise GatewayError("blocked_path",
                                    "Python source path is not allowed.")
-            planned_script_sha256 = ctx.gateway._snapshot(source_parts).sha256
+            script_snapshot = ctx.gateway._snapshot(source_parts)
+            # A digest of an unsafe, group/world-mutable or foreign-owned
+            # script is not a trusted prospective launch input. Reject it
+            # in the real shared preview and again in private launch replan.
+            # No source digest grants F1 positive execution.
+            script_meta = script_snapshot.metadata
+            if (script_meta.st_uid != os.getuid()
+                    or script_meta.st_mode & 0o022):
+                raise GatewayError(
+                    "runner_unavailable",
+                    "Python source requires owner-controlled permissions.",
+                )
+            planned_script_sha256 = script_snapshot.sha256
         if selected_runner == "pipenv":
             # The private launcher requires a single-link regular Pipfile
             # immediately before Popen. Make the public preview reject the

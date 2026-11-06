@@ -93,6 +93,14 @@ def _inspect_output(workspace_root: Path, cwd_parts: tuple[str, ...],
             return  # a new regular file may be created by future Go build
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise GoPolicyError("existing output must be one regular nonlinked file")
+        # An existing Go -o leaf must be owned by this Gateway user,
+        # writable by that owner, and not mutable by group/other users.
+        # This remains a PREVIEW/prelaunch input check, not confinement:
+        # future trusted Go code and post-check pathname races are excluded.
+        if (metadata.st_uid != os.getuid()
+                or not metadata.st_mode & stat.S_IWUSR
+                or metadata.st_mode & 0o022):
+            raise GoPolicyError("existing Go output is not owner-controlled")
     except OSError as exc:
         raise GoPolicyError("output parent cannot be opened without links") from exc
     finally:

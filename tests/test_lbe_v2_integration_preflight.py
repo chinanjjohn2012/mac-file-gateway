@@ -258,6 +258,29 @@ def test_r006_info_discloses_preview_separately_from_positive_apply(scene):
         svc.close()
 
 
+def test_r006_owner_latch_does_not_hide_nonspawning_preview(scene):
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        # A stale native reaper/reader latch would prohibit new children,
+        # but the shared dry-run planning path does not create children.
+        assert svc._lbe_owner is not None
+        svc._lbe_owner._unavailable = True
+        assert svc.info()["exec_policy"]["owner_unavailable"] is True
+        assert svc.info()["exec_policy"]["available"] is False
+        assert svc.info()["exec_policy"]["preview_available"] is True
+        preview = svc.invoke_exec("a", "go-project", ["go", "test", "./..."])
+        assert preview["status"] == "preview"
+        assert preview["executed"] is False
+        with pytest.raises(GatewayError) as denied:
+            svc.invoke_exec("a", "go-project", ["go", "test", "./..."],
+                            dry_run=False)
+        assert denied.value.code == "exec_cleanup_proof_required"
+    finally:
+        svc.close()
+
+
 def test_r006_unhealthy_v2_info_does_not_claim_preview(scene):
     a, b, _private, _runtime = scene
     svc = service(scene, v2_config(a, b))

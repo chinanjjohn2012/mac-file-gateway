@@ -569,8 +569,12 @@ class WorkspaceService:
             # nonspawning plan even though positive Exec remains F1-denied.
             # Preview requests share the synchronous request slot gate, not
             # the original-child lease; never imply native launch authority.
+            # Preview has no original-child lease and can remain usable
+            # after the native owner latches unavailable. Only healthy old
+            # durable state and free synchronous request slots are needed.
             v2_preview_available = bool(
-                v2_state_healthy and eligible_names
+                is_v2 and effective and durability == "healthy"
+                and not self._closing and eligible_names
                 and len(self._exec_active) < 4)
             return {"name": "Mac File Gateway", "version": "2.5.0", "mode": "multi",
                     "workspace_count": len(self._workspaces),

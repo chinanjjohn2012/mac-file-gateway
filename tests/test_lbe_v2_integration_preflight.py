@@ -1163,3 +1163,62 @@ def test_d4_all_three_ingresses_same_plan_and_f1_denial_no_native(
         assert not (a / "go-project" / "bin" / "app").exists()
     finally:
         svc.close()
+
+
+# D6 test-first RED: reject a forged internal LbeWorkPlan before invoking
+# caller-supplied equality hooks. Public F1 remains denied; no T1 is executed.
+@pytest.mark.parametrize("poisoned_field", [
+    "workspace", "runner", "runner_project", "requested_argv",
+])
+def test_d6_internal_launcher_rejects_nonprimitive_plan_without_hooks(
+    scene, monkeypatch, poisoned_field,
+):
+    from dataclasses import replace
+    from gateway.lbe_native_launcher import make_trusted_lbe_launcher
+    from gateway.lbe_plan import prepare_lbe_work_plan
+    from gateway.lbe_worker import LbeNoChildStarted
+
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    hooks = []
+
+    class MaliciousComparator:
+        def __eq__(self, _other):
+            hooks.append("eq")
+            return True
+
+        def __ne__(self, _other):
+            hooks.append("ne")
+            return False
+
+    class MaliciousTuple(tuple):
+        def __eq__(self, _other):
+            hooks.append("tuple_eq")
+            return True
+
+        def __ne__(self, _other):
+            hooks.append("tuple_ne")
+            return False
+
+    def no_spawn(*_args, **_kwargs):
+        raise AssertionError("forged internal plan must never invoke Popen")
+
+    try:
+        ctx = svc.require_exec("a")
+        plan = prepare_lbe_work_plan(
+            ctx, cwd="default-project",
+            argv=["python", "-m", "pytest"], timeout_seconds=5)
+        forged = replace(
+            plan, **{poisoned_field: (
+                MaliciousTuple(plan.requested_argv)
+                if poisoned_field == "requested_argv"
+                else MaliciousComparator())})
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", no_spawn)
+            with pytest.raises(LbeNoChildStarted):
+                make_trusted_lbe_launcher(ctx)(forged)
+        assert hooks == [], "deny before user-defined hash/equality callbacks"
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()

@@ -1604,3 +1604,30 @@ def test_r006_rest_and_official_mcp_forward_internal_event_only(
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
+
+
+@pytest.mark.parametrize("poll_connection", [False, True])
+def test_r006_cancel_bridge_preserves_gateway_error_from_sync_gate(
+    poll_connection,
+):
+    import anyio
+    from gateway.lbe_cancel_bridge import invoke_exec_with_cancel
+
+    class DeniedService:
+        def invoke_exec(self, workspace, cwd, argv, timeout_seconds=60,
+                        dry_run=True, *, cancelled=None):
+            raise GatewayError("exec_cleanup_proof_required",
+                               "Public Exec apply is not qualified.")
+
+    async def poll():
+        return False
+
+    async def scenario():
+        with pytest.raises(GatewayError) as denied:
+            await invoke_exec_with_cancel(
+                DeniedService(), "a", "go-project",
+                ["go", "test", "./..."], timeout_seconds=5, dry_run=False,
+                is_disconnected=poll if poll_connection else None)
+        assert denied.value.code == "exec_cleanup_proof_required"
+
+    anyio.run(scenario)

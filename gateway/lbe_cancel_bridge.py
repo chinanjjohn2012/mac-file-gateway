@@ -32,28 +32,42 @@ async def invoke_exec_with_cancel(
 
     async def watch_disconnect() -> None:
         assert is_disconnected is not None
-        while not finished.is_set():
-            if await is_disconnected():
-                cancelled.set()
-                return
-            with anyio.move_on_after(0.05):
-                await finished.wait()
+        try:
+            while not finished.is_set():
+                if await is_disconnected():
+                    cancelled.set()
+                    return
+                with anyio.move_on_after(0.05):
+                    await finished.wait()
+        except Exception:
+            # If polling the connection fails, never presume a healthy
+            # waiter. Signal loss of wait; do not assert child cleanup.
+            cancelled.set()
 
+    # An AnyIO task group wraps exceptions from its body in ExceptionGroup.
+    # Existing REST/MCP contracts require the original GatewayError instead.
+    # Capture it while inside the group, then re-raise only AFTER exit.
+    result: dict[str, Any] | None = None
+    error: BaseException | None = None
     async with anyio.create_task_group() as tasks:
         if is_disconnected is not None:
             tasks.start_soon(watch_disconnect)
         try:
-            return await anyio.to_thread.run_sync(
+            result = await anyio.to_thread.run_sync(
                 partial(
                     service.invoke_exec, workspace, cwd, argv,
                     timeout_seconds, dry_run, cancelled=cancelled,
                 ),
                 abandon_on_cancel=True,
             )
-        except BaseException:
-            # Covers task cancellation and watcher failure. No child is
-            # terminated; only the synchronous waiter is notified.
+        except BaseException as exc:
+            # Covers cancellation as well as a failed sync Worker. A
+            # detached Worker remains responsible for its own child.
             cancelled.set()
-            raise
+            error = exc
         finally:
             finished.set()
+    if error is not None:
+        raise error
+    assert result is not None
+    return result

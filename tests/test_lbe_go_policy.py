@@ -94,6 +94,18 @@ def test_explicit_scope_root_and_nested_cwd(project):
                 cwd="go-project/cmd").output_relative_to_workspace == "go-project/cmd/bin/app"
 
 
+@pytest.mark.parametrize("mode", [0o666, 0o660, 0o444])
+def test_r006_existing_go_output_requires_owner_safe_write_mode(project, mode):
+    """Go -o must not plan overwriting an unsafe or unwritable existing leaf."""
+    target = project / "go-project" / "bin" / "app"
+    target.write_bytes(b"existing binary")
+    target.chmod(mode)
+    before = target.read_bytes()
+    with pytest.raises(GoPolicyError):
+        plan(project, ["go", "build", "-o=bin/app", "./cmd/server"])
+    assert target.read_bytes() == before
+
+
 def test_existing_regular_unlinked_output_allowed(project):
     target = project / "go-project" / "bin" / "app"
     target.write_bytes(b"old build")

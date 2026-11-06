@@ -1493,6 +1493,70 @@ def test_r006_stalled_disconnect_probe_cannot_block_finished_exec(denied):
     anyio.run(scenario)
 
 
+# Real shared preview must not accept mutable, untrusted Python project
+# source files as if their planned SHA pins were stable launch inputs.
+@pytest.mark.parametrize("cwd", ["go-project", "python-project"])
+@pytest.mark.parametrize("mode", [0o666, 0o664])
+def test_r006_python_script_untrusted_mode_denied_in_shared_plan(
+    scene, cwd, mode,
+):
+    a, b, _private, _runtime = scene
+    script = a / cwd / "hello.py"
+    script.write_text("print('fixture only')\n")
+    script.chmod(mode)
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        with pytest.raises(GatewayError) as denied:
+            svc.invoke_exec("a", cwd, ["python", "hello.py"])
+        assert denied.value.code == "runner_unavailable"
+        with pytest.raises(GatewayError) as denied:
+            svc.invoke_exec("a", cwd, ["python", "hello.py"], dry_run=False)
+        assert denied.value.code == "exec_cleanup_proof_required"
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+
+
+def test_r006_unsafe_python_source_denied_across_rest_and_official_mcp(scene):
+    pytest.importorskip("mcp")
+    a, b, _private, _runtime = scene
+    (a / "go-project" / "hello.py").write_text("print('fixture')\n")
+    (a / "go-project" / "hello.py").chmod(0o666)
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    args = {"workspace": "a", "cwd": "go-project",
+            "argv": ["python", "hello.py"], "timeout_seconds": 5}
+    headers = {"Accept": "application/json, text/event-stream",
+               "Content-Type": "application/json"}
+    try:
+        with TestClient(create_multi_app(svc),
+                        base_url="http://127.0.0.1:8765") as client:
+            rest = client.post("/run", json=args)
+            assert rest.json()["error"] == "runner_unavailable"
+            assert rest.status_code != 200
+            init = client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25",
+                           "capabilities": {},
+                           "clientInfo": {"name": "r006-source", "version": "1"}},
+            })
+            assert init.status_code == 200
+            client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "method": "notifications/initialized"})
+            response = client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "run_command", "arguments": args},
+            })
+            assert response.status_code == 200
+            result = response.json()["result"]
+            assert result["isError"] is True
+            assert result["structuredContent"]["error"] == "runner_unavailable"
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+
+
 # r006 cancellation is a waiter notification, never child termination.
 def test_r006_transport_task_cancellation_reaches_worker():
     import anyio

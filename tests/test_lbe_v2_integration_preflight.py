@@ -1114,6 +1114,17 @@ def test_d4_all_three_ingresses_same_plan_and_f1_denial_no_native(
                 if argv == ["go", "build", "-o=bin/app", "./cmd/app"]
                 else None
             )
+            if cwd == "python-project":
+                import hashlib
+                expected_script = (a / cwd / "hello.py").read_bytes()
+                expected_pipfile = (a / cwd / "Pipfile").read_bytes()
+                assert direct["planned_script_sha256"] == (
+                    hashlib.sha256(expected_script).hexdigest())
+                assert direct["planned_pipfile_sha256"] == (
+                    hashlib.sha256(expected_pipfile).hexdigest())
+            else:
+                assert direct["planned_script_sha256"] is None
+                assert direct["planned_pipfile_sha256"] is None
             assert direct["cleanup_proven"] is False
             assert direct["full_descendant_tree_clean"] == "not_proven"
             with TestClient(create_multi_app(svc),

@@ -607,6 +607,18 @@ def test_r006_python_script_source_hash_must_be_exact_and_bound():
         LbeWorker._check_plan(replace(base, planned_script_sha256="a" * 64))
     with pytest.raises(LbeWorkerError, match="invalid_plan"):
         LbeWorker._check_plan(replace(valid, planned_pipfile_sha256="b" * 64))
+    called = []
+    class MaliciousDigest:
+        def __eq__(self, _other):
+            called.append("eq")
+            return True
+        def __hash__(self):
+            called.append("hash")
+            return 1
+    with pytest.raises(LbeWorkerError, match="invalid_plan"):
+        LbeWorker._check_plan(replace(valid,
+            planned_script_sha256=MaliciousDigest()))
+    assert called == []
 
 
 def test_r006_pipenv_runner_requires_pinned_pipfile_hash():

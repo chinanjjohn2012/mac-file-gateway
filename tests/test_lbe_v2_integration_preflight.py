@@ -1168,7 +1168,8 @@ def test_d4_all_three_ingresses_same_plan_and_f1_denial_no_native(
 # D6 test-first RED: reject a forged internal LbeWorkPlan before invoking
 # caller-supplied equality hooks. Public F1 remains denied; no T1 is executed.
 @pytest.mark.parametrize("poisoned_field", [
-    "workspace", "runner", "runner_project", "requested_argv",
+    "workspace", "cwd", "runner", "runner_project",
+    "requested_argv", "effective_argv",
 ])
 def test_d6_internal_launcher_rejects_nonprimitive_plan_without_hooks(
     scene, monkeypatch, poisoned_field,
@@ -1212,7 +1213,7 @@ def test_d6_internal_launcher_rejects_nonprimitive_plan_without_hooks(
         forged = replace(
             plan, **{poisoned_field: (
                 MaliciousTuple(plan.requested_argv)
-                if poisoned_field == "requested_argv"
+                if poisoned_field.endswith("_argv")
                 else MaliciousComparator())})
         with monkeypatch.context() as m:
             m.setattr(subprocess, "Popen", no_spawn)

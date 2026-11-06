@@ -14,7 +14,8 @@ from typing import TYPE_CHECKING, Callable
 
 from .core import GatewayError, _parts
 from .executor import _SAFE_ENV_KEYS
-from .lbe_worker import LbeNoChildStarted, LbeWorkPlan, OriginalChild
+from .lbe_worker import (LbeNoChildStarted, LbeWorkPlan, OriginalChild,
+                         LbeWorker, LbeWorkerError)
 
 if TYPE_CHECKING:
     from .workspaces import WorkspaceContext
@@ -32,7 +33,18 @@ def make_trusted_lbe_launcher(ctx: "WorkspaceContext") -> Callable[[LbeWorkPlan]
         raise TypeError("Trusted WorkspaceContext required.")
 
     def launch(plan: LbeWorkPlan) -> OriginalChild:
-        if type(plan) is not LbeWorkPlan or plan.workspace != ctx.name:
+        # An LbeWorkPlan dataclass does not enforce annotated field types.
+        # A hostile frozen instance can use __eq__/__ne__ of a field to
+        # masquerade as a canonical plan during the equality check below.
+        # Validate FIRST, before any comparison of untrusted plan values,
+        # including the workspace name and whole-plan equality.
+        if type(plan) is not LbeWorkPlan:
+            raise LbeNoChildStarted("no child: invalid internal plan")
+        try:
+            LbeWorker._check_plan(plan)
+        except LbeWorkerError:
+            raise LbeNoChildStarted("no child: invalid internal plan") from None
+        if plan.workspace != ctx.name:
             raise LbeNoChildStarted("no child: invalid internal plan")
         from .lbe_plan import prepare_lbe_work_plan
 

@@ -60,7 +60,11 @@ publisher, pathname race, original child/reaper or positive integration.
 No destructive PID/PGID signal, shared/user Mac/Tunnel/production,
 merge, release or deployment is authorized.
 
-EVIDENCE_STATUS: SAFE_T0_PENDING_CURRENT_HEAD_CI
+EVIDENCE_STATUS: D6_R004_ORIGINAL_HEAD_CI_PASS_OBSERVED
+ORIGINAL_D6_HEAD_SHA: f0e94679242412e1a14bab1e05d87a024e146c61
+ORIGINAL_D6_HEAD_TREE: a77978fdbd05154f048f72206f1e8681a8296962
+ORIGINAL_D6_CI: https://github.com/chinanjjohn2012/mac-file-gateway/actions/runs/42172004726/job/127741766040
+ORIGINAL_D6_RESULT: 2216 passed, 19 skipped, 1 warning, 52 subtests; 22 of 22 job steps success; G05 292 blobs and 291 Manifest. HISTORICAL evidence for any later Head.
 INTEGRATION_STATUS: NOT_TESTED
 R10_STATUS: BLOCKED
 FULL_CODE_REVIEW_PASS: NOT_ISSUED

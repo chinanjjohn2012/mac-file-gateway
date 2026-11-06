@@ -245,3 +245,24 @@ def test_d7_large_text_source_keeps_small_metadata_limit(fixture, text_path, exp
     (root / text_path).write_bytes(payload)
     with pytest.raises(LbePipenvFixtureT0Denied, match="oversized"):
         _check({**expected, expected_key: _sha(payload)})
+
+
+def test_d7_python_digest_detects_same_size_rewrite(fixture):
+    root, expected = fixture
+    path = root / ".venv/bin/python"
+    first = path.read_bytes()
+    assert _check(expected).native_launch_allowed is False
+    replacement = b"Q" + first[1:]
+    assert len(first) == len(replacement)
+    path.write_bytes(replacement)
+    with pytest.raises(LbePipenvFixtureT0Denied, match="digest mismatch"):
+        _check(expected)
+
+
+def test_d7_python_byte_limit_remains_bounded(fixture, monkeypatch):
+    import gateway.lbe_pipenv_fixture_t0 as subject
+    _root, expected = fixture
+    with monkeypatch.context() as m:
+        m.setattr(subject, "_MAX_PYTHON_EXECUTABLE_BYTES", 16)
+        with pytest.raises(LbePipenvFixtureT0Denied, match="oversized"):
+            _check(expected)

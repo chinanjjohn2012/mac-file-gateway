@@ -23,6 +23,7 @@ _SHA = re.compile(r"[0-9a-f]{64}\Z")
 _FLAGS_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FLAGS_FILE = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 _MAX_FILE_BYTES = 1024 * 1024
+_MAX_PYTHON_EXECUTABLE_BYTES = 128 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,41 @@ def _file(parent: int, name: str, *, executable: bool = False) -> bytes:
         os.close(fd)
 
 
+
+def _python_file_sha256(parent: int, name: str) -> str:
+    """Stream bounded selected interpreter bytes, NEVER load or launch code.
+
+    This limited nofollow FD digest is not a loaded/interpreter/stdlib or
+    post-close pathname identity proof, and cannot authorize native work.
+    """
+    fd = os.open(name, _FLAGS_FILE, dir_fd=parent)
+    try:
+        before = os.fstat(fd)
+        _owned(before, directory=False, label=name)
+        if not (before.st_mode & stat.S_IXUSR):
+            raise LbePipenvFixtureT0Denied("python file not owner-executable")
+        if not 0 < before.st_size <= _MAX_PYTHON_EXECUTABLE_BYTES:
+            raise LbePipenvFixtureT0Denied("fixture python file oversized or empty")
+        remaining = before.st_size
+        digest = hashlib.sha256()
+        while remaining:
+            chunk = os.read(fd, min(64 * 1024, remaining))
+            if not chunk:
+                raise LbePipenvFixtureT0Denied(
+                    "fixture python file changed during read")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(fd)
+        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns",
+                  "st_ctime_ns", "st_mode", "st_uid", "st_nlink")
+        if any(getattr(before, k) != getattr(after, k) for k in fields):
+            raise LbePipenvFixtureT0Denied(
+                "fixture python inode changed during read")
+        return digest.hexdigest()
+    finally:
+        os.close(fd)
+
+
 def inspect_private_pipenv_fixture_t0(
     *, project_root: str,
     expected_pipfile_sha256: str,
@@ -144,10 +180,12 @@ def inspect_private_pipenv_fixture_t0(
         config = _file(venv, "pyvenv.cfg")
         bin_fd = _dir(venv, "bin")
         stack.callback(os.close, bin_fd)
-        python = _file(bin_fd, "python", executable=True)
-        observed = tuple(
-            hashlib.sha256(x).hexdigest() for x in
-            (pipfile, lock, config, python)
+        python_hash = _python_file_sha256(bin_fd, "python")
+        observed = (
+            hashlib.sha256(pipfile).hexdigest(),
+            hashlib.sha256(lock).hexdigest(),
+            hashlib.sha256(config).hexdigest(),
+            python_hash,
         )
         if observed != expected:
             raise LbePipenvFixtureT0Denied("fixture source digest mismatch")

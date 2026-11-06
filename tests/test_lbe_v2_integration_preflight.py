@@ -1274,3 +1274,17 @@ def test_r006_go_build_preview_returns_canonical_planned_output(
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
+
+
+def test_r006_pipenv_writable_pipfile_denied_as_source(scene):
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        (a / "python-project" / "Pipfile").chmod(0o666)
+        with pytest.raises(GatewayError) as exc:
+            svc.invoke_exec("a", "python-project", ["python", "hello.py"],
+                            timeout_seconds=5, dry_run=True)
+        assert exc.value.code == "runner_unavailable"
+    finally:
+        svc.close()

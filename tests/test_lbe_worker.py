@@ -562,3 +562,28 @@ def test_r006_planned_go_output_is_strictly_typed_and_not_a_grant():
     with pytest.raises(LbeWorkerError, match="invalid_plan"):
         LbeWorker._check_plan(py)
     assert hooks == []
+
+
+@pytest.mark.parametrize("argv,shown", [
+    (("go","build","-o","bin/app","./cmd/app"), None),
+    (("go","build","-o=bin/app","./cmd/app"), "go-project/bin/other"),
+    (("go","build","./cmd/app"), "go-project/bin/app"),
+    (("go","test","./..."), "go-project/bin/app"),
+])
+def test_r006_go_planned_output_must_match_command(argv, shown):
+    from dataclasses import replace
+    candidate = replace(plan(), requested_argv=argv, effective_argv=argv,
+                        planned_go_output=shown)
+    with pytest.raises(LbeWorkerError, match="invalid_plan"):
+        LbeWorker._check_plan(candidate)
+
+
+@pytest.mark.parametrize("argv", [
+    ("go","build","-o","bin/app","./cmd/app"),
+    ("go","build","-o=bin/app","./cmd/app"),
+])
+def test_r006_go_planned_output_accepts_both_legal_flag_forms(argv):
+    from dataclasses import replace
+    candidate = replace(plan(), requested_argv=argv, effective_argv=argv,
+                        planned_go_output="go-project/bin/app")
+    LbeWorker._check_plan(candidate)

@@ -1852,3 +1852,41 @@ def test_r006_go_output_parent_permission_denied_across_all_transports(scene):
     finally:
         svc.close()
         output_parent.chmod(0o755)
+
+
+def test_r006_read_only_reflects_internal_exec_authority_not_preview(scene):
+    """T0 synthetic status oracle; never invoke positive Exec or run Popen.
+
+    The ONLY simulated internal flag here is NOT a client/config grant.
+    A real hosted Python T1 needs its separately reviewed startup envelope.
+    """
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        before = svc.info()
+        assert before["read_only"] is True
+        assert before["file_read_only"] is True
+        assert before["exec_policy"]["available"] is False
+        assert before["exec_policy"]["preview_available"] is True
+
+        # Simulate approved constructor-only capability in a disposable
+        # information-only test; no native child, new endpoint or flag.
+        svc._lbe_positive_authorized = True
+        authorized = svc.info()
+        assert authorized["exec_policy"]["completion_capability"] == "best_effort"
+        assert authorized["read_only"] is False
+        assert authorized["file_read_only"] is True
+        with TestClient(create_multi_app(svc, enable_mcp=False),
+                        base_url="http://127.0.0.1:8765") as client:
+            health = client.get("/health")
+            assert health.status_code == 200
+            assert health.json()["read_only"] is False
+            assert health.json()["file_read_only"] is True
+
+        svc._lbe_positive_authorized = False
+        assert svc.info()["read_only"] is True
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc._lbe_positive_authorized = False
+        svc.close()

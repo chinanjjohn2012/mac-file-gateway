@@ -1446,6 +1446,53 @@ def test_r006_pipfile_content_change_invalidates_earlier_plan(
         svc.close()
 
 
+# A stuck REST disconnect probe must not hold a completed response/error.
+# Fake synchronous service only: never starts Python, Go or Pipenv.
+@pytest.mark.parametrize("denied", [False, True])
+def test_r006_stalled_disconnect_probe_cannot_block_finished_exec(denied):
+    import anyio
+    import threading
+    from gateway.lbe_cancel_bridge import invoke_exec_with_cancel
+
+    poll_started = threading.Event()
+
+    async def poll():
+        poll_started.set()
+        await anyio.sleep_forever()
+
+    class FastService:
+        def invoke_exec(self, workspace, cwd, argv, timeout_seconds=60,
+                        dry_run=True, *, cancelled=None):
+            assert type(cancelled) is threading.Event
+            assert poll_started.wait(2), "probe must start before Worker exits"
+            if denied:
+                raise GatewayError("exec_cleanup_proof_required",
+                                   "Public positive Exec stays denied.")
+            return {"status": "preview", "executed": False}
+
+    async def scenario():
+        with anyio.fail_after(2):
+            if denied:
+                with pytest.raises(GatewayError) as exc:
+                    await invoke_exec_with_cancel(
+                        FastService(), "a", "go-project",
+                        ["go", "test", "./..."],
+                        timeout_seconds=5, dry_run=False,
+                        is_disconnected=poll,
+                    )
+                assert exc.value.code == "exec_cleanup_proof_required"
+            else:
+                result = await invoke_exec_with_cancel(
+                    FastService(), "a", "go-project",
+                    ["go", "test", "./..."],
+                    timeout_seconds=5, dry_run=True,
+                    is_disconnected=poll,
+                )
+                assert result == {"status": "preview", "executed": False}
+
+    anyio.run(scenario)
+
+
 # r006 cancellation is a waiter notification, never child termination.
 def test_r006_transport_task_cancellation_reaches_worker():
     import anyio

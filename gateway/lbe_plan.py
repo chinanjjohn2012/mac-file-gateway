@@ -20,6 +20,46 @@ if TYPE_CHECKING:
     from .workspaces import WorkspaceContext
 
 
+
+def _check_owner_controlled_source_parents(
+    root_fd: int, source_parts: tuple[str, ...],
+) -> None:
+    """Check actual Workspace-relative ancestor FDs of a selected source.
+
+    Unlike a byte digest of the file itself, this rejects directories that
+    another same-host user could rewrite before a future pathname launch.
+    This is only a conservative preflight check, NOT an immutable source FD
+    to exec binding, sandbox or evidence that imports/toolchains are closed.
+    The native launcher repeats this same shared plan immediately pre-Popen.
+    """
+    if not source_parts:
+        raise GatewayError("runner_unavailable", "Unqualified source path.")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    held: list[int] = []
+    try:
+        fd = os.dup(root_fd)
+        held.append(fd)
+        for name in (None, *source_parts[:-1]):
+            if name is not None:
+                fd = os.open(name, flags, dir_fd=fd)
+                held.append(fd)
+            metadata = os.fstat(fd)
+            if (not stat.S_ISDIR(metadata.st_mode)
+                    or metadata.st_uid != os.getuid()
+                    or metadata.st_mode & 0o022):
+                raise GatewayError(
+                    "runner_unavailable",
+                    "Selected source parent must be owner-controlled.",
+                )
+    except OSError:
+        raise GatewayError(
+            "runner_unavailable", "Selected source parent cannot be safely opened.",
+        ) from None
+    finally:
+        for fd in reversed(held):
+            os.close(fd)
+
+
 def prepare_lbe_work_plan(
     ctx: "WorkspaceContext", *, cwd: str, argv: list[str],
     timeout_seconds: int = 60,
@@ -80,6 +120,8 @@ def prepare_lbe_work_plan(
             if not ctx.gateway._allowed(source_parts, is_file=True):
                 raise GatewayError("blocked_path",
                                    "Python source path is not allowed.")
+            _check_owner_controlled_source_parents(
+                ctx.gateway._root_fd, source_parts)
             script_snapshot = ctx.gateway._snapshot(source_parts)
             # A digest of an unsafe, group/world-mutable or foreign-owned
             # script is not a trusted prospective launch input. Reject it
@@ -107,6 +149,8 @@ def prepare_lbe_work_plan(
                     "runner_unavailable",
                     "Configured Pipenv runner requires an allowed Pipfile.",
                 )
+            _check_owner_controlled_source_parents(
+                ctx.gateway._root_fd, pipfile_parts)
             try:
                 # Re-open the entire runner project using Gateway's pinned
                 # no-follow directory traversal. A path swap between the

@@ -41,6 +41,7 @@ def prepare_lbe_work_plan(
     cwd_parts, _cwd_path = runner._cwd(cwd)
     canonical_cwd = _canonical(cwd_parts)
 
+    planned_go_output = None
     if requested[0] == "go":
         try:
             validated = validate_go_command(
@@ -53,6 +54,10 @@ def prepare_lbe_work_plan(
             raise GatewayError("command_not_allowed",
                                "Go command or output is not allowed.") from None
         effective = validated.argv
+        # The Go policy has already checked Workspace scopes, exclusions
+        # and a nofollow output parent. Preserve its canonical output path
+        # as preview information, never as proof that a file was written.
+        planned_go_output = validated.output_relative_to_workspace
         selected_runner = "direct"
         runner_project = canonical_cwd
     else:
@@ -99,6 +104,7 @@ def prepare_lbe_work_plan(
         runner=selected_runner,
         runner_project=runner_project,
         timeout_seconds=timeout_seconds,
+        planned_go_output=planned_go_output,
     )
     # Both caller- and worker-side shape checks stay active. Neither check
     # grants Exec or bypasses the existing private state/admission gates.

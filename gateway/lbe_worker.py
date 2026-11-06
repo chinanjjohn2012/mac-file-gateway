@@ -64,6 +64,8 @@ class LbeWorkPlan:
     runner: str
     runner_project: str
     timeout_seconds: int
+    # Informational canonical Go -o target, not a write receipt or grant.
+    planned_go_output: str | None = None
 
 
 class LbeWorker:
@@ -104,6 +106,10 @@ class LbeWorker:
                 or type(plan.timeout_seconds) is not int
                 or not 1 <= plan.timeout_seconds <= 300):
             raise LbeWorkerError("invalid_plan")
+        if (plan.planned_go_output is not None
+                and (type(plan.planned_go_output) is not str
+                     or not plan.planned_go_output)):
+            raise LbeWorkerError("invalid_plan")
         for argv in (plan.requested_argv, plan.effective_argv):
             if (type(argv) is not tuple or not 1 <= len(argv) <= 64
                     or sum(len(s) for s in argv if type(s) is str) > 8192
@@ -114,6 +120,12 @@ class LbeWorker:
         try:
             _parts(plan.cwd)
             _parts(plan.runner_project)
+            if plan.planned_go_output is not None:
+                # Unlike the generic file API normalizer, response metadata
+                # must already be in the exact canonical Workspace form.
+                if ("/".join(_parts(plan.planned_go_output))
+                        != plan.planned_go_output):
+                    raise LbeWorkerError("invalid_plan")
             if plan.requested_argv[0] == "go":
                 # Go build's -o and actual pinned output checks are *always*
                 # mandatory in the shared service preflight. This internal
@@ -122,7 +134,14 @@ class LbeWorker:
                         or plan.requested_argv[1] not in {"test", "vet", "build"}
                         or plan.runner != "direct"):
                     raise LbeWorkerError("invalid_plan")
+                if (plan.planned_go_output is not None
+                        and (plan.requested_argv[1] != "build"
+                             or not any(x == "-o" or x.startswith("-o=")
+                                        for x in plan.requested_argv[2:]))):
+                    raise LbeWorkerError("invalid_plan")
             else:
+                if plan.planned_go_output is not None:
+                    raise LbeWorkerError("invalid_plan")
                 _validate_command(list(plan.requested_argv))
         except GatewayError:
             raise LbeWorkerError("invalid_plan") from None
@@ -143,6 +162,7 @@ class LbeWorker:
             "effective_argv": list(plan.effective_argv),
             "runner": plan.runner,
             "runner_project": plan.runner_project,
+            "planned_go_output": plan.planned_go_output,
             "dry_run": False,
             "mode": "local_best_effort",
             "status": status,

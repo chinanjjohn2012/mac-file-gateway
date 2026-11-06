@@ -354,6 +354,8 @@ class WorkspaceService:
             "effective_argv": list(plan.effective_argv),
             "runner": plan.runner,
             "runner_project": plan.runner_project,
+            # Informational normalized Go build output; never a write claim.
+            "planned_go_output": plan.planned_go_output,
             "dry_run": True,
             "executed": False,
             "exit_code": None,

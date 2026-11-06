@@ -528,3 +528,37 @@ def test_worker_plain_go_python_pipenv_plan_shapes_do_not_grant_exec():
                      effective_argv=("pipenv", "run", "python", "-m", "pytest"))
     LbeWorker._check_plan(pipenv)
     assert good_go.runner == "direct" and pipenv.runner == "pipenv"
+
+
+
+# r006: a planned Go output is display metadata, not execution authority.
+def test_r006_planned_go_output_is_strictly_typed_and_not_a_grant():
+    from dataclasses import replace
+
+    base = plan()
+    argv = ("go", "build", "-o=bin/app", "./cmd/app")
+    proposed = replace(
+        base, requested_argv=argv, effective_argv=argv,
+        planned_go_output="go-project/bin/app")
+    LbeWorker._check_plan(proposed)
+    hooks = []
+
+    class Malicious:
+        def __eq__(self, other):
+            hooks.append("eq")
+            return True
+
+    for invalid in (Malicious(), True, 10, "", "../outside", "bin//bad"):
+        forged = replace(proposed, planned_go_output=invalid)
+        with pytest.raises(LbeWorkerError, match="invalid_plan"):
+            LbeWorker._check_plan(forged)
+    no_flag = replace(
+        base, planned_go_output="go-project/bin/app")
+    with pytest.raises(LbeWorkerError, match="invalid_plan"):
+        LbeWorker._check_plan(no_flag)
+    py = replace(
+        proposed, requested_argv=("python", "-m", "pytest"),
+        effective_argv=("python", "-m", "pytest"))
+    with pytest.raises(LbeWorkerError, match="invalid_plan"):
+        LbeWorker._check_plan(py)
+    assert hooks == []

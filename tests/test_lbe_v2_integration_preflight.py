@@ -1108,6 +1108,11 @@ def test_d4_all_three_ingresses_same_plan_and_f1_denial_no_native(
             assert direct["status"] == "preview"
             assert direct["executed"] is False
             assert direct["runner"] == selected_runner
+            assert direct["planned_go_output"] == (
+                "go-project/bin/app"
+                if argv == ["go", "build", "-o=bin/app", "./cmd/app"]
+                else None
+            )
             assert direct["cleanup_proven"] is False
             assert direct["full_descendant_tree_clean"] == "not_proven"
             with TestClient(create_multi_app(svc),
@@ -1169,7 +1174,7 @@ def test_d4_all_three_ingresses_same_plan_and_f1_denial_no_native(
 # caller-supplied equality hooks. Public F1 remains denied; no T1 is executed.
 @pytest.mark.parametrize("poisoned_field", [
     "workspace", "cwd", "runner", "runner_project",
-    "requested_argv", "effective_argv",
+    "requested_argv", "effective_argv", "planned_go_output",
 ])
 def test_d6_internal_launcher_rejects_nonprimitive_plan_without_hooks(
     scene, monkeypatch, poisoned_field,
@@ -1220,6 +1225,52 @@ def test_d6_internal_launcher_rejects_nonprimitive_plan_without_hooks(
             with pytest.raises(LbeNoChildStarted):
                 make_trusted_lbe_launcher(ctx)(forged)
         assert hooks == [], "deny before user-defined hash/equality callbacks"
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+
+
+
+# r006: actual product feature (PREVIEW ONLY) - normalized Go -o target.
+# Output is an informational destination, not file creation / Exec grant.
+@pytest.mark.parametrize("argv", [
+    ["go", "build", "-o", "bin/app", "./cmd/app"],
+    ["go", "build", "-o=bin/app", "./cmd/app"],
+])
+def test_r006_go_build_preview_returns_canonical_planned_output(
+    scene, monkeypatch, argv,
+):
+    from gateway.lbe_plan import prepare_lbe_work_plan
+    a, b, _private, _runtime = scene
+    (a / "go-project" / "bin").mkdir(exist_ok=True)
+    state = prime_existing_state(scene)
+    before = sorted(p.name for p in state.iterdir())
+    svc = service(scene, v2_config(a, b))
+
+    def no_spawn(*_args, **_kwargs):
+        raise AssertionError("Go preview or positive-denial must not launch")
+
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", no_spawn)
+            m.setattr(os, "kill", no_spawn)
+            m.setattr(os, "killpg", no_spawn, raising=False)
+            ctx = svc.require_exec("a")
+            plan = prepare_lbe_work_plan(
+                ctx, cwd="go-project", argv=argv, timeout_seconds=5)
+            assert plan.planned_go_output == "go-project/bin/app"
+            preview = svc.invoke_exec(
+                "a", "go-project", argv, timeout_seconds=5)
+            assert preview["planned_go_output"] == plan.planned_go_output
+            assert preview["status"] == "preview"
+            assert preview["executed"] is False
+            with pytest.raises(GatewayError) as denied:
+                svc.invoke_exec(
+                    "a", "go-project", argv, timeout_seconds=5,
+                    dry_run=False)
+            assert denied.value.code == "exec_cleanup_proof_required"
+        assert not (a / "go-project" / "bin" / "app").exists()
+        assert sorted(p.name for p in state.iterdir()) == before
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()

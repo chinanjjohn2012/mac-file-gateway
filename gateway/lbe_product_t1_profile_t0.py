@@ -55,7 +55,11 @@ _LIMIT_CEILINGS = {
     "children_per_service": 4,
 }
 # Exact draft tuple for R003; numeric claims alone are never enforcement.
-_EXACT_LIMITS = dict(_LIMIT_CEILINGS)
+_EXACT_LIMITS = {
+    **_LIMIT_CEILINGS,
+    "cpu_millicores": 2000,
+    "memory_mib": 4096,
+}
 _RISK_DISCLOSURES = (
     "SAME_UID_HOST_ACCESS_POSSIBLE",
     "OUTBOUND_NETWORK_ACCESS_POSSIBLE",

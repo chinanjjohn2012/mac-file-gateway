@@ -580,7 +580,14 @@ class WorkspaceService:
                     "workspace_count": len(self._workspaces),
                     **({"config_schema_version": 2}
                        if self.settings.schema_version == 2 else {}),
-                    "read_only": not (self.any_write or self.any_git),
+                    # A paths-only v2 preview is read-only. A separately
+                    # qualified internal positive Exec capability is not:
+                    # its trusted child may mutate host state, even if its
+                    # capacity is temporarily occupied or its waiter lost.
+                    # This is STATUS reporting only, never an Exec grant.
+                    "read_only": not (
+                        self.any_write or self.any_git or
+                        (is_v2 and self._lbe_positive_authorized)),
                     "file_read_only": not self.any_write, "path_base": ".",
                     "workspaces": self.list_workspaces()["workspaces"],
                     "exec_policy": {

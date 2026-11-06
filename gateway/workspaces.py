@@ -380,7 +380,8 @@ class WorkspaceService:
     @staticmethod
     def _lbe_apply(ctx: WorkspaceContext, owner: DirectChildOwner,
                    cwd: str, argv: list[str],
-                   timeout_seconds: int) -> dict[str, Any]:
+                   timeout_seconds: int, *,
+                   cancelled: threading.Event | None = None) -> dict[str, Any]:
         """Worker apply, reachable only from the approved hosted Python T1.
 
         Ordinary schema-v2 public requests are denied before this method.
@@ -395,7 +396,7 @@ class WorkspaceService:
         worker = LbeWorker(
             owner, launcher=make_trusted_lbe_launcher(ctx))
         try:
-            return worker.run(plan)
+            return worker.run(plan, cancelled=cancelled)
         except LbeWorkerError as exc:
             raise GatewayError(
                 exc.code, "Local best-effort command could not complete safely.",
@@ -403,7 +404,8 @@ class WorkspaceService:
             ) from None
 
     def invoke_exec(self, name: str, cwd: str, argv: list[str],
-                    timeout_seconds: int = 60, dry_run: bool = True) -> dict[str, Any]:
+                    timeout_seconds: int = 60, dry_run: bool = True, *,
+                    cancelled: threading.Event | None = None) -> dict[str, Any]:
         """One synchronous v1 and draft v2 admission boundary.
 
         Ordinary schema-v2 paths authorize preview only until the exact
@@ -422,6 +424,8 @@ class WorkspaceService:
             self._exec_state.require_healthy()
             if type(dry_run) is not bool:
                 raise GatewayError("invalid_argument", "dry_run must be boolean.")
+            if cancelled is not None and type(cancelled) is not threading.Event:
+                raise GatewayError("invalid_argument", "Invalid internal cancellation token.")
             # F1 has NO positive cleanup-proof path. Proof denial wins over
             # an occupied Worker slot and happens before Runner/PREPARED.
             # Never use an instance-global subprocess ban: Git may spawn
@@ -450,7 +454,8 @@ class WorkspaceService:
                 else:
                     assert self._lbe_owner is not None
                     result = self._lbe_apply(
-                        ctx, self._lbe_owner, cwd, argv, timeout_seconds)
+                        ctx, self._lbe_owner, cwd, argv, timeout_seconds,
+                        cancelled=cancelled)
             else:
                 # Preserve the entire historic v1 preview and F1 deny-only path.
                 result = ctx.gateway.run_command(cwd, argv, timeout_seconds, dry_run)

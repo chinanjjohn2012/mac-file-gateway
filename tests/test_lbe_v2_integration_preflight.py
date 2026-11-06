@@ -1554,3 +1554,53 @@ def test_r006_private_apply_passes_cancel_token_and_public_f1_stays_denied(
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
+
+
+def test_r006_rest_and_official_mcp_forward_internal_event_only(
+    scene, monkeypatch,
+):
+    import threading
+
+    pytest.importorskip("mcp")
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    original = svc.invoke_exec
+    seen = []
+
+    def observed_invoke(*args, **kwargs):
+        seen.append(kwargs.get("cancelled"))
+        return original(*args, **kwargs)
+
+    args = {"workspace": "a", "cwd": "go-project",
+            "argv": ["go", "test", "./..."], "timeout_seconds": 5}
+    headers = {"Accept": "application/json, text/event-stream",
+               "Content-Type": "application/json"}
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(svc, "invoke_exec", observed_invoke)
+            with TestClient(create_multi_app(svc),
+                            base_url="http://127.0.0.1:8765") as client:
+                rest = client.post("/run", json=args)
+                assert rest.status_code == 200
+                init = client.post("/mcp", headers=headers, json={
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"protocolVersion": "2025-11-25",
+                               "capabilities": {},
+                               "clientInfo": {"name": "r006-cancel", "version": "1"}},
+                })
+                assert init.status_code == 200
+                client.post("/mcp", headers=headers, json={
+                    "jsonrpc": "2.0", "method": "notifications/initialized"})
+                mcp = client.post("/mcp", headers=headers, json={
+                    "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": {"name": "run_command", "arguments": args},
+                })
+                assert mcp.status_code == 200
+                assert mcp.json()["result"]["structuredContent"] == rest.json()
+        assert len(seen) == 2
+        assert all(type(token) is threading.Event for token in seen)
+        assert seen[0] is not seen[1]
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()

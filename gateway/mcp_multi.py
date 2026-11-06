@@ -11,6 +11,7 @@ from pydantic import Field, StrictBool
 from starlette.concurrency import run_in_threadpool
 
 from .core import GatewayError
+from .lbe_cancel_bridge import invoke_exec_with_cancel
 from .multi_fields import validate_tool_arguments
 from .workspaces import WorkspaceService
 
@@ -87,8 +88,8 @@ def build_multi_mcp(service: WorkspaceService, *, port: int = 8765) -> MCPServer
             privilege escalation. Git has separate admission.
             """
             try:
-                return await run_in_threadpool(
-                    service.invoke_exec, workspace, cwd, argv,
+                return await invoke_exec_with_cancel(
+                    service, workspace, cwd, argv,
                     timeout_seconds, dry_run,
                 )
             except GatewayError as exc:

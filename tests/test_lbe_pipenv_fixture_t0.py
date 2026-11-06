@@ -205,3 +205,43 @@ def test_forged_file_snapshot_flags_cannot_authorize_native(fixture):
     )
     with pytest.raises(LbePipenvFixtureT0Denied):
         authorize_native_pipenv_from_t0(candidate)
+
+
+
+# D7 RED: a bounded private Python executable may be larger than the
+# 1 MiB cap for metadata text. These are NON-PYTHON fixture bytes and
+# MUST never be loaded or spawned.
+def test_d7_large_fake_python_file_stream_snapshot_no_execute(fixture, monkeypatch):
+    root, expected = fixture
+    payload = b"D7-NOT-A-REAL-PYTHON-IMAGE\n" * 90000
+    assert len(payload) > 1024 * 1024
+    path = root / ".venv/bin/python"
+    path.write_bytes(payload)
+    path.chmod(0o700)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("T0 source hashing may not launch a process or network")
+
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", forbidden)
+        m.setattr(subprocess, "run", forbidden)
+        m.setattr(socket, "socket", forbidden)
+        snap = _check({**expected, "expected_python_sha256": _sha(payload)})
+    assert snap.python_file_sha256 == _sha(payload)
+    assert snap.native_launch_allowed is False
+    assert snap.product_apply_allowed is False
+    with pytest.raises(LbePipenvFixtureT0Denied, match="PIPENV_NATIVE=NOT_RUN"):
+        authorize_native_pipenv_from_t0(snap)
+
+
+@pytest.mark.parametrize("text_path,expected_key", [
+    ("Pipfile.lock", "expected_lock_sha256"),
+    (".venv/pyvenv.cfg", "expected_pyvenv_cfg_sha256"),
+])
+def test_d7_large_text_source_keeps_small_metadata_limit(fixture, text_path, expected_key):
+    root, expected = fixture
+    # Exactly one byte beyond the existing 1 MiB *text* limit.
+    payload = b"x" * (1024 * 1024 + 1)
+    (root / text_path).write_bytes(payload)
+    with pytest.raises(LbePipenvFixtureT0Denied, match="oversized"):
+        _check({**expected, expected_key: _sha(payload)})

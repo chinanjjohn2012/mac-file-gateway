@@ -1999,3 +1999,50 @@ def test_r006_untrusted_python_parent_refused_by_rest_and_mcp(scene, cwd):
     finally:
         root.chmod(0o755)
         svc.close()
+
+
+@pytest.mark.parametrize("poison", ["workspace", "source_directory"])
+def test_r006_source_ancestor_mutated_after_plan_rejected_before_private_popen(
+    scene, monkeypatch, poison,
+):
+    """The real trusted launcher must replan before even a fake Popen call."""
+    from gateway.lbe_native_launcher import make_trusted_lbe_launcher
+    from gateway.lbe_plan import prepare_lbe_work_plan
+    from gateway.lbe_worker import LbeNoChildStarted
+
+    a, b, _private, _runtime = scene
+    src = a / "go-project" / "src"
+    src.mkdir()
+    (src / "safe.py").write_text("print('source')\n")
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    argv = ["python", "src/safe.py"]
+    changed = a if poison == "workspace" else src
+    launches = []
+    try:
+        ctx = svc.require_exec("a")
+        plan = prepare_lbe_work_plan(ctx, cwd="go-project", argv=argv)
+        assert plan.planned_script_sha256 is not None
+        changed.chmod(0o777)
+
+        def forbidden_popen(*_args, **_kwargs):
+            launches.append(True)
+            raise AssertionError("an unsafe source parent must never reach Popen")
+
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", forbidden_popen)
+            with pytest.raises(LbeNoChildStarted):
+                make_trusted_lbe_launcher(ctx)(plan)
+        assert launches == []
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+        with pytest.raises(GatewayError) as denied:
+            svc.invoke_exec("a", "go-project", argv, dry_run=False)
+        assert denied.value.code == "exec_cleanup_proof_required"
+
+        changed.chmod(0o755)
+        again = svc.invoke_exec("a", "go-project", argv, dry_run=True)
+        assert again["status"] == "preview"
+        assert again["planned_script_sha256"] == plan.planned_script_sha256
+    finally:
+        changed.chmod(0o755)
+        svc.close()

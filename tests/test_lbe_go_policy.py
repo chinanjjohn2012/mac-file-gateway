@@ -280,3 +280,41 @@ def test_r006_go_output_parent_accepts_safe_owner_directories(project, mode):
     result = plan(project, ["go", "build", "-o", "bin/app", "./cmd/server"])
     assert result.output_relative_to_workspace == "go-project/bin/app"
     assert not (project / "go-project" / "bin" / "app").exists()
+
+
+# r006 selected Go source directory admission, no compiler or subprocess.
+# The no -o case must not silently skip owner-controlled cwd checks.
+@pytest.mark.parametrize("verb", ["test", "vet", "build"])
+@pytest.mark.parametrize("target", ["workspace", "go-project", "cmd"])
+@pytest.mark.parametrize("mode", [0o777, 0o775])
+def test_r006_go_without_output_rejects_mutable_project_ancestors(
+    project, verb, target, mode,
+):
+    path = (project if target == "workspace" else
+            project / "go-project" if target == "go-project" else
+            project / "go-project" / "cmd")
+    path.chmod(mode)
+    try:
+        with pytest.raises(GoPolicyError, match="owner-controlled"):
+            plan(project, ["go", verb, "./..."], cwd="go-project/cmd")
+    finally:
+        path.chmod(0o755)
+
+
+@pytest.mark.parametrize("verb", ["test", "vet", "build"])
+@pytest.mark.parametrize("mode", [0o700, 0o755])
+def test_r006_go_without_output_valid_owner_dirs_still_preview(
+    project, verb, mode,
+):
+    (project / "go-project" / "cmd").chmod(mode)
+    approved = plan(project, ["go", verb, "./..."], cwd="go-project/cmd")
+    assert approved.argv == ("go", verb, "./...")
+    assert approved.runner == "direct"
+    assert approved.output_relative_to_workspace is None
+
+
+def test_r006_go_without_output_cwd_symlink_rejected_at_source_admission(project):
+    (project / "go-project" / "linked").symlink_to(
+        "cmd", target_is_directory=True)
+    with pytest.raises(GoPolicyError):
+        plan(project, ["go", "test", "./..."], cwd="go-project/linked")

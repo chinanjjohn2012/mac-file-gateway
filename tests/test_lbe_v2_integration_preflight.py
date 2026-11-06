@@ -2046,3 +2046,50 @@ def test_r006_source_ancestor_mutated_after_plan_rejected_before_private_popen(
     finally:
         changed.chmod(0o755)
         svc.close()
+
+
+def test_r006_go_without_output_source_parent_denied_across_transports(scene):
+    """Real Direct/REST/official MCP fail closed; F1 positive still denied."""
+    pytest.importorskip("mcp")
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    project = a / "go-project"
+    project.chmod(0o777)
+    args = {"workspace": "a", "cwd": "go-project",
+            "argv": ["go", "test", "./..."], "timeout_seconds": 5}
+    hdr = {"Accept": "application/json, text/event-stream",
+           "Content-Type": "application/json"}
+    try:
+        with pytest.raises(GatewayError) as blocked:
+            svc.invoke_exec("a", "go-project", args["argv"])
+        assert blocked.value.code == "command_not_allowed"
+        with pytest.raises(GatewayError) as hard_stop:
+            svc.invoke_exec("a", "go-project", args["argv"], dry_run=False)
+        assert hard_stop.value.code == "exec_cleanup_proof_required"
+        with TestClient(create_multi_app(svc),
+                        base_url="http://127.0.0.1:8765") as client:
+            rest = client.post("/run", json=args)
+            assert rest.status_code != 200
+            assert rest.json()["error"] == "command_not_allowed"
+            init = client.post("/mcp", headers=hdr, json={
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25",
+                           "capabilities": {},
+                           "clientInfo": {"name": "go-source-preflight", "version": "1"}},
+            })
+            assert init.status_code == 200
+            client.post("/mcp", headers=hdr, json={
+                "jsonrpc": "2.0", "method": "notifications/initialized"})
+            response = client.post("/mcp", headers=hdr, json={
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "run_command", "arguments": args},
+            })
+            assert response.status_code == 200
+            result = response.json()["result"]
+            assert result["isError"] is True
+            assert result["structuredContent"]["error"] == "command_not_allowed"
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        project.chmod(0o755)
+        svc.close()

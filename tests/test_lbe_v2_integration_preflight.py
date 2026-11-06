@@ -673,6 +673,7 @@ def test_v1_public_policy_has_no_v2_keys(scene):
         assert "config_schema_version" not in info
         assert "mode" not in info["exec_policy"]
         assert "candidate_mode" not in info["exec_policy"]
+        assert "supported_preview_commands" not in info["exec_policy"]
     finally:
         svc.close()
 
@@ -1163,6 +1164,12 @@ def test_d4_all_three_ingresses_same_plan_and_f1_denial_no_native(
                 assert policies[0] == policies[1]
                 assert policies[0]["available"] is False
                 assert policies[0]["completion_capability"] == "none"
+                supported = policies[0]["supported_preview_commands"]
+                assert "go build ./..." in supported
+                assert "go build -o <relative-output> ./package" in supported
+                assert "python -m pytest" in supported
+                assert "python <relative-script.py>" in supported
+                assert policies[0]["available"] is False
             assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
         assert sorted(p.name for p in state.iterdir()) == originals
         assert not (a / "go-project" / "bin" / "app").exists()

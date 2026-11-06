@@ -585,6 +585,19 @@ class WorkspaceService:
                         "max_concurrent_per_workspace": 1,
                         "max_concurrent_total": 4,
                         "dry_run_default": True,
+                        # Discovery is for NONSPAWNING validated commands only.
+                        # It is not an operative Exec grant and does not mean
+                        # the current owner/source/native gates have passed.
+                        **({"supported_preview_commands": [
+                            "pytest",
+                            "python -m pytest",
+                            "python -m compileall",
+                            "python <relative-script.py>",
+                            "go test ./...",
+                            "go vet ./...",
+                            "go build ./...",
+                            "go build -o <relative-output> ./package",
+                        ]} if is_v2 else {}),
                         "warning": (
                             "Best-effort Exec runs project code as the Gateway OS user; "
                             "direct-child exit, timeout or cancellation never proves "

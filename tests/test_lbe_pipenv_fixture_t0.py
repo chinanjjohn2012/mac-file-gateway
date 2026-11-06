@@ -266,3 +266,68 @@ def test_d7_python_byte_limit_remains_bounded(fixture, monkeypatch):
         m.setattr(subject, "_MAX_PYTHON_EXECUTABLE_BYTES", 16)
         with pytest.raises(LbePipenvFixtureT0Denied, match="oversized"):
             _check(expected)
+
+
+
+# r006: six deterministic original-FD metadata mutation regressions.
+# Test-only os.read hook mutates disposable first-party fake bytes AFTER the
+# source code's pre-read fstat but BEFORE post-read fstat. Never spawn code.
+@pytest.mark.parametrize("relative", [
+    "Pipfile", "Pipfile.lock", ".venv/pyvenv.cfg",
+])
+@pytest.mark.parametrize("mutation", ["chmod", "hardlink"])
+def test_r006_inflight_pipenv_metadata_mutation_is_rejected(
+    fixture, monkeypatch, relative, mutation,
+):
+    root, expected = fixture
+    target = root / relative
+    identity = target.stat()
+    real_read = os.read
+    touched = []
+
+    def read_then_modify(fd, count):
+        data = real_read(fd, count)
+        if (data and not touched
+                and os.fstat(fd).st_dev == identity.st_dev
+                and os.fstat(fd).st_ino == identity.st_ino):
+            touched.append(fd)
+            if mutation == "chmod":
+                target.chmod(0o666)
+            else:
+                os.link(target, root / "race-added-hardlink")
+        return data
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "read", read_then_modify)
+        with pytest.raises(LbePipenvFixtureT0Denied,
+                           match="fixture inode changed during read"):
+            _check(expected)
+
+    assert len(touched) == 1, "the original open FD was really inspected"
+    with pytest.raises(OSError):
+        os.fstat(touched[0])  # error path closes the selected file descriptor
+    final = target.stat()
+    if mutation == "chmod":
+        assert final.st_mode & 0o022
+    else:
+        assert final.st_nlink == 2
+
+
+@pytest.mark.parametrize("relative,field", [
+    ("Pipfile", "expected_pipfile_sha256"),
+    ("Pipfile.lock", "expected_lock_sha256"),
+    (".venv/pyvenv.cfg", "expected_pyvenv_cfg_sha256"),
+])
+def test_r006_unchanged_one_mib_pipenv_metadata_is_allowed(
+    fixture, relative, field,
+):
+    root, expected = fixture
+    target = root / relative
+    original = target.read_bytes()
+    assert len(original) < 1024 * 1024
+    data = original + b" " * (1024 * 1024 - len(original))
+    target.write_bytes(data)
+    result = _check({**expected, field: _sha(data)})
+    assert result.file_snapshot_observed is True
+    assert result.native_launch_allowed is False
+    assert result.product_apply_allowed is False

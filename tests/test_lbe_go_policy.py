@@ -257,3 +257,26 @@ def test_gateway_output_policy_must_return_exact_boolean_true(project):
                 exec_paths=("go-project",),
                 output_allowed=lambda _parts: answer,
             )
+
+
+# r006: Go build output planning must reject untrusted project directories.
+# No compiler or native Go executable is launched by these source-only tests.
+@pytest.mark.parametrize("mode", [0o777, 0o775, 0o733])
+@pytest.mark.parametrize("target_dir", ["bin", "go-project"])
+def test_r006_go_output_parent_requires_owner_control(project, mode, target_dir):
+    selected = (project / "go-project" / "bin"
+                if target_dir == "bin" else project / "go-project")
+    selected.chmod(mode)
+    try:
+        with pytest.raises(GoPolicyError, match="owner-controlled"):
+            plan(project, ["go", "build", "-o=bin/app", "./cmd/server"])
+    finally:
+        selected.chmod(0o755)
+
+
+@pytest.mark.parametrize("mode", [0o700, 0o755])
+def test_r006_go_output_parent_accepts_safe_owner_directories(project, mode):
+    (project / "go-project" / "bin").chmod(mode)
+    result = plan(project, ["go", "build", "-o", "bin/app", "./cmd/server"])
+    assert result.output_relative_to_workspace == "go-project/bin/app"
+    assert not (project / "go-project" / "bin" / "app").exists()

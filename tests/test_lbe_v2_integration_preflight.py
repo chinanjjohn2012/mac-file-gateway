@@ -1802,3 +1802,53 @@ def test_r006_cancel_bridge_preserves_gateway_error_from_sync_gate(
         assert denied.value.code == "exec_cleanup_proof_required"
 
     anyio.run(scenario)
+
+
+# r006: Direct/REST/MCP real planning, with no Go process and F1 apply denied.
+def test_r006_go_output_parent_permission_denied_across_all_transports(scene):
+    pytest.importorskip("mcp")
+    a, b, _private, _runtime = scene
+    output_parent = a / "go-project" / "bin"
+    output_parent.mkdir()
+    output_parent.chmod(0o777)
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    argv = ["go", "build", "-o=bin/app", "./cmd/app"]
+    args = {"workspace": "a", "cwd": "go-project", "argv": argv,
+            "timeout_seconds": 5}
+    headers = {"Accept": "application/json, text/event-stream",
+               "Content-Type": "application/json"}
+    try:
+        with pytest.raises(GatewayError) as denied:
+            svc.invoke_exec("a", "go-project", argv)
+        assert denied.value.code == "command_not_allowed"
+        with TestClient(create_multi_app(svc),
+                        base_url="http://127.0.0.1:8765") as client:
+            rest = client.post("/run", json=args)
+            assert rest.status_code != 200
+            assert rest.json()["error"] == "command_not_allowed"
+            initialized = client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25",
+                           "capabilities": {},
+                           "clientInfo": {"name": "r006-output-dir", "version": "1"}},
+            })
+            assert initialized.status_code == 200
+            client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "method": "notifications/initialized"})
+            blocked = client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "run_command", "arguments": args},
+            })
+            assert blocked.status_code == 200
+            result = blocked.json()["result"]
+            assert result["isError"] is True
+            assert result["structuredContent"]["error"] == "command_not_allowed"
+        with pytest.raises(GatewayError) as apply:
+            svc.invoke_exec("a", "go-project", argv, dry_run=False)
+        assert apply.value.code == "exec_cleanup_proof_required"
+        assert not (output_parent / "app").exists()
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+        output_parent.chmod(0o755)

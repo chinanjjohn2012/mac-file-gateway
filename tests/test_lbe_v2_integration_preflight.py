@@ -1890,3 +1890,112 @@ def test_r006_read_only_reflects_internal_exec_authority_not_preview(scene):
     finally:
         svc._lbe_positive_authorized = False
         svc.close()
+
+
+# Product prelaunch: selected Python/Pipenv source directory owner control.
+# These are nonspawning real shared preview tests, not native T1.
+@pytest.mark.parametrize("cwd,poison,mode", [
+    ("go-project", "workspace", 0o777),
+    ("go-project", "project", 0o775),
+    ("python-project", "workspace", 0o777),
+    ("python-project", "project", 0o775),
+])
+def test_r006_source_parent_writable_refused_by_live_preview(scene, cwd, poison, mode):
+    a, b, _private, _runtime = scene
+    (a / cwd / "hello.py").write_text("print('fixture')\n")
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    target = a if poison == "workspace" else a / cwd
+    target.chmod(mode)
+    try:
+        with pytest.raises(GatewayError) as exc:
+            svc.invoke_exec("a", cwd, ["python", "hello.py"])
+        assert exc.value.code == "runner_unavailable"
+        with pytest.raises(GatewayError) as denied:
+            svc.invoke_exec("a", cwd, ["python", "hello.py"], dry_run=False)
+        assert denied.value.code == "exec_cleanup_proof_required"
+    finally:
+        target.chmod(0o755)
+        svc.close()
+
+
+@pytest.mark.parametrize("mode", [0o777, 0o775])
+def test_r006_nested_python_source_parent_writable_refused(scene, mode):
+    a, b, _private, _runtime = scene
+    nested = a / "go-project" / "src" / "deep"
+    nested.mkdir(parents=True)
+    (nested / "hello.py").write_text("print('fixture')\n")
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    parent = nested.parent
+    parent.chmod(mode)
+    try:
+        with pytest.raises(GatewayError) as denied:
+            svc.invoke_exec("a", "go-project", ["python", "src/deep/hello.py"])
+        assert denied.value.code == "runner_unavailable"
+    finally:
+        parent.chmod(0o755)
+        svc.close()
+
+
+@pytest.mark.parametrize("mode", [0o700, 0o755])
+def test_r006_nested_python_source_safe_parent_preview_succeeds(scene, mode):
+    import hashlib
+    a, b, _private, _runtime = scene
+    nested = a / "go-project" / "src" / "deep"
+    nested.mkdir(parents=True)
+    script = nested / "hello.py"
+    script.write_text("print('fixture')\n")
+    nested.parent.chmod(mode)
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        preview = svc.invoke_exec("a", "go-project", ["python", "src/deep/hello.py"])
+        assert preview["executed"] is False
+        assert preview["status"] == "preview"
+        assert preview["planned_script_sha256"] == hashlib.sha256(
+            script.read_bytes()).hexdigest()
+    finally:
+        nested.parent.chmod(0o755)
+        svc.close()
+
+
+@pytest.mark.parametrize("cwd", ["go-project", "python-project"])
+def test_r006_untrusted_python_parent_refused_by_rest_and_mcp(scene, cwd):
+    pytest.importorskip("mcp")
+    a, b, _private, _runtime = scene
+    (a / cwd / "hello.py").write_text("print('fixture')\n")
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    root = a / cwd
+    root.chmod(0o777)
+    args = {"workspace": "a", "cwd": cwd,
+            "argv": ["python", "hello.py"], "timeout_seconds": 5}
+    hdr = {"Accept": "application/json, text/event-stream",
+           "Content-Type": "application/json"}
+    try:
+        with TestClient(create_multi_app(svc),
+                        base_url="http://127.0.0.1:8765") as client:
+            rest = client.post("/run", json=args)
+            assert rest.status_code != 200
+            assert rest.json()["error"] == "runner_unavailable"
+            init = client.post("/mcp", headers=hdr, json={
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25",
+                           "capabilities": {},
+                           "clientInfo": {"name": "source-parent", "version": "1"}},
+            })
+            assert init.status_code == 200
+            client.post("/mcp", headers=hdr, json={
+                "jsonrpc": "2.0", "method": "notifications/initialized"})
+            resp = client.post("/mcp", headers=hdr, json={
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "run_command", "arguments": args},
+            })
+            assert resp.status_code == 200
+            msg = resp.json()["result"]
+            assert msg["isError"] is True
+            assert msg["structuredContent"]["error"] == "runner_unavailable"
+    finally:
+        root.chmod(0o755)
+        svc.close()

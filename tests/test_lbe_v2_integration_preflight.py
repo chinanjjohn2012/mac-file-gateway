@@ -232,6 +232,43 @@ def test_v2_existing_healthy_state_previews_and_refuses_invalid_apply(scene, mon
         svc.close()
 
 
+def test_r006_info_discloses_preview_separately_from_positive_apply(scene):
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        policy = svc.info()["exec_policy"]
+        assert policy["mode"] == "local_best_effort"
+        assert policy["enabled"] is True
+        assert policy["preview_available"] is True
+        assert policy["available"] is False
+        assert policy["completion_capability"] == "none"
+        with TestClient(create_multi_app(svc, enable_mcp=False),
+                        base_url="http://127.0.0.1:8765") as client:
+            assert client.get("/health").json()["exec_policy"] == svc.info()["exec_policy"]
+            assert client.get("/info").json()["exec_policy"] == svc.info()["exec_policy"]
+        # No native child: emulate a busy synchronous request lease.
+        with svc._lifecycle:
+            svc._exec_active.add("a")
+        assert svc.info()["exec_policy"]["preview_available"] is False
+        with svc._lifecycle:
+            svc._exec_active.remove("a")
+        assert svc.info()["exec_policy"]["preview_available"] is True
+    finally:
+        svc.close()
+
+
+def test_r006_unhealthy_v2_info_does_not_claim_preview(scene):
+    a, b, _private, _runtime = scene
+    svc = service(scene, v2_config(a, b))
+    try:
+        policy = svc.info()["exec_policy"]
+        assert policy["preview_available"] is False
+        assert policy["available"] is False
+    finally:
+        svc.close()
+
+
 def test_v2_auto_pipenv_disabled_for_unconfigured_cwd_and_go(scene):
     a, b, _private, _runtime = scene
     prime_existing_state(scene)

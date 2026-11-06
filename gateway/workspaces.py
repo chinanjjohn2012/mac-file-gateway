@@ -565,6 +565,13 @@ class WorkspaceService:
             v2_available = bool(
                 v2_state_healthy and self._lbe_positive_authorized and
                 self._lbe_owner.can_admit_any(eligible_names))
+            # A healthy schema-v2 service may support an entirely
+            # nonspawning plan even though positive Exec remains F1-denied.
+            # Preview requests share the synchronous request slot gate, not
+            # the original-child lease; never imply native launch authority.
+            v2_preview_available = bool(
+                v2_state_healthy and eligible_names
+                and len(self._exec_active) < 4)
             return {"name": "Mac File Gateway", "version": "2.5.0", "mode": "multi",
                     "workspace_count": len(self._workspaces),
                     **({"config_schema_version": 2}
@@ -582,6 +589,8 @@ class WorkspaceService:
                            if self._lbe_owner is not None else {}),
                         "enabled": self.settings.exec_enabled,
                         "available": v2_available if is_v2 else False,
+                        **({"preview_available": v2_preview_available}
+                           if is_v2 else {}),
                         "completion_capability": (
                             "best_effort" if (v2_state_healthy
                                               and self._lbe_positive_authorized)

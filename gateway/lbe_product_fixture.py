@@ -94,7 +94,7 @@ class D4OneUseAttemptMarker:
     is outside this in-memory primitive.
     """
     __slots__ = ("_candidate", "_ctx", "_pid", "_lock",
-                 "_consumed", "_staged", "_runner", "_macho_set")
+                 "_consumed", "_staged", "_runner", "_macho_set", "_dylib")
 
     def __init__(self, candidate: D4FixtureCandidate,
                  ctx: "WorkspaceContext", *,
@@ -161,6 +161,7 @@ class D4OneUseAttemptMarker:
         self._staged = staged_source
         self._runner = None
         self._macho_set = None
+        self._dylib = None
         self._pid = os.getpid()
         self._lock = threading.Lock()
         self._consumed = False
@@ -200,6 +201,26 @@ class D4OneUseAttemptMarker:
                 raise D4FixtureDenied("loader-set prelaunch binding drift") from None
             self._macho_set = binding
 
+    def attach_private_dylib_sources(self, binding: object) -> None:
+        """Bind source-only private Mach-O dylib references exactly once.
+
+        Only the service's exact D4PrivateDylibSourceRecheck may attach.
+        A plain record, custom callback, client value or claim of loaded
+        code cannot grant Exec; unknown system libraries remain unproven.
+        """
+        from .lbe_dylib_sources import D4PrivateDylibSourceRecheck
+
+        if type(binding) is not D4PrivateDylibSourceRecheck:
+            raise D4FixtureDenied("private dynamic loader binding must be internal")
+        with self._lock:
+            if self._consumed or self._dylib is not None:
+                raise D4FixtureDenied("private loader graph already bound or burned")
+            try:
+                binding.check_binding(self._ctx, self._candidate.plan)
+            except Exception:
+                raise D4FixtureDenied("private loader binding drift") from None
+            self._dylib = binding
+
     def consume_for(self, plan: LbeWorkPlan) -> None:
         """Burn once, then recheck source and plan BEFORE possible spawn."""
         with self._lock:
@@ -230,6 +251,8 @@ class D4OneUseAttemptMarker:
                 self._runner.recheck_for(self._ctx, self._candidate.plan)
             if self._macho_set is not None:
                 self._macho_set.recheck_for(self._ctx, self._candidate.plan)
+            if self._dylib is not None:
+                self._dylib.recheck_for(self._ctx, self._candidate.plan)
         except D4FixtureDenied:
             raise
         except Exception:

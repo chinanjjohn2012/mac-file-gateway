@@ -848,7 +848,39 @@ class WorkspaceService:
                 or current.directory_identity != candidate.directory_identity):
             raise GatewayError(
                 "runner_unavailable", "D4 fixture drifted during assembly.")
-        return (*prepared, tuple(stage_receipts))
+        # Runtime source trees are already closed against these exact bytes.
+        # Resolve only PRIVATE Mach-O library references actually present in
+        # the operator-staged Go/lib directories; a synthetic @rpath or
+        # unpinned host/system library is an explicit unqualified gap, NOT
+        # independent dyld loading proof or execution permission.
+        private_dylibs = tuple(sorted(
+            (kind + "/" + leaf, digest)
+            for kind, rows in staged_manifests.items()
+            for leaf, digest in rows
+            if type(leaf) is str and leaf.endswith(".dylib")
+            and type(digest) is str
+        ))
+        from .lbe_dylib_sources import (
+            D4PrivateDylibDenied, D4PrivateDylibSourceRecheck,
+            inspect_d4_private_dylib_candidates,
+        )
+        from .lbe_product_fixture import D4FixtureDenied
+
+        try:
+            graph = inspect_d4_private_dylib_candidates(
+                prepared[5], private_root=private_root,
+                expected_private_dylibs=private_dylibs)
+            ctx = self.get(name)
+            binding = D4PrivateDylibSourceRecheck(
+                ctx, current.plan, prepared[5], graph,
+                private_root=private_root,
+                expected_private_dylibs=private_dylibs)
+            prepared[1].attach_private_dylib_sources(binding)
+        except (D4PrivateDylibDenied, D4FixtureDenied):
+            raise GatewayError(
+                "runner_unavailable", "D4 private native dylib source unqualified."
+            ) from None
+        return (*prepared, graph, tuple(stage_receipts))
 
     def _prepare_d4_r003_selected_macho_source(
         self, name: str, cwd: str, argv: list[str], *,

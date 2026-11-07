@@ -1999,8 +1999,9 @@ def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
 
     import struct
 
-    def private_macho(label):
-        install = ("/usr/lib/" + label + ".dylib").encode("ascii") + b"\x00"
+    def private_macho(label, *, install_name=None):
+        install = (install_name or ("/usr/lib/" + label + ".dylib")).encode(
+            "ascii") + b"\x00"
         size = (24 + len(install) + 3) & ~3
         cmd = (struct.pack("<III", 0x0C, size, 24) + b"\x00" * 12
                + install + b"\x00" * (size - 24 - len(install)))
@@ -2021,8 +2022,12 @@ def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
         needed_scratch = {"home", "tmp", "gopath", "modcache", "gocache", "gotmp"}
     elif kind == "python_direct":
         trees_data = {
-            "bin": {"python": private_macho("Python")},
-            "lib": {"python/stdlib.py": b"x=1\n"},
+            "bin": {"python": private_macho(
+                "Python", install_name="@loader_path/../lib/libPrivate.dylib")},
+            "lib": {
+                "python/stdlib.py": b"x=1\n",
+                "libPrivate.dylib": private_macho("PrivateLib"),
+            },
         }
         needed_scratch = {"home", "tmp"}
     else:
@@ -2058,7 +2063,7 @@ def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
         m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
         m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
             _ for _ in ()).throw(AssertionError("no native child in T0")))
-        candidate, marker, observed, recipe, runner, native, receipts = (
+        candidate, marker, observed, recipe, runner, native, graph, receipts = (
             service._assemble_d4_r003_source_only_runner(
                 "a", cwd, argv, private_root=str(private),
                 provisioner_root=str(provisioner),
@@ -2083,6 +2088,13 @@ def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
         assert all(item.selected_cpu == "arm64"
                    and item.native_launch_allowed is False
                    for _, item in native.static_selected_executables)
+        assert graph.native_launch_allowed is False
+        assert graph.dynamically_loaded_all_sources_proven is False
+        if kind == "python_direct":
+            assert tuple(path for path, _ in graph.private_native_images) == (
+                "lib/libPrivate.dylib",)
+        else:
+            assert graph.private_native_images == ()
         result = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher).run(
             candidate.plan, product_attempt=marker)
         assert result["status"] == "launch_failed"
@@ -2468,3 +2480,59 @@ def test_d4_product_bundle_rejects_hash_matched_non_macho_go_compiler(
             service.invoke_exec("a", "go-project", ["go", "test", "./..."],
                                 dry_run=False)
         assert public.value.code == "exec_cleanup_proof_required"
+
+
+def test_d4_private_dylib_recheck_burns_one_use_attempt_before_launcher(
+        product_service, monkeypatch):
+    import hashlib
+    import struct
+    from gateway import lbe_dylib_sources
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, workspace = product_service
+    private = workspace.parent.parent
+    provisioner = private.parent / (private.name + "-operator")
+    (provisioner / "bin").mkdir(parents=True)
+    (provisioner / "lib").mkdir()
+
+    def macho(name):
+        path = name.encode("ascii") + b"\x00"
+        size = (24 + len(path) + 3) & ~3
+        command = (struct.pack("<III", 0x0C, size, 24)
+                   + b"\x00" * 12 + path
+                   + b"\x00" * (size - 24 - len(path)))
+        return (struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C,
+                            0, 2, 1, len(command), 0, 0) + command)
+
+    (provisioner / "bin/python").write_bytes(
+        macho("@loader_path/../lib/libPrivate.dylib"))
+    (provisioner / "bin/python").chmod(0o700)
+    (provisioner / "lib/libPrivate.dylib").write_bytes(
+        macho("/usr/lib/libSystem.B.dylib"))
+    (provisioner / "lib/libPrivate.dylib").chmod(0o700)
+    manifests = {
+        "bin": _d4_tree_expected(provisioner / "bin"),
+        "lib": _d4_tree_expected(provisioner / "lib"),
+    }
+    launched = []
+    def impossible(_plan):
+        launched.append(True)
+        raise AssertionError("private dylib graph drift cannot spawn")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, marker, _source, _recipe, _runner, _macho, graph, _receipts = (
+            service._assemble_d4_r003_source_only_runner(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                private_root=str(private),
+                provisioner_root=str(provisioner),
+                staged_manifests=manifests))
+        assert len(graph.private_native_images) == 1
+        m.setattr(lbe_dylib_sources, "inspect_d4_private_dylib_candidates",
+                  lambda *_a, **_kw: replace(
+                      graph, unresolved_dynamic_loader_names=("changed",)))
+        with pytest.raises(LbeWorkerError) as denied:
+            LbeWorker(DirectChildOwner(), launcher=impossible).run(
+                candidate.plan, product_attempt=marker)
+        assert denied.value.code == "attempt_replay_denied"
+    assert launched == []

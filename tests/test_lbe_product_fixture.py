@@ -4063,3 +4063,131 @@ def test_d4_go_active_arch_and_unknown_suffix_imports_are_checked(
         inspect_d4_go_direct_import_sources(
             service.get("a"), candidate,
             staged_go_manifest=(("src/fmt/print.go", "a" * 64),))
+
+
+
+def test_d4_go_build_ignores_only_test_imports_and_selects_darwin_stdlib(
+        product_service, monkeypatch):
+    """Real WorkspaceService build source selection, never native go build."""
+    from gateway.lbe_go_import_sources import inspect_d4_go_direct_import_sources
+
+    service, workspace = product_service
+    project = workspace / "go-project"
+    (project / "cmd/app/main.go").write_bytes(
+        b'package main\nimport "fmt"\nfunc main() {fmt.Println("ok")}\n')
+    (project / "cmd/app/main_test.go").write_bytes(
+        b'package main\nimport "unapproved.example/test-only"\n')
+    stage = (
+        ("src/fmt/print.go", "a" * 64),
+        ("src/fmt/print_darwin_arm64.go", "b" * 64),
+        ("src/fmt/print_linux.go", "c" * 64),
+        ("src/fmt/print_windows_arm64.go", "d" * 64),
+        ("src/fmt/print_test.go", "e" * 64),
+    )
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_k: (
+            _ for _ in ()).throw(AssertionError("T0 cannot launch Go")))
+        candidate, marker = service._prepare_d4_r003_attempt(
+            "a", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"])
+        actual = inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate, staged_go_manifest=stage)
+        assert actual.selected_go_command == "build"
+        assert actual.selected_imports == ("fmt",)
+        assert actual.stdlib_stage_members == (
+            ("fmt", ("src/fmt/print.go",
+                     "src/fmt/print_darwin_arm64.go")),)
+        assert actual.inactive_first_party_sources == (
+            "go-project/cmd/app/main_test.go",)
+        assert actual.stdlib_build_constraints_proven is False
+        assert actual.transitive_import_closure_proven is False
+        assert actual.native_launch_allowed is False
+        assert "go-project/cmd/app/main_test.go" in dict(candidate.source_sha256)
+        marker.consume_for(candidate.plan)
+        with pytest.raises(GatewayError) as exc:
+            service.invoke_exec(
+                "a", "go-project",
+                ["go", "build", "-o", "bin/app", "./cmd/app"],
+                dry_run=False)
+        assert exc.value.code == "exec_cleanup_proof_required"
+    assert not (project / "bin/app").exists()
+
+
+@pytest.mark.parametrize("argv", [
+    ["go", "test", "./..."],
+    ["go", "vet", "./..."],
+])
+def test_d4_go_test_and_vet_include_test_only_imports(
+        product_service, argv):
+    from gateway.lbe_go_import_sources import (
+        D4GoImportSourceDenied, inspect_d4_go_direct_import_sources,
+    )
+
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/main_test.go").write_bytes(
+        b'package main\nimport "unapproved.example/test-only"\n')
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", argv)
+    with pytest.raises(D4GoImportSourceDenied):
+        inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate, staged_go_manifest=())
+
+
+def test_d4_go_build_first_party_package_excludes_test_files(
+        product_service):
+    from gateway.lbe_go_import_sources import inspect_d4_go_direct_import_sources
+
+    service, workspace = product_service
+    project = workspace / "go-project"
+    (project / "pkg/util").mkdir(parents=True)
+    (project / "pkg/util/value.go").write_bytes(
+        b"package util\nconst Value = 2\n")
+    (project / "pkg/util/value_test.go").write_bytes(
+        b'package util\nimport "unapproved.example/test-only"\n')
+    (project / "cmd/app/main.go").write_bytes(
+        b'package main\nimport "firstparty.test/app/pkg/util"\n')
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"])
+    record = inspect_d4_go_direct_import_sources(
+        service.get("a"), candidate, staged_go_manifest=())
+    assert record.selected_imports == ("firstparty.test/app/pkg/util",)
+    assert record.first_party_members == (
+        ("firstparty.test/app/pkg/util", ("go-project/pkg/util/value.go",)),)
+    assert record.inactive_first_party_sources == (
+        "go-project/pkg/util/value_test.go",)
+
+
+def test_d4_go_testdata_go_source_is_pinned_but_not_built(product_service):
+    from gateway.lbe_go_import_sources import inspect_d4_go_direct_import_sources
+
+    service, workspace = product_service
+    project = workspace / "go-project"
+    (project / "pkg/util/testdata").mkdir(parents=True)
+    (project / "pkg/util/testdata/shadow.go").write_bytes(
+        b'package fixture\nimport "unknown.example/unbuilt"\n')
+    (project / "pkg/util/value.go").write_bytes(
+        b"package util\nconst Value=7\n")
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    record = inspect_d4_go_direct_import_sources(
+        service.get("a"), candidate, staged_go_manifest=())
+    assert record.selected_imports == ()
+    assert record.inactive_first_party_sources == (
+        "go-project/pkg/util/testdata/shadow.go",)
+    assert "go-project/pkg/util/testdata/shadow.go" in dict(candidate.source_sha256)
+
+
+def test_d4_go_stdlib_manifest_cannot_claim_unpinned_candidate(
+        product_service):
+    from gateway.lbe_go_import_sources import (
+        D4GoImportSourceDenied, inspect_d4_go_direct_import_sources,
+    )
+
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/main.go").write_bytes(
+        b'package main\nimport "fmt"\n')
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"])
+    with pytest.raises(D4GoImportSourceDenied):
+        inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate,
+            staged_go_manifest=(("src/fmt/print.go", "invalid"),))

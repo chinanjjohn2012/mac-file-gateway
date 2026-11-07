@@ -33,6 +33,11 @@ class D4GoDirectImportObservation:
     # Still hash and recheck inactive sources; only their direct import
     # strings are excluded from this Darwin ARM64 static selection.
     inactive_first_party_sources: tuple[str, ...] = ()
+    selected_go_command: str = ""
+    # This is filename-only stdlib source selection from the full pinned
+    # staged archive. Go's actual stdlib build tags, generated inputs and
+    # transitive import graph remain unverified by SOURCE/T0.
+    stdlib_build_constraints_proven: bool = False
     target_goos: str = "darwin"
     target_goarch: str = "arm64"
     build_constraint_closure_proven: bool = False
@@ -413,6 +418,16 @@ def inspect_d4_go_direct_import_sources(
             or len(id_rows) != len(candidate.source_identity)
             or set(rows) != set(id_rows)):
         raise D4GoImportSourceDenied("selected first-party source list ambiguous")
+    requested = candidate.plan.requested_argv
+    if (type(requested) is not tuple or len(requested) < 3
+            or requested[0] != "go"
+            or requested[1] not in ("build", "test", "vet")
+            or type(candidate.plan.effective_argv) is not tuple
+            or candidate.plan.effective_argv != requested):
+        raise D4GoImportSourceDenied("unqualified Go action for source selection")
+    # go build ignores *_test.go. go test and go vet can inspect test
+    # sources; our static selection must not silently omit their imports.
+    go_action = requested[1]
     stage_files: dict[str, str] = {}
     for item in staged_go_manifest:
         if (type(item) is not tuple or len(item) != 2
@@ -446,7 +461,9 @@ def inspect_d4_go_direct_import_sources(
                 # change in either bytes or name needs a fresh candidate.
                 raw = _selected_bytes(project_fd, path[len("go-project/"):],
                                       rows[path], id_rows[path])
-                if not _darwin_arm64_filename_selected(path):
+                if (not _darwin_arm64_filename_selected(path)
+                        or (go_action == "build" and path.endswith("_test.go"))
+                        or "/testdata/" in path):
                     inactive_go_sources.append(path)
                     continue
                 if not _darwin_arm64_explicit_selected(raw):
@@ -478,11 +495,17 @@ def inspect_d4_go_direct_import_sources(
             raise D4GoImportSourceDenied("unreviewed external Go module import")
         else:
             prefix = "src/" + path + "/"
-            members = tuple(sorted(name for name, digest in stage_files.items()
-                                   if name.startswith(prefix)
-                                   and name.endswith(".go")
-                                   and "/" not in name[len(prefix):]
-                                   and isinstance(digest, str)))
+            members = tuple(sorted(
+                name for name, digest in stage_files.items()
+                if name.startswith(prefix)
+                and name.endswith(".go")
+                and not name.endswith("_test.go")
+                and "/" not in name[len(prefix):]
+                and _darwin_arm64_filename_selected(name)
+                and isinstance(digest, str)
+                and len(digest) == 64
+                and all(ch in "0123456789abcdef" for ch in digest)
+            ))
             if not members:
                 raise D4GoImportSourceDenied("Go stdlib import absent from staged source")
             stdlib.append((path, members))
@@ -490,4 +513,5 @@ def inspect_d4_go_direct_import_sources(
         module_path=module, selected_imports=tuple(sorted(full_imports)),
         first_party_members=tuple(local), stdlib_stage_members=tuple(stdlib),
         inactive_first_party_sources=tuple(inactive_go_sources),
+        selected_go_command=go_action,
     )

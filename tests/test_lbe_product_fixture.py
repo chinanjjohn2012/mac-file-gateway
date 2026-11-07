@@ -3536,3 +3536,121 @@ def test_d4_service_pipenv_lock_denied_before_staging_private_runner(
     assert denied.value.code == "runner_unavailable"
     assert not (private / "bin").exists()
     assert not (private / "home").exists()
+
+
+
+@pytest.mark.parametrize("argv", [
+    ["go", "test", "./..."],
+    ["go", "vet", "./..."],
+    ["go", "build", "-o", "bin/app", "./cmd/app"],
+])
+def test_d4_go_direct_import_source_maps_pinned_stdlib_without_native(
+        product_service, monkeypatch, argv):
+    from gateway.lbe_go_import_sources import inspect_d4_go_direct_import_sources
+
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/main.go").write_bytes(
+        b'package main\nimport "fmt"\nfunc main() {fmt.Println("safe")}\n')
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no native Go subprocess allowed")))
+        candidate = service._prepare_d4_r003_fixture_candidate(
+            "a", "go-project", argv)
+        record = inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate,
+            staged_go_manifest=(("src/fmt/print.go", "a" * 64),))
+    assert record.module_path == "firstparty.test/app"
+    assert record.selected_imports == ("fmt",)
+    assert record.stdlib_stage_members == (("fmt", ("src/fmt/print.go",)),)
+    assert record.transitive_import_closure_proven is False
+    assert record.actual_loaded_source_graph_proven is False
+    assert record.native_launch_allowed is False
+    with pytest.raises(GatewayError) as denied:
+        service.invoke_exec("a", "go-project", argv, dry_run=False)
+    assert denied.value.code == "exec_cleanup_proof_required"
+
+
+def test_d4_go_direct_import_local_package_mapping_from_selected_tree(
+        product_service):
+    from gateway.lbe_go_import_sources import inspect_d4_go_direct_import_sources
+
+    service, workspace = product_service
+    go = workspace / "go-project"
+    (go / "pkg/util").mkdir(parents=True)
+    (go / "pkg/util/value.go").write_bytes(b"package util\nconst Value = 9\n")
+    (go / "cmd/app/main.go").write_bytes(
+        b'package main\nimport "firstparty.test/app/pkg/util"\n'
+        b'func main() { _ = util.Value }\n')
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    selected = inspect_d4_go_direct_import_sources(
+        service.get("a"), candidate, staged_go_manifest=())
+    assert selected.first_party_members == (
+        ("firstparty.test/app/pkg/util", ("go-project/pkg/util/value.go",)),)
+    assert selected.stdlib_stage_members == ()
+
+
+@pytest.mark.parametrize("import_path,missing_stdlib", [
+    ("external.example/malicious", False),
+    ("firstparty.test/app/pkg/not-here", False),
+    ("fmt", True),
+])
+def test_d4_go_direct_import_source_deny_external_or_missing_source(
+        product_service, import_path, missing_stdlib):
+    from gateway.lbe_go_import_sources import (
+        D4GoImportSourceDenied, inspect_d4_go_direct_import_sources,
+    )
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/main.go").write_bytes(
+        ('package main\nimport "' + import_path + '"\n').encode("ascii"))
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "vet", "./..."])
+    with pytest.raises(D4GoImportSourceDenied):
+        inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate, staged_go_manifest=()
+            if missing_stdlib else (("src/fmt/print.go", "a" * 64),))
+
+
+def test_d4_go_source_import_recheck_denies_inode_replacement(
+        product_service):
+    from gateway.lbe_go_import_sources import (
+        D4GoImportSourceDenied, inspect_d4_go_direct_import_sources,
+    )
+    service, workspace = product_service
+    go = workspace / "go-project"
+    original = go / "cmd/app/main.go"
+    original.write_bytes(b'package main\nimport "fmt"\n')
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    replacement = original.with_name("replacement.go")
+    replacement.write_bytes(original.read_bytes())
+    os.replace(replacement, original)
+    with pytest.raises(D4GoImportSourceDenied):
+        inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate,
+            staged_go_manifest=(("src/fmt/print.go", "a" * 64),))
+
+
+def test_d4_service_strict_p007_direct_import_failure_before_operator_copy(
+        product_service, monkeypatch):
+    """A simulated P007 match must not bypass missing direct stdlib source."""
+    import gateway.lbe_runtime_tree as stage_tree
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/main.go").write_bytes(
+        b'package main\nimport "fmt"\n')
+    private = workspace.parent.parent
+    source = private.parent / (private.name + "-go-import-operator")
+    with monkeypatch.context() as m:
+        m.setattr(stage_tree, "_d4_p007_go_stage_matches", lambda _rows: True)
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no native Go permitted")))
+        with pytest.raises(GatewayError) as denied:
+            service._assemble_d4_r003_source_only_runner(
+                "a", "go-project", ["go", "test", "./..."],
+                private_root=str(private), provisioner_root=str(source),
+                staged_manifests={"go": (("", None),)},
+                expected_source_identities={"go": "a" * 64},
+                require_go_p007_stage_source=True)
+    assert denied.value.code == "runner_unavailable"
+    assert not (private / "go").exists()
+    assert not (private / "home").exists()

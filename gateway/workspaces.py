@@ -770,6 +770,9 @@ class WorkspaceService:
         from .lbe_pipenv_lock_sources import (
             D4PipenvLockDenied, inspect_d4_pipenv_lock_sources,
         )
+        from .lbe_go_import_sources import (
+            D4GoImportSourceDenied, inspect_d4_go_direct_import_sources,
+        )
         from dataclasses import replace
 
         kinds = (("go",) if candidate.plan.cwd == "go-project"
@@ -813,8 +816,17 @@ class WorkspaceService:
                             expected_venv_record_distributions))
                     observed["venv"] = replace(
                         observed["venv"], pipenv_lock_sources=matched_lock)
+            if (candidate.plan.cwd == "go-project"
+                    and observed["go"].go_1_27_3_p007_stage_manifest_matched):
+                # Direct import selection supplements the full P007 stage.
+                # Neither source observation is a loaded/operating Go graph.
+                direct = inspect_d4_go_direct_import_sources(
+                    self.get(name), candidate,
+                    staged_go_manifest=observed["go"].proposed_manifest)
+                observed["go"] = replace(
+                    observed["go"], go_direct_import_sources=direct)
         except (D4RuntimeTreeDenied, D4RuntimeSourceDenied,
-                D4PipenvLockDenied, OSError):
+                D4PipenvLockDenied, D4GoImportSourceDenied, OSError):
             raise GatewayError(
                 "runner_unavailable", "D4 operator source selection unavailable."
             ) from None
@@ -913,6 +925,17 @@ class WorkspaceService:
                 raise GatewayError(
                     "runner_unavailable",
                     "D4 operator Go source does not match pinned full release.")
+            from .lbe_go_import_sources import (
+                D4GoImportSourceDenied, inspect_d4_go_direct_import_sources,
+            )
+            try:
+                selected_go_imports = inspect_d4_go_direct_import_sources(
+                    self.get(name), candidate,
+                    staged_go_manifest=staged_manifests["go"])
+            except (D4GoImportSourceDenied, OSError):
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 Go imported source set not qualified.") from None
 
         # The reviewed first-party Pipenv .venv tree is distinct from
         # operator-owned bin/lib. Its complete identity is checked before
@@ -1110,6 +1133,19 @@ class WorkspaceService:
             ) from None
         check_venv_identity()
         check_venv_records()
+        if require_go_p007_stage_source:
+            try:
+                rechecked_go_imports = inspect_d4_go_direct_import_sources(
+                    self.get(name), candidate,
+                    staged_go_manifest=staged_manifests["go"])
+            except (D4GoImportSourceDenied, OSError):
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 Go imported source changed during assembly.") from None
+            if rechecked_go_imports != selected_go_imports:
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 Go imported source selection drifted.")
         return (*prepared, graph, tuple(stage_receipts))
 
     def _prepare_d4_r003_selected_macho_source(

@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from .lbe_pipenv_lock_sources import D4PipenvLockSourceObservation
+from .lbe_go_import_sources import D4GoDirectImportObservation
 from email.parser import Parser
 import base64
 import csv
@@ -285,6 +286,7 @@ class D4OperatorSourceManifest:
     # selection without one remains OBSERVED_ONLY, never silently approved.
     pipenv_record_sources: D4PipenvRecordSourceObservation | None = None
     pipenv_lock_sources: D4PipenvLockSourceObservation | None = None
+    go_direct_import_sources: D4GoDirectImportObservation | None = None
     trusted_operator_attested: bool = False
     manifest_independently_approved: bool = False
     actual_loaded_source_graph_proven: bool = False

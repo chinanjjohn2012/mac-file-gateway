@@ -690,6 +690,9 @@ class WorkspaceService:
             observe_d4_runner_preflight,
         )
         from .lbe_product_fixture import D4FixtureDenied
+        from .lbe_macos_runner import (
+            D4MacOSRunnerDenied, D4MacOSRunnerLaunchBoundary,
+        )
 
         try:
             ctx = self.get(name)
@@ -698,7 +701,17 @@ class WorkspaceService:
             bound = D4RunnerSourceRecheck(
                 ctx, candidate.plan, recipe, runner, private_root=private_root)
             marker.attach_runner_source(bound)
-        except (D4RunnerProbeDenied, D4FixtureDenied):
+            # The real Worker-facing macOS Runner adapter is created from
+            # the same service-owned ctx/plan/recipe/live host observation.
+            # It remains a SOURCE/T0 launch-denial boundary until a separate
+            # physical CPU/RAM domain, exact owner T1 grant and operative
+            # F1/D0 exception are independently approved and implemented.
+            launch_boundary = D4MacOSRunnerLaunchBoundary(
+                ctx, candidate.plan, recipe, runner,
+                private_root=private_root)
+            marker.attach_macos_runner_boundary(launch_boundary)
+        except (D4RunnerProbeDenied, D4FixtureDenied,
+                D4MacOSRunnerDenied):
             raise GatewayError(
                 "runner_unavailable",
                 "D4 trusted host resource/source preflight unavailable.",

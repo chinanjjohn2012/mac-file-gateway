@@ -4238,3 +4238,162 @@ def test_d4_go_actual_service_missing_legacy_blank_cannot_exclude_source(
     with pytest.raises(D4GoImportSourceDenied):
         inspect_d4_go_direct_import_sources(
             service.get("a"), candidate, staged_go_manifest=())
+
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project",
+     ["go", "build", "-o", "bin/app", "./cmd/app"]),
+])
+def test_d4_service_macos_runner_launch_boundary_is_bound_but_native_denied(
+        product_service, monkeypatch, kind, cwd, argv):
+    """The actual service supplies the Worker launcher, never a client grant."""
+    from gateway.lbe_macos_runner import D4MacOSRunnerLaunchBoundary
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    trees = _d4_staged_trees(workspace, kind)
+    calls = []
+    def illegal_native(*_args, **_kwargs):
+        calls.append("native")
+        raise AssertionError("SOURCE/T0 may not spawn any process")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", illegal_native)
+        candidate, marker, _source, recipe, host = (
+            service._prepare_d4_r003_runner_preflight(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees=trees))
+        boundary = marker._macos_boundary
+        assert type(boundary) is D4MacOSRunnerLaunchBoundary
+        intent = boundary.intent
+        assert intent.workspace == "a"
+        assert intent.runner == candidate.plan.runner
+        assert intent.resolved_executable == recipe.resolved_executable
+        assert intent.requested_argv == tuple(argv)
+        assert intent.resolved_spawn_argv == recipe.resolved_spawn_argv
+        assert intent.closed_child_environment == recipe.closed_child_environment
+        assert intent.original_timeout_seconds == candidate.plan.timeout_seconds
+        assert intent.selected_source_fingerprint == host.source_fingerprint
+        assert dict(intent.required_limits)["cpu_millicores_max"] == 2000
+        assert dict(intent.required_limits)["memory_mib_max"] == 4096
+        assert intent.real_macos_runner_attested is False
+        assert intent.original_and_descendant_domain_enforced is False
+        assert intent.owner_native_t1_approved is False
+        assert intent.operative_f1_d0_exception_effective is False
+        assert intent.native_launch_allowed is False
+        owner = DirectChildOwner()
+        status = LbeWorker(owner, launcher=boundary.launch).run(
+            candidate.plan, product_attempt=marker)
+        assert status["status"] == "launch_failed"
+        assert status["executed"] is False
+        assert status["process_may_be_running"] is False
+        assert owner.snapshot()["reserved_slots"] == 0
+        assert owner.snapshot()["unavailable"] is False
+        with pytest.raises(LbeWorkerError) as replay:
+            LbeWorker(owner, launcher=boundary.launch).run(
+                candidate.plan, product_attempt=marker)
+        assert replay.value.code == "attempt_replay_denied"
+        with pytest.raises(GatewayError) as public:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert public.value.code == "exec_cleanup_proof_required"
+    assert calls == []
+
+
+def test_d4_macos_runner_binding_rejects_forged_attestation_and_wrong_plan(
+        product_service, monkeypatch):
+    from gateway.lbe_macos_runner import (
+        D4MacOSRunnerDenied, D4MacOSRunnerLaunchBoundary,
+    )
+    from gateway.lbe_worker import LbeNoChildStarted
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="python_direct")
+    trees = _d4_staged_trees(workspace, "python_direct")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_k: (
+            _ for _ in ()).throw(AssertionError("no native Popen permitted")))
+        candidate, marker, _source, recipe, host = (
+            service._prepare_d4_r003_runner_preflight(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees))
+        boundary = marker._macos_boundary
+        assert boundary is not None
+        fake_host = replace(host,
+            github_provider_attested=True,
+            physical_whole_child_cpu_memory_attached=True,
+            exact_owner_native_t1_authorized=True,
+            native_launch_allowed=True, blockers=())
+        with pytest.raises(D4MacOSRunnerDenied):
+            D4MacOSRunnerLaunchBoundary(
+                service.get("a"), candidate.plan, recipe, fake_host,
+                private_root=private)
+        with pytest.raises(LbeNoChildStarted):
+            boundary.launch(replace(candidate.plan))
+        with pytest.raises(D4MacOSRunnerDenied):
+            boundary.check_binding(service.get("a"), replace(candidate.plan))
+        assert service.info()["exec_policy"]["available"] is False
+
+
+def test_d4_macos_runner_prelaunch_ambient_drift_refuses_before_worker_launch(
+        product_service, monkeypatch):
+    from gateway.lbe_macos_runner import D4MacOSRunnerDenied
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeNoChildStarted, LbeWorker, LbeWorkerError
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="go")
+    trees = _d4_staged_trees(workspace, "go")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_k: (
+            _ for _ in ()).throw(AssertionError("no Go process permitted")))
+        candidate, marker, _source, _recipe, _host = (
+            service._prepare_d4_r003_runner_preflight(
+                "a", "go-project", ["go", "test", "./..."],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees))
+        boundary = marker._macos_boundary
+        m.setattr(os, "environ", {
+            "PATH": "/usr/bin:/bin",
+            "HTTPS_PROXY": "http://unqualified-proxy.invalid:8080",
+        })
+        with pytest.raises(D4MacOSRunnerDenied):
+            boundary.recheck_for(service.get("a"), candidate.plan)
+        with pytest.raises(LbeNoChildStarted):
+            boundary.launch(candidate.plan)
+        owner = DirectChildOwner()
+        with pytest.raises(LbeWorkerError) as failed:
+            LbeWorker(owner, launcher=boundary.launch).run(
+                candidate.plan, product_attempt=marker)
+        assert failed.value.code == "attempt_replay_denied"
+        assert owner.snapshot()["reserved_slots"] == 0
+        with pytest.raises(LbeWorkerError) as replay:
+            LbeWorker(owner, launcher=boundary.launch).run(
+                candidate.plan, product_attempt=marker)
+        assert replay.value.code == "attempt_replay_denied"
+
+
+def test_d4_macos_runner_rejects_generic_replacement_of_service_boundary(
+        product_service):
+    from gateway.lbe_product_fixture import D4FixtureDenied
+
+    service, _workspace = product_service
+    _candidate, marker = service._prepare_d4_r003_attempt(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    with pytest.raises(D4FixtureDenied):
+        marker.attach_macos_runner_boundary(lambda *_args: True)
+    assert service.info()["exec_policy"]["available"] is False

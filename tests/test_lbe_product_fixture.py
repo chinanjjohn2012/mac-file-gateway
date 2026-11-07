@@ -2077,19 +2077,25 @@ def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
         # match across observation and source materialization.
         offered = service._observe_d4_r003_operator_provisioner(
             "a", cwd, argv, provisioner_root=str(provisioner))
-        assert set(offered) == set(manifests)
+        assert set(offered) == (set(manifests) | (
+            {"venv"} if kind == "pipenv" else set()))
         assert all(offered[kind_name].proposed_manifest == tuple(
             sorted(manifests[kind_name])) for kind_name in manifests)
+        if kind == "pipenv":
+            assert offered["venv"].proposed_manifest == tuple(sorted(venv_manifest))
         identity_pins = {
             name: view.observed_source_identity_sha256
-            for name, view in offered.items()
+            for name, view in offered.items() if name in manifests
         }
         candidate, marker, observed, recipe, runner, native, graph, receipts = (
             service._assemble_d4_r003_source_only_runner(
                 "a", cwd, argv, private_root=str(private),
                 provisioner_root=str(provisioner),
                 staged_manifests=manifests, venv_manifest=venv_manifest,
-                expected_source_identities=identity_pins))
+                expected_source_identities=identity_pins,
+                expected_venv_identity_sha256=(
+                    offered["venv"].observed_source_identity_sha256
+                    if kind == "pipenv" else None)))
         assert candidate.plan.requested_argv == tuple(argv)
         assert len(receipts) == len(manifests)
         assert all(x.staged_files_verified and not x.native_launch_allowed
@@ -2749,7 +2755,7 @@ def test_d4_fixture_inventory_bounds_entries_before_bulk_materialization(
     ("py-direct", ["python", "-m", "pytest", "-q"], ("bin", "lib")),
     ("py-direct", ["python", "-m", "compileall", "-q", "./src"],
      ("bin", "lib")),
-    ("py-pipenv", ["python", "-m", "pytest", "-q"], ("bin", "lib")),
+    ("py-pipenv", ["python", "-m", "pytest", "-q"], ("bin", "lib", "venv")),
 ])
 def test_d4_service_observes_operator_sources_for_six_reviewable_recipes(
         product_service, monkeypatch, cwd, argv, kinds):
@@ -2763,6 +2769,8 @@ def test_d4_service_observes_operator_sources_for_six_reviewable_recipes(
     service, workspace = product_service
     operator = workspace.parent.parent / "operator-source"
     for kind in kinds:
+        if kind == "venv":
+            continue  # Real source is the first-party project .venv, not operator.
         folder = operator / kind
         folder.mkdir(parents=True, exist_ok=True)
         if kind == "go":
@@ -2786,9 +2794,13 @@ def test_d4_service_observes_operator_sources_for_six_reviewable_recipes(
         item = observed[kind]
         selected = "bin/go" if kind == "go" else (
             "pipenv" if kind == "bin" and cwd == "py-pipenv" else
-            "python" if kind == "bin" else "python/stdlib.py")
-        assert (selected, hashlib.sha256(
-            ("inert-" + kind).encode("ascii")).hexdigest()) in item.proposed_manifest
+            "python" if kind == "bin" else
+            "pyvenv.cfg" if kind == "venv" else "python/stdlib.py")
+        expected = ((workspace / "py-pipenv/.venv/pyvenv.cfg").read_bytes()
+                    if kind == "venv" else ("inert-" + kind).encode("ascii"))
+        assert (selected, hashlib.sha256(expected).hexdigest()) in item.proposed_manifest
+        if kind == "venv":
+            assert item.status == "OBSERVED_FIRST_PARTY_VENV_ONLY_NOT_ATTESTED"
         assert item.manifest_independently_approved is False
         assert item.trusted_operator_attested is False
         assert item.native_launch_allowed is False
@@ -2827,3 +2839,120 @@ def test_d4_assembled_operator_identity_shape_denies_before_staging(
     assert denied.value.code == "runner_unavailable"
     assert not (private / "go").exists()
     assert not (private / "home").exists()
+
+
+
+def test_d4_pipenv_first_party_venv_source_manifest_includes_real_site_files(
+        product_service, monkeypatch):
+    """Product prepares an inspectable .venv manifest, not import authority."""
+    import hashlib
+    from gateway.lbe_runtime_tree import observe_d4_pipenv_venv_manifest
+
+    service, workspace = product_service
+    project = workspace / "py-pipenv"
+    site = project / ".venv/lib/python3.13/site-packages/example_pkg"
+    site.mkdir(parents=True)
+    (site / "__init__.py").write_bytes(b"x = 'inert'\n")
+    (site / "entry.py").write_bytes(b"answer = 42\n")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("venv manifest must not import or spawn")))
+        observed = observe_d4_pipenv_venv_manifest(project_root=str(project))
+    assert observed.kind == "venv"
+    assert ("lib/python3.13/site-packages/example_pkg/entry.py",
+            hashlib.sha256(b"answer = 42\n").hexdigest()
+            ) in observed.proposed_manifest
+    assert ("", None) in observed.proposed_manifest
+    assert observed.file_count >= 4
+    assert observed.entry_count == len(observed.proposed_manifest)
+    assert observed.status == "OBSERVED_FIRST_PARTY_VENV_ONLY_NOT_ATTESTED"
+    assert observed.manifest_independently_approved is False
+    assert observed.actual_loaded_source_graph_proven is False
+    assert observed.native_launch_allowed is False
+    with pytest.raises(GatewayError) as refused:
+        service.invoke_exec("a", "py-pipenv",
+                            ["python", "-m", "pytest", "-q"], dry_run=False)
+    assert refused.value.code == "exec_cleanup_proof_required"
+
+
+@pytest.mark.parametrize("mutation", ["pth", "symlink_interpreter",
+                                    "hardlinked_interpreter", "unsafe_site_dir"])
+def test_d4_pipenv_venv_source_manifest_denies_unqualified_inputs(
+        product_service, mutation):
+    from gateway.lbe_runtime_tree import (
+        D4RuntimeTreeDenied, observe_d4_pipenv_venv_manifest,
+    )
+
+    _service, workspace = product_service
+    project = workspace / "py-pipenv"
+    venv = project / ".venv"
+    if mutation == "pth":
+        site = venv / "lib/python3.13/site-packages"
+        site.mkdir(parents=True)
+        (site / "evil.pth").write_bytes(b"import os\n")
+    elif mutation == "symlink_interpreter":
+        (venv / "bin/python").unlink()
+        (venv / "bin/python").symlink_to("/bin/sh")
+    elif mutation == "hardlinked_interpreter":
+        os.link(venv / "bin/python", venv / "bin/copy")
+    else:
+        site = venv / "lib"
+        site.mkdir()
+        site.chmod(0o777)
+    with pytest.raises(D4RuntimeTreeDenied):
+        observe_d4_pipenv_venv_manifest(project_root=str(project))
+
+
+@pytest.mark.parametrize("bad_identity", ["f" * 64, "0" * 64,
+                                          "not-a-sha", 17, [], True])
+def test_d4_assembled_pipenv_source_rejects_wrong_venv_identity_before_copy(
+        product_service, bad_identity):
+    from gateway.lbe_runtime_tree import observe_d4_pipenv_venv_manifest
+
+    service, workspace = product_service
+    private = workspace.parent.parent
+    project = workspace / "py-pipenv"
+    observed = observe_d4_pipenv_venv_manifest(project_root=str(project))
+    source = private.parent / (private.name + "-operator")
+    with pytest.raises(GatewayError) as err:
+        service._assemble_d4_r003_source_only_runner(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+            private_root=str(private), provisioner_root=str(source),
+            staged_manifests={"bin": (("", None),), "lib": (("", None),)},
+            venv_manifest=observed.proposed_manifest,
+            expected_venv_identity_sha256=bad_identity)
+    assert err.value.code == "runner_unavailable"
+    assert not (private / "bin").exists()
+    assert not (private / "home").exists()
+
+
+def test_d4_assembled_pipenv_source_rejects_same_bytes_new_inode_of_venv(
+        product_service):
+    """A hash-matched first-party .venv replacement must not transfer approval."""
+    import hashlib
+    from gateway.lbe_runtime_tree import observe_d4_pipenv_venv_manifest
+
+    service, workspace = product_service
+    private = workspace.parent.parent
+    project = workspace / "py-pipenv"
+    observed = observe_d4_pipenv_venv_manifest(project_root=str(project))
+    interpreter = project / ".venv/bin/python"
+    old_stat = interpreter.stat()
+    replacement = project / ".venv/bin/new-python"
+    replacement.write_bytes(interpreter.read_bytes())
+    replacement.chmod(0o700)
+    os.replace(replacement, interpreter)
+    assert interpreter.stat().st_ino != old_stat.st_ino
+    assert hashlib.sha256(interpreter.read_bytes()).hexdigest() == (
+        dict(observed.proposed_manifest)["bin/python"])
+    source = private.parent / (private.name + "-operator")
+    with pytest.raises(GatewayError) as err:
+        service._assemble_d4_r003_source_only_runner(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+            private_root=str(private), provisioner_root=str(source),
+            staged_manifests={"bin": (("", None),), "lib": (("", None),)},
+            venv_manifest=observed.proposed_manifest,
+            expected_venv_identity_sha256=(
+                observed.observed_source_identity_sha256))
+    assert err.value.code == "runner_unavailable"
+    assert not (private / "bin").exists()

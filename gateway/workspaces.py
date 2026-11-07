@@ -1297,17 +1297,48 @@ class WorkspaceService:
             return any(ctx.settings.allow_write for ctx in self._workspaces.values())
 
     def list_workspaces(self) -> dict[str, Any]:
+        """Configured grants and actual v2 preview/apply availability differ.
+
+        An exec.paths grant permits preview, not positive F1 launch. Keep
+        the old configured exec field but expose each v2 Workspace's
+        nonspawning preview and actual positive admission status separately.
+        The result is status, never an execution token or new authority.
+        """
         with self._lifecycle:
-            return {"workspaces": [
-                {"id": ctx.name, "read": True, "write": ctx.settings.allow_write,
-                 "exec": bool(self.settings.exec_enabled and ctx.settings.exec_enabled),
-                  "local_skills": False,
-                 "sensitive_content": ctx.gateway.sensitive_audit.status(),
-                 "git": {"enabled": bool(self.settings.git_enabled
-                                         and ctx.settings.git_allowed_commands),
-                         "allowed_commands": list(ctx.settings.git_allowed_commands)}}
-                for ctx in self._workspaces.values()
-            ]}
+            v2 = self.settings.schema_version == 2
+            old_state_healthy = bool(
+                v2 and self._exec_state is not None
+                and self._exec_state.durability_state == "healthy")
+            preview_capacity = bool(
+                old_state_healthy and not self._closing
+                and len(self._exec_active) < 4)
+            result = []
+            for ctx in self._workspaces.values():
+                granted = bool(self.settings.exec_enabled
+                               and ctx.settings.exec_enabled)
+                preview = bool(
+                    granted and preview_capacity
+                    and ctx.name not in self._exec_active)
+                apply = bool(
+                    preview and self._lbe_positive_authorized
+                    and self._lbe_owner is not None
+                    and self._lbe_owner.can_admit_any((ctx.name,)))
+                result.append({
+                    "id": ctx.name, "read": True,
+                    "write": ctx.settings.allow_write,
+                    "exec": granted,
+                    # Never reinterpret existing v1 grants or response shape.
+                    **({"exec_preview_available": preview,
+                        "exec_apply_available": apply} if v2 else {}),
+                    "local_skills": False,
+                    "sensitive_content": ctx.gateway.sensitive_audit.status(),
+                    "git": {
+                        "enabled": bool(self.settings.git_enabled
+                                        and ctx.settings.git_allowed_commands),
+                        "allowed_commands": list(ctx.settings.git_allowed_commands),
+                    },
+                })
+            return {"workspaces": result}
 
     def info(self) -> dict[str, Any]:
         with self._lifecycle:

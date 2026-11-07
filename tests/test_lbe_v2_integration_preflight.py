@@ -2093,3 +2093,107 @@ def test_r006_go_without_output_source_parent_denied_across_transports(scene):
     finally:
         project.chmod(0o755)
         svc.close()
+
+
+
+def test_r006_workspace_discovery_distinguishes_preview_from_positive_exec(
+        scene, monkeypatch):
+    """Actual per-Workspace discovery cannot advertise F1-denied apply."""
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    def refuse_native(*_args, **_kwargs):
+        raise AssertionError("Workspace discovery must not execute a child")
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", refuse_native)
+            m.setattr(os, "kill", refuse_native)
+            m.setattr(os, "killpg", refuse_native, raising=False)
+            by_id = {w["id"]: w for w in svc.list_workspaces()["workspaces"]}
+            assert by_id["a"]["exec"] is True  # configured scope, not grant
+            assert by_id["a"]["exec_preview_available"] is True
+            assert by_id["a"]["exec_apply_available"] is False
+            assert by_id["b"]["exec"] is False
+            assert by_id["b"]["exec_preview_available"] is False
+            assert by_id["b"]["exec_apply_available"] is False
+            assert svc.info()["exec_policy"]["preview_available"] is True
+            assert svc.info()["exec_policy"]["available"] is False
+            with TestClient(create_multi_app(svc, enable_mcp=False),
+                            base_url="http://127.0.0.1:8765") as client:
+                for endpoint in ("/info", "/health"):
+                    response = client.get(endpoint)
+                    assert response.status_code == 200
+                    actual = {w["id"]: w
+                              for w in response.json()["workspaces"]}
+                    assert actual == by_id
+            with pytest.raises(GatewayError) as denied:
+                svc.invoke_exec("a", "go-project", ["go", "test", "./..."],
+                                dry_run=False)
+            assert denied.value.code == "exec_cleanup_proof_required"
+            assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+
+
+def test_r006_workspace_preview_discovery_reports_old_state_and_slot_denial(
+        scene):
+    a, b, _private, _runtime = scene
+    svc = service(scene, v2_config(a, b))
+    try:
+        status = {w["id"]: w for w in svc.list_workspaces()["workspaces"]}
+        assert status["a"]["exec"] is True
+        assert status["a"]["exec_preview_available"] is False
+        assert status["a"]["exec_apply_available"] is False
+        assert svc.info()["exec_policy"]["preview_available"] is False
+    finally:
+        svc.close()
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        assert svc.list_workspaces()["workspaces"][0][
+            "exec_preview_available"] is True
+        with svc._lifecycle:
+            svc._exec_active.add("a")
+        try:
+            current = svc.list_workspaces()["workspaces"][0]
+            assert current["exec"] is True
+            assert current["exec_preview_available"] is False
+            assert current["exec_apply_available"] is False
+            assert svc.info()["exec_policy"]["preview_available"] is False
+        finally:
+            with svc._lifecycle:
+                svc._exec_active.remove("a")
+        # A native owner latch only blocks real children, not safe preview.
+        svc._lbe_owner._unavailable = True
+        current = svc.list_workspaces()["workspaces"][0]
+        assert current["exec_preview_available"] is True
+        assert current["exec_apply_available"] is False
+        assert svc.info()["exec_policy"]["preview_available"] is True
+        assert svc.info()["exec_policy"]["available"] is False
+    finally:
+        svc.close()
+
+
+def test_r006_v1_workspace_discovery_schema_does_not_change(scene):
+    a, b, _private, _runtime = scene
+    cfg = v2_config(a, b)
+    cfg["schema_version"] = 1
+    cfg["server"]["exec"] = {"enabled": True}
+    cfg["workspaces"]["a"]["exec"] = {
+        "enabled": True, "paths": ["python-project"], "runners": []}
+    svc = service(scene, cfg)
+    try:
+        selected = svc.list_workspaces()["workspaces"]
+        assert selected[0]["exec"] is True
+        assert selected[1]["exec"] is False
+        for row in selected:
+            assert "exec_preview_available" not in row
+            assert "exec_apply_available" not in row
+        assert all("exec_preview_available" not in x
+                   for x in svc.info()["workspaces"])
+        with pytest.raises(GatewayError) as denied:
+            svc.invoke_exec("a", "python-project",
+                            ["python", "hello.py"], dry_run=False)
+        assert denied.value.code == "exec_cleanup_proof_required"
+    finally:
+        svc.close()

@@ -2072,15 +2072,28 @@ def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
         m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
         m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
             _ for _ in ()).throw(AssertionError("no native child in T0")))
+        # The separately known fixture manifest is the test's reviewed
+        # expected input; actual operator-observed inode identities must ALSO
+        # match across observation and source materialization.
+        offered = service._observe_d4_r003_operator_provisioner(
+            "a", cwd, argv, provisioner_root=str(provisioner))
+        assert set(offered) == set(manifests)
+        assert all(offered[kind_name].proposed_manifest == tuple(
+            sorted(manifests[kind_name])) for kind_name in manifests)
+        identity_pins = {
+            name: view.observed_source_identity_sha256
+            for name, view in offered.items()
+        }
         candidate, marker, observed, recipe, runner, native, graph, receipts = (
             service._assemble_d4_r003_source_only_runner(
                 "a", cwd, argv, private_root=str(private),
                 provisioner_root=str(provisioner),
-                staged_manifests=manifests, venv_manifest=venv_manifest))
+                staged_manifests=manifests, venv_manifest=venv_manifest,
+                expected_source_identities=identity_pins))
         assert candidate.plan.requested_argv == tuple(argv)
         assert len(receipts) == len(manifests)
         assert all(x.staged_files_verified and not x.native_launch_allowed
-                   for x in receipts)
+                   and x.review_source_identity_bound for x in receipts)
         for name in needed_scratch:
             assert (private / name).is_dir()
             assert not list((private / name).iterdir())
@@ -2792,3 +2805,25 @@ def test_d4_service_operator_source_selection_does_not_self_approve_workspace(
             "a", "py-direct", ["python", "-m", "pytest", "-q"],
             provisioner_root=str(workspace / "py-direct"))
     assert denied.value.code == "runner_unavailable"
+
+
+
+@pytest.mark.parametrize("identity_pins", [
+    {"bin": "f" * 64}, {"go": "f" * 64},
+    {"go": "0" * 64}, {"go": 12}, [], None,
+])
+def test_d4_assembled_operator_identity_shape_denies_before_staging(
+        product_service, identity_pins):
+    """Wrong review identity keys/values cannot trigger partial materialization."""
+    service, workspace = product_service
+    private = workspace.parent.parent
+    provisioner = private.parent / (private.name + "-operator")
+    with pytest.raises(GatewayError) as denied:
+        service._assemble_d4_r003_source_only_runner(
+            "a", "go-project", ["go", "test", "./..."],
+            private_root=str(private), provisioner_root=str(provisioner),
+            staged_manifests={"go": (("", None),)},
+            expected_source_identities=identity_pins)
+    assert denied.value.code == "runner_unavailable"
+    assert not (private / "go").exists()
+    assert not (private / "home").exists()

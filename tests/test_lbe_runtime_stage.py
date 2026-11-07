@@ -400,3 +400,87 @@ def test_operator_reviewed_manifest_rejects_after_observation_source_drift(
             private_root=str(private), provisioner_root=str(source.parent),
             kind="go", expected=offered.proposed_manifest)
     assert not (private / "go").exists()
+
+
+
+def test_review_pinned_operator_identity_rejects_same_bytes_replaced_inode(
+        tmp_path, monkeypatch):
+    """A pre-reviewed observed tree is not just a content-addressed manifest.
+
+    Same file SHA after an atomic inode replacement must not transfer the old
+    source-tree observation to a new, unreviewed staging attempt. No child.
+    """
+    from gateway.lbe_runtime_tree import observe_d4_operator_source_manifest
+
+    private, source, expected = _stage_fixture(tmp_path, kind="go")
+    original = observe_d4_operator_source_manifest(
+        provisioner_root=str(source.parent), kind="go")
+    selected = source / "bin/go"
+    replacement = source.parent / "new-go"
+    replacement.write_bytes(selected.read_bytes())
+    replacement.chmod(0o700)
+    prior_inode = selected.stat().st_ino
+    os.replace(replacement, selected)
+    assert selected.stat().st_ino != prior_inode
+    assert hashlib.sha256(selected.read_bytes()).hexdigest() == (
+        dict(original.proposed_manifest)["bin/go"])
+
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no native child")))
+        with pytest.raises(D4RuntimeStageDenied, match="identity"):
+            stage_d4_operator_runtime_tree(
+                private_root=str(private),
+                provisioner_root=str(source.parent), kind="go",
+                expected=expected, expected_source_identity_sha256=(
+                    original.observed_source_identity_sha256))
+    assert not (private / "go").exists()
+
+
+@pytest.mark.parametrize("invalid", [None, "f" * 64, "0" * 64,
+                                    123, "", True, "A" * 64])
+def test_review_pinned_source_tree_identity_type_and_value_before_staging(
+        tmp_path, invalid):
+    from gateway.lbe_runtime_tree import observe_d4_operator_source_manifest
+
+    private, source, expected = _stage_fixture(tmp_path, kind="go")
+    observed = observe_d4_operator_source_manifest(
+        provisioner_root=str(source.parent), kind="go")
+    # None preserves the existing unbound SOURCE-only internal interface.
+    if invalid is None:
+        receipt = stage_d4_operator_runtime_tree(
+            private_root=str(private), provisioner_root=str(source.parent),
+            kind="go", expected=expected)
+        assert receipt.review_source_identity_bound is False
+        assert receipt.source_identity_sha256 == (
+            observed.observed_source_identity_sha256)
+    else:
+        with pytest.raises(D4RuntimeStageDenied):
+            stage_d4_operator_runtime_tree(
+                private_root=str(private),
+                provisioner_root=str(source.parent), kind="go",
+                expected=expected, expected_source_identity_sha256=invalid)
+        assert not (private / "go").exists()
+
+
+def test_review_pinned_operator_tree_staging_retains_nonoperative_provenance(
+        tmp_path, monkeypatch):
+    from gateway.lbe_runtime_tree import observe_d4_operator_source_manifest
+
+    private, source, known_expected = _stage_fixture(tmp_path, kind="lib")
+    reviewed = observe_d4_operator_source_manifest(
+        provisioner_root=str(source.parent), kind="lib")
+    assert reviewed.proposed_manifest == tuple(sorted(known_expected))
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("identity cannot spawn")))
+        receipt = stage_d4_operator_runtime_tree(
+            private_root=str(private), provisioner_root=str(source.parent),
+            kind="lib", expected=known_expected,
+            expected_source_identity_sha256=(
+                reviewed.observed_source_identity_sha256))
+    assert receipt.review_source_identity_bound is True
+    assert receipt.source_identity_sha256 == (
+        reviewed.observed_source_identity_sha256)
+    assert receipt.owner_provisioner_attested is False
+    assert receipt.native_launch_allowed is False

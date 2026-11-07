@@ -3234,3 +3234,61 @@ def test_d4_strict_pipenv_record_selection_denies_before_operator_copy(
     assert denied.value.code == "runner_unavailable"
     assert not (private / "bin").exists()
     assert not (private / "home").exists()
+
+
+
+def test_d4_service_observes_pipenv_records_in_real_source_bundle(
+        product_service, monkeypatch):
+    """The actual operator preparation surface includes its RECORD receipt."""
+    service, workspace = product_service
+    _d4_record_site_fixture(workspace)
+    operator = workspace.parent.parent / "operator-record-bundle"
+    binroot = operator / "bin"
+    binroot.mkdir(parents=True)
+    (binroot / "pipenv").write_bytes(b"inert signed-looking script data")
+    (binroot / "pipenv").chmod(0o700)
+    stdlib = operator / "lib/python"
+    stdlib.mkdir(parents=True)
+    (stdlib / "stdlib.py").write_bytes(b"x = 1\n")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("observation cannot spawn")))
+        result = service._observe_d4_r003_operator_provisioner(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+            provisioner_root=str(operator),
+            expected_venv_record_distributions=(("example-pkg", "1.0"),))
+    assert set(result) == {"bin", "lib", "venv"}
+    venv = result["venv"]
+    receipt = venv.pipenv_record_sources
+    assert receipt is not None
+    assert receipt.distributions == (("example-pkg", "1.0"),)
+    assert receipt.record_members_checked == 4
+    assert receipt.importable_members_checked == 2
+    assert receipt.venv_identity_sha256 == (
+        venv.observed_source_identity_sha256)
+    assert receipt.actual_loaded_source_graph_proven is False
+    assert receipt.native_launch_allowed is False
+    assert venv.manifest_independently_approved is False
+    assert venv.native_launch_allowed is False
+    with pytest.raises(GatewayError) as denied:
+        service.invoke_exec(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+            dry_run=False)
+    assert denied.value.code == "exec_cleanup_proof_required"
+
+
+def test_d4_service_record_selection_denies_wrong_command_without_source_access(
+        product_service):
+    """Pipenv installation metadata cannot be selected for Go or Direct."""
+    service, workspace = product_service
+    operator = workspace.parent.parent / "operator-record-wrong-flavor"
+    for cwd, argv in (
+        ("go-project", ["go", "test", "./..."]),
+        ("py-direct", ["python", "-m", "pytest", "-q"]),
+    ):
+        with pytest.raises(GatewayError) as denied:
+            service._observe_d4_r003_operator_provisioner(
+                "a", cwd, argv, provisioner_root=str(operator),
+                expected_venv_record_distributions=(("example-pkg", "1.0"),))
+        assert denied.value.code == "runner_unavailable"
+    assert not operator.exists()

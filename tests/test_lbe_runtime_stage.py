@@ -31,6 +31,7 @@ def _tree(root: Path) -> tuple[tuple[str, str | None], ...]:
 
 def _stage_fixture(tmp_path: Path, *, kind: str = "go"):
     root = tmp_path / "owner-private"
+    root.mkdir(mode=0o700)
     source = tmp_path / "operator-provisioned" / kind
     source.mkdir(parents=True)
     if kind == "go":

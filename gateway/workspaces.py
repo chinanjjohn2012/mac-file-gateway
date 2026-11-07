@@ -690,14 +690,14 @@ class WorkspaceService:
 
     def _stage_d4_r003_operator_source(
         self, name: str, cwd: str, argv: list[str], *,
-        private_root: str, kind: str,
+        private_root: str, provisioner_root: str, kind: str,
         expected: tuple[tuple[str, str | None], ...],
         timeout_seconds: int = 60,
     ):
-        """Materialize prequalified source from a trusted disposable fixture.
+        """Materialize source from a separate owner-controlled provisioner.
 
-        This is internal PRODUCT source preparation: a reviewed provisioner
-        must supply exact staged source digests before making this call.
+        This is internal PRODUCT source preparation: the reviewed provisioner
+        must supply exact staged source digests outside the private runner.
         It requires the existing v2 Workspace scope/owner.lock/ExecStateStore
         and canonical six-command fixture; it creates no native child and
         grants no public Exec capability, no matter what digest is supplied.
@@ -716,7 +716,8 @@ class WorkspaceService:
 
         try:
             receipt = stage_d4_operator_runtime_tree(
-                private_root=private_root, kind=kind, expected=expected)
+                private_root=private_root, provisioner_root=provisioner_root,
+                kind=kind, expected=expected)
         except D4RuntimeStageDenied:
             raise GatewayError(
                 "runner_unavailable",
@@ -735,6 +736,106 @@ class WorkspaceService:
                 "First-party runtime changed during source staging.",
             )
         return receipt
+
+    def _assemble_d4_r003_source_only_runner(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, provisioner_root: str,
+        staged_manifests: dict[str, tuple[tuple[str, str | None], ...]],
+        venv_manifest: tuple[tuple[str, str | None], ...] | None = None,
+        timeout_seconds: int = 60,
+    ):
+        """Assemble the real six-command private runtime, never launch it.
+
+        The separate owner-controlled provisioner supplies exactly the Go
+        toolchain or bin/lib source trees. This creates non-reusable private
+        staged directories and fresh HOME/TMP/caches, derives selected
+        executable hashes from the proven staged source set, then traverses
+        the same service-owned D4 recipe/one-use/Runner source preflight.
+        Source manifests are NOT independent provider/image/owner attestation.
+        Any failure leaves partial bytes in the disposable private runner;
+        no rollback, unsafe path overwrite, native child or retry occurs.
+        """
+        candidate = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        if candidate.plan.cwd == "go-project":
+            flavor, kinds = "go", ("go",)
+        elif candidate.plan.cwd == "py-pipenv":
+            flavor, kinds = "pipenv", ("bin", "lib")
+        else:
+            flavor, kinds = "python_direct", ("bin", "lib")
+        if (type(staged_manifests) is not dict
+                or any(type(k) is not str or type(v) is not tuple
+                       for k, v in staged_manifests.items())
+                or set(staged_manifests) != set(kinds)
+                or (flavor == "pipenv") != (type(venv_manifest) is tuple)
+                or (venv_manifest is not None
+                    and type(venv_manifest) is not tuple)):
+            raise GatewayError(
+                "runner_unavailable", "D4 source bundle selection is incomplete.")
+        from .lbe_runtime_stage import (
+            D4RuntimeStageDenied, create_d4_fresh_runner_scratch,
+        )
+
+        stage_receipts = []
+        for kind in kinds:
+            stage_receipts.append(self._stage_d4_r003_operator_source(
+                name, cwd, argv,
+                private_root=private_root,
+                provisioner_root=provisioner_root,
+                kind=kind, expected=staged_manifests[kind],
+                timeout_seconds=timeout_seconds))
+        try:
+            scratch = create_d4_fresh_runner_scratch(
+                private_root=private_root, kind=flavor)
+        except D4RuntimeStageDenied:
+            raise GatewayError(
+                "runner_unavailable", "D4 fresh runtime scratch unavailable."
+            ) from None
+        chosen = {}
+        for kind in kinds:
+            # Stage has already validated the exact source manifest. A
+            # separate caller-provided digest cannot silently replace the
+            # source result or create a trusted execution grant.
+            chosen[kind] = dict(staged_manifests[kind])
+        selected = dict(candidate.source_sha256)
+        if flavor == "go":
+            expected_hashes = {
+                "go": chosen["go"].get("bin/go"),
+                "compile": chosen["go"].get("pkg/tool/darwin_arm64/compile"),
+                "link": chosen["go"].get("pkg/tool/darwin_arm64/link"),
+            }
+        elif flavor == "pipenv":
+            expected_hashes = {
+                "Pipfile": selected.get("py-pipenv/Pipfile"),
+                "Pipfile.lock": selected.get("py-pipenv/Pipfile.lock"),
+                "pyvenv.cfg": selected.get("py-pipenv/.venv/pyvenv.cfg"),
+                "python": selected.get("py-pipenv/.venv/bin/python"),
+                "pipenv": chosen["bin"].get("pipenv"),
+            }
+        else:
+            expected_hashes = {"python": chosen["bin"].get("python")}
+        if any(type(v) is not str or len(v) != 64
+               for v in expected_hashes.values()):
+            raise GatewayError(
+                "runner_unavailable", "D4 staged executable selection incomplete.")
+        expected_trees = dict(staged_manifests)
+        expected_trees.update({name: (("", None),) for name in scratch})
+        if flavor == "pipenv":
+            expected_trees["venv"] = venv_manifest
+        prepared = self._prepare_d4_r003_runner_preflight(
+            name, cwd, argv, private_root=private_root,
+            expected_hashes=expected_hashes,
+            expected_trees=expected_trees,
+            timeout_seconds=timeout_seconds,
+        )
+        current = prepared[0]
+        if (current.plan != candidate.plan
+                or current.source_sha256 != candidate.source_sha256
+                or current.source_identity != candidate.source_identity
+                or current.directory_identity != candidate.directory_identity):
+            raise GatewayError(
+                "runner_unavailable", "D4 fixture drifted during assembly.")
+        return (*prepared, tuple(stage_receipts))
 
     def require_git(self, name: str, command: str) -> WorkspaceContext:
         """Independent authorization, always repeated in sync Worker."""

@@ -1,8 +1,9 @@
 """Actual owner-controlled D4 runtime source staging, without execution.
 
 A trusted, separately reviewed provisioner must first place the entire exact
-source tree under <private_root>/provisioned/{go,bin,lib}. This PRODUCT module
-copies those source bytes into a NEW <private_root>/{go,bin,lib}, using
+source tree under a SEPARATE owner-controlled <provisioner_root>/{go,bin,lib}.
+This PRODUCT module copies those source bytes into a NEW
+<private_root>/{go,bin,lib}, using
 descriptor-relative nofollow opens and exclusive creation. Neither input
 SHA claims nor this stage receipt prove the provider/image, runtime loaded
 source graph, whole-descendant CPU/RAM isolation, or an owner T1 grant.
@@ -138,14 +139,16 @@ def _staged_file(
 
 
 def stage_d4_operator_runtime_tree(
-    *, private_root: str, kind: str,
+    *, private_root: str, provisioner_root: str, kind: str,
     expected: tuple[tuple[str, str | None], ...],
 ) -> D4RuntimeStageReceipt:
     """Exclusively stage one fixed toolchain tree using actual file bytes.
 
-    The candidate input root is exactly provisioned/{go,bin,lib}, already
-    placed by a separately trusted operator inside private_root. The output
-    tree must NOT exist. The entire source is checked before and after
+    The candidate input root is exactly <provisioner_root>/{go,bin,lib},
+    placed by a separately trusted operator OUTSIDE the private runtime root.
+    Both roots are owned and nofollow-walked; overlapping provisioner/runner
+    roots are rejected. The output tree must NOT exist. Source is checked
+    before and after
     staging, and the entire output is inspected before a receipt is returned.
     Failure leaves an unusable partial tree intact (no destructive rollback).
     No caller-controlled target path or executable permission is accepted.
@@ -154,17 +157,31 @@ def stage_d4_operator_runtime_tree(
         raise D4RuntimeStageDenied("unapproved runtime staging target")
     try:
         _parts(private_root, "private runtime root")
+        _parts(provisioner_root, "operator provisioner root")
+        if (private_root == provisioner_root
+                or private_root.startswith(provisioner_root + "/")
+                or provisioner_root.startswith(private_root + "/")):
+            raise D4RuntimeStageDenied(
+                "trusted source and private runtime roots must not overlap")
         wanted = _manifest(expected)
         if len(wanted) > _MAX_FILES:
             raise D4RuntimeStageDenied("too many staged runtime files")
-        source_rel = "provisioned/" + kind
-        source_path = private_root + "/" + source_rel
+        source_rel = kind
+        source_path = provisioner_root + "/" + source_rel
         target_path = private_root + "/" + kind
         source_before = inspect_d4_closed_staged_tree(
-            private_root=private_root, staged_root=source_path,
+            private_root=provisioner_root, staged_root=source_path,
             expected=expected)
         root_fd = _pinned_root(private_root)
         try:
+            provisioner_fd = _pinned_root(provisioner_root)
+            try:
+                if os.fstat(root_fd).st_dev == os.fstat(provisioner_fd).st_dev and (
+                    os.fstat(root_fd).st_ino == os.fstat(provisioner_fd).st_ino
+                ):
+                    raise D4RuntimeStageDenied("source and runtime roots alias")
+            finally:
+                os.close(provisioner_fd)
             # Missing destination required. Do not follow or replace any
             # symlink/dir/file from a failed prior attempt.
             try:
@@ -173,7 +190,11 @@ def stage_d4_operator_runtime_tree(
                 pass
             else:
                 raise D4RuntimeStageDenied("staged runtime destination already exists")
-            source_fd = _relative_directory(root_fd, source_rel)
+            provisioner_fd = _pinned_root(provisioner_root)
+            try:
+                source_fd = _relative_directory(provisioner_fd, source_rel)
+            finally:
+                os.close(provisioner_fd)
             try:
                 os.mkdir(kind, 0o700, dir_fd=root_fd)
                 target_fd = _relative_directory(root_fd, kind)
@@ -220,7 +241,7 @@ def stage_d4_operator_runtime_tree(
         finally:
             os.close(root_fd)
         source_after = inspect_d4_closed_staged_tree(
-            private_root=private_root, staged_root=source_path,
+            private_root=provisioner_root, staged_root=source_path,
             expected=expected)
         target = inspect_d4_closed_staged_tree(
             private_root=private_root, staged_root=target_path,
@@ -242,3 +263,52 @@ def stage_d4_operator_runtime_tree(
         raise D4RuntimeStageDenied(
             "runtime staging source, destination or admission unavailable"
         ) from None
+
+
+def create_d4_fresh_runner_scratch(
+    *, private_root: str, kind: str,
+) -> tuple[str, ...]:
+    """Create the exact EMPTY private HOME/TMP and Go cache/input domains.
+
+    An existing path, even an empty one, is not a fresh trusted domain.
+    This uses exclusively owner-held dirfds and nofollow creation. If an
+    attempt fails, no cleanup, overwrite or automatic retry is performed.
+    This creates directories only; it does NOT enforce CPU/RAM or network.
+    """
+    if type(kind) is not str or kind not in {"go", "pipenv", "python_direct"}:
+        raise D4RuntimeStageDenied("unapproved scratch runtime kind")
+    names = (("home", "tmp", "gopath", "modcache", "gocache", "gotmp")
+             if kind == "go" else ("home", "tmp"))
+    try:
+        fd = _pinned_root(private_root)
+        try:
+            # Refuse all preexisting paths before creating any new directory.
+            for name in names:
+                try:
+                    os.stat(name, dir_fd=fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                else:
+                    raise D4RuntimeStageDenied(
+                        "preexisting runner scratch or cache must be absent")
+            for name in names:
+                os.mkdir(name, 0o700, dir_fd=fd)
+                child = os.open(name, _DIR_FLAGS, dir_fd=fd)
+                try:
+                    identity = _identity(child, directory=True)
+                    if stat.S_IMODE(identity[5]) != 0o700:
+                        raise D4RuntimeStageDenied(
+                            "fresh scratch directory permission drift")
+                    with os.scandir(child) as contents:
+                        if next(contents, None) is not None:
+                            raise D4RuntimeStageDenied(
+                                "fresh scratch directory is not empty")
+                finally:
+                    os.close(child)
+        finally:
+            os.close(fd)
+        return names
+    except (OSError, D4RuntimeTreeDenied, D4RuntimeStageDenied) as exc:
+        if type(exc) is D4RuntimeStageDenied:
+            raise
+        raise D4RuntimeStageDenied("fresh private scratch admission failed") from None

@@ -1875,6 +1875,7 @@ def test_d4_product_stages_real_runtime_bytes_then_prepares_six_recipes(
 
     service, workspace = product_service
     private = workspace.parent.parent
+    provisioner_root = private.parent / (private.name + "-provisioner")
     for folder in ("home", "tmp"):
         (private / folder).mkdir(exist_ok=True)
     if kind == "go":
@@ -1909,7 +1910,7 @@ def test_d4_product_stages_real_runtime_bytes_then_prepares_six_recipes(
         m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
             _ for _ in ()).throw(AssertionError("native PRODUCT_T1 must not execute")))
         for stage_kind, files in selections.items():
-            provisioned = private / "provisioned" / stage_kind
+            provisioned = provisioner_root / stage_kind
             provisioned.mkdir(parents=True)
             for relative, content in files.items():
                 source = provisioned / relative
@@ -1918,6 +1919,7 @@ def test_d4_product_stages_real_runtime_bytes_then_prepares_six_recipes(
                 source.chmod(0o700 if not relative.endswith((".go", ".py")) else 0o600)
             receipt = service._stage_d4_r003_operator_source(
                 "a", cwd, argv, private_root=str(private),
+                provisioner_root=str(provisioner_root),
                 kind=stage_kind, expected=_d4_tree_expected(provisioned))
             assert type(receipt) is D4RuntimeStageReceipt
             assert receipt.staged_files_verified is True
@@ -1971,10 +1973,126 @@ def test_d4_service_staging_cannot_select_foreign_source_kind(
         product_service):
     service, workspace = product_service
     private = workspace.parent.parent
+    provisioner_root = private.parent / (private.name + "-provisioner")
     with pytest.raises(GatewayError) as denied:
         service._stage_d4_r003_operator_source(
             "a", "go-project", ["go", "test", "./..."],
-            private_root=str(private), kind="bin",
+            private_root=str(private), provisioner_root=str(provisioner_root),
+            kind="bin",
             expected=(("", None),))
+    assert denied.value.code == "runner_unavailable"
+    assert not (private / "bin").exists()
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+])
+def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
+        product_service, monkeypatch, kind, cwd, argv):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker
+
+    service, workspace = product_service
+    private = workspace.parent.parent
+    provisioner = private.parent / (private.name + "-operator")
+    if kind == "go":
+        trees_data = {"go": {
+            "bin/go": b"inert-Go",
+            "pkg/tool/darwin_arm64/compile": b"inert-compile",
+            "pkg/tool/darwin_arm64/link": b"inert-link",
+            "src/runtime/runtime.go": b"package runtime\n",
+        }}
+        needed_scratch = {"home", "tmp", "gopath", "modcache", "gocache", "gotmp"}
+    elif kind == "python_direct":
+        trees_data = {
+            "bin": {"python": b"inert-private-Python"},
+            "lib": {"python/stdlib.py": b"x=1\n"},
+        }
+        needed_scratch = {"home", "tmp"}
+    else:
+        interpreter = str(workspace / "py-pipenv" / ".venv/bin/python")
+        trees_data = {
+            "bin": {
+                "pipenv": ("#!" + interpreter +
+                           "\n# preselected inert Pipenv source bytes\n").encode("ascii"),
+            },
+            "lib": {"python/stdlib.py": b"x=1\n"},
+        }
+        needed_scratch = {"home", "tmp"}
+
+    manifests = {}
+    for source_kind, files in trees_data.items():
+        root = provisioner / source_kind
+        root.mkdir(parents=True, exist_ok=True)
+        for name, data in files.items():
+            f = root / name
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(data)
+            f.chmod(0o600 if name.endswith((".py", ".go")) else 0o700)
+        manifests[source_kind] = _d4_tree_expected(root)
+    venv_manifest = (
+        _d4_tree_expected(workspace / "py-pipenv" / ".venv")
+        if kind == "pipenv" else None)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no native child in T0")))
+        candidate, marker, observed, recipe, runner, receipts = (
+            service._assemble_d4_r003_source_only_runner(
+                "a", cwd, argv, private_root=str(private),
+                provisioner_root=str(provisioner),
+                staged_manifests=manifests, venv_manifest=venv_manifest))
+        assert candidate.plan.requested_argv == tuple(argv)
+        assert len(receipts) == len(manifests)
+        assert all(x.staged_files_verified and not x.native_launch_allowed
+                   for x in receipts)
+        for name in needed_scratch:
+            assert (private / name).is_dir()
+            assert not list((private / name).iterdir())
+        assert not (private / "provisioned").exists()
+        assert observed.bounded_staged_file_set_checked is True
+        assert observed.native_launch_allowed is False
+        assert recipe.native_launch_allowed is False
+        assert runner.native_launch_allowed is False
+        assert runner.physical_whole_child_cpu_memory_attached is False
+        result = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher).run(
+            candidate.plan, product_attempt=marker)
+        assert result["status"] == "launch_failed"
+        assert result["executed"] is False
+        with pytest.raises(GatewayError) as refused:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert refused.value.code == "exec_cleanup_proof_required"
+
+
+def test_d4_bundle_invalid_manifest_selection_denied_before_any_staging(
+        product_service):
+    service, workspace = product_service
+    private = workspace.parent.parent
+    provisioner = private.parent / (private.name + "-operator")
+    with pytest.raises(GatewayError) as denied:
+        service._assemble_d4_r003_source_only_runner(
+            "a", "go-project", ["go", "vet", "./..."],
+            private_root=str(private), provisioner_root=str(provisioner),
+            staged_manifests={"bin": (("", None),)})
+    assert denied.value.code == "runner_unavailable"
+    assert not (private / "go").exists()
+    assert not (private / "home").exists()
+
+
+def test_d4_pipenv_bundle_without_venv_sources_denied_before_staging(
+        product_service):
+    service, workspace = product_service
+    private = workspace.parent.parent
+    provisioner = private.parent / (private.name + "-operator")
+    with pytest.raises(GatewayError) as denied:
+        service._assemble_d4_r003_source_only_runner(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+            private_root=str(private), provisioner_root=str(provisioner),
+            staged_manifests={"bin": (("", None),), "lib": (("", None),)})
     assert denied.value.code == "runner_unavailable"
     assert not (private / "bin").exists()

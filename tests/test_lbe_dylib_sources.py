@@ -189,3 +189,61 @@ def test_private_macho_dylibs_non_executable_regular_files_remain_valid(
     assert len(evidence.private_native_images) == 2
     assert evidence.actual_dyld_resolution_verified is False
     assert evidence.native_launch_allowed is False
+
+def test_private_dylib_inherits_main_rpath_for_nested_static_candidate(tmp_path):
+    """Inherited runpaths can locate nested candidates, not prove dyld loads."""
+    private, a, _b, selected, expected = _fixture(tmp_path, rpath=True)
+    nested = _image(libs=("@rpath/libB.dylib",))
+    a.write_bytes(nested)
+    expected = (("lib/libA.dylib", hashlib.sha256(nested).hexdigest()),
+                expected[1])
+    graph = inspect_d4_private_dylib_candidates(
+        selected, private_root=str(private), expected_private_dylibs=expected)
+    assert tuple(label for label, _image in graph.private_native_images) == (
+        "lib/libA.dylib", "lib/libB.dylib")
+    assert graph.unresolved_dynamic_loader_names == ()
+    assert graph.actual_dyld_resolution_verified is False
+    assert graph.native_launch_allowed is False
+
+
+def test_private_dylib_ambiguous_rpath_never_silently_selects_pinned_match(tmp_path):
+    """An unpinned competing runpath must not be filtered out of candidates."""
+    private, _a, _b, _selected, expected = _fixture(tmp_path, rpath=True)
+    first = private / "bin/python"
+    payload = _image(libs=("@rpath/libA.dylib",), rpaths=(
+        "@loader_path/../lib", "@loader_path/../unlisted"))
+    first.write_bytes(payload)
+    image = inspect_d4_selected_macho_loader(
+        private_root=str(private), selected_executable=str(first),
+        expected_sha256=hashlib.sha256(payload).hexdigest())
+    selected = D4NativeLoaderSetObservation(
+        runtime_kind="python_direct",
+        static_selected_executables=(("bin/python", image),),
+        unresolved_declared_install_names=image.unresolved_install_names)
+    graph = inspect_d4_private_dylib_candidates(
+        selected, private_root=str(private), expected_private_dylibs=expected)
+    assert graph.private_native_images == ()
+    assert "@rpath/libA.dylib" in graph.unresolved_dynamic_loader_names
+    assert graph.native_launch_allowed is False
+
+
+def test_private_dylib_unqualified_rpath_is_explicit_gap(tmp_path):
+    private, _a, _b, _selected, expected = _fixture(tmp_path, rpath=True)
+    first = private / "bin/python"
+    payload = _image(libs=("@loader_path/../lib/libA.dylib",), rpaths=(
+        "@loader_path/../../unqualified",))
+    first.write_bytes(payload)
+    image = inspect_d4_selected_macho_loader(
+        private_root=str(private), selected_executable=str(first),
+        expected_sha256=hashlib.sha256(payload).hexdigest())
+    selected = D4NativeLoaderSetObservation(
+        runtime_kind="python_direct",
+        static_selected_executables=(("bin/python", image),),
+        unresolved_declared_install_names=image.unresolved_install_names)
+    graph = inspect_d4_private_dylib_candidates(
+        selected, private_root=str(private), expected_private_dylibs=expected)
+    assert tuple(label for label, _image in graph.private_native_images) == (
+        "lib/libA.dylib", "lib/libB.dylib")
+    assert "LC_RPATH:@loader_path/../../unqualified" in (
+        graph.unresolved_dynamic_loader_names)
+    assert graph.native_launch_allowed is False

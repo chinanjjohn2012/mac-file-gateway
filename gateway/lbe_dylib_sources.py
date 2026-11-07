@@ -71,21 +71,24 @@ def _anchored(ref: str, caller: str, main_executable: str,
     return path
 
 
-def _rpath_candidates(ref: str, image: D4MachOLoaderObservation,
-                      caller: str, main_executable: str,
+def _rpath_candidates(ref: str, runpaths: tuple[str, ...],
                       root: str) -> tuple[str, ...]:
+    """Enumerate ALL lexical candidates, not only manifest-approved matches.
+
+    A chosen image may inherit runpaths from its loader chain. Even if only
+    one of several candidates is pinned, dyld could select another one.
+    Static source inspection must record ambiguity rather than declaring an
+    unqualified dependency closed. Actual dyld search order is NOT attested.
+    """
     suffix = ref[len("@rpath/"):]
-    candidates = set()
-    for entry in image.declared_rpaths:
-        base = _anchored(entry, caller, main_executable, root)
-        if base is None:
+    candidates: set[str] = set()
+    for base in runpaths:
+        derived = posixpath.normpath(posixpath.join(base, suffix))
+        try:
+            _below(root, _canonical(derived, "private rpath candidate"))
+        except D4RuntimeSourceDenied:
             continue
-        derived = _anchored(
-            posixpath.join(base, suffix),
-            caller, main_executable, root,
-        )
-        if derived is not None:
-            candidates.add(derived)
+        candidates.add(derived)
     return tuple(sorted(candidates))
 
 
@@ -139,27 +142,34 @@ def inspect_d4_private_dylib_candidates(
             _below(root, main)
             # This is not another copy of the selected native source: it
             # was already hashed in the pinned selected-executable set.
-            pending = [(main, main, original, 0)]
+            pending = [(main, main, original, 0, ())]
             observed_paths: set[str] = set()
             while pending:
-                caller, main_exe, image, depth = pending.pop()
+                caller, main_exe, image, depth, inherited_paths = pending.pop()
                 if depth > _MAX_DEPTH:
                     raise D4PrivateDylibDenied("private dylib source graph too deep")
+                own_paths = []
+                for declared in image.declared_rpaths:
+                    base = _anchored(declared, caller, main_exe, root)
+                    if base is None:
+                        unresolved.add("LC_RPATH:" + declared)
+                    else:
+                        own_paths.append(base)
+                # dyld may use LC_RPATH entries from the loading chain.
+                # This remains a conservative lexical candidate superset,
+                # NOT observed real dyld resolution or source authority.
+                runpaths = tuple(dict.fromkeys((*own_paths, *inherited_paths)))
                 for name in image.declared_direct_libraries:
                     if any(name.startswith(prefix)
                            for prefix in _SYSTEM_PREFIXES):
                         host_system.add(name)
                         continue
                     if name.startswith("@rpath/"):
-                        matches = [
-                            path for path in _rpath_candidates(
-                                name, image, caller, main_exe, root)
-                            if path in approved
-                        ]
-                        if len(matches) != 1:
+                        candidates = _rpath_candidates(name, runpaths, root)
+                        if len(candidates) != 1 or candidates[0] not in approved:
                             unresolved.add(name)
                             continue
-                        target = matches[0]
+                        target = candidates[0]
                     else:
                         target = _anchored(name, caller, main_exe, root)
                         if target is None or target not in approved:
@@ -179,7 +189,7 @@ def inspect_d4_private_dylib_candidates(
                         raise D4PrivateDylibDenied(
                             "private candidate dylib identity changed between roots")
                     images[target] = parsed
-                    pending.append((target, main_exe, parsed, depth + 1))
+                    pending.append((target, main_exe, parsed, depth + 1, runpaths))
         return D4PrivateDylibCandidateGraph(
             private_native_images=tuple(sorted(
                 ((path[len(root) + 1:], obs) for path, obs in images.items()),

@@ -4505,3 +4505,106 @@ def test_d4_worker_keeps_exact_bound_launcher_if_drain_factory_changes_field(
         assert owner.snapshot()["reserved_slots"] == 0
         assert owner.snapshot()["unavailable"] is False
         assert calls == []
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+])
+def test_d4_service_owns_nonoperative_worker_for_all_six_commands(
+        product_service, monkeypatch, kind, cwd, argv):
+    """The real service owns source, Worker, original slot and denial."""
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    trees = _d4_staged_trees(workspace, kind)
+    calls = []
+    def forbidden(*_args, **_kwargs):
+        calls.append("native_or_signal")
+        raise AssertionError("source-only Worker may not execute native code")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", forbidden)
+        m.setattr(os, "kill", forbidden)
+        m.setattr(os, "killpg", forbidden, raising=False)
+        result = service._exercise_d4_r003_source_only_worker(
+            "a", cwd, argv, private_root=private,
+            expected_hashes=hashes, expected_trees=trees)
+        assert result["workspace"] == "a"
+        assert result["mode"] == "local_best_effort"
+        assert result["status"] == "launch_failed"
+        assert result["executed"] is False
+        assert result["exit_code"] is None
+        assert result["timed_out"] is False
+        assert result["process_may_be_running"] is False
+        assert result["cleanup_proven"] is False
+        assert result["output_complete"] is False
+        assert service._lbe_owner.snapshot()["reserved_slots"] == 0
+        assert service._lbe_owner.snapshot()["unavailable"] is False
+        assert service._exec_active == set()
+        with pytest.raises(GatewayError) as public:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert public.value.code == "exec_cleanup_proof_required"
+    assert calls == []
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("wrong_workspace", "workspace_not_found"),
+    ("bad_cancelled_type", "invalid_argument"),
+    ("already_cancelled", "waiter_disconnected"),
+    ("occupied", "busy"),
+    ("preflight_failure", "runner_unavailable"),
+])
+def test_d4_service_nonoperative_worker_error_releases_request_lease(
+        product_service, monkeypatch, case, expected):
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="go")
+    trees = _d4_staged_trees(workspace, "go")
+    calls = []
+    def forbidden(*_args, **_kwargs):
+        calls.append("native_or_signal")
+        raise AssertionError("no actual Go/native process is authorized")
+    kwargs = {}
+    name = "a"
+    if case == "wrong_workspace":
+        name = "unknown"
+    if case == "bad_cancelled_type":
+        kwargs["cancelled"] = object()
+    if case == "already_cancelled":
+        kwargs["cancelled"] = threading.Event()
+        kwargs["cancelled"].set()
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", forbidden)
+        m.setattr(os, "kill", forbidden)
+        m.setattr(os, "killpg", forbidden, raising=False)
+        if case == "preflight_failure":
+            def fail_source(*_args, **_kwargs):
+                raise GatewayError("runner_unavailable", "injected source drift")
+            m.setattr(service, "_prepare_d4_r003_runner_preflight",
+                      fail_source)
+        if case == "occupied":
+            with service._lifecycle:
+                service._exec_active.add("a")
+        try:
+            with pytest.raises(GatewayError) as denied:
+                service._exercise_d4_r003_source_only_worker(
+                    name, "go-project", ["go", "test", "./..."],
+                    private_root=private, expected_hashes=hashes,
+                    expected_trees=trees, **kwargs)
+            assert denied.value.code == expected
+            assert service._exec_active == (
+                {"a"} if case == "occupied" else set())
+            assert service._lbe_owner.snapshot()["reserved_slots"] == 0
+            assert service._lbe_owner.snapshot()["unavailable"] is False
+        finally:
+            if case == "occupied":
+                with service._lifecycle:
+                    service._exec_active.remove("a")
+    assert calls == []

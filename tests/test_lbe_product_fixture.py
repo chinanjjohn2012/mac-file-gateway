@@ -1992,16 +1992,18 @@ def test_d4_service_staging_cannot_select_foreign_source_kind(
     assert not (private / "bin").exists()
 
 
-@pytest.mark.parametrize("kind,cwd,argv", [
-    ("go", "go-project", ["go", "test", "./..."]),
-    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
-    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+@pytest.mark.parametrize("kind,cwd,argv,strict_p007", [
+    ("go", "go-project", ["go", "test", "./..."], False),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"], False),
+    ("go", "go-project", ["go", "test", "./..."], True),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"], True),
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"], False),
     ("python_direct", "py-direct",
-     ["python", "-m", "compileall", "-q", "./src"]),
-    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+     ["python", "-m", "compileall", "-q", "./src"], False),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"], False),
 ])
 def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
-        product_service, monkeypatch, kind, cwd, argv):
+        product_service, monkeypatch, kind, cwd, argv, strict_p007):
     from gateway.lbe_direct_owner import DirectChildOwner
     from gateway.lbe_worker import LbeWorker
 
@@ -2087,6 +2089,22 @@ def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
             name: view.observed_source_identity_sha256
             for name, view in offered.items() if name in manifests
         }
+        if strict_p007:
+            # A positive T0 check of the ACTUAL service staging path only.
+            # The synthetic pin override is scoped to this disposable test;
+            # it is NOT the real 15657-member Go release or owner signature.
+            import gateway.lbe_runtime_tree as source_tree
+            m.setattr(source_tree, "_P007_GO_STAGE_FILE_COUNT",
+                      offered["go"].file_count)
+            m.setattr(source_tree, "_P007_GO_STAGE_SHA256",
+                      offered["go"].go_p007_stage_manifest_sha256)
+            m.setattr(source_tree, "_P007_GO_CRITICAL_FILES",
+                      frozenset({
+                          "bin/go", "pkg/tool/darwin_arm64/compile",
+                          "pkg/tool/darwin_arm64/link",
+                          "src/runtime/runtime.go",
+                      }))
+            assert source_tree._d4_p007_go_stage_matches(manifests["go"])
         candidate, marker, observed, recipe, runner, native, graph, receipts = (
             service._assemble_d4_r003_source_only_runner(
                 "a", cwd, argv, private_root=str(private),
@@ -2095,7 +2113,8 @@ def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
                 expected_source_identities=identity_pins,
                 expected_venv_identity_sha256=(
                     offered["venv"].observed_source_identity_sha256
-                    if kind == "pipenv" else None)))
+                    if kind == "pipenv" else None),
+                require_go_p007_stage_source=strict_p007))
         assert candidate.plan.requested_argv == tuple(argv)
         assert len(receipts) == len(manifests)
         assert all(x.staged_files_verified and not x.native_launch_allowed
@@ -3011,13 +3030,16 @@ def test_d4_go_strict_p007_source_bundle_rejects_incomplete_toolchain_before_cop
     assert public.value.code == "exec_cleanup_proof_required"
 
 
-@pytest.mark.parametrize("cwd,argv,required", [
-    ("go-project", ["go", "test", "./..."], "yes"),
-    ("py-direct", ["python", "-m", "pytest", "-q"], True),
-    ("py-pipenv", ["python", "-m", "pytest", "-q"], True),
+@pytest.mark.parametrize("cwd,argv,required,expected_error", [
+    ("go-project", ["go", "test", "./..."], "yes",
+     "D4 Go source profile selection invalid"),
+    ("py-direct", ["python", "-m", "pytest", "-q"], True,
+     "D4 complete Go source not selected"),
+    ("py-pipenv", ["python", "-m", "pytest", "-q"], True,
+     "D4 complete Go source not selected"),
 ])
 def test_d4_p007_strict_profile_cannot_select_other_runner_or_truthy_flag(
-        product_service, cwd, argv, required):
+        product_service, cwd, argv, required, expected_error):
     """Strict P007 Go SOURCE selection never becomes a public Exec grant."""
     service, workspace = product_service
     private = workspace.parent.parent
@@ -3028,7 +3050,9 @@ def test_d4_p007_strict_profile_cannot_select_other_runner_or_truthy_flag(
         service._assemble_d4_r003_source_only_runner(
             "a", cwd, argv, private_root=str(private),
             provisioner_root=str(provisioner), staged_manifests=manifests,
+            venv_manifest=((("", None),) if cwd == "py-pipenv" else None),
             require_go_p007_stage_source=required)
     assert denied.value.code == "runner_unavailable"
+    assert expected_error in str(denied.value)
     assert not (private / "go").exists()
     assert not (private / "bin").exists()

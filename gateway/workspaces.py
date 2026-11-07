@@ -843,6 +843,41 @@ class WorkspaceService:
                 "runner_unavailable", "D4 fixture drifted during assembly.")
         return (*prepared, tuple(stage_receipts))
 
+    def _prepare_d4_r003_selected_macho_source(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, expected_hashes: dict[str, str],
+        expected_trees: dict[str, tuple[tuple[str, str | None], ...]],
+        timeout_seconds: int = 60,
+    ):
+        """Inspect actual Darwin ARM64 selected loader, without native T1.
+
+        This extends the service-owned six-command source -> runner inspection
+        with bounded Mach-O LC_LOAD_DYLIB/LC_RPATH evidence, and chooses the
+        pinned Pipenv shebang interpreter rather than mistaking the script
+        for the loaded Python image. The physical OS child resource domain,
+        actual dyld closure, GitHub image and owner grant remain NOT PROVEN.
+        The ordinary public Exec apply gate is untouched and denies.
+        """
+        prepared = self._prepare_d4_r003_runner_preflight(
+            name, cwd, argv, private_root=private_root,
+            expected_hashes=expected_hashes,
+            expected_trees=expected_trees,
+            timeout_seconds=timeout_seconds,
+        )
+        from .lbe_macho_loader import (
+            D4MachOLoaderDenied, select_d4_macho_loader_source,
+        )
+
+        try:
+            loader = select_d4_macho_loader_source(
+                prepared[2], prepared[3], private_root=private_root)
+        except D4MachOLoaderDenied:
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 ARM64 native loader declarations are not qualified.",
+            ) from None
+        return (*prepared, loader)
+
     def require_git(self, name: str, command: str) -> WorkspaceContext:
         """Independent authorization, always repeated in sync Worker."""
         ctx = self.get(name)

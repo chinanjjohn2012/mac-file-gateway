@@ -2156,3 +2156,88 @@ def test_d4_runner_source_recheck_cannot_be_attached_from_generic_callback(
         marker.attach_runner_source(lambda *_args: None)
     assert candidate.native_launch_allowed is False
     assert service.info()["exec_policy"]["available"] is False
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+])
+def test_d4_service_selects_real_static_arm64_loader_in_six_source_recipes(
+        product_service, monkeypatch, kind, cwd, argv):
+    import hashlib
+    import struct
+    from gateway.lbe_macho_loader import (
+        D4MachOLoaderDenied, authorize_d4_native_from_static_macho,
+    )
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    if kind == "go":
+        selected = Path(private) / "go/bin/go"
+    elif kind == "pipenv":
+        selected = workspace / "py-pipenv/.venv/bin/python"
+    else:
+        selected = Path(private) / "bin/python"
+    lib = b"/usr/lib/libSystem.B.dylib\x00"
+    cmdsize = (24 + len(lib) + 3) & ~3
+    cmd = (struct.pack("<III", 0x0C, cmdsize, 24)
+           + b"\x00" * 12 + lib
+           + b"\x00" * (cmdsize - 24 - len(lib)))
+    native_data = struct.pack(
+        "<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 1, len(cmd), 0, 0) + cmd
+    selected.write_bytes(native_data)
+    hashes["go" if kind == "go" else "python"] = (
+        hashlib.sha256(native_data).hexdigest())
+    trees = _d4_staged_trees(workspace, kind)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no T1 for Mach-O source T0")))
+        candidate, marker, observation, recipe, host, macho = (
+            service._prepare_d4_r003_selected_macho_source(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees=trees))
+        assert macho.selected_cpu == "arm64"
+        assert macho.selected_sha256 == hashlib.sha256(native_data).hexdigest()
+        assert macho.selected_relative_executable == str(selected)[len(private) + 1:]
+        assert macho.declared_direct_libraries == ("/usr/lib/libSystem.B.dylib",)
+        assert macho.full_loaded_source_graph_attested is False
+        assert macho.actual_dyld_resolution_attested is False
+        assert macho.native_launch_allowed is False
+        assert observation.native_launch_allowed is False
+        assert recipe.native_launch_allowed is False
+        assert host.native_launch_allowed is False
+        with pytest.raises(D4MachOLoaderDenied, match="NOT_AUTHORIZED"):
+            authorize_d4_native_from_static_macho(macho)
+        with pytest.raises(GatewayError) as denied:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert denied.value.code == "exec_cleanup_proof_required"
+
+
+def test_d4_service_macho_loader_rejects_non_macho_even_with_exact_source_hash(
+        product_service, monkeypatch):
+    import hashlib
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="python_direct")
+    interpreter = Path(private) / "bin/python"
+    data = b"not a Darwin ARM64 executable" + b"x" * 80
+    interpreter.write_bytes(data)
+    hashes["python"] = hashlib.sha256(data).hexdigest()
+    trees = _d4_staged_trees(workspace, "python_direct")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_selected_macho_source(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                private_root=private,
+                expected_hashes=hashes, expected_trees=trees)
+    assert denied.value.code == "runner_unavailable"
+    assert service.info()["exec_policy"]["available"] is False

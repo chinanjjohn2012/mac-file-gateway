@@ -3396,3 +3396,74 @@ def test_d4_go_embed_input_crlf_and_tab_indented_directive_denied(product_servic
         service._prepare_d4_r003_fixture_candidate(
             "a", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"])
     assert denied.value.code == "command_not_allowed"
+
+
+@pytest.mark.parametrize("argv", [
+    ["go", "test", "./..."],
+    ["go", "vet", "./..."],
+    ["go", "build", "-o", "bin/app", "./cmd/app"],
+])
+@pytest.mark.parametrize("cgo_syntax", [
+    b'import "C"\n',
+    b'import (\n "fmt"\n "C"\n)\n',
+    b'import ("C")\n',
+    b'import _ "C"\n',
+])
+def test_d4_go_cgo_pseudo_import_requires_unqualified_compiler(
+        product_service, monkeypatch, argv, cgo_syntax):
+    """cgo may invoke a separate C toolchain or consume headers outside .go.
+
+    Reject that source at the real service admission boundary before any
+    source-only recipe or future launcher; CGO_ENABLED=0 is not a proof.
+    """
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/main.go").write_bytes(
+        b"package main\n" + cgo_syntax + b"func main() {}\n")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("No Go/C compiler can run")))
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_fixture_candidate(
+                "a", "go-project", argv)
+    assert denied.value.code == "command_not_allowed"
+    with pytest.raises(GatewayError) as apply:
+        service.invoke_exec("a", "go-project", argv, dry_run=False)
+    assert apply.value.code == "exec_cleanup_proof_required"
+
+
+def test_d4_go_non_cgo_imports_and_C_text_remain_legal_source(
+        product_service):
+    """Ordinary Go imports and literals should not be rejected as cgo."""
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/main.go").write_bytes(
+        b'package main\nimport "fmt"\n'
+        b'func main() { fmt.Println("C and import C are only strings") }\n')
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    assert candidate.native_launch_allowed is False
+    assert candidate.actual_loaded_sources_proven is False
+
+
+@pytest.mark.parametrize("decl,accepted", [
+    (b"go 1.26\n", True),
+    (b"go 1.27\n", True),
+    (b"go 1.27.3\n", True),
+    (b"go 1.27.4\n", False),
+    (b"go 1.28\n", False),
+    (b"go 1.999\n", False),
+])
+def test_d4_go_module_version_cannot_exceed_pinned_P007_toolchain(
+        product_service, decl, accepted):
+    """A future Go language version is not satisfied by pinned Go 1.27.3."""
+    service, workspace = product_service
+    (workspace / "go-project/go.mod").write_bytes(
+        b"module firstparty.test/app\n" + decl)
+    if accepted:
+        candidate = service._prepare_d4_r003_fixture_candidate(
+            "a", "go-project", ["go", "vet", "./..."])
+        assert candidate.native_launch_allowed is False
+    else:
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_fixture_candidate(
+                "a", "go-project", ["go", "vet", "./..."])
+        assert denied.value.code == "command_not_allowed"

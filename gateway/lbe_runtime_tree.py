@@ -279,6 +279,9 @@ class D4OperatorSourceManifest:
     # Go archive and loader graph are NOT verified by this receipt.
     go_p007_stage_manifest_sha256: str | None = None
     go_1_27_3_p007_stage_manifest_matched: bool = False
+    # Optional separately selected first-party site RECORD receipt. A source
+    # selection without one remains OBSERVED_ONLY, never silently approved.
+    pipenv_record_sources: D4PipenvRecordSourceObservation | None = None
     trusted_operator_attested: bool = False
     manifest_independently_approved: bool = False
     actual_loaded_source_graph_proven: bool = False
@@ -455,6 +458,7 @@ def observe_d4_operator_source_manifest(
 
 def observe_d4_pipenv_venv_manifest(
     *, project_root: str,
+    expected_record_distributions: tuple[tuple[str, str], ...] | None = None,
 ) -> D4OperatorSourceManifest:
     """Observe real first-party .venv files, including sites, without import.
 
@@ -464,10 +468,21 @@ def observe_d4_pipenv_venv_manifest(
     Even an exact manifest does NOT prove CPython's effective import paths,
     executable-resolution closure, complete seed/site modules, nor T1 rights.
     """
-    return _observe_d4_selected_source_manifest(
+    observed = _observe_d4_selected_source_manifest(
         source_root=project_root, selected_name=".venv", kind="venv",
         status="OBSERVED_FIRST_PARTY_VENV_ONLY_NOT_ATTESTED",
     )
+    if expected_record_distributions is None:
+        return observed
+    records = inspect_d4_pipenv_installed_record_sources(
+        project_root=project_root,
+        expected_venv_manifest=observed.proposed_manifest,
+        expected_distributions=expected_record_distributions,
+    )
+    if records.venv_identity_sha256 != observed.observed_source_identity_sha256:
+        raise D4RuntimeTreeDenied(
+            "first-party Pipenv RECORD source changed between observations")
+    return replace(observed, pipenv_record_sources=records)
 
 
 

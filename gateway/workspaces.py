@@ -747,7 +747,9 @@ class WorkspaceService:
 
     def _observe_d4_r003_operator_provisioner(
         self, name: str, cwd: str, argv: list[str], *,
-        provisioner_root: str, timeout_seconds: int = 60,
+        provisioner_root: str,
+        expected_venv_record_distributions: tuple[tuple[str, str], ...] | None = None,
+        timeout_seconds: int = 60,
     ):
         """Observe complete operator source bytes for explicit later approval.
 
@@ -768,6 +770,11 @@ class WorkspaceService:
 
         kinds = (("go",) if candidate.plan.cwd == "go-project"
                  else ("bin", "lib"))
+        if (expected_venv_record_distributions is not None
+                and candidate.plan.cwd != "py-pipenv"):
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 first-party Pipenv RECORD scope unavailable.")
         try:
             source = _canonical(provisioner_root, "operator provisioner")
             workspace = _canonical(
@@ -787,7 +794,9 @@ class WorkspaceService:
                 # Workspace, not the operator. A whole imported-source
                 # manifest is reviewable without import or execution.
                 observed["venv"] = observe_d4_pipenv_venv_manifest(
-                    project_root=workspace + "/py-pipenv")
+                    project_root=workspace + "/py-pipenv",
+                    expected_record_distributions=(
+                        expected_venv_record_distributions))
         except (D4RuntimeTreeDenied, D4RuntimeSourceDenied, OSError):
             raise GatewayError(
                 "runner_unavailable", "D4 operator source selection unavailable."

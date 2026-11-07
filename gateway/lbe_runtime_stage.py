@@ -23,7 +23,7 @@ import stat
 from .lbe_runtime_tree import (
     D4ClosedTreeSnapshot, D4RuntimeTreeDenied,
     _DIR_FLAGS, _FILE_FLAGS, _MAX_SINGLE_FILE, _MAX_TOTAL_BYTES,
-    _identity, _manifest, _parts, _rel,
+    _identity, _manifest, _parts, _rel, _SHA,
     inspect_d4_closed_staged_tree,
 )
 
@@ -52,6 +52,10 @@ class D4RuntimeStageReceipt:
     loaded_runtime_sources_proven: bool = False
     physical_child_resource_enforced: bool = False
     native_launch_allowed: bool = False
+    # True means a previously observed inode/source-tree fingerprint was
+    # explicitly supplied and matched across copying. This is not external
+    # provenance, image attestation or native execution authority.
+    review_source_identity_bound: bool = False
 
 
 def _pinned_root(path: str) -> int:
@@ -141,6 +145,7 @@ def _staged_file(
 def stage_d4_operator_runtime_tree(
     *, private_root: str, provisioner_root: str, kind: str,
     expected: tuple[tuple[str, str | None], ...],
+    expected_source_identity_sha256: str | None = None,
 ) -> D4RuntimeStageReceipt:
     """Exclusively stage one fixed toolchain tree using actual file bytes.
 
@@ -155,6 +160,14 @@ def stage_d4_operator_runtime_tree(
     """
     if type(kind) is not str or kind not in _KINDS:
         raise D4RuntimeStageDenied("unapproved runtime staging target")
+    # The optional prior *observation* prevents an immutable file hash
+    # manifest being silently re-used after same-content inode replacement.
+    # It does not turn the proposed bytes into independently approved source.
+    if (expected_source_identity_sha256 is not None
+            and (type(expected_source_identity_sha256) is not str
+                 or _SHA.fullmatch(expected_source_identity_sha256) is None
+                 or expected_source_identity_sha256 == "0" * 64)):
+        raise D4RuntimeStageDenied("review-bound source identity invalid")
     try:
         _parts(private_root, "private runtime root")
         _parts(provisioner_root, "operator provisioner root")
@@ -172,6 +185,11 @@ def stage_d4_operator_runtime_tree(
         source_before = inspect_d4_closed_staged_tree(
             private_root=provisioner_root, staged_root=source_path,
             expected=expected)
+        if (expected_source_identity_sha256 is not None
+                and source_before.observed_identity_sha256
+                != expected_source_identity_sha256):
+            raise D4RuntimeStageDenied(
+                "review-bound source tree identity drifted")
         root_fd = _pinned_root(private_root)
         try:
             provisioner_fd = _pinned_root(provisioner_root)
@@ -247,6 +265,9 @@ def stage_d4_operator_runtime_tree(
             private_root=private_root, staged_root=target_path,
             expected=expected)
         if (source_after != source_before
+                or (expected_source_identity_sha256 is not None
+                    and source_after.observed_identity_sha256
+                    != expected_source_identity_sha256)
                 or files != target.file_count
                 or total != target.total_file_bytes
                 or target.entry_count != len(wanted)):
@@ -256,6 +277,8 @@ def stage_d4_operator_runtime_tree(
             entries=target.entry_count, files=files, total_bytes=total,
             source_identity_sha256=source_before.observed_identity_sha256,
             staged_identity_sha256=target.observed_identity_sha256,
+            review_source_identity_bound=(
+                expected_source_identity_sha256 is not None),
         )
     except (OSError, D4RuntimeTreeDenied, D4RuntimeStageDenied) as exc:
         if type(exc) is D4RuntimeStageDenied:

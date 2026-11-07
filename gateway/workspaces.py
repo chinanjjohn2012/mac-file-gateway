@@ -698,6 +698,7 @@ class WorkspaceService:
         self, name: str, cwd: str, argv: list[str], *,
         private_root: str, provisioner_root: str, kind: str,
         expected: tuple[tuple[str, str | None], ...],
+        expected_source_identity_sha256: str | None = None,
         timeout_seconds: int = 60,
     ):
         """Materialize source from a separate owner-controlled provisioner.
@@ -723,7 +724,8 @@ class WorkspaceService:
         try:
             receipt = stage_d4_operator_runtime_tree(
                 private_root=private_root, provisioner_root=provisioner_root,
-                kind=kind, expected=expected)
+                kind=kind, expected=expected,
+                expected_source_identity_sha256=expected_source_identity_sha256)
         except D4RuntimeStageDenied:
             raise GatewayError(
                 "runner_unavailable",
@@ -802,6 +804,7 @@ class WorkspaceService:
         private_root: str, provisioner_root: str,
         staged_manifests: dict[str, tuple[tuple[str, str | None], ...]],
         venv_manifest: tuple[tuple[str, str | None], ...] | None = None,
+        expected_source_identities: dict[str, str] | None = None,
         timeout_seconds: int = 60,
     ):
         """Assemble the real six-command private runtime, never launch it.
@@ -834,6 +837,21 @@ class WorkspaceService:
                     and type(venv_manifest) is not tuple)):
             raise GatewayError(
                 "runner_unavailable", "D4 source bundle selection is incomplete.")
+        # These IDs are expected from a separately inspected/reviewed
+        # operator-source snapshot. A caller-provided hash is NOT approval:
+        # it only prevents staging an unobserved inode tree with matching
+        # contents/modes. Validate complete kind set before creating files.
+        if (expected_source_identities is not None
+                and (type(expected_source_identities) is not dict
+                     or set(expected_source_identities) != set(kinds)
+                     or any(type(value) is not str or len(value) != 64
+                            or value == "0" * 64
+                            or any(ch not in "0123456789abcdef"
+                                   for ch in value)
+                            for value in expected_source_identities.values()))):
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 operator source identity selection is incomplete.")
         from .lbe_runtime_stage import (
             D4RuntimeStageDenied, create_d4_fresh_runner_scratch,
         )
@@ -845,6 +863,9 @@ class WorkspaceService:
                 private_root=private_root,
                 provisioner_root=provisioner_root,
                 kind=kind, expected=staged_manifests[kind],
+                expected_source_identity_sha256=(
+                    expected_source_identities[kind]
+                    if expected_source_identities is not None else None),
                 timeout_seconds=timeout_seconds))
         try:
             scratch = create_d4_fresh_runner_scratch(

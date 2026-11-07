@@ -652,6 +652,42 @@ class WorkspaceService:
             ) from None
         return candidate, marker, observed, recipe
 
+    def _prepare_d4_r003_runner_preflight(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, expected_hashes: dict[str, str],
+        expected_trees: dict[str, tuple[tuple[str, str | None], ...]],
+        timeout_seconds: int = 60,
+    ):
+        """Observe actual host source identity without native T1 qualification.
+
+        This continues the real v2 WorkspaceService product path after old
+        owner.lock/ExecStateStore checks, the six-command recipe and one-use
+        Worker source binding. Real kernel/UID/root inode and per-process
+        rlimits are inspected, but the *whole descendant* CPU/RAM domain,
+        immutable GitHub runner image, owner T1 consent and loaded source
+        are NOT proved; an ordinary public apply and NativeLauncher DENY.
+        """
+        candidate, marker, observed, recipe = (
+            self._prepare_d4_r003_native_recipe(
+                name, cwd, argv, private_root=private_root,
+                expected_hashes=expected_hashes,
+                expected_trees=expected_trees,
+                timeout_seconds=timeout_seconds,
+            ))
+        from .lbe_runner_preflight import (
+            D4RunnerProbeDenied, observe_d4_runner_preflight,
+        )
+
+        try:
+            runner = observe_d4_runner_preflight(
+                self.get(name), recipe, private_root=private_root)
+        except D4RunnerProbeDenied:
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 trusted host resource/source preflight unavailable.",
+            ) from None
+        return candidate, marker, observed, recipe, runner
+
     def require_git(self, name: str, command: str) -> WorkspaceContext:
         """Independent authorization, always repeated in sync Worker."""
         ctx = self.get(name)

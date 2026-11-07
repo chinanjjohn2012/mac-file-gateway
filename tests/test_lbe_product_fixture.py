@@ -1660,3 +1660,150 @@ def test_d4_native_recipe_rejects_any_unapproved_child_environment_key_or_path(
             prepare_d4_native_launch_recipe(
                 service.get("a"), candidate, forged, private_root=private)
     assert service.info()["exec_policy"]["available"] is False
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+])
+def test_d4_host_preflight_observes_actual_kernel_and_private_root_not_t1(
+        product_service, monkeypatch, kind, cwd, argv):
+    from gateway.lbe_runner_preflight import (
+        D4RunnerProbeDenied, require_d4_native_runner_admission,
+    )
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    trees = _d4_staged_trees(workspace, kind)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("No native T1 authorized")))
+        candidate, marker, observed, recipe, host = (
+            service._prepare_d4_r003_runner_preflight(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees=trees,
+                timeout_seconds=120))
+        assert host.workspace == "a"
+        assert host.source_fingerprint == recipe.selected_source_fingerprint
+        assert host.kernel_sysname == os.uname().sysname
+        assert host.machine == os.uname().machine
+        assert host.uid == os.getuid()
+        assert host.effective_uid == os.geteuid()
+        assert host.pid == os.getpid()
+        assert host.kernel_and_private_paths_observed is True
+        assert len(host.private_root_inode) == 6
+        assert len(host.workspace_inode) == 6
+        assert host.proposed_limits == recipe.required_limits
+        assert dict(host.proposed_limits)["cpu_millicores_max"] == 2000
+        assert dict(host.proposed_limits)["memory_mib_max"] == 4096
+        assert host.immutable_github_image_observed is False
+        assert host.github_provider_attested is False
+        assert host.no_shared_mounts_proven is False
+        assert host.no_host_credentials_proven is False
+        assert host.loaded_source_graph_proven is False
+        assert host.physical_whole_child_cpu_memory_attached is False
+        assert host.exact_owner_native_t1_authorized is False
+        assert host.native_launch_allowed is False
+        assert not recipe.native_launch_allowed
+        with pytest.raises(D4RunnerProbeDenied, match="NOT_AUTHORIZED"):
+            require_d4_native_runner_admission(host, recipe)
+        with pytest.raises(GatewayError) as denial:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert denial.value.code == "exec_cleanup_proof_required"
+
+
+def test_d4_host_probe_real_rlimits_and_ci_labels_never_equal_domain_proof(
+        product_service, monkeypatch):
+    from gateway import lbe_runner_preflight as source
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="python_direct")
+    trees = _d4_staged_trees(workspace, "python_direct")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, marker, _obs, recipe = service._prepare_d4_r003_native_recipe(
+            "a", "py-direct", ["python", "-m", "pytest", "-q"],
+            private_root=private, expected_hashes=hashes, expected_trees=trees)
+        m.setattr(source.resource, "getrlimit", lambda _resource: (10, 10))
+        os.environ.update({
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_TOKEN": "fake-test-value-never-serialized",
+            "HTTPS_PROXY": "http://fake.test.invalid:1234",
+        })
+        host = source.observe_d4_runner_preflight(
+            service.get("a"), recipe, private_root=private)
+    assert host.claimed_ci_label_present is True
+    assert host.ambient_sensitive_credentials_present is True
+    assert host.ambient_proxy_settings_present is True
+    assert host.rlimit_cpu_seconds_soft == 10
+    assert host.rlimit_as_bytes_soft == 10
+    assert host.physical_whole_child_cpu_memory_attached is False
+    assert host.github_provider_attested is False
+    assert host.native_launch_allowed is False
+    assert "fake-test-value" not in repr(host)
+
+
+def test_d4_host_preflight_rejects_insecure_workspace_after_native_recipe(
+        product_service, monkeypatch):
+    from gateway.lbe_runner_preflight import (
+        D4RunnerProbeDenied, observe_d4_runner_preflight,
+    )
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="python_direct")
+    trees = _d4_staged_trees(workspace, "python_direct")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        _candidate, _marker, _obs, recipe = (
+            service._prepare_d4_r003_native_recipe(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes, expected_trees=trees))
+        workspace.chmod(0o777)
+        with pytest.raises(D4RunnerProbeDenied, match="owner controlled"):
+            observe_d4_runner_preflight(
+                service.get("a"), recipe, private_root=private)
+
+
+def test_d4_host_probe_forged_resource_and_image_claim_is_still_hard_denied(
+        product_service, monkeypatch):
+    from gateway.lbe_runner_preflight import (
+        D4RunnerProbeDenied, observe_d4_runner_preflight,
+        require_d4_native_runner_admission,
+    )
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="go")
+    trees = _d4_staged_trees(workspace, "go")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        _candidate, _marker, _obs, recipe = (
+            service._prepare_d4_r003_native_recipe(
+                "a", "go-project", ["go", "vet", "./..."],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees))
+        host = observe_d4_runner_preflight(
+            service.get("a"), recipe, private_root=private)
+        forged = replace(host,
+            github_provider_attested=True,
+            immutable_github_image_observed=True,
+            physical_whole_child_cpu_memory_attached=True,
+            exact_owner_native_t1_authorized=True,
+            native_launch_allowed=True,
+            blockers=())
+        with pytest.raises(D4RunnerProbeDenied, match="NOT_AUTHORIZED"):
+            require_d4_native_runner_admission(forged, recipe)
+        with pytest.raises(D4RunnerProbeDenied, match="promoted"):
+            observe_d4_runner_preflight(
+                service.get("a"), replace(recipe, native_launch_allowed=True),
+                private_root=private)
+    assert service.info()["exec_policy"]["available"] is False

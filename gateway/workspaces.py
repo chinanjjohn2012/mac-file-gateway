@@ -528,6 +528,52 @@ class WorkspaceService:
         # get() rechecks service-closing state after source inspection.
         return candidate, D4OneUseAttemptMarker(candidate, self.get(name))
 
+    def _inspect_d4_r003_staged_runtime(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, expected_hashes: dict[str, str],
+        timeout_seconds: int = 60,
+    ):
+        """Actual internal staged-source selection, NO Go/Pipenv execution.
+
+        Build a strict first-party service plan, verify the existing v1
+        ExecStateStore and Workspace gates, then read the staged native
+        executable files and build a fresh, closed proposed environment.
+        This is an internal *source* step for a future runner bootstrap,
+        not a public REST/MCP API, owner test consent, full loaded-source
+        attestation or a way to activate F1 or the NativeLauncher.
+        """
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if self.settings.schema_version != 2:
+                raise GatewayError(
+                    "exec_disabled", "D4 stage requires schema v2.")
+            if self._exec_state is None:
+                raise GatewayError(
+                    "exec_state_unavailable", "Exec durable state unavailable.")
+            self._exec_state.require_healthy()
+            self._active_operations += 1
+        try:
+            from .lbe_runtime_source import (
+                D4RuntimeSourceDenied, inspect_d4_runtime_sources,
+            )
+
+            candidate = self._prepare_d4_r003_fixture_candidate(
+                name, cwd, argv, timeout_seconds=timeout_seconds)
+            try:
+                return inspect_d4_runtime_sources(
+                    ctx, candidate, private_root=private_root,
+                    expected_hashes=expected_hashes,
+                )
+            except D4RuntimeSourceDenied:
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 staged runtime source or environment unavailable.",
+                ) from None
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
     def require_git(self, name: str, command: str) -> WorkspaceContext:
         """Independent authorization, always repeated in sync Worker."""
         ctx = self.get(name)

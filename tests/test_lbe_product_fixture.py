@@ -908,3 +908,192 @@ def test_d4_forged_directory_identity_is_not_a_product_authorization(
             replace(candidate, directory_identity=(("other", (0,) * 8),)),
             service.get("a"))
     assert candidate.native_launch_allowed is False
+
+
+def _stage_d4_native_bytes_in_private_runner(root, *, kind):
+    import hashlib
+
+    private = root.parent.parent
+    def stage(relative, data):
+        location = private / relative
+        location.parent.mkdir(parents=True, exist_ok=True)
+        location.write_bytes(data)
+        location.chmod(0o700)
+        return hashlib.sha256(data).hexdigest()
+
+    for name in ("home", "tmp"):
+        (private / name).mkdir(exist_ok=True)
+    if kind == "go":
+        for name in ("gopath", "modcache", "gocache", "gotmp"):
+            (private / name).mkdir(exist_ok=True)
+        return str(private), {
+            "go": stage("go/bin/go", b"staged Go primary test bytes"),
+            "compile": stage(
+                "go/pkg/tool/darwin_arm64/compile",
+                b"staged Go compiler test bytes"),
+            "link": stage(
+                "go/pkg/tool/darwin_arm64/link",
+                b"staged Go linker test bytes"),
+        }
+    if kind != "pipenv":
+        raise AssertionError("unsupported test fixture")
+    py_project = root / "py-pipenv"
+    return str(private), {
+        "Pipfile": hashlib.sha256(
+            (py_project / "Pipfile").read_bytes()).hexdigest(),
+        "Pipfile.lock": hashlib.sha256(
+            (py_project / "Pipfile.lock").read_bytes()).hexdigest(),
+        "pyvenv.cfg": hashlib.sha256(
+            (py_project / ".venv" / "pyvenv.cfg").read_bytes()).hexdigest(),
+        "python": hashlib.sha256(
+            (py_project / ".venv" / "bin" / "python").read_bytes()).hexdigest(),
+        "pipenv": stage("bin/pipenv", b"staged Pipenv entrypoint test bytes"),
+    }
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+])
+def test_d4_service_observes_real_staged_sources_and_closed_child_environment(
+        product_service, monkeypatch, kind, cwd, argv):
+    from gateway.lbe_runtime_source import (
+        D4RuntimeSourceDenied, authorize_d4_native_from_observation,
+    )
+
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind=kind)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_k: (
+            _ for _ in ()).throw(AssertionError("T0 cannot spawn native Go/Pipenv")))
+        actual = service._inspect_d4_r003_staged_runtime(
+            "a", cwd, argv, private_root=private, expected_hashes=hashes,
+            timeout_seconds=120)
+    assert actual.kind == kind
+    assert actual.workspace == "a"
+    assert actual.staged_file_bytes_checked is True
+    assert actual.child_environment_constructed is True
+    assert actual.actual_import_graph_attested is False
+    assert actual.runner_image_attested is False
+    assert actual.credentials_and_mounts_attested is False
+    assert actual.physical_resource_domain_attached is False
+    assert actual.owner_native_t1_grant is False
+    assert actual.native_launch_allowed is False
+    assert actual.blockers
+    assert actual.observed_kernel == os.uname().sysname
+    assert actual.observed_machine == os.uname().machine
+    env = dict(actual.closed_child_environment)
+    assert env["HOME"] == private + "/home"
+    assert env["TMPDIR"] == private + "/tmp"
+    assert "GITHUB_TOKEN" not in env and "PYTHONPATH" not in env
+    if kind == "go":
+        assert env["GOFLAGS"] == ""
+        assert env["GOTOOLCHAIN"] == "local"
+        assert env["GOPROXY"] == "off"
+        assert len(actual.staged_executables) == 3
+    else:
+        assert env["PIP_NO_INDEX"] == "1"
+        assert env["PIPENV_PIPFILE"] == str(root / "py-pipenv" / "Pipfile")
+        assert len(actual.staged_executables) == 2
+    with pytest.raises(D4RuntimeSourceDenied, match="NOT_AUTHORIZED"):
+        authorize_d4_native_from_observation(actual)
+    with pytest.raises(GatewayError) as refused:
+        service.invoke_exec("a", cwd, argv, dry_run=False)
+    assert refused.value.code == "exec_cleanup_proof_required"
+
+
+@pytest.mark.parametrize("kind,cwd,argv,changed_key,changed_relative", [
+    ("go", "go-project", ["go", "test", "./..."],
+     "compile", "go/pkg/tool/darwin_arm64/compile"),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"],
+     "link", "go/pkg/tool/darwin_arm64/link"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"],
+     "pipenv", "bin/pipenv"),
+])
+def test_d4_service_source_bytes_changed_after_pinning_deny_before_launch(
+        product_service, monkeypatch, kind, cwd, argv, changed_key,
+        changed_relative):
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind=kind)
+    (root.parent.parent / changed_relative).write_bytes(b"unqualified replacement")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_k: (
+            _ for _ in ()).throw(AssertionError("No native child allowed")))
+        with pytest.raises(GatewayError) as denied:
+            service._inspect_d4_r003_staged_runtime(
+                "a", cwd, argv, private_root=private, expected_hashes=hashes)
+    assert denied.value.code == "runner_unavailable"
+    assert hashes[changed_key] != ""
+
+
+@pytest.mark.parametrize("key,value", [
+    ("GOFLAGS", "-toolexec=/outside/untrusted"),
+    ("GOCACHEPROG", "/outside/loader"),
+    ("PIPENV_PYTHON", "/outside/python"),
+    ("PYTHONPATH", "/outside/site"),
+    ("DYLD_INSERT_LIBRARIES", "/outside/lib.dylib"),
+    ("GITHUB_TOKEN", "fake-token-not-logged"),
+    ("GH_TOKEN", "fake-token-not-logged"),
+    ("AWS_SECRET_ACCESS_KEY", "fake-secret-not-logged"),
+    ("GIT_ASKPASS", "/outside/credential"),
+])
+def test_d4_live_parent_selector_or_credentials_refuse_staged_observation(
+        product_service, monkeypatch, key, value):
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind="go")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin", key: value})
+        with pytest.raises(GatewayError) as denied:
+            service._inspect_d4_r003_staged_runtime(
+                "a", "go-project", ["go", "test", "./..."],
+                private_root=private, expected_hashes=hashes)
+    assert denied.value.code == "runner_unavailable"
+
+
+@pytest.mark.parametrize("violation", [
+    "wrong_root", "incomplete_hashes", "false_hash", "symlink_tool",
+    "outside_workspace", "private_root_is_workspace",
+])
+def test_d4_staged_runtime_fails_closed_on_unqualified_runner_sources(
+        product_service, monkeypatch, violation):
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind="go")
+    if violation == "wrong_root":
+        private = str(root.parent)
+    elif violation == "incomplete_hashes":
+        del hashes["link"]
+    elif violation == "false_hash":
+        hashes["go"] = "f" * 64
+    elif violation == "symlink_tool":
+        target = root.parent.parent / "go" / "bin" / "go"
+        target.unlink()
+        target.symlink_to("/bin/sh")
+    elif violation == "outside_workspace":
+        private = "/outside/runner"
+    else:
+        private = str(root)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        with pytest.raises(GatewayError) as denied:
+            service._inspect_d4_r003_staged_runtime(
+                "a", "go-project", ["go", "test", "./..."],
+                private_root=private, expected_hashes=hashes)
+    assert denied.value.code == "runner_unavailable"
+
+
+def test_d4_staged_runtime_not_client_mintable_or_executable_on_python_direct(
+        product_service, monkeypatch):
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind="go")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        with pytest.raises(GatewayError) as denied:
+            service._inspect_d4_r003_staged_runtime(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes)
+    assert denied.value.code == "runner_unavailable"
+    assert service.info()["exec_policy"]["available"] is False

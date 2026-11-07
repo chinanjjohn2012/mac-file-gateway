@@ -99,3 +99,32 @@ def test_d4_go_explicit_build_tag_selection_for_fixed_darwin_arm64(
 def test_d4_go_unknown_or_ambiguous_explicit_build_constraints_denied(content):
     with pytest.raises(D4GoImportSourceDenied):
         _darwin_arm64_explicit_selected(content)
+
+
+
+@pytest.mark.parametrize("content,selected", [
+    (b'/* Copyright\n * fixed source\n */\n'
+     b'//go:build darwin && arm64\n\npackage main\n', True),
+    (b'/* Copyright */\n//go:build linux\n\npackage main\n', False),
+    (b'// Copyright\n\n// +build darwin,arm64\n\npackage main\n', True),
+    (b'/* old copyright */\n//go:build darwin\n'
+     b'// +build darwin\n\npackage main\n', True),
+    # Modern Go build tags are recognized even without a blank line.
+    (b'//go:build darwin\npackage main\n', True),
+])
+def test_d4_go_valid_license_header_preserves_explicit_selection(content, selected):
+    assert _darwin_arm64_explicit_selected(content) is selected
+
+
+@pytest.mark.parametrize("source", [
+    b'// +build linux\npackage main\n',
+    b'// +build windows\n// ordinary comment\npackage main\n',
+    b'//go:build linux\n// +build linux\npackage main\n',
+    b'/* Copyright\n//go:build linux\n*/\npackage main\n',
+    b'/* Copyright\n// +build linux\n*/\npackage main\n',
+    b'//go:build darwin\n/* unfinished\npackage main\n',
+    b'//go:build linux\n\npackage main\n//go:build darwin\n',
+])
+def test_d4_go_unqualified_build_header_never_silently_omits_actual_source(source):
+    with pytest.raises(D4GoImportSourceDenied):
+        _darwin_arm64_explicit_selected(source)

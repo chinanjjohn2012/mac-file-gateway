@@ -4191,3 +4191,50 @@ def test_d4_go_stdlib_manifest_cannot_claim_unpinned_candidate(
         inspect_d4_go_direct_import_sources(
             service.get("a"), candidate,
             staged_go_manifest=(("src/fmt/print.go", "invalid"),))
+
+
+
+def test_d4_go_actual_service_build_header_with_license_block_is_accepted(
+        product_service, monkeypatch):
+    from gateway.lbe_go_import_sources import inspect_d4_go_direct_import_sources
+
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/main.go").write_bytes(
+        b'/* Copyright approved fixture */\n'
+        b'//go:build darwin && arm64\n\n'
+        b'package main\nimport "fmt"\nfunc main(){fmt.Println("ok")}\n')
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_k: (
+            _ for _ in ()).throw(AssertionError("Go T1 is not authorized")))
+        candidate = service._prepare_d4_r003_fixture_candidate(
+            "a", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"])
+        record = inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate,
+            staged_go_manifest=(("src/fmt/print.go", "a" * 64),))
+        assert record.selected_imports == ("fmt",)
+        assert record.native_launch_allowed is False
+        with pytest.raises(GatewayError) as exc:
+            service.invoke_exec(
+                "a", "go-project",
+                ["go", "build", "-o", "bin/app", "./cmd/app"],
+                dry_run=False)
+        assert exc.value.code == "exec_cleanup_proof_required"
+
+
+def test_d4_go_actual_service_missing_legacy_blank_cannot_exclude_source(
+        product_service):
+    from gateway.lbe_go_import_sources import (
+        D4GoImportSourceDenied, inspect_d4_go_direct_import_sources,
+    )
+
+    service, workspace = product_service
+    # Go ignores a +build selector without its required separating blank.
+    # Do not claim this file is excluded from Darwin compile inputs.
+    (workspace / "go-project/cmd/app/other.go").write_bytes(
+        b'// +build linux\npackage main\n'
+        b'import "unqualified.example/foreign"\n')
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"])
+    with pytest.raises(D4GoImportSourceDenied):
+        inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate, staged_go_manifest=())

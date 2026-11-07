@@ -208,23 +208,58 @@ def _darwin_arm64_explicit_selected(raw: bytes) -> bool:
         raise D4GoImportSourceDenied("duplicate Go build directives")
     if not directives:
         return True
-    # A directive must precede the first actual package clause, with only
-    # empty lines and Go comments before it. Reject ambiguous layout rather
-    # than pretending to reproduce the Go lexer or generated inputs.
+    # Verify the actual leading Go comment region, not a raw grep of all
+    # source lines. A copyright /*...*/ block before the build tag is legal;
+    # a //go:build marker inside that block or after package is NOT.
+    # Legacy +build has an additional blank-line separation requirement:
+    # without it Go ignores that old constraint, so treating it as a
+    # source-selection condition could silently omit actual compiler input.
     header = raw.splitlines()
-    seen_code = False
-    for line in header:
+    inside_block = False
+    package_at = None
+    last_legacy_at = None
+    for pos, line in enumerate(header):
         stripped = line.strip()
+        if inside_block:
+            if _BUILD_DIRECTIVE.match(stripped):
+                raise D4GoImportSourceDenied(
+                    "build tag embedded in Go block comment")
+            if b"*/" in stripped:
+                inside_block = False
+                remainder = stripped.split(b"*/", 1)[1].strip()
+                if remainder and not remainder.startswith(b"//"):
+                    raise D4GoImportSourceDenied(
+                        "ambiguous Go header after block comment")
+            continue
         if not stripped:
             continue
-        if stripped.startswith(b"package "):
-            seen_code = True
+        if stripped.startswith(b"/*"):
+            if b"*/" in stripped:
+                remainder = stripped.split(b"*/", 1)[1].strip()
+                if remainder and not remainder.startswith(b"//"):
+                    raise D4GoImportSourceDenied(
+                        "ambiguous Go header after block comment")
+            else:
+                inside_block = True
             continue
-        if (stripped.startswith(b"//go:build")
-                or stripped.startswith(b"// +build")) and seen_code:
-            raise D4GoImportSourceDenied("Go build tag after package clause")
-        if not seen_code and not stripped.startswith(b"//"):
-            raise D4GoImportSourceDenied("unqualified Go build directive header")
+        if stripped.startswith(b"//"):
+            if _LEGACY_BUILD.fullmatch(stripped):
+                last_legacy_at = pos
+            continue
+        if re.match(rb"package[ \t]+[A-Za-z_][A-Za-z0-9_]*", stripped):
+            package_at = pos
+            break
+        raise D4GoImportSourceDenied("unqualified Go build directive header")
+    if inside_block or package_at is None:
+        raise D4GoImportSourceDenied("Go build source has no valid package header")
+    if any(_BUILD_DIRECTIVE.match(line.strip())
+           for line in header[package_at:]):
+        raise D4GoImportSourceDenied("build tag after Go package clause")
+    if (last_legacy_at is not None
+            and not any(not line.strip()
+                        for line in header[last_legacy_at + 1:package_at])):
+        raise D4GoImportSourceDenied(
+            "legacy Go build constraints not separated from package")
     # Allow exactly one modern expression plus optional old +build lines.
     modern_selected = _eval_modern_go_build(modern[0]) if modern else None
     legacy_selected = _eval_legacy_go_build(legacy) if legacy else None

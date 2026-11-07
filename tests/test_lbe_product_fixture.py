@@ -936,6 +936,10 @@ def _stage_d4_native_bytes_in_private_runner(root, *, kind):
                 "go/pkg/tool/darwin_arm64/link",
                 b"staged Go linker test bytes"),
         }
+    if kind == "python_direct":
+        return str(private), {
+            "python": stage("bin/python", b"staged direct Python test bytes"),
+        }
     if kind != "pipenv":
         raise AssertionError("unsupported test fixture")
     py_project = root / "py-pipenv"
@@ -1224,6 +1228,13 @@ def _d4_staged_trees(root, kind):
             for name in ("gopath", "modcache", "gocache", "gotmp")
         })
         return {"go": _d4_tree_expected(private / "go"), **scratch}
+    if kind == "python_direct":
+        (private / "lib").mkdir(exist_ok=True)
+        return {
+            "bin": _d4_tree_expected(private / "bin"),
+            "lib": _d4_tree_expected(private / "lib"),
+            **scratch,
+        }
     if kind != "pipenv":
         raise AssertionError("invalid private source kind")
     (private / "lib").mkdir(exist_ok=True)
@@ -1381,3 +1392,203 @@ def test_d4_product_denies_prepopulated_native_scratch_even_with_approved_digest
                 "a", cwd, argv, private_root=private, expected_hashes=hashes,
                 expected_trees=trees)
     assert denied.value.code == "runner_unavailable"
+
+
+@pytest.mark.parametrize("kind,cwd,argv,first", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"], "python"),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"], "python"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"], "pipenv"),
+    ("go", "go-project", ["go", "test", "./..."], "go"),
+    ("go", "go-project", ["go", "vet", "./..."], "go"),
+    ("go", "go-project",
+     ["go", "build", "-o", "bin/app", "./cmd/app"], "go"),
+])
+def test_d4_all_six_commands_produce_private_source_only_native_recipe(
+        product_service, monkeypatch, kind, cwd, argv, first):
+    from gateway.lbe_launch_recipe import (
+        D4NativeRecipeDenied, launch_d4_native_from_recipe,
+    )
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    trees = _d4_staged_trees(workspace, kind)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("native T1 forbidden")))
+        candidate, marker, observation, recipe = (
+            service._prepare_d4_r003_native_recipe(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees=trees,
+                timeout_seconds=120))
+        assert recipe.workspace == "a"
+        assert recipe.profile_git_blob == candidate.profile_git_blob
+        assert recipe.runner == candidate.plan.runner
+        assert recipe.requested_argv == tuple(argv)
+        assert recipe.service_effective_argv == candidate.plan.effective_argv
+        assert recipe.working_directory == str(workspace / cwd)
+        assert recipe.resolved_spawn_argv[0] == recipe.resolved_executable
+        assert recipe.resolved_executable.startswith(private + "/")
+        assert recipe.resolved_executable.endswith("/" + first)
+        assert recipe.resolved_spawn_argv[1:] == candidate.plan.effective_argv[1:]
+        assert recipe.original_timeout_seconds == 120
+        assert len(recipe.selected_source_fingerprint) == 64
+        assert recipe.native_launch_allowed is False
+        assert recipe.real_runner_qualified is False
+        assert recipe.actual_loaded_source_graph_proven is False
+        assert recipe.physical_cpu_memory_enforcement_proven is False
+        assert recipe.owner_t1_grant_present is False
+        assert observation.native_launch_allowed is False
+        assert dict(recipe.required_limits)["cpu_millicores_max"] == 2000
+        assert dict(recipe.required_limits)["memory_mib_max"] == 4096
+        assert dict(recipe.closed_child_environment)["HOME"] == private + "/home"
+        assert "GITHUB_TOKEN" not in dict(recipe.closed_child_environment)
+        if kind == "go" and argv[1] == "build":
+            assert recipe.canonical_output_path == str(
+                workspace / "go-project" / "bin" / "app")
+        else:
+            assert recipe.canonical_output_path is None
+        if kind == "python_direct":
+            assert observation.kind == "python_direct"
+            assert dict(recipe.closed_child_environment)["PYTHONSAFEPATH"] == "1"
+            assert len(observation.staged_executables) == 1
+        if kind == "pipenv":
+            assert recipe.resolved_executable == private + "/bin/pipenv"
+            assert recipe.resolved_spawn_argv[:3] == (
+                private + "/bin/pipenv", "run", "python")
+        with pytest.raises(D4NativeRecipeDenied, match="cannot launch"):
+            launch_d4_native_from_recipe(recipe)
+        with pytest.raises(GatewayError) as denied:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert denied.value.code == "exec_cleanup_proof_required"
+        result = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher).run(
+            candidate.plan, product_attempt=marker)
+        assert result["status"] == "launch_failed"
+        assert result["executed"] is False
+        with pytest.raises(LbeWorkerError) as replay:
+            LbeWorker(DirectChildOwner(), launcher=_no_child_launcher).run(
+                candidate.plan, product_attempt=marker)
+        assert replay.value.code == "attempt_replay_denied"
+
+
+@pytest.mark.parametrize("mutation", [
+    "wrong_python_hash", "extra_site", "bad_pth", "source_replacement",
+    "foreign_parent_selector",
+])
+def test_d4_python_direct_recipe_rejects_changed_real_inputs_before_launch(
+        product_service, monkeypatch, mutation):
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="python_direct")
+    trees = _d4_staged_trees(workspace, "python_direct")
+    if mutation == "wrong_python_hash":
+        hashes["python"] = "b" * 64
+    elif mutation == "extra_site":
+        (workspace.parent.parent / "lib" / "shadow.py").write_bytes(
+            b"unqualified module import input\n")
+    elif mutation == "bad_pth":
+        (workspace.parent.parent / "lib" / "x.pth").write_bytes(
+            b"import os; os.system('not allowed')\n")
+    elif mutation == "source_replacement":
+        (workspace.parent.parent / "bin" / "python").write_bytes(
+            b"unqualified changed source\n")
+    with monkeypatch.context() as m:
+        env = {"PATH": "/usr/bin:/bin"}
+        if mutation == "foreign_parent_selector":
+            env["PYTHONPATH"] = "/tmp/unqualified"
+        m.setattr(os, "environ", env)
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no native child")))
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_native_recipe(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees)
+    assert denied.value.code == "runner_unavailable"
+
+
+@pytest.mark.parametrize("timeout", [0, 121, 300, True, "120"])
+def test_d4_recipe_rejects_timeout_outside_original_child_budget(
+        product_service, monkeypatch, timeout):
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="python_direct")
+    trees = _d4_staged_trees(workspace, "python_direct")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("native T1 forbidden")))
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_native_recipe(
+                "a", "py-direct",
+                ["python", "-m", "compileall", "-q", "./src"],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees, timeout_seconds=timeout)
+    assert denied.value.code in {"runner_unavailable", "invalid_argument"}
+
+
+def test_d4_native_recipe_rejects_forged_observation_and_cannot_mint_grant(
+        product_service, monkeypatch):
+    from gateway.lbe_launch_recipe import (
+        D4NativeRecipeDenied, launch_d4_native_from_recipe,
+        prepare_d4_native_launch_recipe,
+    )
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="python_direct")
+    trees = _d4_staged_trees(workspace, "python_direct")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, _marker, observed, recipe = (
+            service._prepare_d4_r003_native_recipe(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees))
+        for field, val in (
+            ("native_launch_allowed", True),
+            ("actual_import_graph_attested", True),
+            ("bounded_staged_file_set_checked", False),
+            ("staged_source_trees", ()),
+        ):
+            with pytest.raises(D4NativeRecipeDenied):
+                prepare_d4_native_launch_recipe(
+                    service.get("a"), candidate,
+                    replace(observed, **{field: val}),
+                    private_root=private)
+        with pytest.raises(D4NativeRecipeDenied):
+            launch_d4_native_from_recipe(replace(recipe, native_launch_allowed=True))
+    assert recipe.native_launch_allowed is False
+
+
+def test_d4_python_direct_worker_prelaunch_rechecks_real_private_python(
+        product_service, monkeypatch):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="python_direct")
+    trees = _d4_staged_trees(workspace, "python_direct")
+    called = []
+    def should_not_launch(_plan):
+        called.append(True)
+        raise AssertionError("source changed before Worker launch")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, marker, _obs, recipe = service._prepare_d4_r003_native_recipe(
+            "a", "py-direct", ["python", "-m", "pytest", "-q"],
+            private_root=private, expected_hashes=hashes,
+            expected_trees=trees)
+        assert recipe.native_launch_allowed is False
+        (workspace.parent.parent / "bin" / "python").write_bytes(
+            b"replaced right before source recheck\n")
+        with pytest.raises(LbeWorkerError) as denied:
+            LbeWorker(DirectChildOwner(), launcher=should_not_launch).run(
+                candidate.plan, product_attempt=marker)
+        assert denied.value.code == "attempt_replay_denied"
+    assert called == []

@@ -59,6 +59,11 @@ _ENV_CONSTANT_GO = {
     "GOSUMDB": "off", "GOWORK": "off", "GO111MODULE": "on",
     "CGO_ENABLED": "0",
 }
+_ENV_CONSTANT_PYTHON_DIRECT = {
+    "LANG": "C", "LC_ALL": "C",
+    "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONUNBUFFERED": "1", "PYTHONSAFEPATH": "1",
+}
 _ENV_CONSTANT_PIPENV = {
     "LANG": "C", "LC_ALL": "C", "PIPENV_VENV_IN_PROJECT": "1",
     "PIPENV_DONT_LOAD_ENV": "1", "PIPENV_IGNORE_VIRTUALENVS": "1",
@@ -356,6 +361,22 @@ def inspect_d4_runtime_sources(
                   (candidate.plan.cwd + "/.venv/bin/python",
                    observed.python_file_sha256))
         kind = "pipenv"
+    elif candidate.plan.cwd == "py-direct" and candidate.plan.runner == "direct":
+        if set(expected_hashes) != {"python"}:
+            raise D4RuntimeSourceDenied("missing exact direct Python interpreter input")
+        expected_python = _hash_expected(expected_hashes["python"], "python")
+        selected_python = _child(root, "bin/python")
+        observed_python = _private_file_hash(selected_python, root)
+        if observed_python != expected_python:
+            raise D4RuntimeSourceDenied("selected Python interpreter source changed")
+        env = dict(_ENV_CONSTANT_PYTHON_DIRECT)
+        env.update({
+            "PATH": root + "/bin:/usr/bin:/bin",
+            "HOME": _child(root, "home"),
+            "TMPDIR": _child(root, "tmp"),
+        })
+        staged = (("bin/python", observed_python),)
+        kind = "python_direct"
     else:
         raise D4RuntimeSourceDenied("unapproved native stage selection")
 
@@ -381,14 +402,19 @@ def inspect_d4_runtime_sources(
                 ("gotmp", root + "/gotmp"),
             )
             tree_roots = (("go", root + "/go"),) + scratch_roots
-        else:
+        elif kind == "pipenv":
             tree_roots = (
                 ("bin", root + "/bin"),
                 ("lib", root + "/lib"),
                 ("venv", pipenv_project + "/.venv"),
             ) + scratch_roots
+        else:
+            tree_roots = (
+                ("bin", root + "/bin"),
+                ("lib", root + "/lib"),
+            ) + scratch_roots
         if set(expected_trees) != {name for name, _path in tree_roots}:
-            raise D4RuntimeSourceDenied("missing staged Go/Pipenv source roots")
+            raise D4RuntimeSourceDenied("missing staged runtime source roots")
         for name, _location in scratch_roots:
             if (type(expected_trees[name]) is not tuple
                     or expected_trees[name] != (("", None),)):

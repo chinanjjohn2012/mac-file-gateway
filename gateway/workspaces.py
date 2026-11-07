@@ -619,6 +619,39 @@ class WorkspaceService:
             ) from None
         return candidate, marker, observed
 
+    def _prepare_d4_r003_native_recipe(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, expected_hashes: dict[str, str],
+        expected_trees: dict[str, tuple[tuple[str, str | None], ...]],
+        timeout_seconds: int = 60,
+    ):
+        """Real internal product command selection; no native execution.
+
+        Binds an exact six-command fixture to a source-only absolute
+        executable, working directory, canonical output and constructed
+        private child environment. The returned recipe cannot be passed to
+        a public API or be treated as a D0/F1/NativeLauncher grant.
+        """
+        candidate, marker, observed = self._prepare_d4_r003_staged_attempt(
+            name, cwd, argv, private_root=private_root,
+            expected_hashes=expected_hashes,
+            expected_trees=expected_trees,
+            timeout_seconds=timeout_seconds,
+        )
+        from .lbe_launch_recipe import (
+            D4NativeRecipeDenied, prepare_d4_native_launch_recipe,
+        )
+
+        try:
+            recipe = prepare_d4_native_launch_recipe(
+                self.get(name), candidate, observed, private_root=private_root)
+        except D4NativeRecipeDenied:
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 native source-only recipe is unavailable.",
+            ) from None
+        return candidate, marker, observed, recipe
+
     def require_git(self, name: str, command: str) -> WorkspaceContext:
         """Independent authorization, always repeated in sync Worker."""
         ctx = self.get(name)

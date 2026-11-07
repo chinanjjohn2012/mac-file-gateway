@@ -531,6 +531,7 @@ class WorkspaceService:
     def _inspect_d4_r003_staged_runtime(
         self, name: str, cwd: str, argv: list[str], *,
         private_root: str, expected_hashes: dict[str, str],
+        expected_trees: dict[str, tuple[tuple[str, str | None], ...]] | None = None,
         timeout_seconds: int = 60,
     ):
         """Actual internal staged-source selection, NO Go/Pipenv execution.
@@ -563,6 +564,7 @@ class WorkspaceService:
                 return inspect_d4_runtime_sources(
                     ctx, candidate, private_root=private_root,
                     expected_hashes=expected_hashes,
+                    expected_trees=expected_trees,
                 )
             except D4RuntimeSourceDenied:
                 raise GatewayError(
@@ -577,6 +579,7 @@ class WorkspaceService:
     def _prepare_d4_r003_staged_attempt(
         self, name: str, cwd: str, argv: list[str], *,
         private_root: str, expected_hashes: dict[str, str],
+        expected_trees: dict[str, tuple[tuple[str, str | None], ...]] | None = None,
         timeout_seconds: int = 60,
     ):
         """Bind actual staged source/env observations to a one-use Worker.
@@ -591,6 +594,7 @@ class WorkspaceService:
         observed = self._inspect_d4_r003_staged_runtime(
             name, cwd, argv, private_root=private_root,
             expected_hashes=expected_hashes,
+            expected_trees=expected_trees,
             timeout_seconds=timeout_seconds,
         )
         candidate = self._prepare_d4_r003_fixture_candidate(
@@ -604,7 +608,8 @@ class WorkspaceService:
         try:
             binding = D4StagedSourceRecheck(
                 ctx, candidate, private_root=private_root,
-                expected_hashes=expected_hashes, observed=observed)
+                expected_hashes=expected_hashes, observed=observed,
+                expected_trees=expected_trees)
             marker = D4OneUseAttemptMarker(
                 candidate, ctx, staged_source=binding)
         except D4RuntimeSourceDenied:

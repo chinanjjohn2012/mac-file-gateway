@@ -1197,3 +1197,142 @@ def test_d4_user_supplied_staged_callback_cannot_replace_internal_recheck(
         D4OneUseAttemptMarker(
             candidate, service.get("a"), staged_source=lambda *_: None)
     assert service.info()["exec_policy"]["available"] is False
+
+
+def _d4_tree_expected(path):
+    import hashlib
+
+    entries = [("", None)]
+    for leaf in sorted(path.rglob("*")):
+        name = leaf.relative_to(path).as_posix()
+        if leaf.is_dir() and not leaf.is_symlink():
+            entries.append((name, None))
+        else:
+            entries.append((name, hashlib.sha256(leaf.read_bytes()).hexdigest()))
+    return tuple(sorted(entries))
+
+
+def _d4_staged_trees(root, kind):
+    private = root.parent.parent
+    if kind == "go":
+        return {"go": _d4_tree_expected(private / "go")}
+    if kind != "pipenv":
+        raise AssertionError("invalid private source kind")
+    (private / "lib").mkdir(exist_ok=True)
+    return {
+        "venv": _d4_tree_expected(root / "py-pipenv" / ".venv"),
+        "bin": _d4_tree_expected(private / "bin"),
+        "lib": _d4_tree_expected(private / "lib"),
+    }
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+])
+def test_d4_product_stage_binds_entire_staged_source_tree_to_worker(
+        product_service, monkeypatch, kind, cwd, argv):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind=kind)
+    trees = _d4_staged_trees(root, kind)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_k: (
+            _ for _ in ()).throw(AssertionError("no real T1 child")))
+        candidate, marker, observation = service._prepare_d4_r003_staged_attempt(
+            "a", cwd, argv, private_root=private, expected_hashes=hashes,
+            expected_trees=trees)
+        assert observation.bounded_staged_file_set_checked is True
+        assert len(observation.staged_source_trees) == (1 if kind == "go" else 3)
+        assert all(entry_count > 0 and len(digest) == 64
+                   for _label, digest, entry_count, _total in
+                   observation.staged_source_trees)
+        assert observation.actual_import_graph_attested is False
+        assert observation.physical_resource_domain_attached is False
+        assert observation.owner_native_t1_grant is False
+        assert observation.native_launch_allowed is False
+        result = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher).run(
+            candidate.plan, product_attempt=marker)
+        assert result["status"] == "launch_failed"
+        assert result["executed"] is False
+        with pytest.raises(LbeWorkerError) as replay:
+            LbeWorker(DirectChildOwner(), launcher=_no_child_launcher).run(
+                candidate.plan, product_attempt=marker)
+        assert replay.value.code == "attempt_replay_denied"
+
+
+@pytest.mark.parametrize("kind,added_path", [
+    ("go", "go/src/new-package/extra.go"),
+    ("go", "go/pkg/tool/darwin_arm64/new_tool"),
+    ("pipenv", "lib/shadow.py"),
+    ("pipenv", "projects/a/py-pipenv/.venv/lib/site.py"),
+])
+def test_d4_product_staged_tree_extra_source_denied_before_launcher(
+        product_service, monkeypatch, kind, added_path):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind=kind)
+    trees = _d4_staged_trees(root, kind)
+    cwd = "go-project" if kind == "go" else "py-pipenv"
+    argv = (["go", "test", "./..."] if kind == "go"
+            else ["python", "-m", "pytest", "-q"])
+    launcher_count = []
+    def blocked(_plan):
+        launcher_count.append(True)
+        raise AssertionError("never launch after source tree drift")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, marker, observation = service._prepare_d4_r003_staged_attempt(
+            "a", cwd, argv, private_root=private,
+            expected_hashes=hashes, expected_trees=trees)
+        assert observation.bounded_staged_file_set_checked
+        extra = root.parent.parent / added_path
+        extra.parent.mkdir(parents=True, exist_ok=True)
+        extra.write_bytes(b"unqualified staged extra input")
+        with pytest.raises(LbeWorkerError) as denied:
+            LbeWorker(DirectChildOwner(), launcher=blocked).run(
+                candidate.plan, product_attempt=marker)
+        assert denied.value.code == "attempt_replay_denied"
+    assert launcher_count == []
+
+
+@pytest.mark.parametrize("kind", ["go", "pipenv"])
+def test_d4_product_stage_rejects_missing_tree_even_when_binaries_hash_match(
+        product_service, monkeypatch, kind):
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind=kind)
+    cwd = "go-project" if kind == "go" else "py-pipenv"
+    argv = (["go", "test", "./..."] if kind == "go"
+            else ["python", "-m", "pytest", "-q"])
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        with pytest.raises(GatewayError) as denied:
+            service._inspect_d4_r003_staged_runtime(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees={})
+    assert denied.value.code == "runner_unavailable"
+
+
+def test_d4_product_stage_rejects_trusted_manifest_with_pth_startup_code(
+        product_service, monkeypatch):
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind="pipenv")
+    (root.parent.parent / "lib").mkdir(exist_ok=True)
+    (root.parent.parent / "lib" / "custom.pth").write_bytes(
+        b"import unexpected_site_startup\n")
+    trees = _d4_staged_trees(root, "pipenv")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        with pytest.raises(GatewayError) as denied:
+            service._inspect_d4_r003_staged_runtime(
+                "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees)
+    assert denied.value.code == "runner_unavailable"

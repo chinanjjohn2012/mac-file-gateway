@@ -1,0 +1,231 @@
+"""Closed staged native-source tree inventory for D4 R003 product preparation.
+
+Checks actual *staged* files/dirs via owner-controlled, nofollow descriptor
+walks. The expected complete file set and SHA256 digests must come from an
+independently reviewed provisioner, NOT a client request or this scan. This
+module neither imports nor executes unqualified foreign code; it cannot attest
+what a future interpreter/compiler will actually load, which runner image is
+used, nor an OS CPU/RAM resource domain. No receipt confers Exec authority.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
+import os
+import re
+import stat
+
+
+class D4RuntimeTreeDenied(ValueError):
+    """Unknown, changing, or unsafe staged executable source tree."""
+
+
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+_SHA = re.compile(r"[0-9a-f]{64}\Z")
+_COMPONENT = re.compile(r"[A-Za-z0-9_.+@-]{1,255}\Z")
+_MAX_ENTRIES = 24000
+_MAX_DEPTH = 24
+_MAX_SINGLE_FILE = 128 * 1024 * 1024
+_MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
+_FIELDS = ("st_dev", "st_ino", "st_size", "st_mtime_ns",
+           "st_ctime_ns", "st_mode", "st_uid", "st_nlink")
+# Ordinary Python .pth files can execute import statements at site startup.
+# Until there is an independently reviewed site/seed loader selection, reject
+# even a correctly hashed .pth. These are source-selection *denials*, not a
+# claim that other files cannot import foreign code.
+_UNQUALIFIED_STARTUP = frozenset({
+    "sitecustomize.py", "usercustomize.py", "__pycache__",
+})
+
+
+@dataclass(frozen=True, slots=True)
+class D4ClosedTreeSnapshot:
+    relative_root: str
+    entry_count: int
+    file_count: int
+    total_file_bytes: int
+    observed_identity_sha256: str
+    status: str = "STAGED_CLOSED_FILE_SET_ONLY"
+    staged_sources_closed: bool = True
+    actual_loader_selected_sources_proven: bool = False
+    runner_attested: bool = False
+    resource_domain_enforced: bool = False
+    native_launch_allowed: bool = False
+
+
+def _parts(path: object, label: str) -> tuple[str, ...]:
+    if (type(path) is not str or not 2 <= len(path) <= 2048
+            or not path.startswith("/") or "\\" in path
+            or ":" in path or any(ord(c) < 33 or ord(c) >= 127 for c in path)):
+        raise D4RuntimeTreeDenied("invalid absolute " + label)
+    parts = path[1:].split("/")
+    if any(_COMPONENT.fullmatch(p) is None or p in (".", "..")
+           for p in parts):
+        raise D4RuntimeTreeDenied("noncanonical " + label)
+    return tuple(parts)
+
+
+def _rel(path: object) -> tuple[str, ...]:
+    if type(path) is not str or not path:
+        raise D4RuntimeTreeDenied("invalid staged relative path")
+    parts = path.split("/")
+    if (len(parts) > _MAX_DEPTH
+            or any(_COMPONENT.fullmatch(p) is None or p in (".", "..")
+                   for p in parts)):
+        raise D4RuntimeTreeDenied("unqualified staged relative path")
+    if any(p in _UNQUALIFIED_STARTUP or p.endswith(".pth") for p in parts):
+        raise D4RuntimeTreeDenied("unqualified Python startup source")
+    return tuple(parts)
+
+
+def _identity(fd: int, *, directory: bool) -> tuple[int, ...]:
+    st = os.fstat(fd)
+    if ((not stat.S_ISDIR(st.st_mode) if directory else
+         not stat.S_ISREG(st.st_mode))
+            or st.st_uid != os.getuid() or st.st_mode & 0o022
+            or (not directory and st.st_nlink != 1)):
+        raise D4RuntimeTreeDenied("unsafe staged source inode")
+    return tuple(getattr(st, f) for f in _FIELDS)
+
+
+def _manifest(expected: object) -> dict[str, str | None]:
+    if (type(expected) is not tuple
+            or not 1 <= len(expected) <= _MAX_ENTRIES):
+        raise D4RuntimeTreeDenied("missing bounded exact source manifest")
+    entries: dict[str, str | None] = {}
+    for row in expected:
+        if (type(row) is not tuple or len(row) != 2
+                or type(row[0]) is not str
+                or type(row[1]) not in (str, type(None))):
+            raise D4RuntimeTreeDenied("invalid expected tree row")
+        name, digest = row
+        if name != "":
+            _rel(name)
+        if (name in entries or
+                (digest is not None and
+                 (_SHA.fullmatch(digest) is None or digest == "0" * 64))):
+            raise D4RuntimeTreeDenied("duplicate or invalid source manifest")
+        entries[name] = digest
+    if "" not in entries or entries[""] is not None:
+        raise D4RuntimeTreeDenied("expected tree root must be a directory")
+    for path in entries:
+        if path:
+            parent = path.rpartition("/")[0]
+            if parent not in entries or entries[parent] is not None:
+                raise D4RuntimeTreeDenied("expected parent directory missing")
+    return entries
+
+
+def _root_fd(private: tuple[str, ...],
+             selected: tuple[str, ...]) -> int:
+    if len(selected) <= len(private) or selected[:len(private)] != private:
+        raise D4RuntimeTreeDenied("staged tree outside private runner")
+    fd = os.open("/", _DIR_FLAGS)
+    try:
+        for index, part in enumerate(selected):
+            child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            if index + 1 >= len(private):
+                _identity(fd, directory=True)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def inspect_d4_closed_staged_tree(
+    *, private_root: str, staged_root: str,
+    expected: tuple[tuple[str, str | None], ...],
+) -> D4ClosedTreeSnapshot:
+    """Match the ENTIRE selected tree and metadata, not just listed leaves.
+
+    A successful result only certifies this bounded staged tree's observed
+    bytes, names, modes and FD identities at inspection time. Files outside
+    this tree, dynamic imports, the process image, shared libraries, symlinks,
+    mounts and pathname-exec races remain separately unproven.
+    """
+    private = _parts(private_root, "private root")
+    chosen = _parts(staged_root, "staged root")
+    wanted = _manifest(expected)
+    count = 0
+    file_count = 0
+    byte_count = 0
+    digest = hashlib.sha256()
+
+    def observe(name: str, sha: str | None, identity: tuple[int, ...]) -> None:
+        nonlocal count
+        if name not in wanted or wanted[name] != sha:
+            raise D4RuntimeTreeDenied("unknown or modified staged tree entry")
+        count += 1
+        if count > _MAX_ENTRIES:
+            raise D4RuntimeTreeDenied("staged source tree exceeds entry limit")
+        digest.update(repr((name, sha, identity)).encode("ascii"))
+        digest.update(b"\n")
+
+    def walk(fd: int, prefix: str, level: int) -> None:
+        nonlocal file_count, byte_count
+        before = _identity(fd, directory=True)
+        names = tuple(sorted(os.listdir(fd)))
+        if len(names) + count + 1 > _MAX_ENTRIES:
+            raise D4RuntimeTreeDenied("staged source directory too large")
+        observe(prefix, None, before)
+        for part in names:
+            _rel(part)
+            name = prefix + "/" + part if prefix else part
+            if name not in wanted:
+                raise D4RuntimeTreeDenied("unlisted staged source file")
+            if wanted[name] is None:
+                if level >= _MAX_DEPTH:
+                    raise D4RuntimeTreeDenied("staged source tree too deep")
+                child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+                try:
+                    walk(child, name, level + 1)
+                finally:
+                    os.close(child)
+            else:
+                child = os.open(part, _FILE_FLAGS, dir_fd=fd)
+                try:
+                    identity = _identity(child, directory=False)
+                    size = identity[2]
+                    if (size < 0 or size > _MAX_SINGLE_FILE
+                            or byte_count + size > _MAX_TOTAL_BYTES):
+                        raise D4RuntimeTreeDenied("staged source byte budget exceeded")
+                    stream = hashlib.sha256()
+                    remaining = size
+                    while remaining:
+                        data = os.read(child, min(65536, remaining))
+                        if not data:
+                            raise D4RuntimeTreeDenied("staged source truncated")
+                        stream.update(data)
+                        remaining -= len(data)
+                    if _identity(child, directory=False) != identity:
+                        raise D4RuntimeTreeDenied("staged source inode changed")
+                    file_count += 1
+                    byte_count += size
+                    observe(name, stream.hexdigest(), identity)
+                finally:
+                    os.close(child)
+        if (tuple(sorted(os.listdir(fd))) != names
+                or _identity(fd, directory=True) != before):
+            raise D4RuntimeTreeDenied("staged source directory drifted")
+
+    try:
+        fd = _root_fd(private, chosen)
+        try:
+            walk(fd, "", 0)
+        finally:
+            os.close(fd)
+    except (OSError, ValueError) as exc:
+        if type(exc) is D4RuntimeTreeDenied:
+            raise
+        raise D4RuntimeTreeDenied("staged source tree cannot be safely read") from None
+    if count != len(wanted):
+        raise D4RuntimeTreeDenied("expected staged sources not all present")
+    return D4ClosedTreeSnapshot(
+        relative_root="/".join(chosen[len(private):]),
+        entry_count=count, file_count=file_count,
+        total_file_bytes=byte_count,
+        observed_identity_sha256=digest.hexdigest(),
+    )

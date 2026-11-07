@@ -31,6 +31,9 @@ from .lbe_prelaunch_t0 import (
     check_go_environment_t0, check_pipenv_environment_t0,
     LbePrelaunchT0Denied,
 )
+from .lbe_runtime_tree import (
+    D4RuntimeTreeDenied, inspect_d4_closed_staged_tree,
+)
 
 if TYPE_CHECKING:
     from .workspaces import WorkspaceContext
@@ -83,9 +86,11 @@ class D4RuntimeSourceObservation:
     closed_child_environment: tuple[tuple[str, str], ...]
     observed_kernel: str
     observed_machine: str
+    staged_source_trees: tuple[tuple[str, str, int, int], ...] = ()
     status: str = "ACTUAL_STAGED_SOURCE_ONLY_NO_EXECUTION_AUTHORITY"
     staged_file_bytes_checked: bool = True
     child_environment_constructed: bool = True
+    bounded_staged_file_set_checked: bool = False
     actual_import_graph_attested: bool = False
     runner_image_attested: bool = False
     credentials_and_mounts_attested: bool = False
@@ -218,6 +223,7 @@ def _private_file_hash(path: str, root: str) -> str:
 def inspect_d4_runtime_sources(
     ctx: "WorkspaceContext", candidate: D4FixtureCandidate, *,
     private_root: str, expected_hashes: dict[str, str],
+    expected_trees: dict[str, tuple[tuple[str, str | None], ...]] | None = None,
 ) -> D4RuntimeSourceObservation:
     """Real staged source inspection and closed-env selection, no execution.
 
@@ -353,6 +359,36 @@ def inspect_d4_runtime_sources(
     else:
         raise D4RuntimeSourceDenied("unapproved native stage selection")
 
+    tree_receipts: list[tuple[str, str, int, int]] = []
+    if expected_trees is not None:
+        # A closed staged tree is only a selected FILE SET. It never proves
+        # the future compiler/interpreter's actual import or dynamic loader
+        # resolution and never authorizes a Popen.
+        if type(expected_trees) is not dict:
+            raise D4RuntimeSourceDenied("staged source manifest must be exact")
+        if kind == "go":
+            tree_roots = (("go", root + "/go"),)
+        else:
+            tree_roots = (
+                ("bin", root + "/bin"),
+                ("lib", root + "/lib"),
+                ("venv", pipenv_project + "/.venv"),
+            )
+        if set(expected_trees) != {name for name, _path in tree_roots}:
+            raise D4RuntimeSourceDenied("missing staged Go/Pipenv source roots")
+        for name, staged_root in tree_roots:
+            try:
+                snapshot = inspect_d4_closed_staged_tree(
+                    private_root=root, staged_root=staged_root,
+                    expected=expected_trees[name],
+                )
+            except (D4RuntimeTreeDenied, OSError):
+                raise D4RuntimeSourceDenied(
+                    "actual staged runtime tree is not closed") from None
+            tree_receipts.append((
+                name, snapshot.observed_identity_sha256,
+                snapshot.entry_count, snapshot.total_file_bytes,
+            ))
     kernel = os.uname()
     return D4RuntimeSourceObservation(
         workspace=ctx.name, kind=kind,
@@ -363,6 +399,8 @@ def inspect_d4_runtime_sources(
         closed_child_environment=tuple(sorted(env.items())),
         observed_kernel=kernel.sysname,
         observed_machine=kernel.machine,
+        staged_source_trees=tuple(tree_receipts),
+        bounded_staged_file_set_checked=expected_trees is not None,
     )
 
 
@@ -377,12 +415,15 @@ class D4StagedSourceRecheck:
     inspection after the Worker burns the one-use attempt and before its
     launcher. Full imported-source/OS isolation/approval remain absent.
     """
-    __slots__ = ("_ctx", "_candidate", "_root", "_hashes", "_observed")
+    __slots__ = ("_ctx", "_candidate", "_root", "_hashes",
+                 "_trees", "_observed")
 
     def __init__(self, ctx: "WorkspaceContext",
                  candidate: D4FixtureCandidate, *,
                  private_root: str, expected_hashes: dict[str, str],
-                 observed: D4RuntimeSourceObservation) -> None:
+                 observed: D4RuntimeSourceObservation,
+                 expected_trees: dict[str, tuple[tuple[str, str | None], ...]] | None = None,
+                 ) -> None:
         from .workspaces import WorkspaceContext
 
         if (type(ctx) is not WorkspaceContext
@@ -403,10 +444,19 @@ class D4StagedSourceRecheck:
         if any(type(k) is not str or type(v) is not str
                or _SHA.fullmatch(v) is None for k,v in pairs):
             raise D4RuntimeSourceDenied("invalid pinned staged-source digests")
+        if (expected_trees is not None
+                and (type(expected_trees) is not dict
+                     or any(type(k) is not str or type(v) is not tuple
+                            for k, v in expected_trees.items()))):
+            raise D4RuntimeSourceDenied("invalid staged tree binding")
+        if observed.bounded_staged_file_set_checked is not (expected_trees is not None):
+            raise D4RuntimeSourceDenied("staged tree inventory not bound")
         self._ctx = ctx
         self._candidate = candidate
         self._root = root
         self._hashes = pairs
+        self._trees = (None if expected_trees is None
+                       else tuple(sorted(expected_trees.items())))
         self._observed = observed
 
     def check_binding(self, ctx: "WorkspaceContext",
@@ -421,6 +471,8 @@ class D4StagedSourceRecheck:
             self._ctx, self._candidate,
             private_root=self._root,
             expected_hashes=dict(self._hashes),
+            expected_trees=(None if self._trees is None
+                            else dict(self._trees)),
         )
         if latest != self._observed:
             raise D4RuntimeSourceDenied(

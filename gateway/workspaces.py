@@ -718,6 +718,96 @@ class WorkspaceService:
             ) from None
         return candidate, marker, observed, recipe, runner
 
+    def _exercise_d4_r003_source_only_worker(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, expected_hashes: dict[str, str],
+        expected_trees: dict[str, tuple[tuple[str, str | None], ...]],
+        timeout_seconds: int = 60,
+        cancelled: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        """Service-owned source -> Worker -> macOS Runner, always NO CHILD.
+
+        This real internal product call chain is never registered as an
+        HTTP/MCP adapter. It shares the synchronous Workspace request lease,
+        historical owner.lock/ExecStateStore denial, one-use source marker and
+        the service's actual DirectChildOwner. Unlike a fake test launcher,
+        it invokes ONLY the already hard-denying bound macOS Runner method.
+        Neither this internal entrypoint nor supplied SHA bytes can authorize
+        PRODUCT_T1, lift public F1/D0 or prove a whole-descendant OS domain.
+        """
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if self.settings.schema_version != 2:
+                raise GatewayError(
+                    "exec_disabled", "D4 source-only Worker requires schema v2.")
+            if self._exec_state is None:
+                raise GatewayError(
+                    "exec_state_unavailable", "Exec durable state unavailable.")
+            self._exec_state.require_healthy()
+            if cancelled is not None and type(cancelled) is not threading.Event:
+                raise GatewayError(
+                    "invalid_argument", "Invalid internal cancellation token.")
+            if cancelled is not None and cancelled.is_set():
+                raise GatewayError(
+                    "waiter_disconnected", "Request was cancelled before source preparation.")
+            if name in self._exec_active or len(self._exec_active) >= 4:
+                raise GatewayError(
+                    "busy", "A controlled command already occupies this slot.")
+            owner = self._lbe_owner
+            if owner is None:
+                raise GatewayError(
+                    "exec_state_unavailable", "D4 original-child owner missing.")
+            self._exec_active.add(name)
+            self._active_operations += 1
+        try:
+            candidate, marker, _source, _recipe, _host = (
+                self._prepare_d4_r003_runner_preflight(
+                    name, cwd, argv, private_root=private_root,
+                    expected_hashes=expected_hashes,
+                    expected_trees=expected_trees,
+                    timeout_seconds=timeout_seconds))
+            from .lbe_product_fixture import D4OneUseAttemptMarker
+            from .lbe_macos_runner import (
+                D4MacOSRunnerDenied, D4MacOSRunnerLaunchBoundary,
+            )
+            from .lbe_worker import LbeWorker, LbeWorkerError
+
+            # Product code, not a caller, chooses the exact service-bound
+            # launch callback. No alternate launcher or temporary owner can
+            # borrow this source and native-denial witness.
+            if (type(marker) is not D4OneUseAttemptMarker
+                    or marker._ctx is not ctx
+                    or marker._candidate is not candidate):
+                raise GatewayError(
+                    "runner_unavailable", "Service Runner marker missing.")
+            boundary = marker._macos_boundary
+            if type(boundary) is not D4MacOSRunnerLaunchBoundary:
+                raise GatewayError(
+                    "runner_unavailable", "Service Runner binding missing.")
+            try:
+                boundary.check_binding(ctx, candidate.plan)
+            except D4MacOSRunnerDenied:
+                raise GatewayError(
+                    "runner_unavailable", "Service Runner identity drift.") from None
+            try:
+                result = LbeWorker(
+                    owner, launcher=boundary.launch,
+                ).run(candidate.plan, cancelled=cancelled,
+                      product_attempt=marker)
+            except LbeWorkerError as exc:
+                raise GatewayError(
+                    exc.code, "D4 source-only Worker did not complete safely.",
+                    details={
+                        "process_may_be_running": exc.process_may_be_running,
+                    },
+                ) from None
+            return {**result, "workspace": name}
+        finally:
+            with self._lifecycle:
+                self._exec_active.remove(name)
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
     def _stage_d4_r003_operator_source(
         self, name: str, cwd: str, argv: list[str], *,
         private_root: str, provisioner_root: str, kind: str,

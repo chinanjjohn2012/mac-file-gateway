@@ -688,6 +688,54 @@ class WorkspaceService:
             ) from None
         return candidate, marker, observed, recipe, runner
 
+    def _stage_d4_r003_operator_source(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, kind: str,
+        expected: tuple[tuple[str, str | None], ...],
+        timeout_seconds: int = 60,
+    ):
+        """Materialize prequalified source from a trusted disposable fixture.
+
+        This is internal PRODUCT source preparation: a reviewed provisioner
+        must supply exact staged source digests before making this call.
+        It requires the existing v2 Workspace scope/owner.lock/ExecStateStore
+        and canonical six-command fixture; it creates no native child and
+        grants no public Exec capability, no matter what digest is supplied.
+        """
+        candidate = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        allowed = (
+            {"go"} if candidate.plan.cwd == "go-project" else {"bin", "lib"}
+        )
+        if type(kind) is not str or kind not in allowed:
+            raise GatewayError(
+                "runner_unavailable", "Selected runtime staging kind denied.")
+        from .lbe_runtime_stage import (
+            D4RuntimeStageDenied, stage_d4_operator_runtime_tree,
+        )
+
+        try:
+            receipt = stage_d4_operator_runtime_tree(
+                private_root=private_root, kind=kind, expected=expected)
+        except D4RuntimeStageDenied:
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 private runtime staging unavailable.",
+            ) from None
+        # Staging has not promoted the original candidate to authority:
+        # re-read the real Workspace before returning selected bytes.
+        after = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        if (after.plan != candidate.plan
+                or after.source_sha256 != candidate.source_sha256
+                or after.source_identity != candidate.source_identity
+                or after.directory_identity != candidate.directory_identity):
+            raise GatewayError(
+                "runner_unavailable",
+                "First-party runtime changed during source staging.",
+            )
+        return receipt
+
     def require_git(self, name: str, command: str) -> WorkspaceContext:
         """Independent authorization, always repeated in sync Worker."""
         ctx = self.get(name)

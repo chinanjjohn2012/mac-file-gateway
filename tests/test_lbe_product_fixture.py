@@ -1853,3 +1853,128 @@ def test_d4_pipenv_script_interpreter_must_be_exact_staged_private_python(
                 private_root=private, expected_hashes=hashes,
                 expected_trees=trees)
     assert denied.value.code == "runner_unavailable"
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+])
+def test_d4_product_stages_real_runtime_bytes_then_prepares_six_recipes(
+        product_service, monkeypatch, kind, cwd, argv):
+    import hashlib
+
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker
+    from gateway.lbe_runner_preflight import require_d4_native_runner_admission
+    from gateway.lbe_runtime_stage import D4RuntimeStageReceipt
+
+    service, workspace = product_service
+    private = workspace.parent.parent
+    for folder in ("home", "tmp"):
+        (private / folder).mkdir(exist_ok=True)
+    if kind == "go":
+        for folder in ("gopath", "modcache", "gocache", "gotmp"):
+            (private / folder).mkdir(exist_ok=True)
+        selections = {
+            "go": {
+                "bin/go": b"inert primary Go bytes",
+                "pkg/tool/darwin_arm64/compile": b"inert Go compiler bytes",
+                "pkg/tool/darwin_arm64/link": b"inert Go linker bytes",
+                "src/runtime/runtime.go": b"package runtime\n",
+            }
+        }
+    elif kind == "pipenv":
+        firstparty = workspace / "py-pipenv"
+        selections = {
+            "bin": {
+                "pipenv": (
+                    "#!" + str(firstparty / ".venv" / "bin" / "python") +
+                    "\n# trusted test-only Pipenv script bytes\n").encode("ascii"),
+            },
+            "lib": {"python/stdlib.py": b"x = 1\n"},
+        }
+    else:
+        selections = {
+            "bin": {"python": b"inert direct Python bytecode executable"},
+            "lib": {"python/stdlib.py": b"x = 1\n"},
+        }
+    expected_hashes = {}
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("native PRODUCT_T1 must not execute")))
+        for stage_kind, files in selections.items():
+            provisioned = private / "provisioned" / stage_kind
+            provisioned.mkdir(parents=True)
+            for relative, content in files.items():
+                source = provisioned / relative
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_bytes(content)
+                source.chmod(0o700 if not relative.endswith((".go", ".py")) else 0o600)
+            receipt = service._stage_d4_r003_operator_source(
+                "a", cwd, argv, private_root=str(private),
+                kind=stage_kind, expected=_d4_tree_expected(provisioned))
+            assert type(receipt) is D4RuntimeStageReceipt
+            assert receipt.staged_files_verified is True
+            assert receipt.native_launch_allowed is False
+            assert receipt.loaded_runtime_sources_proven is False
+        if kind == "go":
+            expected_hashes = {
+                key: hashlib.sha256((private / relative).read_bytes()).hexdigest()
+                for key, relative in (
+                    ("go", "go/bin/go"),
+                    ("compile", "go/pkg/tool/darwin_arm64/compile"),
+                    ("link", "go/pkg/tool/darwin_arm64/link"),
+                )
+            }
+        elif kind == "pipenv":
+            firstparty = workspace / "py-pipenv"
+            expected_hashes = {
+                "Pipfile": hashlib.sha256((firstparty / "Pipfile").read_bytes()).hexdigest(),
+                "Pipfile.lock": hashlib.sha256((firstparty / "Pipfile.lock").read_bytes()).hexdigest(),
+                "pyvenv.cfg": hashlib.sha256((firstparty / ".venv/pyvenv.cfg").read_bytes()).hexdigest(),
+                "python": hashlib.sha256((firstparty / ".venv/bin/python").read_bytes()).hexdigest(),
+                "pipenv": hashlib.sha256((private / "bin/pipenv").read_bytes()).hexdigest(),
+            }
+        else:
+            expected_hashes = {
+                "python": hashlib.sha256((private / "bin/python").read_bytes()).hexdigest()
+            }
+        trees = _d4_staged_trees(workspace, kind)
+        candidate, marker, observation, recipe, runner = (
+            service._prepare_d4_r003_runner_preflight(
+                "a", cwd, argv, private_root=str(private),
+                expected_hashes=expected_hashes, expected_trees=trees))
+        assert candidate.plan.requested_argv == tuple(argv)
+        assert recipe.resolved_executable.startswith(str(private) + "/")
+        assert recipe.native_launch_allowed is False
+        assert observation.native_launch_allowed is False
+        assert runner.physical_whole_child_cpu_memory_attached is False
+        assert runner.native_launch_allowed is False
+        with pytest.raises(Exception, match="NOT_AUTHORIZED"):
+            require_d4_native_runner_admission(runner, recipe)
+        result = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher).run(
+            candidate.plan, product_attempt=marker)
+        assert result["status"] == "launch_failed"
+        assert result["executed"] is False
+        with pytest.raises(GatewayError) as denied:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert denied.value.code == "exec_cleanup_proof_required"
+
+
+def test_d4_service_staging_cannot_select_foreign_source_kind(
+        product_service):
+    service, workspace = product_service
+    private = workspace.parent.parent
+    with pytest.raises(GatewayError) as denied:
+        service._stage_d4_r003_operator_source(
+            "a", "go-project", ["go", "test", "./..."],
+            private_root=str(private), kind="bin",
+            expected=(("", None),))
+    assert denied.value.code == "runner_unavailable"
+    assert not (private / "bin").exists()

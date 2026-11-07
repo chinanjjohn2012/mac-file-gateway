@@ -110,6 +110,28 @@ def _resolve_first_party(module: str,
     return None
 
 
+def _local_import_members(module: str, selected: set[str]) -> tuple[str, ...] | None:
+    """Map module and parent initializers, allowing PEP420 namespace parents.
+
+    Parent __init__.py files are executed when importing a package member,
+    and thus are real selected first-party inputs. Namespace parents have
+    no source bytes of their own and are never passed off as a loaded graph.
+    """
+    parts = module.split(".")
+    if not parts or any(not p or not p.isidentifier() for p in parts):
+        return None
+    resolved = _resolve_first_party(module, selected)
+    prefix = "/".join(parts) + "/"
+    if resolved is None and not any(name.startswith(prefix) for name in selected):
+        return None
+    members = {resolved} if resolved is not None else set()
+    for pos in range(1, len(parts)):
+        parent = "/".join(parts[:pos]) + "/__init__.py"
+        if parent in selected:
+            members.add(parent)
+    return tuple(sorted(members))
+
+
 def _classify_source(path: str, raw: bytes,
                      selected: set[str]) -> tuple[set[tuple[str, str]],
                                                    set[str], set[str]]:
@@ -127,13 +149,13 @@ def _classify_source(path: str, raw: bytes,
                  else origin[:-len(".__init__")])
     for node in ast.walk(parsed):
         if isinstance(node, ast.Import):
-            names = (alias.name for alias in node.names)
-            for name in names:
+            for alias in node.names:
+                name = alias.name
                 if name.startswith(("src.", "tests.")) or name in ("src", "tests"):
-                    target = _resolve_first_party(name, selected)
-                    if target is None:
+                    members = _local_import_members(name, selected)
+                    if members is None:
                         raise D4PythonImportDenied("selected first-party import missing")
-                    edges.add((path, target))
+                    edges.update((path, member) for member in members)
                 else:
                     external.add(name)
         elif isinstance(node, ast.ImportFrom):
@@ -143,21 +165,33 @@ def _classify_source(path: str, raw: bytes,
                     raise D4PythonImportDenied("relative Python import escapes project")
                 head = package[:len(package) - node.level + 1]
                 name = ".".join(head + (node.module.split(".") if node.module else []))
-                target = _resolve_first_party(name, selected)
-                if target is None:
-                    raise D4PythonImportDenied("relative Python source missing")
-                edges.add((path, target))
+                first_party = True
             elif node.module is not None:
                 name = node.module
-                if name.startswith(("src.", "tests.")) or name in ("src", "tests"):
-                    target = _resolve_first_party(name, selected)
-                    if target is None:
-                        raise D4PythonImportDenied("absolute first-party source missing")
-                    edges.add((path, target))
-                else:
-                    external.add(name)
+                first_party = (name.startswith(("src.", "tests."))
+                               or name in ("src", "tests"))
             else:
                 raise D4PythonImportDenied("ambiguous Python import")
+            if first_party:
+                members = _local_import_members(name, selected)
+                if members is None:
+                    raise D4PythonImportDenied("selected first-party import missing")
+                edges.update((path, member) for member in members)
+                # from package import submodule may load a submodule even
+                # when the package initializer itself is the base import.
+                # A missing child can also be an attribute in __init__, so
+                # do not invent a loaded child or falsely deny valid code.
+                for alias in node.names:
+                    if alias.name == "*":
+                        # Runtime-defined exported names are not closed by AST.
+                        dynamic.add(path)
+                    else:
+                        child = _local_import_members(
+                            name + "." + alias.name, selected)
+                        if child is not None:
+                            edges.update((path, member) for member in child)
+            else:
+                external.add(name)
         elif isinstance(node, ast.Call):
             function = node.func
             if ((isinstance(function, ast.Name)

@@ -3714,7 +3714,9 @@ def test_d4_actual_service_selects_python_first_party_import_edges_without_spawn
         receipt = candidate.python_import_sources
         assert receipt is not None
         assert receipt.first_party_import_edges == (
-            ("src/pkg/entry.py", "src/pkg/util.py"),)
+            ("src/pkg/entry.py", "src/pkg/__init__.py"),
+            ("src/pkg/entry.py", "src/pkg/util.py"),
+        )
         assert "os" in receipt.unresolved_external_imports
         assert receipt.actual_sys_path_proven is False
         assert receipt.actual_loaded_source_graph_proven is False
@@ -3810,3 +3812,96 @@ def test_d4_python_dynamic_import_recorded_as_unqualified_source(
     assert receipt.unresolved_external_imports == ("importlib",)
     assert receipt.dynamic_import_closure_proven is False
     assert receipt.native_launch_allowed is False
+
+
+
+def test_d4_real_service_first_party_from_import_submodule_is_selected(
+        product_service, monkeypatch):
+    service, workspace = product_service
+    package = workspace / "py-direct/src/pkg"
+    package.mkdir()
+    (package / "__init__.py").write_bytes(b"# package initializer\n")
+    (package / "util.py").write_bytes(b"value = 42\n")
+    (workspace / "py-direct/src/main.py").write_bytes(
+        b"from src.pkg import util\nvalue = util.value\n")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no native Python allowed")))
+        candidate, marker = service._prepare_d4_r003_attempt(
+            "a", "py-direct", ["python", "-m", "pytest", "-q"])
+        receipt = candidate.python_import_sources
+        assert receipt is not None
+        assert ("src/main.py", "src/pkg/__init__.py") in receipt.first_party_import_edges
+        assert ("src/main.py", "src/pkg/util.py") in receipt.first_party_import_edges
+        assert receipt.actual_loaded_source_graph_proven is False
+        marker.consume_for(candidate.plan)
+        with pytest.raises(GatewayError) as blocked:
+            service.invoke_exec(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"], dry_run=False)
+        assert blocked.value.code == "exec_cleanup_proof_required"
+
+
+@pytest.mark.parametrize("forge", ["unselected", "native", "missing"])
+def test_d4_python_one_use_marker_rejects_forged_import_receipt(
+        product_service, forge):
+    from gateway.lbe_product_fixture import D4OneUseAttemptMarker
+
+    service, _workspace = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    receipt = candidate.python_import_sources
+    assert receipt is not None
+    if forge == "unselected":
+        changed = replace(
+            receipt, first_party_import_edges=(("src/main.py", "src/outside.py"),))
+    elif forge == "native":
+        changed = replace(receipt, native_launch_allowed=True)
+    else:
+        changed = None
+    with pytest.raises(D4FixtureDenied):
+        D4OneUseAttemptMarker(
+            replace(candidate, python_import_sources=changed),
+            service.get("a"))
+
+
+def test_d4_python_one_use_burns_before_launcher_on_import_receipt_drift(
+        product_service, monkeypatch):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    import gateway.lbe_python_import_sources as first_party
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, _workspace = product_service
+    candidate, marker = service._prepare_d4_r003_attempt(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    receipt = candidate.python_import_sources
+    assert receipt is not None
+    calls = []
+    def never_launch(_plan):
+        calls.append("launched")
+        raise AssertionError("stale import receipt cannot reach child launcher")
+    with monkeypatch.context() as m:
+        m.setattr(first_party, "inspect_d4_python_first_party_import_sources",
+                  lambda *_a: replace(
+                      receipt, unresolved_external_imports=("outside",)))
+        worker = LbeWorker(DirectChildOwner(), launcher=never_launch)
+        with pytest.raises(LbeWorkerError) as denied:
+            worker.run(candidate.plan, product_attempt=marker)
+        assert denied.value.code == "attempt_replay_denied"
+        with pytest.raises(LbeWorkerError) as replay:
+            worker.run(candidate.plan, product_attempt=marker)
+        assert replay.value.code == "attempt_replay_denied"
+    assert calls == []
+
+
+def test_d4_go_plan_rejects_forged_python_import_binding(product_service):
+    from gateway.lbe_product_fixture import D4OneUseAttemptMarker
+    service, _workspace = product_service
+    python = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    go = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    assert python.python_import_sources is not None
+    with pytest.raises(D4FixtureDenied):
+        D4OneUseAttemptMarker(
+            replace(go, python_import_sources=python.python_import_sources),
+            service.get("a"))

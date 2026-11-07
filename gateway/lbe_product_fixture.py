@@ -164,6 +164,33 @@ class D4OneUseAttemptMarker:
             seen_directories.add(entry[0])
         if candidate.plan.cwd not in seen_directories:
             raise D4FixtureDenied("candidate project directory is unqualified")
+        if candidate.plan.cwd in ("py-direct", "py-pipenv"):
+            # The service-generated AST source receipt is a first-party
+            # source selection, never an authorization or actual import.
+            # Bind it to the one-use Worker marker, so a forged or stale
+            # receipt cannot silently skip the prelaunch source check.
+            from .lbe_python_import_sources import (
+                D4PythonSourceImportObservation,
+                inspect_d4_python_first_party_import_sources,
+            )
+            receipt = candidate.python_import_sources
+            if (type(receipt) is not D4PythonSourceImportObservation
+                    or receipt.native_launch_allowed is not False
+                    or receipt.actual_loaded_source_graph_proven is not False
+                    or receipt.actual_sys_path_proven is not False
+                    or receipt.dynamic_import_closure_proven is not False
+                    or receipt.imported_external_sources_proven is not False):
+                raise D4FixtureDenied("Python source receipt lacks no-exec identity")
+            try:
+                actual_receipt = inspect_d4_python_first_party_import_sources(
+                    ctx, candidate)
+            except Exception:
+                raise D4FixtureDenied(
+                    "Python selected source not available for binding") from None
+            if actual_receipt != receipt:
+                raise D4FixtureDenied("Python import source receipt is unbound")
+        elif candidate.python_import_sources is not None:
+            raise D4FixtureDenied("non-Python plan cannot supply Python source")
         if staged_source is not None:
             # No generic callback or client-crafted predicate may stand in
             # for this exact internally inspected source recheck.
@@ -260,6 +287,14 @@ class D4OneUseAttemptMarker:
                     or current.source_identity != self._candidate.source_identity
                     or current.directory_identity != self._candidate.directory_identity):
                 raise D4FixtureDenied("selected first-party source changed before launch")
+            if plan.cwd in ("py-direct", "py-pipenv"):
+                from .lbe_python_import_sources import (
+                    inspect_d4_python_first_party_import_sources,
+                )
+                current_receipt = inspect_d4_python_first_party_import_sources(
+                    self._ctx, current)
+                if current_receipt != self._candidate.python_import_sources:
+                    raise D4FixtureDenied("Python import source mapping changed")
             if self._staged is not None:
                 self._staged.recheck_for(self._ctx, self._candidate)
             if self._runner is not None:

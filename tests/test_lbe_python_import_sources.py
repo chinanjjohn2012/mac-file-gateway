@@ -64,3 +64,49 @@ def test_python_module_path_lookup_only_from_selected_files():
     assert _resolve_first_party("src.pkg.util", _SELECTED) == "src/pkg/util.py"
     assert _resolve_first_party("src.pkg.missing", _SELECTED) is None
     assert _resolve_first_party("../outside", _SELECTED) is None
+
+
+def test_python_from_package_import_submodule_includes_parent_initializer():
+    source = b'from src.pkg import util\n'
+    edges, unknown, dynamic = _classify_source(
+        "src/pkg/entry.py", source, _SELECTED)
+    assert edges == {
+        ("src/pkg/entry.py", "src/__init__.py"),
+        ("src/pkg/entry.py", "src/pkg/__init__.py"),
+        ("src/pkg/entry.py", "src/pkg/util.py"),
+    }
+    assert not unknown and not dynamic
+
+
+def test_python_relative_from_import_submodule_includes_parent_initializer():
+    edges, unknown, dynamic = _classify_source(
+        "src/pkg/entry.py", b'from . import util\n', _SELECTED)
+    assert edges == {
+        ("src/pkg/entry.py", "src/__init__.py"),
+        ("src/pkg/entry.py", "src/pkg/__init__.py"),
+        ("src/pkg/entry.py", "src/pkg/util.py"),
+    }
+    assert not unknown and not dynamic
+
+
+def test_python_namespace_package_import_resolves_available_child():
+    source = {"src/pkg/entry.py", "src/pkg/util.py"}
+    edges, unknown, dynamic = _classify_source(
+        "src/pkg/entry.py", b'import src.pkg.util\n', source)
+    assert edges == {("src/pkg/entry.py", "src/pkg/util.py")}
+    assert not unknown and not dynamic
+
+
+def test_python_attribute_or_star_import_never_claims_full_closure():
+    attribute, unknown, dynamic = _classify_source(
+        "src/pkg/entry.py", b'from . import provided_by_initializer\n', _SELECTED)
+    assert attribute == {
+        ("src/pkg/entry.py", "src/__init__.py"),
+        ("src/pkg/entry.py", "src/pkg/__init__.py"),
+    }
+    assert not unknown and not dynamic
+    starred, unknown, dynamic = _classify_source(
+        "src/pkg/entry.py", b'from . import *\n', _SELECTED)
+    assert starred == attribute
+    assert not unknown
+    assert dynamic == {"src/pkg/entry.py"}

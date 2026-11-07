@@ -743,6 +743,60 @@ class WorkspaceService:
             )
         return receipt
 
+    def _observe_d4_r003_operator_provisioner(
+        self, name: str, cwd: str, argv: list[str], *,
+        provisioner_root: str, timeout_seconds: int = 60,
+    ):
+        """Observe complete operator source bytes for explicit later approval.
+
+        This is the real WorkspaceService six-command SOURCE-only workflow.
+        A generated manifest can be shown to an independent operator/reviewer,
+        but MUST NOT be automatically promoted into the separately reviewed
+        expected manifest accepted by _assemble_d4_r003_source_only_runner.
+        In particular, bytes cannot self-attest their trusted provisioner,
+        image, loaded-source closure, resources or owner T1 permission.
+        """
+        candidate = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        from .lbe_runtime_tree import (
+            D4RuntimeTreeDenied, observe_d4_operator_source_manifest,
+        )
+        from .lbe_runtime_source import _canonical, D4RuntimeSourceDenied
+
+        kinds = (("go",) if candidate.plan.cwd == "go-project"
+                 else ("bin", "lib"))
+        try:
+            source = _canonical(provisioner_root, "operator provisioner")
+            workspace = _canonical(
+                str(self.get(name).gateway._root_path), "Workspace root")
+            if (source == workspace
+                    or source.startswith(workspace + "/")
+                    or workspace.startswith(source + "/")):
+                raise D4RuntimeSourceDenied(
+                    "operator provisioner overlaps Workspace")
+            observed = {
+                kind: observe_d4_operator_source_manifest(
+                    provisioner_root=source, kind=kind)
+                for kind in kinds
+            }
+        except (D4RuntimeTreeDenied, D4RuntimeSourceDenied, OSError):
+            raise GatewayError(
+                "runner_unavailable", "D4 operator source selection unavailable."
+            ) from None
+        # Source inspection must not retain a first-party Workspace snapshot
+        # across operator file reads without rechecking its live identity.
+        after = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        if (after.plan != candidate.plan
+                or after.source_sha256 != candidate.source_sha256
+                or after.source_identity != candidate.source_identity
+                or after.directory_identity != candidate.directory_identity):
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 Workspace source changed during operator observation.",
+            )
+        return observed
+
     def _assemble_d4_r003_source_only_runner(
         self, name: str, cwd: str, argv: list[str], *,
         private_root: str, provisioner_root: str,

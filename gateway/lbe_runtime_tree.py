@@ -240,3 +240,140 @@ def inspect_d4_closed_staged_tree(
         total_file_bytes=byte_count,
         observed_identity_sha256=digest.hexdigest(),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class D4OperatorSourceManifest:
+    """Observed operator bytes for independent review, never a trusted grant.
+
+    The caller must separately approve the exact manifest and trusted provider
+    before supplying it to the existing stage/assembly path. A source tree
+    cannot vouch for its own origin, selected loader graph or target runner.
+    """
+    kind: str
+    proposed_manifest: tuple[tuple[str, str | None], ...]
+    observed_source_identity_sha256: str
+    entry_count: int
+    file_count: int
+    total_file_bytes: int
+    status: str = "OBSERVED_OPERATOR_SOURCE_ONLY_NOT_ATTESTED"
+    trusted_operator_attested: bool = False
+    manifest_independently_approved: bool = False
+    actual_loaded_source_graph_proven: bool = False
+    native_launch_allowed: bool = False
+
+
+def observe_d4_operator_source_manifest(
+    *, provisioner_root: str, kind: str,
+) -> D4OperatorSourceManifest:
+    """Build a reviewable manifest from actual operator source, without spawn.
+
+    The existing assembler requires exact independent expected manifests.
+    This read-only producer eliminates an ad-hoc rglob/hash script while
+    retaining nofollow FD traversal, total size/entry caps, inode-drift
+    checks and the existing downstream snapshot verifier. It is NEVER an
+    identity or trust attestation of the operator, and never auto-approves
+    the result for staging or execution.
+    """
+    if type(kind) is not str or kind not in {"go", "bin", "lib"}:
+        raise D4RuntimeTreeDenied("unsupported operator source tree kind")
+    parts = _parts(provisioner_root, "operator provisioner root")
+    rows: list[tuple[str, str | None]] = []
+    files, total_bytes = 0, 0
+
+    def bounded_names(fd: int) -> tuple[str, ...]:
+        names: list[str] = []
+        with os.scandir(fd) as iterator:
+            for entry in iterator:
+                if len(names) >= _MAX_ENTRIES:
+                    raise D4RuntimeTreeDenied("operator directory entry limit")
+                _rel(entry.name)
+                names.append(entry.name)
+        return tuple(sorted(names))
+
+    def walk(fd: int, relative: str, depth: int) -> None:
+        nonlocal files, total_bytes
+        if len(rows) >= _MAX_ENTRIES or depth > _MAX_DEPTH:
+            raise D4RuntimeTreeDenied("operator source entry or depth limit")
+        initial = _identity(fd, directory=True)
+        names = bounded_names(fd)
+        rows.append((relative, None))
+        for name in names:
+            selected = relative + "/" + name if relative else name
+            _rel(selected)
+            st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if stat.S_ISDIR(st.st_mode):
+                child = os.open(name, _DIR_FLAGS, dir_fd=fd)
+                try:
+                    walk(child, selected, depth + 1)
+                finally:
+                    os.close(child)
+            elif stat.S_ISREG(st.st_mode):
+                child = os.open(name, _FILE_FLAGS, dir_fd=fd)
+                try:
+                    initial_file = _identity(child, directory=False)
+                    size = initial_file[2]
+                    if (len(rows) >= _MAX_ENTRIES
+                            or size < 0 or size > _MAX_SINGLE_FILE
+                            or total_bytes + size > _MAX_TOTAL_BYTES):
+                        raise D4RuntimeTreeDenied(
+                            "operator source bytes or entries exceed limit")
+                    digest = hashlib.sha256()
+                    remaining = size
+                    while remaining:
+                        data = os.read(child, min(65536, remaining))
+                        if not data:
+                            raise D4RuntimeTreeDenied(
+                                "operator source was truncated")
+                        digest.update(data)
+                        remaining -= len(data)
+                    if _identity(child, directory=False) != initial_file:
+                        raise D4RuntimeTreeDenied(
+                            "operator file inode changed during snapshot")
+                    rows.append((selected, digest.hexdigest()))
+                    files += 1
+                    total_bytes += size
+                finally:
+                    os.close(child)
+            else:
+                raise D4RuntimeTreeDenied(
+                    "operator source is neither a private directory nor file")
+        if (bounded_names(fd) != names
+                or _identity(fd, directory=True) != initial):
+            raise D4RuntimeTreeDenied("operator directory drifted")
+
+    try:
+        fd = os.open("/", _DIR_FLAGS)
+        try:
+            for part in parts:
+                child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+                os.close(fd)
+                fd = child
+            _identity(fd, directory=True)
+            selected = os.open(kind, _DIR_FLAGS, dir_fd=fd)
+            try:
+                walk(selected, "", 0)
+            finally:
+                os.close(selected)
+        finally:
+            os.close(fd)
+        proposed = tuple(sorted(rows))
+        # Re-validate the ENTIRE candidate through the same authoritative
+        # staged-tree inspector, including metadata and all paths. This
+        # catches drift between initial observation and manifest delivery.
+        verified = inspect_d4_closed_staged_tree(
+            private_root=provisioner_root,
+            staged_root=provisioner_root + "/" + kind,
+            expected=proposed,
+        )
+    except (OSError, ValueError) as exc:
+        if type(exc) is D4RuntimeTreeDenied:
+            raise
+        raise D4RuntimeTreeDenied(
+            "operator source manifest observation unavailable") from None
+    return D4OperatorSourceManifest(
+        kind=kind, proposed_manifest=proposed,
+        observed_source_identity_sha256=verified.observed_identity_sha256,
+        entry_count=verified.entry_count,
+        file_count=files, total_file_bytes=total_bytes,
+    )

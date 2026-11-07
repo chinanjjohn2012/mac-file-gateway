@@ -185,3 +185,43 @@ def test_changed_inode_detected_during_stream_read(tmp_path, monkeypatch):
         with pytest.raises(D4RuntimeTreeDenied):
             _check(private, root, original)
     assert switched
+
+
+def test_staged_tree_walk_uses_bounded_descriptor_enumeration_not_listdir(
+        tmp_path, monkeypatch):
+    private, root = _make_tree(tmp_path)
+    expected = _expected(root)
+    def unbounded_listdir(*_args, **_kwargs):
+        raise AssertionError("Unbounded listdir must never inspect staged input")
+    with monkeypatch.context() as m:
+        m.setattr(os, "listdir", unbounded_listdir)
+        observed = _check(private, root, expected)
+    assert observed.entry_count == len(expected)
+    assert observed.native_launch_allowed is False
+
+
+def test_staged_tree_file_limit_refuses_more_entries_without_import_or_child(
+        tmp_path, monkeypatch):
+    import gateway.lbe_runtime_tree as guarded
+
+    private, root = _make_tree(tmp_path)
+    expected = _expected(root)
+    for i in range(70):
+        (root / "src" / "pkg" / f"extra_{i}.go").write_bytes(b"package pkg\n")
+    with monkeypatch.context() as m:
+        m.setattr(guarded, "_MAX_ENTRIES", 32)
+        m.setattr(subprocess, "Popen", lambda *_a, **_k: (
+            _ for _ in ()).throw(AssertionError("never launch native")))
+        with pytest.raises(D4RuntimeTreeDenied):
+            _check(private, root, expected)
+
+
+def test_staged_tree_accepts_exact_total_entry_boundary(tmp_path, monkeypatch):
+    import gateway.lbe_runtime_tree as guarded
+
+    private, root = _make_tree(tmp_path)
+    expected = _expected(root)
+    with monkeypatch.context() as m:
+        m.setattr(guarded, "_MAX_ENTRIES", len(expected))
+        observed = _check(private, root, expected)
+    assert observed.entry_count == len(expected)

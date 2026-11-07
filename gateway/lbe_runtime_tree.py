@@ -164,12 +164,23 @@ def inspect_d4_closed_staged_tree(
         digest.update(repr((name, sha, identity)).encode("ascii"))
         digest.update(b"\n")
 
+    def bounded_names(fd: int) -> tuple[str, ...]:
+        # Do not let a not-yet-approved staging tree force Python's
+        # os.listdir() to materialize millions of names before checking
+        # the entry budget. Scan the pinned FD with an early cutoff.
+        names: list[str] = []
+        with os.scandir(fd) as entries:
+            for item in entries:
+                if len(names) >= _MAX_ENTRIES:
+                    raise D4RuntimeTreeDenied("staged source directory too large")
+                _rel(item.name)
+                names.append(item.name)
+        return tuple(sorted(names))
+
     def walk(fd: int, prefix: str, level: int) -> None:
         nonlocal file_count, byte_count
         before = _identity(fd, directory=True)
-        names = tuple(sorted(os.listdir(fd)))
-        if len(names) + count + 1 > _MAX_ENTRIES:
-            raise D4RuntimeTreeDenied("staged source directory too large")
+        names = bounded_names(fd)
         observe(prefix, None, before)
         for part in names:
             _rel(part)
@@ -207,7 +218,7 @@ def inspect_d4_closed_staged_tree(
                     observe(name, stream.hexdigest(), identity)
                 finally:
                     os.close(child)
-        if (tuple(sorted(os.listdir(fd))) != names
+        if (bounded_names(fd) != names
                 or _identity(fd, directory=True) != before):
             raise D4RuntimeTreeDenied("staged source directory drifted")
 

@@ -484,3 +484,84 @@ def test_review_pinned_operator_tree_staging_retains_nonoperative_provenance(
         reviewed.observed_source_identity_sha256)
     assert receipt.owner_provisioner_attested is False
     assert receipt.native_launch_allowed is False
+
+
+def test_go_operator_snapshot_matches_p007_canonical_sha_line_algorithm(
+        tmp_path, monkeypatch):
+    """Actual product observer emits a P007-comparable full stage fingerprint.
+
+    P007 sorted SHA+two-spaces+./go/path lines, NOT paths alone. This
+    intentionally inert fake sample is NOT the real 15657-file Go release.
+    """
+    from gateway.lbe_runtime_tree import observe_d4_operator_source_manifest
+
+    _private, source, fixture = _stage_fixture(tmp_path, kind="go")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no Go process")))
+        candidate = observe_d4_operator_source_manifest(
+            provisioner_root=str(source.parent), kind="go")
+    expected_lines = sorted(
+        digest + "  ./go/" + relative
+        for relative, digest in fixture if digest is not None)
+    expected_fingerprint = hashlib.sha256(
+        ("\n".join(expected_lines) + "\n").encode("ascii")).hexdigest()
+    assert candidate.go_p007_stage_manifest_sha256 == expected_fingerprint
+    assert candidate.go_1_27_3_p007_stage_manifest_matched is False
+    assert candidate.trusted_operator_attested is False
+    assert candidate.manifest_independently_approved is False
+    assert candidate.actual_loaded_source_graph_proven is False
+    assert candidate.native_launch_allowed is False
+
+
+def test_go_operator_p007_recognizer_uses_locked_full_release_signature(
+        tmp_path, monkeypatch):
+    """A real complete source manifest could match P007 without executing Go.
+
+    The fixture temporarily replaces the *private test constants*, NEVER
+    production profile pins, to exercise the positive comparison without
+    downloading or running the actual 68 MB Go archive. This test cannot
+    establish upstream/release provenance or native authorization.
+    """
+    import gateway.lbe_runtime_tree as source_tree
+
+    _private, source, _known = _stage_fixture(tmp_path, kind="go")
+    baseline = source_tree.observe_d4_operator_source_manifest(
+        provisioner_root=str(source.parent), kind="go")
+    assert baseline.go_1_27_3_p007_stage_manifest_matched is False
+    assert source_tree._P007_GO_STAGE_FILE_COUNT == 15657
+    assert source_tree._P007_GO_STAGE_SHA256 == (
+        "e43f516501f4e9b07de05dd470ffdab0b4c2acc086acf1e282d39c40fb00dc6a")
+    with monkeypatch.context() as m:
+        m.setattr(source_tree, "_P007_GO_STAGE_FILE_COUNT", baseline.file_count)
+        m.setattr(source_tree, "_P007_GO_STAGE_SHA256",
+                  baseline.go_p007_stage_manifest_sha256)
+        m.setattr(source_tree, "_P007_GO_CRITICAL_FILES",
+                  frozenset({"bin/go", "src/runtime/runtime.go"}))
+        recognized = source_tree.observe_d4_operator_source_manifest(
+            provisioner_root=str(source.parent), kind="go")
+        assert recognized.go_1_27_3_p007_stage_manifest_matched is True
+        assert recognized.trusted_operator_attested is False
+        assert recognized.manifest_independently_approved is False
+        assert recognized.actual_loaded_source_graph_proven is False
+        assert recognized.native_launch_allowed is False
+        (source / "src/runtime/runtime.go").write_bytes(
+            b"package runtime // changed source\n")
+        drifted = source_tree.observe_d4_operator_source_manifest(
+            provisioner_root=str(source.parent), kind="go")
+        assert drifted.go_1_27_3_p007_stage_manifest_matched is False
+        assert drifted.go_p007_stage_manifest_sha256 != (
+            baseline.go_p007_stage_manifest_sha256)
+
+
+@pytest.mark.parametrize("kind", ["bin", "lib"])
+def test_non_go_operator_never_claims_p007_toolchain_identity(
+        tmp_path, kind):
+    from gateway.lbe_runtime_tree import observe_d4_operator_source_manifest
+
+    _private, source, _expected = _stage_fixture(tmp_path, kind=kind)
+    result = observe_d4_operator_source_manifest(
+        provisioner_root=str(source.parent), kind=kind)
+    assert result.go_p007_stage_manifest_sha256 is None
+    assert result.go_1_27_3_p007_stage_manifest_matched is False
+    assert result.native_launch_allowed is False

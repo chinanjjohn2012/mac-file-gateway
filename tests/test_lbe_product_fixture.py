@@ -2804,6 +2804,12 @@ def test_d4_service_observes_operator_sources_for_six_reviewable_recipes(
         assert item.manifest_independently_approved is False
         assert item.trusted_operator_attested is False
         assert item.native_launch_allowed is False
+        if kind == "go":
+            assert len(item.go_p007_stage_manifest_sha256) == 64
+            assert item.go_1_27_3_p007_stage_manifest_matched is False
+        else:
+            assert item.go_p007_stage_manifest_sha256 is None
+            assert item.go_1_27_3_p007_stage_manifest_matched is False
     with pytest.raises(GatewayError) as denied:
         service.invoke_exec("a", cwd, argv, dry_run=False)
     assert denied.value.code == "exec_cleanup_proof_required"

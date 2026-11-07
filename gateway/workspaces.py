@@ -466,6 +466,50 @@ class WorkspaceService:
                 self._active_operations -= 1
                 self._lifecycle.notify_all()
 
+    def _prepare_d4_r003_fixture_candidate(
+        self, name: str, cwd: str, argv: list[str],
+        timeout_seconds: int = 60,
+    ):
+        """Service-origin selected first-party D4 input inspection, NO grant.
+
+        This internal source-read function does not open positive Exec,
+        bypass native Go/Pipenv denial, attest third-party loaded source or
+        allow a REST/MCP caller to provide an authorization capability.
+        A future independently approved product launch must recheck the
+        *same* input, actual runner and all remaining guards pre-Popen.
+        """
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if self.settings.schema_version != 2:
+                raise GatewayError(
+                    "exec_disabled", "D4 input qualification requires schema v2.")
+            if self._exec_state is None:
+                raise GatewayError(
+                    "exec_state_unavailable", "Exec durable state is unavailable.")
+            self._exec_state.require_healthy()
+            # Keep pinned Workspace and old-state owner handles live while
+            # inspecting first-party source bytes outside the lifecycle lock.
+            self._active_operations += 1
+        try:
+            from .lbe_plan import prepare_lbe_work_plan
+            from .lbe_product_fixture import (
+                D4FixtureDenied, check_d4_r003_fixture,
+            )
+
+            plan = prepare_lbe_work_plan(
+                ctx, cwd=cwd, argv=argv, timeout_seconds=timeout_seconds)
+            try:
+                return check_d4_r003_fixture(ctx, plan)
+            except D4FixtureDenied:
+                raise GatewayError(
+                    "command_not_allowed",
+                    "D4 first-party fixture is not qualified for this plan.",
+                ) from None
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
     def require_git(self, name: str, command: str) -> WorkspaceContext:
         """Independent authorization, always repeated in sync Worker."""
         ctx = self.get(name)

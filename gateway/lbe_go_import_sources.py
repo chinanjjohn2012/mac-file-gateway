@@ -30,6 +30,12 @@ class D4GoDirectImportObservation:
     selected_imports: tuple[str, ...]
     first_party_members: tuple[tuple[str, tuple[str, ...]], ...]
     stdlib_stage_members: tuple[tuple[str, tuple[str, ...]], ...]
+    # Still hash and recheck inactive sources; only their direct import
+    # strings are excluded from this Darwin ARM64 static selection.
+    inactive_first_party_sources: tuple[str, ...] = ()
+    target_goos: str = "darwin"
+    target_goarch: str = "arm64"
+    build_constraint_closure_proven: bool = False
     status: str = "FIRST_PARTY_DIRECT_IMPORTS_MAPPED_TO_STAGED_GO_SOURCE_T0"
     transitive_import_closure_proven: bool = False
     generated_build_inputs_proven: bool = False
@@ -45,6 +51,44 @@ _PATH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\Z")
 _IDENT = re.compile(rb"[A-Za-z_][A-Za-z0-9_]*")
 _MAX_SOURCE = 1024 * 1024
 _MAX_TOKENS = 45000
+# Conservative known Go filename selectors. Unknown suffixes are NOT
+# silently interpreted as an inactive platform: default is inventorying
+# and parsing the file, possibly rejecting an unqualified import.
+_GOOS = frozenset((
+    "aix", "android", "darwin", "dragonfly", "freebsd", "illumos",
+    "ios", "js", "linux", "netbsd", "openbsd", "plan9", "solaris",
+    "wasip1", "windows",
+))
+_GOARCH = frozenset((
+    "386", "amd64", "arm", "arm64", "loong64", "mips", "mipsle",
+    "mips64", "mips64le", "ppc64", "ppc64le", "riscv64",
+    "s390x", "wasm",
+))
+_EXPLICIT_BUILD_TAG = re.compile(
+    rb"(?m)^[ \t]*//[ \t]*(?:go:build|\+build)(?:[ \t]|$)"
+)
+
+
+def _darwin_arm64_filename_selected(relative: str) -> bool:
+    """Apply only Go's conventional implicit file-name build selectors.
+
+    This is NOT a substitute for the go/build parser, custom -tags, cgo
+    or generated sources. Unrecognized patterns are included conservatively.
+    The target is fixed by D4 R003 to macOS 15 ARM64; no host GOOS/GOARCH.
+    """
+    if type(relative) is not str or not relative.endswith(".go"):
+        raise D4GoImportSourceDenied("invalid Go source filename")
+    stem = relative.rsplit("/", 1)[-1][:-3]
+    if stem.endswith("_test"):
+        stem = stem[:-5]
+    parts = stem.split("_")
+    if len(parts) >= 3 and parts[-2] in _GOOS and parts[-1] in _GOARCH:
+        return parts[-2] == "darwin" and parts[-1] == "arm64"
+    if parts[-1] in _GOOS:
+        return parts[-1] == "darwin"
+    if parts[-1] in _GOARCH:
+        return parts[-1] == "arm64"
+    return True
 
 
 def _controlled(fd: int, *, directory: bool) -> tuple[int, ...]:
@@ -235,10 +279,24 @@ def inspect_d4_go_direct_import_sources(
                 raise D4GoImportSourceDenied("Go module identity unavailable")
             module = module_lines[0]
             full_imports: set[str] = set()
+            active_go_sources: list[str] = []
+            inactive_go_sources: list[str] = []
             for path in go_sources:
-                src = _selected_bytes(project_fd, path[len("go-project/"):],
+                # Hash and inode-verify even inactive source files. A later
+                # change in either bytes or name needs a fresh candidate.
+                raw = _selected_bytes(project_fd, path[len("go-project/"):],
                                       rows[path], id_rows[path])
-                full_imports.update(_direct_imports(src))
+                if not _darwin_arm64_filename_selected(path):
+                    inactive_go_sources.append(path)
+                    continue
+                if _EXPLICIT_BUILD_TAG.search(raw) is not None:
+                    # Evaluating //go:build, +build, release/tool/custom tags
+                    # using this narrow lexical parser would be dishonest.
+                    # Fail closed instead of claiming actual build closure.
+                    raise D4GoImportSourceDenied(
+                        "selected Go source has unresolved build constraints")
+                active_go_sources.append(path)
+                full_imports.update(_direct_imports(raw))
         finally:
             os.close(project_fd)
     except (OSError, KeyError, OverflowError, ValueError) as exc:
@@ -253,7 +311,7 @@ def inspect_d4_go_direct_import_sources(
         if path == module or path.startswith(module + "/"):
             suffix = path[len(module):].lstrip("/")
             prefix = "go-project/" + (suffix + "/" if suffix else "")
-            members = tuple(sorted(name for name in go_sources
+            members = tuple(sorted(name for name in active_go_sources
                                    if name.startswith(prefix)
                                    and "/" not in name[len(prefix):]))
             if not members:
@@ -274,4 +332,5 @@ def inspect_d4_go_direct_import_sources(
     return D4GoDirectImportObservation(
         module_path=module, selected_imports=tuple(sorted(full_imports)),
         first_party_members=tuple(local), stdlib_stage_members=tuple(stdlib),
+        inactive_first_party_sources=tuple(inactive_go_sources),
     )

@@ -3905,3 +3905,126 @@ def test_d4_go_plan_rejects_forged_python_import_binding(product_service):
         D4OneUseAttemptMarker(
             replace(go, python_import_sources=python.python_import_sources),
             service.get("a"))
+
+
+
+def test_d4_go_darwin_arm64_source_selection_ignores_unbuilt_platform_imports(
+        product_service, monkeypatch):
+    """Actual source candidate includes all bytes, but imports only target files."""
+    from gateway.lbe_go_import_sources import inspect_d4_go_direct_import_sources
+
+    service, workspace = product_service
+    go = workspace / "go-project/cmd/app"
+    (go / "platform_linux.go").write_bytes(
+        b'package main\nimport "unapproved.example/foreign"\n')
+    (go / "platform_windows_amd64.go").write_bytes(
+        b'package main\nimport "unapproved.example/win"\n')
+    (go / "platform_darwin_arm64.go").write_bytes(
+        b'package main\nimport "fmt"\n')
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no Go child permitted")))
+        candidate, attempt = service._prepare_d4_r003_attempt(
+            "a", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"])
+        all_sources = {name for name, _ in candidate.source_sha256}
+        assert "go-project/cmd/app/platform_linux.go" in all_sources
+        assert "go-project/cmd/app/platform_windows_amd64.go" in all_sources
+        selected = inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate,
+            staged_go_manifest=(("src/fmt/print.go", "a" * 64),))
+        assert selected.selected_imports == ("fmt",)
+        assert selected.stdlib_stage_members == (
+            ("fmt", ("src/fmt/print.go",)),)
+        assert selected.inactive_first_party_sources == (
+            "go-project/cmd/app/platform_linux.go",
+            "go-project/cmd/app/platform_windows_amd64.go",
+        )
+        assert selected.target_goos == "darwin"
+        assert selected.target_goarch == "arm64"
+        assert selected.build_constraint_closure_proven is False
+        assert selected.native_launch_allowed is False
+        attempt.consume_for(candidate.plan)
+        with pytest.raises(GatewayError) as denied:
+            service.invoke_exec(
+                "a", "go-project",
+                ["go", "build", "-o", "bin/app", "./cmd/app"],
+                dry_run=False)
+        assert denied.value.code == "exec_cleanup_proof_required"
+    assert not (workspace / "go-project/bin/app").exists()
+
+
+@pytest.mark.parametrize("source", [
+    b'//go:build darwin\n\npackage main\nimport "fmt"\n',
+    b'// +build darwin,arm64\n\npackage main\n',
+    b'//go:build linux || darwin\n\npackage main\n',
+])
+def test_d4_go_active_explicit_build_tags_require_real_build_constraint_parser(
+        product_service, source):
+    from gateway.lbe_go_import_sources import (
+        inspect_d4_go_direct_import_sources, D4GoImportSourceDenied,
+    )
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/platform_darwin.go").write_bytes(source)
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "vet", "./..."])
+    with pytest.raises(D4GoImportSourceDenied):
+        inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate,
+            staged_go_manifest=(("src/fmt/print.go", "a" * 64),))
+
+
+def test_d4_go_only_non_target_local_package_is_not_falsely_qualified(
+        product_service):
+    from gateway.lbe_go_import_sources import (
+        inspect_d4_go_direct_import_sources, D4GoImportSourceDenied,
+    )
+    service, workspace = product_service
+    go = workspace / "go-project"
+    (go / "pkg/onlylinux").mkdir(parents=True)
+    (go / "pkg/onlylinux/only_linux.go").write_bytes(
+        b"package onlylinux\nconst Value=1\n")
+    (go / "cmd/app/main.go").write_bytes(
+        b'package main\nimport "firstparty.test/app/pkg/onlylinux"\n')
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    with pytest.raises(D4GoImportSourceDenied):
+        inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate, staged_go_manifest=())
+
+
+def test_d4_go_inactive_platform_source_is_still_inode_and_hash_bound(
+        product_service):
+    from gateway.lbe_go_import_sources import (
+        inspect_d4_go_direct_import_sources, D4GoImportSourceDenied,
+    )
+    service, workspace = product_service
+    go = workspace / "go-project/cmd/app"
+    file = go / "platform_linux.go"
+    file.write_bytes(b'package main\nimport "external.example/ignore"\n')
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    replacement = go / "replacement.go"
+    replacement.write_bytes(file.read_bytes())
+    os.replace(replacement, file)
+    with pytest.raises(D4GoImportSourceDenied):
+        inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate, staged_go_manifest=())
+
+
+def test_d4_go_active_arch_and_unknown_suffix_imports_are_checked(
+        product_service):
+    from gateway.lbe_go_import_sources import (
+        inspect_d4_go_direct_import_sources, D4GoImportSourceDenied,
+    )
+    service, workspace = product_service
+    go = workspace / "go-project/cmd/app"
+    (go / "valid_arm64.go").write_bytes(
+        b'package main\nimport "fmt"\n')
+    (go / "unknown_future.go").write_bytes(
+        b'package main\nimport "external.example/ambiguous"\n')
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "vet", "./..."])
+    with pytest.raises(D4GoImportSourceDenied):
+        inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate,
+            staged_go_manifest=(("src/fmt/print.go", "a" * 64),))

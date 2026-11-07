@@ -411,6 +411,22 @@ def _d4_p007_go_stage_digest(
     return hashlib.sha256(("\n".join(lines) + "\n").encode("ascii")).hexdigest()
 
 
+def _d4_p007_go_stage_matches(
+    proposed: tuple[tuple[str, str | None], ...],
+) -> bool:
+    """Recognize only the exact PR101 P007 full Go stage CONTENT manifest.
+
+    Caller must separately inspect physical source bytes, identities and
+    trusted operator. Returning True is NOT an archive signature, actual
+    compile/stdlib/module loader proof, or permission to run native Go.
+    """
+    wanted = _manifest(proposed)
+    files = {name for name, sha in wanted.items() if sha is not None}
+    return (len(files) == _P007_GO_STAGE_FILE_COUNT
+            and _P007_GO_CRITICAL_FILES.issubset(files)
+            and _d4_p007_go_stage_digest(proposed) == _P007_GO_STAGE_SHA256)
+
+
 def observe_d4_operator_source_manifest(
     *, provisioner_root: str, kind: str,
 ) -> D4OperatorSourceManifest:
@@ -424,15 +440,8 @@ def observe_d4_operator_source_manifest(
     if kind != "go":
         return observed
     stage_sha = _d4_p007_go_stage_digest(observed.proposed_manifest)
-    file_names = {
-        name for name, digest in observed.proposed_manifest
-        if digest is not None
-    }
-    matches_exact_release = (
-        observed.file_count == _P007_GO_STAGE_FILE_COUNT
-        and _P007_GO_CRITICAL_FILES.issubset(file_names)
-        and stage_sha == _P007_GO_STAGE_SHA256
-    )
+    matches_exact_release = _d4_p007_go_stage_matches(
+        observed.proposed_manifest)
     return replace(
         observed,
         go_p007_stage_manifest_sha256=stage_sha,

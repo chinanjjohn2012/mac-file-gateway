@@ -813,6 +813,7 @@ class WorkspaceService:
         venv_manifest: tuple[tuple[str, str | None], ...] | None = None,
         expected_source_identities: dict[str, str] | None = None,
         expected_venv_identity_sha256: str | None = None,
+        require_go_p007_stage_source: bool = False,
         timeout_seconds: int = 60,
     ):
         """Assemble the real six-command private runtime, never launch it.
@@ -860,6 +861,32 @@ class WorkspaceService:
             raise GatewayError(
                 "runner_unavailable",
                 "D4 operator source identity selection is incomplete.")
+        # When an owner explicitly requires the PR101 P007 complete Go
+        # release SOURCE candidate, fail before copying anything unless the
+        # FULL 15657-file sorted SHA-prefixed manifest matches the immutable
+        # Go 1.27.3 stage pin. A hash of only go/compile/link is insufficient.
+        # The additional caller-provided source-tree identity catches
+        # subsequent drift but does NOT attest independent approval or origin.
+        # This is a SOURCE-only opt-in, not a NativeLauncher/F1 exception.
+        if type(require_go_p007_stage_source) is not bool:
+            raise GatewayError(
+                "runner_unavailable", "D4 Go source profile selection invalid.")
+        if require_go_p007_stage_source:
+            if flavor != "go" or expected_source_identities is None:
+                raise GatewayError(
+                    "runner_unavailable", "D4 complete Go source not selected.")
+            from .lbe_runtime_tree import (
+                _d4_p007_go_stage_matches, D4RuntimeTreeDenied,
+            )
+            try:
+                matched = _d4_p007_go_stage_matches(staged_manifests["go"])
+            except D4RuntimeTreeDenied:
+                matched = False
+            if not matched:
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 operator Go source does not match pinned full release.")
+
         # The reviewed first-party Pipenv .venv tree is distinct from
         # operator-owned bin/lib. Its complete identity is checked before
         # materializing any source and again after materialization. Even a

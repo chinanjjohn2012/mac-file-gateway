@@ -186,8 +186,17 @@ def _parse_commands(
 
 def inspect_d4_selected_macho_loader(
     *, private_root: str, selected_executable: str, expected_sha256: str,
+    require_execute_bit: bool = True,
 ) -> D4MachOLoaderObservation:
-    """Inspect actual selected private executable by bounded nofollow FDs."""
+    """Read a pinned Mach-O binary, with correct executable/dylib modes.
+
+    Selected go/python/compiler/linker executables MUST have the owner
+    executable bit; Mach-O dylibs are often non-executable regular files,
+    whose safe owner/byte/mode identity is still verified by nofollow FDs.
+    This distinction does not grant any execution or dyld load permission.
+    """
+    if type(require_execute_bit) is not bool:
+        raise D4MachOLoaderDenied("invalid executable/dylib source policy")
     if (type(expected_sha256) is not str
             or len(expected_sha256) != 64
             or any(c not in "0123456789abcdef" for c in expected_sha256)):
@@ -205,7 +214,7 @@ def inspect_d4_selected_macho_loader(
         before = os.fstat(fd)
         if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
                 or before.st_nlink != 1 or before.st_mode & 0o022
-                or not before.st_mode & stat.S_IXUSR
+                or (require_execute_bit and not before.st_mode & stat.S_IXUSR)
                 or not 32 <= before.st_size <= _MAX_FILE):
             raise D4MachOLoaderDenied("unqualified native executable inode")
         offset, size, format_name = _selected_slice(fd, before.st_size)

@@ -58,7 +58,7 @@ def _fixture(tmp_path: Path, *, rpath: bool = False):
     }
     for path, data in payloads.items():
         path.write_bytes(data)
-        path.chmod(0o700)
+        path.chmod(0o700 if path == first else 0o600)
     sha = {str(path.relative_to(private)):
            hashlib.sha256(data).hexdigest()
            for path, data in payloads.items()}
@@ -176,3 +176,16 @@ def test_private_link_declared_escape_is_not_read_as_host_source(tmp_path):
     assert graph.private_native_images == ()
     assert len(graph.unresolved_dynamic_loader_names) == 2
     assert graph.native_launch_allowed is False
+
+
+def test_private_macho_dylibs_non_executable_regular_files_remain_valid(
+        tmp_path):
+    private, a, b, selected, expected = _fixture(tmp_path)
+    assert a.stat().st_mode & 0o100 == 0
+    assert b.stat().st_mode & 0o100 == 0
+    evidence = inspect_d4_private_dylib_candidates(
+        selected, private_root=str(private),
+        expected_private_dylibs=expected)
+    assert len(evidence.private_native_images) == 2
+    assert evidence.actual_dyld_resolution_verified is False
+    assert evidence.native_launch_allowed is False

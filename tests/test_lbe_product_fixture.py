@@ -2049,7 +2049,8 @@ def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
             f = root / name
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_bytes(data)
-            f.chmod(0o600 if name.endswith((".py", ".go")) else 0o700)
+            f.chmod(0o600 if name.endswith((".py", ".go", ".dylib"))
+                    else 0o700)
         manifests[source_kind] = _d4_tree_expected(root)
     if kind == "pipenv":
         # The Pipenv executable is an inspected #! script; the kernel's
@@ -2510,7 +2511,7 @@ def test_d4_private_dylib_recheck_burns_one_use_attempt_before_launcher(
     (provisioner / "bin/python").chmod(0o700)
     (provisioner / "lib/libPrivate.dylib").write_bytes(
         macho("/usr/lib/libSystem.B.dylib"))
-    (provisioner / "lib/libPrivate.dylib").chmod(0o700)
+    (provisioner / "lib/libPrivate.dylib").chmod(0o600)
     manifests = {
         "bin": _d4_tree_expected(provisioner / "bin"),
         "lib": _d4_tree_expected(provisioner / "lib"),

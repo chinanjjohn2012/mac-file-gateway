@@ -172,7 +172,8 @@ def inspect_d4_private_dylib_candidates(
                         raise D4PrivateDylibDenied("private loader source count exceeded")
                     parsed = inspect_d4_selected_macho_loader(
                         private_root=root, selected_executable=target,
-                        expected_sha256=approved[target])
+                        expected_sha256=approved[target],
+                        require_execute_bit=False)
                     existing = images.get(target)
                     if existing is not None and existing != parsed:
                         raise D4PrivateDylibDenied(

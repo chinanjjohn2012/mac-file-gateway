@@ -69,6 +69,7 @@ class D4FixtureCandidate:
     plan: LbeWorkPlan
     source_sha256: tuple[tuple[str, str], ...]
     source_identity: tuple[tuple[str, tuple[int, ...]], ...] = ()
+    directory_identity: tuple[tuple[str, tuple[int, ...]], ...] = ()
     profile_id: str = PROFILE_ID
     profile_git_blob: str = PROFILE_GIT_BLOB
     status: str = _STATUS
@@ -118,7 +119,9 @@ class D4OneUseAttemptMarker:
         if (type(candidate.source_sha256) is not tuple
                 or type(candidate.source_identity) is not tuple
                 or len(candidate.source_sha256) == 0
-                or len(candidate.source_sha256) != len(candidate.source_identity)):
+                or len(candidate.source_sha256) != len(candidate.source_identity)
+                or type(candidate.directory_identity) is not tuple
+                or not 0 < len(candidate.directory_identity) <= 128):
             raise D4FixtureDenied("candidate source inventory is not qualified")
         for item, recorded in zip(candidate.source_sha256,
                                   candidate.source_identity):
@@ -133,6 +136,17 @@ class D4OneUseAttemptMarker:
                     or len(recorded[1]) != 8
                     or any(type(v) is not int for v in recorded[1])):
                 raise D4FixtureDenied("candidate source identity is malformed")
+        seen_directories: set[str] = set()
+        for entry in candidate.directory_identity:
+            if (type(entry) is not tuple or len(entry) != 2
+                    or type(entry[0]) is not str or not entry[0]
+                    or entry[0] in seen_directories
+                    or type(entry[1]) is not tuple or len(entry[1]) != 8
+                    or any(type(v) is not int for v in entry[1])):
+                raise D4FixtureDenied("candidate directory identity malformed")
+            seen_directories.add(entry[0])
+        if candidate.plan.cwd not in seen_directories:
+            raise D4FixtureDenied("candidate project directory is unqualified")
         self._candidate = candidate
         self._ctx = ctx
         self._pid = os.getpid()
@@ -160,7 +174,8 @@ class D4OneUseAttemptMarker:
                 raise D4FixtureDenied("product plan changed before launch")
             current = check_d4_r003_fixture(self._ctx, fresh_plan)
             if (current.source_sha256 != self._candidate.source_sha256
-                    or current.source_identity != self._candidate.source_identity):
+                    or current.source_identity != self._candidate.source_identity
+                    or current.directory_identity != self._candidate.directory_identity):
                 raise D4FixtureDenied("selected first-party source changed before launch")
         except D4FixtureDenied:
             raise
@@ -259,20 +274,25 @@ def _budget_add(row: tuple, budget: list[int]) -> None:
         raise D4FixtureDenied("selected source inventory exceeds bounded budget")
 
 
-def _inspect_empty_dir(parent_fd: int, name: str) -> None:
+def _inspect_empty_dir(
+    parent_fd: int, name: str, *, path: str,
+    directories: list[tuple[str, tuple[int, ...]]],
+) -> None:
     fd = _open_dir(parent_fd, name)
     try:
         identity, names = _inventory_begin(fd)
         if names:
             raise D4FixtureDenied("unapproved cached or output files in fixture")
         _inventory_end(fd, identity, names)
+        directories.append((path, identity))
     finally:
         os.close(fd)
 
 
 def _walk_code_dir(parent_fd: int, name: str, *,
                    prefix: str, kind: str, depth: int,
-                   budget: list[int]) -> tuple[tuple, ...]:
+                   budget: list[int],
+                   directories: list[tuple[str, tuple[int, ...]]]) -> tuple[tuple, ...]:
     """Enumerate selected project package files, not only the entrypoint.
 
     Never follow a linked directory/file, accept an unlisted source kind or
@@ -285,10 +305,13 @@ def _walk_code_dir(parent_fd: int, name: str, *,
     fd = _open_dir(parent_fd, name)
     try:
         identity, names = _inventory_begin(fd)
+        directories.append((prefix, identity))
         selected: list[tuple] = []
         for entry in names:
             if kind == "py" and entry == "__pycache__":
-                _inspect_empty_dir(fd, entry)
+                _inspect_empty_dir(
+                    fd, entry, path=prefix + "/" + entry,
+                    directories=directories)
                 continue
             if (kind == "py" and _PY_NAME.fullmatch(entry)
                     or kind == "go" and _GO_NAME.fullmatch(entry)):
@@ -304,6 +327,7 @@ def _walk_code_dir(parent_fd: int, name: str, *,
             selected.extend(_walk_code_dir(
                 fd, entry, prefix=prefix + "/" + entry, kind=kind,
                 depth=depth + 1, budget=budget,
+                directories=directories,
             ))
         _inventory_end(fd, identity, names)
         if not selected:
@@ -313,8 +337,11 @@ def _walk_code_dir(parent_fd: int, name: str, *,
         os.close(fd)
 
 
-def _python_selected_sources(project_fd: int) -> tuple[tuple, ...]:
+def _python_selected_sources(
+    project_fd: int, directories: list[tuple[str, tuple[int, ...]]],
+) -> tuple[tuple, ...]:
     identity, names = _inventory_begin(project_fd)
+    directories.append(("", identity))
     if "src" not in names:
         raise D4FixtureDenied("Python src input missing")
     budget = [0, 0]
@@ -323,7 +350,7 @@ def _python_selected_sources(project_fd: int) -> tuple[tuple, ...]:
         if name == "src" or name == "tests":
             selected.extend(_walk_code_dir(
                 project_fd, name, prefix=name, kind="py", depth=1,
-                budget=budget,
+                budget=budget, directories=directories,
             ))
         elif name in ("conftest.py", "pytest.ini", "pyproject.toml",
                       "setup.cfg"):
@@ -336,8 +363,11 @@ def _python_selected_sources(project_fd: int) -> tuple[tuple, ...]:
     return tuple(sorted(selected, key=lambda row: row[0]))
 
 
-def _pipenv_selected_sources(project_fd: int) -> tuple[tuple, ...]:
+def _pipenv_selected_sources(
+    project_fd: int, directories: list[tuple[str, tuple[int, ...]]],
+) -> tuple[tuple, ...]:
     identity, names = _inventory_begin(project_fd)
+    directories.append(("", identity))
     if not {"Pipfile", "Pipfile.lock", ".venv"}.issubset(names):
         raise D4FixtureDenied("Pipenv fixture inputs missing")
     budget = [0, 0]
@@ -351,17 +381,19 @@ def _pipenv_selected_sources(project_fd: int) -> tuple[tuple, ...]:
         elif name == "tests":
             selected.extend(_walk_code_dir(
                 project_fd, name, prefix=name, kind="py", depth=1,
-                budget=budget,
+                budget=budget, directories=directories,
             ))
         elif name != ".venv":
             raise D4FixtureDenied("unlisted Pipenv first-party input")
     venv_fd = _open_dir(project_fd, ".venv")
     try:
+        directories.append((".venv", _directory_identity(venv_fd)))
         row = (".venv/pyvenv.cfg", *_file_digest(venv_fd, "pyvenv.cfg"))
         _budget_add(row, budget)
         selected.append(row)
         bin_fd = _open_dir(venv_fd, "bin")
         try:
+            directories.append((".venv/bin", _directory_identity(bin_fd)))
             # A real interpreter may exceed the ordinary 1 MiB metadata cap.
             # Use a bounded 64 KiB streaming reader; never load/execute it.
             row = (".venv/bin/python", *_file_digest(
@@ -444,8 +476,11 @@ def _qualify_go_module_snapshot(
         raise D4FixtureDenied("Go module must contain one module and go version")
 
 
-def _go_selected_sources(project_fd: int) -> tuple[tuple, ...]:
+def _go_selected_sources(
+    project_fd: int, directories: list[tuple[str, tuple[int, ...]]],
+) -> tuple[tuple, ...]:
     identity, names = _inventory_begin(project_fd)
+    directories.append(("", identity))
     if not {"go.mod", "cmd", "bin"}.issubset(names):
         raise D4FixtureDenied("Go module/package/output root missing")
     budget = [0, 0]
@@ -458,11 +493,12 @@ def _go_selected_sources(project_fd: int) -> tuple[tuple, ...]:
         elif name in ("cmd", "internal", "pkg"):
             selected.extend(_walk_code_dir(
                 project_fd, name, prefix=name, kind="go", depth=1,
-                budget=budget,
+                budget=budget, directories=directories,
             ))
         elif name == "bin":
             # Go build -o bin/app must start with a fresh private output dir.
-            _inspect_empty_dir(project_fd, name)
+            _inspect_empty_dir(
+                project_fd, name, path=name, directories=directories)
         else:
             # Do not silently omit extra Go packages, go.work, go:embed data,
             # tool hooks, hidden module/replace sources or output shadows.
@@ -518,12 +554,13 @@ def check_d4_r003_fixture(ctx: "WorkspaceContext",
         _require_controlled(root_fd, directory=True)
         project_fd = _open_dir(root_fd, plan.cwd)
         try:
+            directories: list[tuple[str, tuple[int, ...]]] = []
             if plan.cwd == "py-direct":
-                selected = _python_selected_sources(project_fd)
+                selected = _python_selected_sources(project_fd, directories)
             elif plan.cwd == "py-pipenv":
-                selected = _pipenv_selected_sources(project_fd)
+                selected = _pipenv_selected_sources(project_fd, directories)
             else:
-                selected = _go_selected_sources(project_fd)
+                selected = _go_selected_sources(project_fd, directories)
         finally:
             os.close(project_fd)
     except (OSError, OverflowError, ValueError) as exc:
@@ -553,4 +590,9 @@ def check_d4_r003_fixture(ctx: "WorkspaceContext",
                             for name, digest, _identity in selected),
         source_identity=tuple((plan.cwd + "/" + name, identity)
                               for name, _digest, identity in selected),
+        directory_identity=tuple(sorted(
+            ((plan.cwd + ("/" + name if name else ""), identity)
+             for name, identity in directories),
+            key=lambda entry: entry[0],
+        )),
     )

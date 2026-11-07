@@ -821,3 +821,90 @@ def test_d4_go_qualified_simple_module_has_no_native_authority(
                 "a", "go-project", ["go", "test", "./..."],
                 dry_run=False)
     assert denied.value.code == "exec_cleanup_proof_required"
+
+
+@pytest.mark.parametrize("cwd,argv", _ROWS)
+def test_d4_first_party_inventory_includes_checked_directory_identity(
+        product_service, cwd, argv):
+    service, root = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", cwd, argv)
+    directories = dict(candidate.directory_identity)
+    assert cwd in directories
+    assert all(len(identity) == 8 and all(type(x) is int for x in identity)
+               for identity in directories.values())
+    if cwd == "py-direct":
+        assert cwd + "/src" in directories
+    elif cwd == "py-pipenv":
+        assert cwd + "/.venv" in directories
+        assert cwd + "/.venv/bin" in directories
+    else:
+        assert cwd + "/cmd" in directories
+        assert cwd + "/cmd/app" in directories
+        assert cwd + "/bin" in directories
+    assert candidate.native_launch_allowed is False
+
+
+@pytest.mark.parametrize("cwd,argv,relative", [
+    ("go-project", ["go", "test", "./..."], "bin"),
+    ("go-project", ["go", "build", "-o", "bin/app", "./cmd/app"], "cmd"),
+    ("py-direct", ["python", "-m", "compileall", "-q", "./src"], "src"),
+    ("py-pipenv", ["python", "-m", "pytest", "-q"], ".venv"),
+    ("py-pipenv", ["python", "-m", "pytest", "-q"], ".venv/bin"),
+])
+def test_d4_directory_mode_drift_denies_one_use_attempt_without_child(
+        product_service, cwd, argv, relative):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    candidate, marker = service._prepare_d4_r003_attempt("a", cwd, argv)
+    chosen = root / cwd / relative
+    chosen.chmod(0o700)
+    invoked = []
+    def cannot_launch(_plan):
+        invoked.append(True)
+        raise AssertionError("directory metadata drift must deny before Popen")
+    with pytest.raises(LbeWorkerError) as denied:
+        LbeWorker(DirectChildOwner(), launcher=cannot_launch).run(
+            candidate.plan, product_attempt=marker)
+    assert denied.value.code == "attempt_replay_denied"
+    assert invoked == []
+
+
+def test_d4_added_empty_cache_directory_is_detected_before_worker_launch(
+        product_service):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    candidate, marker = service._prepare_d4_r003_attempt(
+        "a", "py-direct",
+        ["python", "-m", "compileall", "-q", "./src"])
+    (root / "py-direct" / "src" / "__pycache__").mkdir()
+    invoked = []
+    def cannot_launch(_plan):
+        invoked.append(True)
+        raise AssertionError("new input directory must be bound into snapshot")
+    with pytest.raises(LbeWorkerError) as denied:
+        LbeWorker(DirectChildOwner(), launcher=cannot_launch).run(
+            candidate.plan, product_attempt=marker)
+    assert denied.value.code == "attempt_replay_denied"
+    assert invoked == []
+
+
+def test_d4_forged_directory_identity_is_not_a_product_authorization(
+        product_service):
+    from gateway.lbe_product_fixture import D4OneUseAttemptMarker
+
+    service, _root = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    with pytest.raises(D4FixtureDenied):
+        D4OneUseAttemptMarker(
+            replace(candidate, directory_identity=()), service.get("a"))
+    with pytest.raises(D4FixtureDenied):
+        D4OneUseAttemptMarker(
+            replace(candidate, directory_identity=(("other", (0,) * 8),)),
+            service.get("a"))
+    assert candidate.native_launch_allowed is False

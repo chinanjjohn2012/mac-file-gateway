@@ -42,6 +42,7 @@ def product_service(tmp_path: Path):
     (pipenv / "Pipfile.lock").write_bytes(b"{}\n")
     (pipenv / ".venv" / "pyvenv.cfg").write_bytes(b"home = private\n")
     (pipenv / ".venv" / "bin" / "python").write_bytes(b"fixed test-only bytes\n")
+    (pipenv / ".venv" / "bin" / "python").chmod(0o700)
     go = workspace / "go-project"
     (go / "cmd" / "app").mkdir(parents=True)
     (go / "cmd" / "app" / "main.go").write_bytes(b"package main\nfunc main() {}\n")
@@ -516,3 +517,216 @@ def test_d4_marker_recomputes_plan_selection_and_burns_on_policy_drift(
                 candidate.plan, product_attempt=marker)
     assert exc.value.code == "attempt_replay_denied"
     assert launched == []
+
+
+def test_d4_python_pytest_inventory_covers_nested_first_party_test_inputs(
+        product_service):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    py = root / "py-direct"
+    (py / "src" / "pkg").mkdir()
+    (py / "src" / "pkg" / "__init__.py").write_bytes(b"value=7\n")
+    (py / "tests").mkdir()
+    (py / "tests" / "test_runtime.py").write_bytes(b"def test_x(): assert True\n")
+    (py / "conftest.py").write_bytes(b"from pathlib import Path\n")
+    c, attempt = service._prepare_d4_r003_attempt(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    names = {name for name, _digest in c.source_sha256}
+    assert names == {
+        "py-direct/src/main.py",
+        "py-direct/src/pkg/__init__.py",
+        "py-direct/tests/test_runtime.py",
+        "py-direct/conftest.py",
+    }
+    assert len(c.source_identity) == 4
+    (py / "tests" / "test_runtime.py").write_bytes(b"def test_x(): assert False\n")
+    spawned = []
+    def must_not_run(_plan):
+        spawned.append(True)
+        raise AssertionError("new test input must block original child")
+    with pytest.raises(LbeWorkerError) as denied:
+        LbeWorker(DirectChildOwner(), launcher=must_not_run).run(
+            c.plan, product_attempt=attempt)
+    assert denied.value.code == "attempt_replay_denied"
+    assert spawned == []
+
+
+def test_d4_go_recursive_package_inventory_covers_go_test_and_build(
+        product_service):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    project = root / "go-project"
+    (project / "pkg" / "math").mkdir(parents=True)
+    (project / "pkg" / "math" / "value.go").write_bytes(
+        b"package math\nfunc Value() int { return 2 }\n")
+    (project / "cmd" / "app" / "main_test.go").write_bytes(
+        b"package main\n")
+    (project / "go.sum").write_bytes(b"firstparty.test/lib v1.0 h1:a\n")
+    for argv in (["go", "test", "./..."],
+                 ["go", "build", "-o", "bin/app", "./cmd/app"]):
+        c, attempt = service._prepare_d4_r003_attempt("a", "go-project", argv)
+        names = {name for name, _digest in c.source_sha256}
+        assert names == {
+            "go-project/go.mod",
+            "go-project/go.sum",
+            "go-project/cmd/app/main.go",
+            "go-project/cmd/app/main_test.go",
+            "go-project/pkg/math/value.go",
+        }
+        (project / "pkg" / "math" / "value.go").write_bytes(
+            b"package math\nfunc Value() int { return 3 }\n")
+        was_called = []
+        def no_launcher(_plan):
+            was_called.append(True)
+            raise AssertionError("undetected package drift")
+        with pytest.raises(LbeWorkerError) as denied:
+            LbeWorker(DirectChildOwner(), launcher=no_launcher).run(
+                c.plan, product_attempt=attempt)
+        assert denied.value.code == "attempt_replay_denied"
+        assert was_called == []
+        (project / "pkg" / "math" / "value.go").write_bytes(
+            b"package math\nfunc Value() int { return 2 }\n")
+
+
+@pytest.mark.parametrize("mutation", [
+    "sitecustomize", "untracked_config", "hidden_hook",
+    "symlink_nested", "unrecognized_file", "empty_nested",
+])
+def test_d4_python_rejects_unlisted_or_linked_import_source(
+        product_service, mutation):
+    service, root = product_service
+    py = root / "py-direct"
+    if mutation == "sitecustomize":
+        (py / "sitecustomize.py").write_bytes(b"danger=True\n")
+    elif mutation == "untracked_config":
+        (py / "tox.ini").write_bytes(b"[testenv]\n")
+    elif mutation == "hidden_hook":
+        (py / ".pth").write_bytes(b"/other\n")
+    elif mutation == "symlink_nested":
+        (py / "src" / "indirect").symlink_to(
+            root / "go-project", target_is_directory=True)
+    elif mutation == "unrecognized_file":
+        (py / "src" / "module.so").write_bytes(b"unqualified native module\n")
+    else:
+        (py / "src" / "empty").mkdir()
+    with pytest.raises(GatewayError) as denied:
+        service._prepare_d4_r003_fixture_candidate(
+            "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    assert denied.value.code == "command_not_allowed"
+
+
+@pytest.mark.parametrize("mutation", [
+    "go_work", "unlisted_pkg", "native_asm", "embed_asset",
+    "output_preexisting", "symlink_module", "empty_pkg",
+])
+def test_d4_go_fails_closed_on_untracked_module_or_build_inputs(
+        product_service, mutation):
+    service, root = product_service
+    go = root / "go-project"
+    if mutation == "go_work":
+        (go / "go.work").write_bytes(b"go 1.27\n")
+    elif mutation == "unlisted_pkg":
+        (go / "shadowpkg").mkdir()
+        (go / "shadowpkg" / "main.go").write_bytes(b"package shadowpkg\n")
+    elif mutation == "native_asm":
+        (go / "cmd" / "app" / "arm64.s").write_bytes(b"TEXT begin(SB),0,$0\n")
+    elif mutation == "embed_asset":
+        (go / "cmd" / "app" / "secret.bin").write_bytes(b"unqualified\n")
+    elif mutation == "output_preexisting":
+        (go / "bin" / "app").write_bytes(b"stale binary\n")
+    elif mutation == "symlink_module":
+        (go / "pkg").symlink_to(go / "cmd", target_is_directory=True)
+    else:
+        (go / "internal" / "empty").mkdir(parents=True)
+    with pytest.raises(GatewayError) as denied:
+        service._prepare_d4_r003_fixture_candidate(
+            "a", "go-project", ["go", "test", "./..."])
+    assert denied.value.code == "command_not_allowed"
+
+
+def test_d4_pipenv_selected_python_streams_large_dummy_bytes_no_spawn(
+        product_service, monkeypatch):
+    import hashlib
+
+    service, root = product_service
+    location = root / "py-pipenv" / ".venv" / "bin" / "python"
+    data = b"test-only, never executable!\n" * 100000
+    assert len(data) > 1024 * 1024
+    location.write_bytes(data)
+    location.chmod(0o700)
+    with monkeypatch.context() as m:
+        def no_spawn(*_args, **_kwargs):
+            raise AssertionError("No fake interpreter must be launched")
+        m.setattr(subprocess, "Popen", no_spawn)
+        candidate = service._prepare_d4_r003_fixture_candidate(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"])
+    assert dict(candidate.source_sha256)[
+        "py-pipenv/.venv/bin/python"] == hashlib.sha256(data).hexdigest()
+    assert candidate.native_launch_allowed is False
+    assert candidate.actual_loaded_sources_proven is False
+
+
+@pytest.mark.parametrize("mutation", ["non_executable", "empty", "too_large"])
+def test_d4_pipenv_selected_interpreter_requires_bounded_owner_executable(
+        product_service, mutation):
+    service, root = product_service
+    python = root / "py-pipenv" / ".venv" / "bin" / "python"
+    if mutation == "non_executable":
+        python.chmod(0o600)
+    elif mutation == "empty":
+        python.write_bytes(b"")
+    else:
+        # Sparse fixture, no need to allocate a 128 MiB string or run Python.
+        with python.open("r+b") as f:
+            f.truncate(128 * 1024 * 1024 + 1)
+    with pytest.raises(GatewayError) as denied:
+        service._prepare_d4_r003_fixture_candidate(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"])
+    assert denied.value.code == "command_not_allowed"
+
+
+def test_d4_directory_changes_during_snapshot_are_rejected(
+        product_service, monkeypatch):
+    import gateway.lbe_product_fixture as selected
+
+    service, root = product_service
+    src = root / "py-direct" / "src"
+    real_digest = selected._file_digest
+    mutated = []
+    def mutate_after_original_read(parent_fd, name, **kwargs):
+        row = real_digest(parent_fd, name, **kwargs)
+        if name == "main.py" and not mutated:
+            (src / "other.py").write_bytes(b"shadow=1\n")
+            mutated.append(True)
+        return row
+    with monkeypatch.context() as m:
+        m.setattr(selected, "_file_digest", mutate_after_original_read)
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_fixture_candidate(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    assert denied.value.code == "command_not_allowed"
+    assert mutated == [True]
+
+
+def test_d4_pipenv_tests_directory_is_included_before_one_use_marker(
+        product_service):
+    service, root = product_service
+    tests = root / "py-pipenv" / "tests"
+    tests.mkdir()
+    (tests / "test_x.py").write_bytes(b"def test_x(): assert True\n")
+    c, marker = service._prepare_d4_r003_attempt(
+        "a", "py-pipenv", ["python", "-m", "pytest", "-q"])
+    assert "py-pipenv/tests/test_x.py" in dict(c.source_sha256)
+    (tests / "test_x.py").write_bytes(b"def test_x(): assert False\n")
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    with pytest.raises(LbeWorkerError) as denied:
+        LbeWorker(DirectChildOwner(), launcher=lambda plan: (_ for _ in ()).throw(
+            AssertionError("Stale Pipenv test cannot run"))).run(
+            c.plan, product_attempt=marker)
+    assert denied.value.code == "attempt_replay_denied"

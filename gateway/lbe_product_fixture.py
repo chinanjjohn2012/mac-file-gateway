@@ -31,8 +31,14 @@ PROFILE_ID = "MWE-LBE-TRUSTED-PRODUCT-T1-PROFILE-R003"
 PROFILE_GIT_BLOB = "f8556b48ab5f4af7390fb015092862a8a87768fb"
 _STATUS = "SELECTED_FIRST_PARTY_SOURCE_ONLY_NO_NATIVE_AUTHORITY"
 _MAX_SOURCE_BYTES = 1024 * 1024
+_MAX_PYTHON_EXECUTABLE_BYTES = 128 * 1024 * 1024
 _MAX_SRC_ENTRIES = 128
+_MAX_TOTAL_FILES = 128
+_MAX_TOTAL_BYTES = 160 * 1024 * 1024
+_MAX_TREE_DEPTH = 5
 _PY_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\.py\Z")
+_GO_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*\.go\Z")
+_DIR_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*\Z")
 
 # Exact requested argv and effective argv must BOTH be checked: user-supplied
 # `pipenv run` is not equivalent to an internal selected Pipenv runner.
@@ -186,22 +192,27 @@ def _open_dir(parent_fd: int, name: str) -> int:
         raise
 
 
-def _file_digest(parent_fd: int, name: str) -> tuple[str, tuple[int, ...]]:
+def _file_digest(
+    parent_fd: int, name: str, *,
+    max_bytes: int = _MAX_SOURCE_BYTES,
+    executable: bool = False,
+) -> tuple[str, tuple[int, ...]]:
+    """Read selected bytes by nofollow FD, including a bounded Python binary."""
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
                  | os.O_NONBLOCK, dir_fd=parent_fd)
     try:
         metadata = _require_controlled(fd, directory=False)
-        if not 0 < metadata.st_size <= _MAX_SOURCE_BYTES:
+        if not 0 < metadata.st_size <= max_bytes:
             raise D4FixtureDenied("fixture input exceeds source-size bound")
+        if executable and not metadata.st_mode & stat.S_IXUSR:
+            raise D4FixtureDenied("selected interpreter is not owner executable")
         digest = hashlib.sha256()
         read_bytes = 0
-        while True:
-            data = os.read(fd, min(65536, _MAX_SOURCE_BYTES + 1 - read_bytes))
+        while read_bytes < metadata.st_size:
+            data = os.read(fd, min(65536, metadata.st_size - read_bytes))
             if not data:
-                break
+                raise D4FixtureDenied("fixture source changed while reading")
             read_bytes += len(data)
-            if read_bytes > _MAX_SOURCE_BYTES:
-                raise D4FixtureDenied("fixture input changed or grew beyond bound")
             digest.update(data)
         after = _require_controlled(fd, directory=False)
         fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns",
@@ -215,69 +226,187 @@ def _file_digest(parent_fd: int, name: str) -> tuple[str, tuple[int, ...]]:
         os.close(fd)
 
 
-def _python_selected_sources(project_fd: int) -> tuple[tuple[str, str, tuple[int, ...]], ...]:
-    src_fd = _open_dir(project_fd, "src")
+def _directory_identity(fd: int) -> tuple[int, ...]:
+    metadata = _require_controlled(fd, directory=True)
+    fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns",
+              "st_ctime_ns", "st_mode", "st_uid", "st_nlink")
+    return tuple(getattr(metadata, key) for key in fields)
+
+
+def _inventory_begin(fd: int) -> tuple[tuple[int, ...], tuple[str, ...]]:
+    identity = _directory_identity(fd)
+    names = tuple(sorted(os.listdir(fd)))
+    if len(names) > _MAX_SRC_ENTRIES:
+        raise D4FixtureDenied("source directory has too many entries")
+    if any(type(n) is not str or n in ("", ".", "..") or "/" in n
+           or any(ord(c) < 33 or ord(c) >= 127 for c in n)
+           for n in names):
+        raise D4FixtureDenied("source directory contains an unsafe entry")
+    return identity, names
+
+
+def _inventory_end(fd: int, identity: tuple[int, ...],
+                   names: tuple[str, ...]) -> None:
+    if (_directory_identity(fd) != identity
+            or tuple(sorted(os.listdir(fd))) != names):
+        raise D4FixtureDenied("source directory changed while inspecting")
+
+
+def _budget_add(row: tuple, budget: list[int]) -> None:
+    budget[0] += 1
+    budget[1] += row[2][2]
+    if budget[0] > _MAX_TOTAL_FILES or budget[1] > _MAX_TOTAL_BYTES:
+        raise D4FixtureDenied("selected source inventory exceeds bounded budget")
+
+
+def _inspect_empty_dir(parent_fd: int, name: str) -> None:
+    fd = _open_dir(parent_fd, name)
     try:
-        names = os.listdir(src_fd)
-        if not names or len(names) > _MAX_SRC_ENTRIES:
-            raise D4FixtureDenied("first-party Python fixture inventory invalid")
-        selected: list[tuple[str, str]] = []
-        for name in sorted(names):
-            if name == "__pycache__":
-                cache_fd = _open_dir(src_fd, name)
-                try:
-                    # A fresh fixture must not import pre-existing bytecode.
-                    if os.listdir(cache_fd):
-                        raise D4FixtureDenied("unqualified cached Python bytecode")
-                finally:
-                    os.close(cache_fd)
-            elif _PY_NAME.fullmatch(name):
-                selected.append(("src/" + name, *_file_digest(src_fd, name)))
-            else:
-                # No unreviewed subdirectories, symlink traversal, .pth, or
-                # generated import inputs in this fixed compileall fixture.
-                raise D4FixtureDenied("unlisted Python fixture source")
+        identity, names = _inventory_begin(fd)
+        if names:
+            raise D4FixtureDenied("unapproved cached or output files in fixture")
+        _inventory_end(fd, identity, names)
+    finally:
+        os.close(fd)
+
+
+def _walk_code_dir(parent_fd: int, name: str, *,
+                   prefix: str, kind: str, depth: int,
+                   budget: list[int]) -> tuple[tuple, ...]:
+    """Enumerate selected project package files, not only the entrypoint.
+
+    Never follow a linked directory/file, accept an unlisted source kind or
+    trust bytes that moved while the directory walk was active. This proves
+    only a bounded first-party source snapshot, NOT imported toolchain/site
+    source identity, nor protection against a later Popen pathname race.
+    """
+    if depth > _MAX_TREE_DEPTH:
+        raise D4FixtureDenied("source tree is deeper than approved fixture")
+    fd = _open_dir(parent_fd, name)
+    try:
+        identity, names = _inventory_begin(fd)
+        selected: list[tuple] = []
+        for entry in names:
+            if kind == "py" and entry == "__pycache__":
+                _inspect_empty_dir(fd, entry)
+                continue
+            if (kind == "py" and _PY_NAME.fullmatch(entry)
+                    or kind == "go" and _GO_NAME.fullmatch(entry)):
+                row = (prefix + "/" + entry, *_file_digest(fd, entry))
+                _budget_add(row, budget)
+                selected.append(row)
+                continue
+            if _DIR_NAME.fullmatch(entry) is None or depth == _MAX_TREE_DEPTH:
+                raise D4FixtureDenied("unexpected file or import source in fixture")
+            metadata = os.stat(entry, dir_fd=fd, follow_symlinks=False)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise D4FixtureDenied("unlisted source, symlink or nonregular entry")
+            selected.extend(_walk_code_dir(
+                fd, entry, prefix=prefix + "/" + entry, kind=kind,
+                depth=depth + 1, budget=budget,
+            ))
+        _inventory_end(fd, identity, names)
         if not selected:
-            raise D4FixtureDenied("no first-party Python sources selected")
+            raise D4FixtureDenied("empty package directory is not qualified")
         return tuple(selected)
     finally:
-        os.close(src_fd)
+        os.close(fd)
 
 
-def _pipenv_selected_sources(project_fd: int) -> tuple[tuple[str, str, tuple[int, ...]], ...]:
-    selected = [
-        ("Pipfile", *_file_digest(project_fd, "Pipfile")),
-        ("Pipfile.lock", *_file_digest(project_fd, "Pipfile.lock")),
-    ]
+def _python_selected_sources(project_fd: int) -> tuple[tuple, ...]:
+    identity, names = _inventory_begin(project_fd)
+    if "src" not in names:
+        raise D4FixtureDenied("Python src input missing")
+    budget = [0, 0]
+    selected: list[tuple] = []
+    for name in names:
+        if name == "src" or name == "tests":
+            selected.extend(_walk_code_dir(
+                project_fd, name, prefix=name, kind="py", depth=1,
+                budget=budget,
+            ))
+        elif name in ("conftest.py", "pytest.ini", "pyproject.toml",
+                      "setup.cfg"):
+            row = (name, *_file_digest(project_fd, name))
+            _budget_add(row, budget)
+            selected.append(row)
+        else:
+            raise D4FixtureDenied("unlisted Python fixture input or import hook")
+    _inventory_end(project_fd, identity, names)
+    return tuple(sorted(selected, key=lambda row: row[0]))
+
+
+def _pipenv_selected_sources(project_fd: int) -> tuple[tuple, ...]:
+    identity, names = _inventory_begin(project_fd)
+    if not {"Pipfile", "Pipfile.lock", ".venv"}.issubset(names):
+        raise D4FixtureDenied("Pipenv fixture inputs missing")
+    budget = [0, 0]
+    selected: list[tuple] = []
+    for name in names:
+        if name in ("Pipfile", "Pipfile.lock", "conftest.py",
+                    "pytest.ini", "pyproject.toml", "setup.cfg"):
+            row = (name, *_file_digest(project_fd, name))
+            _budget_add(row, budget)
+            selected.append(row)
+        elif name == "tests":
+            selected.extend(_walk_code_dir(
+                project_fd, name, prefix=name, kind="py", depth=1,
+                budget=budget,
+            ))
+        elif name != ".venv":
+            raise D4FixtureDenied("unlisted Pipenv first-party input")
     venv_fd = _open_dir(project_fd, ".venv")
     try:
-        selected.append((".venv/pyvenv.cfg", *_file_digest(venv_fd, "pyvenv.cfg")))
+        row = (".venv/pyvenv.cfg", *_file_digest(venv_fd, "pyvenv.cfg"))
+        _budget_add(row, budget)
+        selected.append(row)
         bin_fd = _open_dir(venv_fd, "bin")
         try:
-            selected.append((".venv/bin/python", *_file_digest(bin_fd, "python")))
+            # A real interpreter may exceed the ordinary 1 MiB metadata cap.
+            # Use a bounded 64 KiB streaming reader; never load/execute it.
+            row = (".venv/bin/python", *_file_digest(
+                bin_fd, "python", max_bytes=_MAX_PYTHON_EXECUTABLE_BYTES,
+                executable=True,
+            ))
+            _budget_add(row, budget)
+            selected.append(row)
         finally:
             os.close(bin_fd)
     finally:
         os.close(venv_fd)
-    return tuple(selected)
+    _inventory_end(project_fd, identity, names)
+    # .venv/site, .pth, stdlib and actual Pipenv loader are NOT proven by
+    # these selected first-party inputs; the F1/NativeLauncher deny remains.
+    return tuple(sorted(selected, key=lambda row: row[0]))
 
 
-def _go_selected_sources(project_fd: int) -> tuple[tuple[str, str, tuple[int, ...]], ...]:
-    selected = [("go.mod", *_file_digest(project_fd, "go.mod"))]
-    cmd_fd = _open_dir(project_fd, "cmd")
-    try:
-        app_fd = _open_dir(cmd_fd, "app")
-        try:
-            selected.append(("cmd/app/main.go", *_file_digest(app_fd, "main.go")))
-        finally:
-            os.close(app_fd)
-    finally:
-        os.close(cmd_fd)
-    # Actual go build -o validation separately requires a pre-existing
-    # nofollow bin parent; this also refuses a linked output directory.
-    bin_fd = _open_dir(project_fd, "bin")
-    os.close(bin_fd)
-    return tuple(selected)
+def _go_selected_sources(project_fd: int) -> tuple[tuple, ...]:
+    identity, names = _inventory_begin(project_fd)
+    if not {"go.mod", "cmd", "bin"}.issubset(names):
+        raise D4FixtureDenied("Go module/package/output root missing")
+    budget = [0, 0]
+    selected: list[tuple] = []
+    for name in names:
+        if name in ("go.mod", "go.sum") or _GO_NAME.fullmatch(name):
+            row = (name, *_file_digest(project_fd, name))
+            _budget_add(row, budget)
+            selected.append(row)
+        elif name in ("cmd", "internal", "pkg"):
+            selected.extend(_walk_code_dir(
+                project_fd, name, prefix=name, kind="go", depth=1,
+                budget=budget,
+            ))
+        elif name == "bin":
+            # Go build -o bin/app must start with a fresh private output dir.
+            _inspect_empty_dir(project_fd, name)
+        else:
+            # Do not silently omit extra Go packages, go.work, go:embed data,
+            # tool hooks, hidden module/replace sources or output shadows.
+            raise D4FixtureDenied("unlisted Go module or build input")
+    _inventory_end(project_fd, identity, names)
+    if "cmd/app/main.go" not in {row[0] for row in selected}:
+        raise D4FixtureDenied("fixed Go app entrypoint is missing")
+    return tuple(sorted(selected, key=lambda row: row[0]))
 
 
 def check_d4_r003_fixture(ctx: "WorkspaceContext",

@@ -354,6 +354,11 @@ class WorkspaceService:
             "effective_argv": list(plan.effective_argv),
             "runner": plan.runner,
             "runner_project": plan.runner_project,
+            # Informational normalized Go build output; never a write claim.
+            "planned_go_output": plan.planned_go_output,
+            # Content snapshots only; no loaded source or native authority.
+            "planned_script_sha256": plan.planned_script_sha256,
+            "planned_pipfile_sha256": plan.planned_pipfile_sha256,
             "dry_run": True,
             "executed": False,
             "exit_code": None,
@@ -375,7 +380,8 @@ class WorkspaceService:
     @staticmethod
     def _lbe_apply(ctx: WorkspaceContext, owner: DirectChildOwner,
                    cwd: str, argv: list[str],
-                   timeout_seconds: int) -> dict[str, Any]:
+                   timeout_seconds: int, *,
+                   cancelled: threading.Event | None = None) -> dict[str, Any]:
         """Worker apply, reachable only from the approved hosted Python T1.
 
         Ordinary schema-v2 public requests are denied before this method.
@@ -390,7 +396,7 @@ class WorkspaceService:
         worker = LbeWorker(
             owner, launcher=make_trusted_lbe_launcher(ctx))
         try:
-            return worker.run(plan)
+            return worker.run(plan, cancelled=cancelled)
         except LbeWorkerError as exc:
             raise GatewayError(
                 exc.code, "Local best-effort command could not complete safely.",
@@ -398,7 +404,8 @@ class WorkspaceService:
             ) from None
 
     def invoke_exec(self, name: str, cwd: str, argv: list[str],
-                    timeout_seconds: int = 60, dry_run: bool = True) -> dict[str, Any]:
+                    timeout_seconds: int = 60, dry_run: bool = True, *,
+                    cancelled: threading.Event | None = None) -> dict[str, Any]:
         """One synchronous v1 and draft v2 admission boundary.
 
         Ordinary schema-v2 paths authorize preview only until the exact
@@ -417,6 +424,8 @@ class WorkspaceService:
             self._exec_state.require_healthy()
             if type(dry_run) is not bool:
                 raise GatewayError("invalid_argument", "dry_run must be boolean.")
+            if cancelled is not None and type(cancelled) is not threading.Event:
+                raise GatewayError("invalid_argument", "Invalid internal cancellation token.")
             # F1 has NO positive cleanup-proof path. Proof denial wins over
             # an occupied Worker slot and happens before Runner/PREPARED.
             # Never use an instance-global subprocess ban: Git may spawn
@@ -445,7 +454,8 @@ class WorkspaceService:
                 else:
                     assert self._lbe_owner is not None
                     result = self._lbe_apply(
-                        ctx, self._lbe_owner, cwd, argv, timeout_seconds)
+                        ctx, self._lbe_owner, cwd, argv, timeout_seconds,
+                        cancelled=cancelled)
             else:
                 # Preserve the entire historic v1 preview and F1 deny-only path.
                 result = ctx.gateway.run_command(cwd, argv, timeout_seconds, dry_run)
@@ -455,6 +465,651 @@ class WorkspaceService:
                 self._exec_active.remove(name)
                 self._active_operations -= 1
                 self._lifecycle.notify_all()
+
+    def _prepare_d4_r003_fixture_candidate(
+        self, name: str, cwd: str, argv: list[str],
+        timeout_seconds: int = 60,
+    ):
+        """Service-origin selected first-party D4 input inspection, NO grant.
+
+        This internal source-read function does not open positive Exec,
+        bypass native Go/Pipenv denial, attest third-party loaded source or
+        allow a REST/MCP caller to provide an authorization capability.
+        A future independently approved product launch must recheck the
+        *same* input, actual runner and all remaining guards pre-Popen.
+        """
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if self.settings.schema_version != 2:
+                raise GatewayError(
+                    "exec_disabled", "D4 input qualification requires schema v2.")
+            if self._exec_state is None:
+                raise GatewayError(
+                    "exec_state_unavailable", "Exec durable state is unavailable.")
+            self._exec_state.require_healthy()
+            # Keep pinned Workspace and old-state owner handles live while
+            # inspecting first-party source bytes outside the lifecycle lock.
+            self._active_operations += 1
+        try:
+            from .lbe_plan import prepare_lbe_work_plan
+            from .lbe_product_fixture import (
+                D4FixtureDenied, check_d4_r003_fixture,
+            )
+
+            plan = prepare_lbe_work_plan(
+                ctx, cwd=cwd, argv=argv, timeout_seconds=timeout_seconds)
+            try:
+                return check_d4_r003_fixture(ctx, plan)
+            except D4FixtureDenied:
+                raise GatewayError(
+                    "command_not_allowed",
+                    "D4 first-party fixture is not qualified for this plan.",
+                ) from None
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
+    def _prepare_d4_r003_attempt(
+        self, name: str, cwd: str, argv: list[str],
+        timeout_seconds: int = 60,
+    ):
+        """Source-only, one-use internal attempt; never an Exec grant.
+
+        This returns the same live service's first-party candidate and a
+        context-bound, atomic marker. The Worker verifies the marker again
+        just before reservation/launch. Neither this private method nor a
+        token can change the operative F1 or NativeLauncher Go/Pipenv DENY.
+        """
+        candidate = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        from .lbe_product_fixture import D4OneUseAttemptMarker
+
+        # get() rechecks service-closing state after source inspection.
+        return candidate, D4OneUseAttemptMarker(candidate, self.get(name))
+
+    def _inspect_d4_r003_staged_runtime(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, expected_hashes: dict[str, str],
+        expected_trees: dict[str, tuple[tuple[str, str | None], ...]] | None = None,
+        timeout_seconds: int = 60,
+    ):
+        """Actual internal staged-source selection, NO Go/Pipenv execution.
+
+        Build a strict first-party service plan, verify the existing v1
+        ExecStateStore and Workspace gates, then read the staged native
+        executable files and build a fresh, closed proposed environment.
+        This is an internal *source* step for a future runner bootstrap,
+        not a public REST/MCP API, owner test consent, full loaded-source
+        attestation or a way to activate F1 or the NativeLauncher.
+        """
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if self.settings.schema_version != 2:
+                raise GatewayError(
+                    "exec_disabled", "D4 stage requires schema v2.")
+            if self._exec_state is None:
+                raise GatewayError(
+                    "exec_state_unavailable", "Exec durable state unavailable.")
+            self._exec_state.require_healthy()
+            self._active_operations += 1
+        try:
+            from .lbe_runtime_source import (
+                D4RuntimeSourceDenied, inspect_d4_runtime_sources,
+            )
+
+            candidate = self._prepare_d4_r003_fixture_candidate(
+                name, cwd, argv, timeout_seconds=timeout_seconds)
+            try:
+                return inspect_d4_runtime_sources(
+                    ctx, candidate, private_root=private_root,
+                    expected_hashes=expected_hashes,
+                    expected_trees=expected_trees,
+                )
+            except D4RuntimeSourceDenied:
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 staged runtime source or environment unavailable.",
+                ) from None
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
+    def _prepare_d4_r003_staged_attempt(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, expected_hashes: dict[str, str],
+        expected_trees: dict[str, tuple[tuple[str, str | None], ...]] | None = None,
+        timeout_seconds: int = 60,
+    ):
+        """Bind actual staged source/env observations to a one-use Worker.
+
+        The internal source-only attempt remains non-authorizing. It must
+        recheck first-party and staged binaries, parent execution selectors,
+        and the constructed closed child environment after atomic attempt
+        consumption and before any possible child launch. Missing Runner
+        image, loaded-source closure, resource witness, owner approval and
+        operative F1 exception always leave Go/Pipenv native execution DENIED.
+        """
+        observed = self._inspect_d4_r003_staged_runtime(
+            name, cwd, argv, private_root=private_root,
+            expected_hashes=expected_hashes,
+            expected_trees=expected_trees,
+            timeout_seconds=timeout_seconds,
+        )
+        candidate = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        ctx = self.get(name)
+        from .lbe_product_fixture import D4OneUseAttemptMarker
+        from .lbe_runtime_source import (
+            D4RuntimeSourceDenied, D4StagedSourceRecheck,
+        )
+
+        try:
+            binding = D4StagedSourceRecheck(
+                ctx, candidate, private_root=private_root,
+                expected_hashes=expected_hashes, observed=observed,
+                expected_trees=expected_trees)
+            marker = D4OneUseAttemptMarker(
+                candidate, ctx, staged_source=binding)
+        except D4RuntimeSourceDenied:
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 staged source recheck binding unavailable.",
+            ) from None
+        return candidate, marker, observed
+
+    def _prepare_d4_r003_native_recipe(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, expected_hashes: dict[str, str],
+        expected_trees: dict[str, tuple[tuple[str, str | None], ...]],
+        timeout_seconds: int = 60,
+    ):
+        """Real internal product command selection; no native execution.
+
+        Binds an exact six-command fixture to a source-only absolute
+        executable, working directory, canonical output and constructed
+        private child environment. The returned recipe cannot be passed to
+        a public API or be treated as a D0/F1/NativeLauncher grant.
+        """
+        candidate, marker, observed = self._prepare_d4_r003_staged_attempt(
+            name, cwd, argv, private_root=private_root,
+            expected_hashes=expected_hashes,
+            expected_trees=expected_trees,
+            timeout_seconds=timeout_seconds,
+        )
+        from .lbe_launch_recipe import (
+            D4NativeRecipeDenied, prepare_d4_native_launch_recipe,
+        )
+
+        try:
+            recipe = prepare_d4_native_launch_recipe(
+                self.get(name), candidate, observed, private_root=private_root)
+        except D4NativeRecipeDenied:
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 native source-only recipe is unavailable.",
+            ) from None
+        return candidate, marker, observed, recipe
+
+    def _prepare_d4_r003_runner_preflight(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, expected_hashes: dict[str, str],
+        expected_trees: dict[str, tuple[tuple[str, str | None], ...]],
+        timeout_seconds: int = 60,
+    ):
+        """Observe actual host source identity without native T1 qualification.
+
+        This continues the real v2 WorkspaceService product path after old
+        owner.lock/ExecStateStore checks, the six-command recipe and one-use
+        Worker source binding. Real kernel/UID/root inode and per-process
+        rlimits are inspected, but the *whole descendant* CPU/RAM domain,
+        immutable GitHub runner image, owner T1 consent and loaded source
+        are NOT proved; an ordinary public apply and NativeLauncher DENY.
+        """
+        candidate, marker, observed, recipe = (
+            self._prepare_d4_r003_native_recipe(
+                name, cwd, argv, private_root=private_root,
+                expected_hashes=expected_hashes,
+                expected_trees=expected_trees,
+                timeout_seconds=timeout_seconds,
+            ))
+        from .lbe_runner_preflight import (
+            D4RunnerProbeDenied, D4RunnerSourceRecheck,
+            observe_d4_runner_preflight,
+        )
+        from .lbe_product_fixture import D4FixtureDenied
+
+        try:
+            ctx = self.get(name)
+            runner = observe_d4_runner_preflight(
+                ctx, recipe, private_root=private_root)
+            bound = D4RunnerSourceRecheck(
+                ctx, candidate.plan, recipe, runner, private_root=private_root)
+            marker.attach_runner_source(bound)
+        except (D4RunnerProbeDenied, D4FixtureDenied):
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 trusted host resource/source preflight unavailable.",
+            ) from None
+        return candidate, marker, observed, recipe, runner
+
+    def _stage_d4_r003_operator_source(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, provisioner_root: str, kind: str,
+        expected: tuple[tuple[str, str | None], ...],
+        expected_source_identity_sha256: str | None = None,
+        timeout_seconds: int = 60,
+    ):
+        """Materialize source from a separate owner-controlled provisioner.
+
+        This is internal PRODUCT source preparation: the reviewed provisioner
+        must supply exact staged source digests outside the private runner.
+        It requires the existing v2 Workspace scope/owner.lock/ExecStateStore
+        and canonical six-command fixture; it creates no native child and
+        grants no public Exec capability, no matter what digest is supplied.
+        """
+        candidate = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        allowed = (
+            {"go"} if candidate.plan.cwd == "go-project" else {"bin", "lib"}
+        )
+        if type(kind) is not str or kind not in allowed:
+            raise GatewayError(
+                "runner_unavailable", "Selected runtime staging kind denied.")
+        from .lbe_runtime_stage import (
+            D4RuntimeStageDenied, stage_d4_operator_runtime_tree,
+        )
+
+        try:
+            receipt = stage_d4_operator_runtime_tree(
+                private_root=private_root, provisioner_root=provisioner_root,
+                kind=kind, expected=expected,
+                expected_source_identity_sha256=expected_source_identity_sha256)
+        except D4RuntimeStageDenied:
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 private runtime staging unavailable.",
+            ) from None
+        # Staging has not promoted the original candidate to authority:
+        # re-read the real Workspace before returning selected bytes.
+        after = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        if (after.plan != candidate.plan
+                or after.source_sha256 != candidate.source_sha256
+                or after.source_identity != candidate.source_identity
+                or after.directory_identity != candidate.directory_identity):
+            raise GatewayError(
+                "runner_unavailable",
+                "First-party runtime changed during source staging.",
+            )
+        return receipt
+
+    def _observe_d4_r003_operator_provisioner(
+        self, name: str, cwd: str, argv: list[str], *,
+        provisioner_root: str, timeout_seconds: int = 60,
+    ):
+        """Observe complete operator source bytes for explicit later approval.
+
+        This is the real WorkspaceService six-command SOURCE-only workflow.
+        A generated manifest can be shown to an independent operator/reviewer,
+        but MUST NOT be automatically promoted into the separately reviewed
+        expected manifest accepted by _assemble_d4_r003_source_only_runner.
+        In particular, bytes cannot self-attest their trusted provisioner,
+        image, loaded-source closure, resources or owner T1 permission.
+        """
+        candidate = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        from .lbe_runtime_tree import (
+            D4RuntimeTreeDenied, observe_d4_operator_source_manifest,
+            observe_d4_pipenv_venv_manifest,
+        )
+        from .lbe_runtime_source import _canonical, D4RuntimeSourceDenied
+
+        kinds = (("go",) if candidate.plan.cwd == "go-project"
+                 else ("bin", "lib"))
+        try:
+            source = _canonical(provisioner_root, "operator provisioner")
+            workspace = _canonical(
+                str(self.get(name).gateway._root_path), "Workspace root")
+            if (source == workspace
+                    or source.startswith(workspace + "/")
+                    or workspace.startswith(source + "/")):
+                raise D4RuntimeSourceDenied(
+                    "operator provisioner overlaps Workspace")
+            observed = {
+                kind: observe_d4_operator_source_manifest(
+                    provisioner_root=source, kind=kind)
+                for kind in kinds
+            }
+            if candidate.plan.cwd == "py-pipenv":
+                # Unlike bin/lib, .venv belongs to the FIRST-PARTY
+                # Workspace, not the operator. A whole imported-source
+                # manifest is reviewable without import or execution.
+                observed["venv"] = observe_d4_pipenv_venv_manifest(
+                    project_root=workspace + "/py-pipenv")
+        except (D4RuntimeTreeDenied, D4RuntimeSourceDenied, OSError):
+            raise GatewayError(
+                "runner_unavailable", "D4 operator source selection unavailable."
+            ) from None
+        # Source inspection must not retain a first-party Workspace snapshot
+        # across operator file reads without rechecking its live identity.
+        after = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        if (after.plan != candidate.plan
+                or after.source_sha256 != candidate.source_sha256
+                or after.source_identity != candidate.source_identity
+                or after.directory_identity != candidate.directory_identity):
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 Workspace source changed during operator observation.",
+            )
+        return observed
+
+    def _assemble_d4_r003_source_only_runner(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, provisioner_root: str,
+        staged_manifests: dict[str, tuple[tuple[str, str | None], ...]],
+        venv_manifest: tuple[tuple[str, str | None], ...] | None = None,
+        expected_source_identities: dict[str, str] | None = None,
+        expected_venv_identity_sha256: str | None = None,
+        require_go_p007_stage_source: bool = False,
+        timeout_seconds: int = 60,
+    ):
+        """Assemble the real six-command private runtime, never launch it.
+
+        The separate owner-controlled provisioner supplies exactly the Go
+        toolchain or bin/lib source trees. This creates non-reusable private
+        staged directories and fresh HOME/TMP/caches, derives selected
+        executable hashes from the proven staged source set, then traverses
+        the same service-owned D4 recipe/one-use/Runner and selected native
+        Mach-O loader-set preflight. Non-Mach-O and wrong-architecture
+        toolchain binaries fail before any possible native execution.
+        Source manifests are NOT independent provider/image/owner attestation.
+        Any failure leaves partial bytes in the disposable private runner;
+        no rollback, unsafe path overwrite, native child or retry occurs.
+        """
+        candidate = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        if candidate.plan.cwd == "go-project":
+            flavor, kinds = "go", ("go",)
+        elif candidate.plan.cwd == "py-pipenv":
+            flavor, kinds = "pipenv", ("bin", "lib")
+        else:
+            flavor, kinds = "python_direct", ("bin", "lib")
+        if (type(staged_manifests) is not dict
+                or any(type(k) is not str or type(v) is not tuple
+                       for k, v in staged_manifests.items())
+                or set(staged_manifests) != set(kinds)
+                or (flavor == "pipenv") != (type(venv_manifest) is tuple)
+                or (venv_manifest is not None
+                    and type(venv_manifest) is not tuple)):
+            raise GatewayError(
+                "runner_unavailable", "D4 source bundle selection is incomplete.")
+        # These IDs are expected from a separately inspected/reviewed
+        # operator-source snapshot. A caller-provided hash is NOT approval:
+        # it only prevents staging an unobserved inode tree with matching
+        # contents/modes. Validate complete kind set before creating files.
+        if (expected_source_identities is not None
+                and (type(expected_source_identities) is not dict
+                     or set(expected_source_identities) != set(kinds)
+                     or any(type(value) is not str or len(value) != 64
+                            or value == "0" * 64
+                            or any(ch not in "0123456789abcdef"
+                                   for ch in value)
+                            for value in expected_source_identities.values()))):
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 operator source identity selection is incomplete.")
+        # When an owner explicitly requires the PR101 P007 complete Go
+        # release SOURCE candidate, fail before copying anything unless the
+        # FULL 15657-file sorted SHA-prefixed manifest matches the immutable
+        # Go 1.27.3 stage pin. A hash of only go/compile/link is insufficient.
+        # The additional caller-provided source-tree identity catches
+        # subsequent drift but does NOT attest independent approval or origin.
+        # This is a SOURCE-only opt-in, not a NativeLauncher/F1 exception.
+        if type(require_go_p007_stage_source) is not bool:
+            raise GatewayError(
+                "runner_unavailable", "D4 Go source profile selection invalid.")
+        if require_go_p007_stage_source:
+            if flavor != "go" or expected_source_identities is None:
+                raise GatewayError(
+                    "runner_unavailable", "D4 complete Go source not selected.")
+            from .lbe_runtime_tree import (
+                _d4_p007_go_stage_matches, D4RuntimeTreeDenied,
+            )
+            try:
+                matched = _d4_p007_go_stage_matches(staged_manifests["go"])
+            except D4RuntimeTreeDenied:
+                matched = False
+            if not matched:
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 operator Go source does not match pinned full release.")
+
+        # The reviewed first-party Pipenv .venv tree is distinct from
+        # operator-owned bin/lib. Its complete identity is checked before
+        # materializing any source and again after materialization. Even a
+        # matching identity is NOT imported-source attestation or T1 consent.
+        if (expected_venv_identity_sha256 is not None
+                and (flavor != "pipenv"
+                     or type(expected_venv_identity_sha256) is not str
+                     or len(expected_venv_identity_sha256) != 64
+                     or expected_venv_identity_sha256 == "0" * 64
+                     or any(ch not in "0123456789abcdef"
+                            for ch in expected_venv_identity_sha256))):
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 first-party virtualenv identity selection is incomplete.")
+
+        def check_venv_identity() -> None:
+            if expected_venv_identity_sha256 is None:
+                return
+            from .lbe_runtime_tree import (
+                D4RuntimeTreeDenied, inspect_d4_closed_staged_tree,
+            )
+            try:
+                project = str(self.get(name).gateway._root_path) + "/py-pipenv"
+                seen = inspect_d4_closed_staged_tree(
+                    private_root=private_root,
+                    staged_root=project + "/.venv",
+                    expected=venv_manifest,
+                )
+            except (D4RuntimeTreeDenied, OSError):
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 private virtualenv source not qualified.") from None
+            if seen.observed_identity_sha256 != expected_venv_identity_sha256:
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 private virtualenv source identity changed.")
+
+        check_venv_identity()
+        from .lbe_runtime_stage import (
+            D4RuntimeStageDenied, create_d4_fresh_runner_scratch,
+        )
+
+        stage_receipts = []
+        for kind in kinds:
+            stage_receipts.append(self._stage_d4_r003_operator_source(
+                name, cwd, argv,
+                private_root=private_root,
+                provisioner_root=provisioner_root,
+                kind=kind, expected=staged_manifests[kind],
+                expected_source_identity_sha256=(
+                    expected_source_identities[kind]
+                    if expected_source_identities is not None else None),
+                timeout_seconds=timeout_seconds))
+        # Bin/lib or Go staging may take time. The pinned first-party venv
+        # identity MUST still match before preparing any child environment.
+        check_venv_identity()
+        try:
+            scratch = create_d4_fresh_runner_scratch(
+                private_root=private_root, kind=flavor)
+        except D4RuntimeStageDenied:
+            raise GatewayError(
+                "runner_unavailable", "D4 fresh runtime scratch unavailable."
+            ) from None
+        chosen = {}
+        for kind in kinds:
+            # Stage has already validated the exact source manifest. A
+            # separate caller-provided digest cannot silently replace the
+            # source result or create a trusted execution grant.
+            chosen[kind] = dict(staged_manifests[kind])
+        selected = dict(candidate.source_sha256)
+        if flavor == "go":
+            expected_hashes = {
+                "go": chosen["go"].get("bin/go"),
+                "compile": chosen["go"].get("pkg/tool/darwin_arm64/compile"),
+                "link": chosen["go"].get("pkg/tool/darwin_arm64/link"),
+            }
+        elif flavor == "pipenv":
+            expected_hashes = {
+                "Pipfile": selected.get("py-pipenv/Pipfile"),
+                "Pipfile.lock": selected.get("py-pipenv/Pipfile.lock"),
+                "pyvenv.cfg": selected.get("py-pipenv/.venv/pyvenv.cfg"),
+                "python": selected.get("py-pipenv/.venv/bin/python"),
+                "pipenv": chosen["bin"].get("pipenv"),
+            }
+        else:
+            expected_hashes = {"python": chosen["bin"].get("python")}
+        if any(type(v) is not str or len(v) != 64
+               for v in expected_hashes.values()):
+            raise GatewayError(
+                "runner_unavailable", "D4 staged executable selection incomplete.")
+        expected_trees = dict(staged_manifests)
+        expected_trees.update({name: (("", None),) for name in scratch})
+        if flavor == "pipenv":
+            expected_trees["venv"] = venv_manifest
+        # The primary product source preparation NOW requires the same
+        # actual pinned ARM64 image/header and one-use loader-set recheck as
+        # the separate source inspector, for every selected Go compiler/linker
+        # and the exact selected Python interpreter. Static declarations do
+        # not establish dyld resolution or native execution authorization.
+        prepared = self._prepare_d4_r003_selected_loader_set(
+            name, cwd, argv, private_root=private_root,
+            expected_hashes=expected_hashes,
+            expected_trees=expected_trees,
+            timeout_seconds=timeout_seconds,
+        )
+        current = prepared[0]
+        if (current.plan != candidate.plan
+                or current.source_sha256 != candidate.source_sha256
+                or current.source_identity != candidate.source_identity
+                or current.directory_identity != candidate.directory_identity):
+            raise GatewayError(
+                "runner_unavailable", "D4 fixture drifted during assembly.")
+        # Runtime source trees are already closed against these exact bytes.
+        # Resolve only PRIVATE Mach-O library references actually present in
+        # the operator-staged Go/lib directories; a synthetic @rpath or
+        # unpinned host/system library is an explicit unqualified gap, NOT
+        # independent dyld loading proof or execution permission.
+        private_dylibs = tuple(sorted(
+            (kind + "/" + leaf, digest)
+            for kind, rows in staged_manifests.items()
+            for leaf, digest in rows
+            if type(leaf) is str and leaf.endswith(".dylib")
+            and type(digest) is str
+        ))
+        from .lbe_dylib_sources import (
+            D4PrivateDylibDenied, D4PrivateDylibSourceRecheck,
+            inspect_d4_private_dylib_candidates,
+        )
+        from .lbe_product_fixture import D4FixtureDenied
+
+        try:
+            graph = inspect_d4_private_dylib_candidates(
+                prepared[5], private_root=private_root,
+                expected_private_dylibs=private_dylibs)
+            ctx = self.get(name)
+            binding = D4PrivateDylibSourceRecheck(
+                ctx, current.plan, prepared[5], graph,
+                private_root=private_root,
+                expected_private_dylibs=private_dylibs)
+            prepared[1].attach_private_dylib_sources(binding)
+        except (D4PrivateDylibDenied, D4FixtureDenied):
+            raise GatewayError(
+                "runner_unavailable", "D4 private native dylib source unqualified."
+            ) from None
+        check_venv_identity()
+        return (*prepared, graph, tuple(stage_receipts))
+
+    def _prepare_d4_r003_selected_macho_source(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, expected_hashes: dict[str, str],
+        expected_trees: dict[str, tuple[tuple[str, str | None], ...]],
+        timeout_seconds: int = 60,
+    ):
+        """Inspect actual Darwin ARM64 selected loader, without native T1.
+
+        This extends the service-owned six-command source -> runner inspection
+        with bounded Mach-O LC_LOAD_DYLIB/LC_RPATH evidence, and chooses the
+        pinned Pipenv shebang interpreter rather than mistaking the script
+        for the loaded Python image. The physical OS child resource domain,
+        actual dyld closure, GitHub image and owner grant remain NOT PROVEN.
+        The ordinary public Exec apply gate is untouched and denies.
+        """
+        prepared = self._prepare_d4_r003_runner_preflight(
+            name, cwd, argv, private_root=private_root,
+            expected_hashes=expected_hashes,
+            expected_trees=expected_trees,
+            timeout_seconds=timeout_seconds,
+        )
+        from .lbe_macho_loader import (
+            D4MachOLoaderDenied, select_d4_macho_loader_source,
+        )
+
+        try:
+            loader = select_d4_macho_loader_source(
+                prepared[2], prepared[3], private_root=private_root)
+        except D4MachOLoaderDenied:
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 ARM64 native loader declarations are not qualified.",
+            ) from None
+        return (*prepared, loader)
+
+    def _prepare_d4_r003_selected_loader_set(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, expected_hashes: dict[str, str],
+        expected_trees: dict[str, tuple[tuple[str, str | None], ...]],
+        timeout_seconds: int = 60,
+    ):
+        """Service-owned native binary set inspection and one-use recheck.
+
+        Go selects actual go + compile + link, Python Direct selects its
+        private interpreter, and Pipenv selects the private interpreter
+        targeted by the verified #! script. No imports/commands are run:
+        direct dyld declarations still cannot prove the real loaded graph.
+        The snapshot recheck is attached only to the internal one-use
+        Worker source marker and adds no positive Exec authority.
+        """
+        candidate, marker, observed, recipe, runner = (
+            self._prepare_d4_r003_runner_preflight(
+                name, cwd, argv, private_root=private_root,
+                expected_hashes=expected_hashes,
+                expected_trees=expected_trees,
+                timeout_seconds=timeout_seconds,
+            ))
+        from .lbe_native_loader_set import (
+            D4NativeLoaderSetDenied, D4NativeLoaderSetRecheck,
+            inspect_d4_native_loader_set,
+        )
+        from .lbe_product_fixture import D4FixtureDenied
+
+        try:
+            loader_set = inspect_d4_native_loader_set(
+                observed, recipe, private_root=private_root)
+            bound = D4NativeLoaderSetRecheck(
+                self.get(name), candidate.plan, observed, recipe,
+                loader_set, private_root=private_root)
+            marker.attach_macho_loader_set(bound)
+        except (D4NativeLoaderSetDenied, D4FixtureDenied):
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 selected ARM64 native binary source set unavailable.",
+            ) from None
+        return candidate, marker, observed, recipe, runner, loader_set
 
     def require_git(self, name: str, command: str) -> WorkspaceContext:
         """Independent authorization, always repeated in sync Worker."""
@@ -555,11 +1210,29 @@ class WorkspaceService:
             v2_available = bool(
                 v2_state_healthy and self._lbe_positive_authorized and
                 self._lbe_owner.can_admit_any(eligible_names))
+            # A healthy schema-v2 service may support an entirely
+            # nonspawning plan even though positive Exec remains F1-denied.
+            # Preview requests share the synchronous request slot gate, not
+            # the original-child lease; never imply native launch authority.
+            # Preview has no original-child lease and can remain usable
+            # after the native owner latches unavailable. Only healthy old
+            # durable state and free synchronous request slots are needed.
+            v2_preview_available = bool(
+                is_v2 and effective and durability == "healthy"
+                and not self._closing and eligible_names
+                and len(self._exec_active) < 4)
             return {"name": "Mac File Gateway", "version": "2.5.0", "mode": "multi",
                     "workspace_count": len(self._workspaces),
                     **({"config_schema_version": 2}
                        if self.settings.schema_version == 2 else {}),
-                    "read_only": not (self.any_write or self.any_git),
+                    # A paths-only v2 preview is read-only. A separately
+                    # qualified internal positive Exec capability is not:
+                    # its trusted child may mutate host state, even if its
+                    # capacity is temporarily occupied or its waiter lost.
+                    # This is STATUS reporting only, never an Exec grant.
+                    "read_only": not (
+                        self.any_write or self.any_git or
+                        (is_v2 and self._lbe_positive_authorized)),
                     "file_read_only": not self.any_write, "path_base": ".",
                     "workspaces": self.list_workspaces()["workspaces"],
                     "exec_policy": {
@@ -572,6 +1245,8 @@ class WorkspaceService:
                            if self._lbe_owner is not None else {}),
                         "enabled": self.settings.exec_enabled,
                         "available": v2_available if is_v2 else False,
+                        **({"preview_available": v2_preview_available}
+                           if is_v2 else {}),
                         "completion_capability": (
                             "best_effort" if (v2_state_healthy
                                               and self._lbe_positive_authorized)
@@ -583,6 +1258,19 @@ class WorkspaceService:
                         "max_concurrent_per_workspace": 1,
                         "max_concurrent_total": 4,
                         "dry_run_default": True,
+                        # Discovery is for NONSPAWNING validated commands only.
+                        # It is not an operative Exec grant and does not mean
+                        # the current owner/source/native gates have passed.
+                        **({"supported_preview_commands": [
+                            "pytest",
+                            "python -m pytest",
+                            "python -m compileall",
+                            "python <relative-script.py>",
+                            "go test ./...",
+                            "go vet ./...",
+                            "go build ./...",
+                            "go build -o <relative-output> ./package",
+                        ]} if is_v2 else {}),
                         "warning": (
                             "Best-effort Exec runs project code as the Gateway OS user; "
                             "direct-child exit, timeout or cancellation never proves "

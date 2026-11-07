@@ -15,6 +15,7 @@ from starlette.routing import Route
 from starlette.types import ASGIApp
 
 from .core import GatewayError
+from .lbe_cancel_bridge import invoke_exec_with_cancel
 from .http import Boundary, _params, _int, _bool, _json_params, _error, MAX_GIT_BODY
 from .multi_admission import StrictPostAdmission, MAX_RAW_BODY
 from .multi_fields import validate_tool_arguments
@@ -109,7 +110,10 @@ def create_multi_app(service: WorkspaceService, *, enable_mcp: bool = True,
             validate_tool_arguments(operation, args, multi=True)
             workspace = args.pop('workspace')
             if operation == 'run_command':
-                result = await run_in_threadpool(service.invoke_exec, workspace, **args)
+                result = await invoke_exec_with_cancel(
+                    service, workspace, **args,
+                    is_disconnected=request.is_disconnected,
+                )
             elif operation == 'run_git':
                 # Each actual synchronous Git Worker repeats global/Workspace
                 # authorization and retains root FD until terminal cleanup.

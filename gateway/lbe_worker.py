@@ -21,6 +21,7 @@ from typing import Any, Callable, Protocol
 from .lbe_direct_owner import DirectChildOwner, LbeOwnerError
 from .core import GatewayError, _parts
 from .executor import _validate_command
+from .lbe_go_policy import GoPolicyError, _components
 from .lbe_pipe_drain import BoundedPipeDrain, LbePipeError
 
 
@@ -64,6 +65,10 @@ class LbeWorkPlan:
     runner: str
     runner_project: str
     timeout_seconds: int
+    # Informational canonical Go -o target, not a write receipt or grant.
+    planned_go_output: str | None = None
+    planned_script_sha256: str | None = None
+    planned_pipfile_sha256: str | None = None
 
 
 class LbeWorker:
@@ -104,6 +109,21 @@ class LbeWorker:
                 or type(plan.timeout_seconds) is not int
                 or not 1 <= plan.timeout_seconds <= 300):
             raise LbeWorkerError("invalid_plan")
+        if (plan.planned_go_output is not None
+                and (type(plan.planned_go_output) is not str
+                     or not plan.planned_go_output)):
+            raise LbeWorkerError("invalid_plan")
+        # Exact lowercase SHA-256 of bounded selected source bytes.
+        # An untrusted caller object must never reach equality or hashing.
+        for source_digest in (
+            plan.planned_script_sha256, plan.planned_pipfile_sha256
+        ):
+            if (source_digest is not None
+                    and (type(source_digest) is not str
+                         or len(source_digest) != 64
+                         or any(ch not in "0123456789abcdef"
+                                for ch in source_digest))):
+                raise LbeWorkerError("invalid_plan")
         for argv in (plan.requested_argv, plan.effective_argv):
             if (type(argv) is not tuple or not 1 <= len(argv) <= 64
                     or sum(len(s) for s in argv if type(s) is str) > 8192
@@ -114,7 +134,16 @@ class LbeWorker:
         try:
             _parts(plan.cwd)
             _parts(plan.runner_project)
+            if plan.planned_go_output is not None:
+                # Unlike the generic file API normalizer, response metadata
+                # must already be in the exact canonical Workspace form.
+                if ("/".join(_parts(plan.planned_go_output))
+                        != plan.planned_go_output):
+                    raise LbeWorkerError("invalid_plan")
             if plan.requested_argv[0] == "go":
+                if (plan.planned_script_sha256 is not None
+                        or plan.planned_pipfile_sha256 is not None):
+                    raise LbeWorkerError("invalid_plan")
                 # Go build's -o and actual pinned output checks are *always*
                 # mandatory in the shared service preflight. This internal
                 # shape check is NOT a replacement for GoPolicy validation.
@@ -122,15 +151,48 @@ class LbeWorker:
                         or plan.requested_argv[1] not in {"test", "vet", "build"}
                         or plan.runner != "direct"):
                     raise LbeWorkerError("invalid_plan")
+                # Bind any Go -o preview target to the actual argv,
+                # regardless of separated versus = syntax. This is a
+                # shape check, NOT a substitute for the OS/path-policy
+                # preflight in the trusted WorkspaceService.
+                selected_output = None
+                index = 2
+                while index < len(plan.requested_argv):
+                    token = plan.requested_argv[index]
+                    if token == "-o" or token.startswith("-o="):
+                        if (plan.requested_argv[1] != "build"
+                                or selected_output is not None):
+                            raise LbeWorkerError("invalid_plan")
+                        if token == "-o":
+                            index += 1
+                            if index >= len(plan.requested_argv):
+                                raise LbeWorkerError("invalid_plan")
+                            output = plan.requested_argv[index]
+                        else:
+                            output = token[3:]
+                        selected_output = "/".join((
+                            *_parts(plan.cwd), *_components(output)))
+                    index += 1
+                if plan.planned_go_output != selected_output:
+                    raise LbeWorkerError("invalid_plan")
             else:
-                _validate_command(list(plan.requested_argv))
-        except GatewayError:
+                if plan.planned_go_output is not None:
+                    raise LbeWorkerError("invalid_plan")
+                script = _validate_command(list(plan.requested_argv))
+                if (script is None) != (plan.planned_script_sha256 is None):
+                    raise LbeWorkerError("invalid_plan")
+        except (GatewayError, GoPolicyError):
             raise LbeWorkerError("invalid_plan") from None
         if plan.runner == "pipenv":
+            if plan.planned_pipfile_sha256 is None:
+                raise LbeWorkerError("invalid_plan")
             if plan.effective_argv != ("pipenv", "run", *plan.requested_argv):
                 raise LbeWorkerError("invalid_plan")
-        elif plan.effective_argv != plan.requested_argv:
-            raise LbeWorkerError("invalid_plan")
+        else:
+            if plan.planned_pipfile_sha256 is not None:
+                raise LbeWorkerError("invalid_plan")
+            if plan.effective_argv != plan.requested_argv:
+                raise LbeWorkerError("invalid_plan")
 
     @staticmethod
     def _base(plan: LbeWorkPlan, *, status: str, executed: bool,
@@ -143,6 +205,9 @@ class LbeWorker:
             "effective_argv": list(plan.effective_argv),
             "runner": plan.runner,
             "runner_project": plan.runner_project,
+            "planned_go_output": plan.planned_go_output,
+            "planned_script_sha256": plan.planned_script_sha256,
+            "planned_pipfile_sha256": plan.planned_pipfile_sha256,
             "dry_run": False,
             "mode": "local_best_effort",
             "status": status,
@@ -163,7 +228,8 @@ class LbeWorker:
         }
 
     def run(self, plan: LbeWorkPlan, *,
-            cancelled: threading.Event | None = None) -> dict[str, Any]:
+            cancelled: threading.Event | None = None,
+            product_attempt: object = None) -> dict[str, Any]:
         """Run via a trusted injected launcher, never public Exec authority.
 
         Fake T0 tests create no real child. The separately owner-approved
@@ -175,6 +241,20 @@ class LbeWorker:
         self._check_plan(plan)
         if cancelled is not None and type(cancelled) is not threading.Event:
             raise LbeWorkerError("invalid_argument")
+        if product_attempt is not None:
+            # Future internal R003 attempts must burn a plan-bound marker
+            # atomically before any reservation/launch, even on cancellation.
+            # This object is NOT native authority; no public service path can
+            # supply it, and the current F1/Go/Pipenv refusal is unchanged.
+            from .lbe_product_fixture import (
+                D4FixtureDenied, D4OneUseAttemptMarker,
+            )
+            if type(product_attempt) is not D4OneUseAttemptMarker:
+                raise LbeWorkerError("invalid_argument")
+            try:
+                product_attempt.consume_for(plan)
+            except D4FixtureDenied:
+                raise LbeWorkerError("attempt_replay_denied") from None
         if cancelled is not None and cancelled.is_set():
             raise LbeWorkerError("waiter_disconnected")
         try:

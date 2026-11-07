@@ -525,6 +525,111 @@ def test_worker_plain_go_python_pipenv_plan_shapes_do_not_grant_exec():
     )
     LbeWorker._check_plan(good_py)
     pipenv = replace(good_py, runner="pipenv",
-                     effective_argv=("pipenv", "run", "python", "-m", "pytest"))
+                     effective_argv=("pipenv", "run", "python", "-m", "pytest"),
+                     planned_pipfile_sha256="a" * 64)
     LbeWorker._check_plan(pipenv)
     assert good_go.runner == "direct" and pipenv.runner == "pipenv"
+
+
+
+# r006: a planned Go output is display metadata, not execution authority.
+def test_r006_planned_go_output_is_strictly_typed_and_not_a_grant():
+    from dataclasses import replace
+
+    base = plan()
+    argv = ("go", "build", "-o=bin/app", "./cmd/app")
+    proposed = replace(
+        base, requested_argv=argv, effective_argv=argv,
+        planned_go_output="go-project/bin/app")
+    LbeWorker._check_plan(proposed)
+    hooks = []
+
+    class Malicious:
+        def __eq__(self, other):
+            hooks.append("eq")
+            return True
+
+    for invalid in (Malicious(), True, 10, "", "../outside", "bin//bad"):
+        forged = replace(proposed, planned_go_output=invalid)
+        with pytest.raises(LbeWorkerError, match="invalid_plan"):
+            LbeWorker._check_plan(forged)
+    no_flag = replace(
+        base, planned_go_output="go-project/bin/app")
+    with pytest.raises(LbeWorkerError, match="invalid_plan"):
+        LbeWorker._check_plan(no_flag)
+    py = replace(
+        proposed, requested_argv=("python", "-m", "pytest"),
+        effective_argv=("python", "-m", "pytest"))
+    with pytest.raises(LbeWorkerError, match="invalid_plan"):
+        LbeWorker._check_plan(py)
+    assert hooks == []
+
+
+@pytest.mark.parametrize("argv,shown", [
+    (("go","build","-o","bin/app","./cmd/app"), None),
+    (("go","build","-o=bin/app","./cmd/app"), "go-project/bin/other"),
+    (("go","build","./cmd/app"), "go-project/bin/app"),
+    (("go","test","./..."), "go-project/bin/app"),
+])
+def test_r006_go_planned_output_must_match_command(argv, shown):
+    from dataclasses import replace
+    candidate = replace(plan(), requested_argv=argv, effective_argv=argv,
+                        planned_go_output=shown)
+    with pytest.raises(LbeWorkerError, match="invalid_plan"):
+        LbeWorker._check_plan(candidate)
+
+
+@pytest.mark.parametrize("argv", [
+    ("go","build","-o","bin/app","./cmd/app"),
+    ("go","build","-o=bin/app","./cmd/app"),
+])
+def test_r006_go_planned_output_accepts_both_legal_flag_forms(argv):
+    from dataclasses import replace
+    candidate = replace(plan(), requested_argv=argv, effective_argv=argv,
+                        planned_go_output="go-project/bin/app")
+    LbeWorker._check_plan(candidate)
+
+
+def test_r006_python_script_source_hash_must_be_exact_and_bound():
+    from dataclasses import replace
+
+    base = plan()
+    script_args = ("python", "hello.py")
+    valid = replace(base, requested_argv=script_args,
+                    effective_argv=script_args,
+                    planned_script_sha256="a" * 64)
+    LbeWorker._check_plan(valid)
+    for poisoned in (None, "", True, 123, "A" * 64, "x" * 64, "a" * 63):
+        with pytest.raises(LbeWorkerError, match="invalid_plan"):
+            LbeWorker._check_plan(
+                replace(valid, planned_script_sha256=poisoned))
+    with pytest.raises(LbeWorkerError, match="invalid_plan"):
+        LbeWorker._check_plan(replace(base, planned_script_sha256="a" * 64))
+    with pytest.raises(LbeWorkerError, match="invalid_plan"):
+        LbeWorker._check_plan(replace(valid, planned_pipfile_sha256="b" * 64))
+    called = []
+    class MaliciousDigest:
+        def __eq__(self, _other):
+            called.append("eq")
+            return True
+        def __hash__(self):
+            called.append("hash")
+            return 1
+    with pytest.raises(LbeWorkerError, match="invalid_plan"):
+        LbeWorker._check_plan(replace(valid,
+            planned_script_sha256=MaliciousDigest()))
+    assert called == []
+
+
+def test_r006_pipenv_runner_requires_pinned_pipfile_hash():
+    from dataclasses import replace
+    base = plan()
+    py = ("python", "-m", "pytest")
+    valid = replace(base, requested_argv=py,
+                    effective_argv=("pipenv", "run", *py),
+                    runner="pipenv", planned_pipfile_sha256="a" * 64)
+    LbeWorker._check_plan(valid)
+    for invalid in (None, "invalid", "f" * 63, True):
+        with pytest.raises(LbeWorkerError, match="invalid_plan"):
+            LbeWorker._check_plan(
+                replace(valid, planned_pipfile_sha256=invalid))

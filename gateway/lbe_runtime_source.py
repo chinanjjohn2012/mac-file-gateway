@@ -186,8 +186,23 @@ def _parent_selector_guard() -> None:
                 "unqualified inherited selector or secret-bearing environment")
 
 
-def _private_file_hash(path: str, root: str) -> str:
-    """Read private staged Pipenv entrypoint by nofollow FDs, bounded bytes."""
+def _private_file_hash(
+    path: str, root: str, *, exact_script_interpreter: str | None = None,
+) -> str:
+    """Read staged executable by pinned nofollow FD; optionally pin shebang.
+
+    The Pipenv entrypoint may itself be a script. Checking only that file's
+    SHA would still leave the kernel's #! interpreter pointing at a foreign
+    Python binary. Bind its exact absolute private .venv/bin/python here,
+    using the SAME FD/read as the digest; never execute the script.
+    """
+    expected_line: bytes | None = None
+    if exact_script_interpreter is not None:
+        selected = _canonical(exact_script_interpreter, "script interpreter")
+        _below(root, selected)
+        selected_parent, _leaf = selected.rsplit("/", 1)
+        _stat_private_directory(selected_parent, root)
+        expected_line = ("#!" + selected + "\n").encode("ascii")
     directory, basename = path.rsplit("/", 1)
     # Use the SAME pinned nofollow descriptor to open the leaf. Reopening
     # an absolute path after validation would reintroduce a prefix race.
@@ -205,17 +220,24 @@ def _private_file_hash(path: str, root: str) -> str:
                 raise D4RuntimeSourceDenied("staged native entrypoint unsafe")
             digest = hashlib.sha256()
             remaining = before.st_size
+            script_prefix = bytearray()
             while remaining:
                 data = os.read(fd, min(65536, remaining))
                 if not data:
                     raise D4RuntimeSourceDenied("staged native entrypoint truncated")
                 remaining -= len(data)
                 digest.update(data)
+                if expected_line is not None and len(script_prefix) < len(expected_line):
+                    script_prefix.extend(
+                        data[:len(expected_line) - len(script_prefix)])
             after = os.fstat(fd)
             fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns",
                       "st_ctime_ns", "st_mode", "st_uid", "st_nlink")
             if any(getattr(before, x) != getattr(after, x) for x in fields):
                 raise D4RuntimeSourceDenied("staged entrypoint changed during read")
+            if expected_line is not None and script_prefix != expected_line:
+                raise D4RuntimeSourceDenied(
+                    "Pipenv script shebang does not select staged private Python")
             return digest.hexdigest()
         finally:
             os.close(fd)
@@ -332,7 +354,9 @@ def inspect_d4_runtime_sources(
         except (LbePipenvFixtureT0Denied, OSError):
             raise D4RuntimeSourceDenied("actual Pipenv staged files are not qualified") from None
         pipenv_entry = _child(root, "bin/pipenv")
-        staged_pipenv_sha = _private_file_hash(pipenv_entry, root)
+        staged_pipenv_sha = _private_file_hash(
+            pipenv_entry, root,
+            exact_script_interpreter=pipenv_project + "/.venv/bin/python")
         if staged_pipenv_sha != hashes["pipenv"]:
             raise D4RuntimeSourceDenied("staged Pipenv entrypoint drifted")
         env = dict(_ENV_CONSTANT_PIPENV)

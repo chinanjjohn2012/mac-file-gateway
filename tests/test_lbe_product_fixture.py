@@ -952,7 +952,10 @@ def _stage_d4_native_bytes_in_private_runner(root, *, kind):
             (py_project / ".venv" / "pyvenv.cfg").read_bytes()).hexdigest(),
         "python": hashlib.sha256(
             (py_project / ".venv" / "bin" / "python").read_bytes()).hexdigest(),
-        "pipenv": stage("bin/pipenv", b"staged Pipenv entrypoint test bytes"),
+        "pipenv": stage(
+            "bin/pipenv",
+            ("#!" + str(py_project / ".venv" / "bin" / "python") +
+             "\n# controlled Pipenv test-only script bytes\n").encode("ascii")),
     }
 
 
@@ -1807,3 +1810,46 @@ def test_d4_host_probe_forged_resource_and_image_claim_is_still_hard_denied(
                 service.get("a"), replace(recipe, native_launch_allowed=True),
                 private_root=private)
     assert service.info()["exec_policy"]["available"] is False
+
+
+@pytest.mark.parametrize("mutation", [
+    "outside_python", "env_python", "wrong_private_python",
+    "interpreter_flags", "crlf_shebang", "no_shebang",
+])
+def test_d4_pipenv_script_interpreter_must_be_exact_staged_private_python(
+        product_service, monkeypatch, mutation):
+    import hashlib
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="pipenv")
+    pinned_python = str(workspace / "py-pipenv" / ".venv" / "bin" / "python")
+    if mutation == "outside_python":
+        data = b"#!/usr/bin/python3\n#not trusted\n"
+    elif mutation == "env_python":
+        data = b"#!/usr/bin/env python3\n#not trusted\n"
+    elif mutation == "wrong_private_python":
+        data = ("#!" + private + "/bin/python\n#wrong private interpreter\n"
+                ).encode("ascii")
+    elif mutation == "interpreter_flags":
+        data = ("#!" + pinned_python + " -I\n#extra argument\n").encode("ascii")
+    elif mutation == "crlf_shebang":
+        data = ("#!" + pinned_python + "\r\n#wrong line ending\n").encode("ascii")
+    else:
+        data = b"no-shebang-even-if-content-hash-is-pinned\n"
+    entrypoint = workspace.parent.parent / "bin" / "pipenv"
+    entrypoint.write_bytes(data)
+    hashes["pipenv"] = hashlib.sha256(data).hexdigest()
+    # The EXACT bad bytes are included in the supplied manifest: digest
+    # matching is not enough to qualify the kernel-selected interpreter.
+    trees = _d4_staged_trees(workspace, "pipenv")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("foreign script must not spawn")))
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_native_recipe(
+                "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees)
+    assert denied.value.code == "runner_unavailable"

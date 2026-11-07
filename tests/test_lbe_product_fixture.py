@@ -2962,3 +2962,73 @@ def test_d4_assembled_pipenv_source_rejects_same_bytes_new_inode_of_venv(
                 observed.observed_source_identity_sha256))
     assert err.value.code == "runner_unavailable"
     assert not (private / "bin").exists()
+
+
+
+@pytest.mark.parametrize("cwd,argv", [
+    ("go-project", ["go", "test", "./..."]),
+    ("go-project", ["go", "vet", "./..."]),
+    ("go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+])
+def test_d4_go_strict_p007_source_bundle_rejects_incomplete_toolchain_before_copy(
+        product_service, cwd, argv):
+    """A real operator manifest must match ALL 15657 Go source bytes.
+
+    Three selected executable hashes are not the complete compiler/stdlib
+    source inventory. This opt-in SOURCE-only gate never enables native Go.
+    """
+    service, workspace = product_service
+    private = workspace.parent.parent
+    provisioner = private.parent / (private.name + "-operator")
+    go = provisioner / "go"
+    (go / "bin").mkdir(parents=True)
+    (go / "bin/go").write_bytes(b"inert Go binary")
+    (go / "bin/go").chmod(0o700)
+    (go / "pkg/tool/darwin_arm64").mkdir(parents=True)
+    for name in ("compile", "link"):
+        tool = go / "pkg/tool/darwin_arm64" / name
+        tool.write_bytes(("inert " + name).encode("ascii"))
+        tool.chmod(0o700)
+    (go / "src/runtime").mkdir(parents=True)
+    (go / "src/runtime/proc.go").write_bytes(b"package runtime\n")
+    manifest = _d4_tree_expected(go)
+    observed = service._observe_d4_r003_operator_provisioner(
+        "a", cwd, argv, provisioner_root=str(provisioner))
+    assert observed["go"].go_1_27_3_p007_stage_manifest_matched is False
+    with pytest.raises(GatewayError) as stopped:
+        service._assemble_d4_r003_source_only_runner(
+            "a", cwd, argv, private_root=str(private),
+            provisioner_root=str(provisioner),
+            staged_manifests={"go": manifest},
+            expected_source_identities={
+                "go": observed["go"].observed_source_identity_sha256},
+            require_go_p007_stage_source=True)
+    assert stopped.value.code == "runner_unavailable"
+    assert not (private / "go").exists()
+    assert not (private / "home").exists()
+    with pytest.raises(GatewayError) as public:
+        service.invoke_exec("a", cwd, argv, dry_run=False)
+    assert public.value.code == "exec_cleanup_proof_required"
+
+
+@pytest.mark.parametrize("cwd,argv,required", [
+    ("go-project", ["go", "test", "./..."], "yes"),
+    ("py-direct", ["python", "-m", "pytest", "-q"], True),
+    ("py-pipenv", ["python", "-m", "pytest", "-q"], True),
+])
+def test_d4_p007_strict_profile_cannot_select_other_runner_or_truthy_flag(
+        product_service, cwd, argv, required):
+    """Strict P007 Go SOURCE selection never becomes a public Exec grant."""
+    service, workspace = product_service
+    private = workspace.parent.parent
+    provisioner = private.parent / (private.name + "-operator")
+    manifests = ({"go": (("", None),)} if cwd == "go-project"
+                 else {"bin": (("", None),), "lib": (("", None),)})
+    with pytest.raises(GatewayError) as denied:
+        service._assemble_d4_r003_source_only_runner(
+            "a", cwd, argv, private_root=str(private),
+            provisioner_root=str(provisioner), staged_manifests=manifests,
+            require_go_p007_stage_source=required)
+    assert denied.value.code == "runner_unavailable"
+    assert not (private / "go").exists()
+    assert not (private / "bin").exists()

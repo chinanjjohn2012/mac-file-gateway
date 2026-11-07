@@ -9,6 +9,7 @@ turn the current public F1 denial into a positive Exec permission.
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 import hashlib
 import os
@@ -69,6 +70,37 @@ class D4FixtureCandidate:
     runner_qualified: bool = False
     resource_enforcement_proven: bool = False
     owner_approval_attested: bool = False
+
+
+
+class D4OneUseAttemptMarker:
+    """Atomic deny-replay primitive for a checked first-party source candidate.
+
+    NOT a grant/owner consent or verification of actual loaded source,
+    macOS runner, credentials or resource enforcement. Public Direct/REST/MCP
+    cannot supply this local object, and the current service never mints one
+    as execution authority. One use is burned before possible reservation/
+    Popen, including invalid plan, cancellation and busy. Does not survive
+    Gateway crash or remove the operator's duplicate-effects risk.
+    """
+    __slots__ = ("_candidate", "_pid", "_lock", "_consumed")
+
+    def __init__(self, candidate: D4FixtureCandidate) -> None:
+        if type(candidate) is not D4FixtureCandidate:
+            raise D4FixtureDenied("only checked candidate is eligible")
+        self._candidate = candidate
+        self._pid = os.getpid()
+        self._lock = threading.Lock()
+        self._consumed = False
+
+    def consume_for(self, plan: LbeWorkPlan) -> None:
+        """Burn before any possible native spawn, even on mismatched input."""
+        with self._lock:
+            if self._consumed:
+                raise D4FixtureDenied("product attempt already consumed")
+            self._consumed = True
+            if os.getpid() != self._pid or plan is not self._candidate.plan:
+                raise D4FixtureDenied("product attempt plan identity changed")
 
 
 def _require_controlled(fd: int, *, directory: bool) -> os.stat_result:

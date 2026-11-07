@@ -258,3 +258,106 @@ def test_d4_no_private_exec_state_disallows_candidate_even_if_fixture_exists(
         service._prepare_d4_r003_fixture_candidate(
             "a", "py-direct", ["python", "-m", "pytest", "-q"])
     assert exc.value.code == "exec_state_unavailable"
+
+def _no_child_launcher(_plan):
+    from gateway.lbe_worker import LbeNoChildStarted
+    raise LbeNoChildStarted("safe test-only negative launcher")
+
+
+def test_d4_one_use_marker_consumed_before_any_possible_child(product_service):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_product_fixture import D4OneUseAttemptMarker
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, _root = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    marker = D4OneUseAttemptMarker(candidate)
+    worker = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher)
+    first = worker.run(candidate.plan, product_attempt=marker)
+    assert first["status"] == "launch_failed"
+    assert first["executed"] is False
+    with pytest.raises(LbeWorkerError) as duplicate:
+        worker.run(candidate.plan, product_attempt=marker)
+    assert duplicate.value.code == "attempt_replay_denied"
+
+
+def test_d4_one_use_marker_denies_concurrent_same_attempt(product_service):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_product_fixture import D4OneUseAttemptMarker
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, _root = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    marker = D4OneUseAttemptMarker(candidate)
+    worker = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher)
+    gate = threading.Barrier(2)
+    outcomes = []
+
+    def compete():
+        gate.wait()
+        try:
+            outcomes.append(worker.run(
+                candidate.plan, product_attempt=marker)["status"])
+        except LbeWorkerError as exc:
+            outcomes.append(exc.code)
+
+    left = threading.Thread(target=compete)
+    right = threading.Thread(target=compete)
+    left.start()
+    right.start()
+    left.join(timeout=3)
+    right.join(timeout=3)
+    assert not left.is_alive() and not right.is_alive()
+    assert sorted(outcomes) == ["attempt_replay_denied", "launch_failed"]
+
+
+def test_d4_one_use_marker_burns_on_mismatch_or_cancel(product_service):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_product_fixture import D4OneUseAttemptMarker
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, _root = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    worker = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher)
+    marker = D4OneUseAttemptMarker(candidate)
+    with pytest.raises(LbeWorkerError) as mismatch:
+        worker.run(replace(candidate.plan, timeout_seconds=119),
+                   product_attempt=marker)
+    assert mismatch.value.code == "attempt_replay_denied"
+    with pytest.raises(LbeWorkerError) as replay:
+        worker.run(candidate.plan, product_attempt=marker)
+    assert replay.value.code == "attempt_replay_denied"
+
+    separate = D4OneUseAttemptMarker(candidate)
+    cancelled = threading.Event()
+    cancelled.set()
+    with pytest.raises(LbeWorkerError) as stopped:
+        worker.run(candidate.plan, product_attempt=separate,
+                   cancelled=cancelled)
+    assert stopped.value.code == "waiter_disconnected"
+    with pytest.raises(LbeWorkerError) as replay_after_cancel:
+        worker.run(candidate.plan, product_attempt=separate)
+    assert replay_after_cancel.value.code == "attempt_replay_denied"
+
+
+def test_d4_attempt_marker_not_a_client_or_native_authority(product_service):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_product_fixture import D4OneUseAttemptMarker
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, _root = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    with pytest.raises(D4FixtureDenied):
+        D4OneUseAttemptMarker(object())
+    worker = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher)
+    with pytest.raises(LbeWorkerError) as bad_input:
+        worker.run(candidate.plan, product_attempt=object())
+    assert bad_input.value.code == "invalid_argument"
+    with pytest.raises(GatewayError) as public:
+        service.invoke_exec("a", "go-project", ["go", "test", "./..."],
+                            dry_run=False)
+    assert public.value.code == "exec_cleanup_proof_required"

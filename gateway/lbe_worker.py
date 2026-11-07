@@ -228,7 +228,8 @@ class LbeWorker:
         }
 
     def run(self, plan: LbeWorkPlan, *,
-            cancelled: threading.Event | None = None) -> dict[str, Any]:
+            cancelled: threading.Event | None = None,
+            product_attempt: object = None) -> dict[str, Any]:
         """Run via a trusted injected launcher, never public Exec authority.
 
         Fake T0 tests create no real child. The separately owner-approved
@@ -240,6 +241,20 @@ class LbeWorker:
         self._check_plan(plan)
         if cancelled is not None and type(cancelled) is not threading.Event:
             raise LbeWorkerError("invalid_argument")
+        if product_attempt is not None:
+            # Future internal R003 attempts must burn a plan-bound marker
+            # atomically before any reservation/launch, even on cancellation.
+            # This object is NOT native authority; no public service path can
+            # supply it, and the current F1/Go/Pipenv refusal is unchanged.
+            from .lbe_product_fixture import (
+                D4FixtureDenied, D4OneUseAttemptMarker,
+            )
+            if type(product_attempt) is not D4OneUseAttemptMarker:
+                raise LbeWorkerError("invalid_argument")
+            try:
+                product_attempt.consume_for(plan)
+            except D4FixtureDenied:
+                raise LbeWorkerError("attempt_replay_denied") from None
         if cancelled is not None and cancelled.is_set():
             raise LbeWorkerError("waiter_disconnected")
         try:

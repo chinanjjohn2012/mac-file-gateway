@@ -1992,22 +1992,25 @@ def test_d4_service_staging_cannot_select_foreign_source_kind(
     assert not (private / "bin").exists()
 
 
-@pytest.mark.parametrize("kind,cwd,argv,strict_p007,strict_record", [
-    ("go", "go-project", ["go", "test", "./..."], False, False),
-    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"], False, False),
-    ("go", "go-project", ["go", "test", "./..."], True, False),
-    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"], True, False),
-    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"], False, False),
+@pytest.mark.parametrize("kind,cwd,argv,strict_p007,strict_record,record_drift", [
+    ("go", "go-project", ["go", "test", "./..."], False, False, None),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"], False, False, None),
+    ("go", "go-project", ["go", "test", "./..."], True, False, None),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"], True, False, None),
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"], False, False, None),
     ("python_direct", "py-direct",
-     ["python", "-m", "compileall", "-q", "./src"], False, False),
-    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"], False, False),
-    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"], False, True),
+     ["python", "-m", "compileall", "-q", "./src"], False, False, None),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"], False, False, None),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"], False, True, None),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"], False, True, "source_bytes"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"], False, True, "record_hash"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"], False, True, "same_bytes_new_inode"),
 ])
 def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
         product_service, monkeypatch, kind, cwd, argv, strict_p007,
-        strict_record):
+        strict_record, record_drift):
     from gateway.lbe_direct_owner import DirectChildOwner
-    from gateway.lbe_worker import LbeWorker
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
 
     import struct
 
@@ -2148,10 +2151,43 @@ def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
                 "lib/libPrivate.dylib",)
         else:
             assert graph.private_native_images == ()
-        result = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher).run(
-            candidate.plan, product_attempt=marker)
-        assert result["status"] == "launch_failed"
-        assert result["executed"] is False
+        if record_drift is None:
+            result = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher).run(
+                candidate.plan, product_attempt=marker)
+            assert result["status"] == "launch_failed"
+            assert result["executed"] is False
+        else:
+            assert kind == "pipenv" and strict_record
+            site = workspace / "py-pipenv/.venv/lib/python3.13/site-packages"
+            entry = site / "example_pkg/entry.py"
+            if record_drift == "source_bytes":
+                entry.write_bytes(b"answer = 43\n")
+            elif record_drift == "record_hash":
+                record = site / "example_pkg-1.0.dist-info/RECORD"
+                record.write_text(
+                    record.read_text("utf-8").replace("sha256=", "sha256=AAAA", 1),
+                    encoding="utf-8")
+            else:
+                assert record_drift == "same_bytes_new_inode"
+                original_inode = entry.stat().st_ino
+                replacement = entry.with_name("new-entry.py")
+                replacement.write_bytes(entry.read_bytes())
+                os.chmod(replacement, entry.stat().st_mode & 0o777)
+                os.replace(replacement, entry)
+                assert entry.stat().st_ino != original_inode
+            attempted = []
+            def forbidden(_plan):
+                attempted.append(True)
+                raise AssertionError("Pipenv RECORD drift must deny before launcher")
+            with pytest.raises(LbeWorkerError) as denial:
+                LbeWorker(DirectChildOwner(), launcher=forbidden).run(
+                    candidate.plan, product_attempt=marker)
+            assert denial.value.code == "attempt_replay_denied"
+            with pytest.raises(LbeWorkerError) as replay:
+                LbeWorker(DirectChildOwner(), launcher=forbidden).run(
+                    candidate.plan, product_attempt=marker)
+            assert replay.value.code == "attempt_replay_denied"
+            assert attempted == []
         with pytest.raises(GatewayError) as refused:
             service.invoke_exec("a", cwd, argv, dry_run=False)
         assert refused.value.code == "exec_cleanup_proof_required"
@@ -3292,3 +3328,13 @@ def test_d4_service_record_selection_denies_wrong_command_without_source_access(
                 expected_venv_record_distributions=(("example-pkg", "1.0"),))
         assert denied.value.code == "runner_unavailable"
     assert not operator.exists()
+
+
+def test_d4_pipenv_record_one_use_marker_rejects_generic_callback(product_service):
+    from gateway.lbe_product_fixture import D4FixtureDenied
+
+    service, _workspace = product_service
+    _candidate, marker = service._prepare_d4_r003_attempt(
+        "a", "py-pipenv", ["python", "-m", "pytest", "-q"])
+    with pytest.raises(D4FixtureDenied):
+        marker.attach_pipenv_record_sources(lambda *_a: True)

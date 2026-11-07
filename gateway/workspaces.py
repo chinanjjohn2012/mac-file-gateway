@@ -767,6 +767,10 @@ class WorkspaceService:
             observe_d4_pipenv_venv_manifest,
         )
         from .lbe_runtime_source import _canonical, D4RuntimeSourceDenied
+        from .lbe_pipenv_lock_sources import (
+            D4PipenvLockDenied, inspect_d4_pipenv_lock_sources,
+        )
+        from dataclasses import replace
 
         kinds = (("go",) if candidate.plan.cwd == "go-project"
                  else ("bin", "lib"))
@@ -797,7 +801,20 @@ class WorkspaceService:
                     project_root=workspace + "/py-pipenv",
                     expected_record_distributions=(
                         expected_venv_record_distributions))
-        except (D4RuntimeTreeDenied, D4RuntimeSourceDenied, OSError):
+                if expected_venv_record_distributions is not None:
+                    # Lock default/develop requirements must agree with
+                    # the separately selected RECORD-installed site.
+                    lock_hash = dict(candidate.source_sha256)[
+                        "py-pipenv/Pipfile.lock"]
+                    matched_lock = inspect_d4_pipenv_lock_sources(
+                        project_root=workspace + "/py-pipenv",
+                        expected_lock_sha256=lock_hash,
+                        expected_distributions=(
+                            expected_venv_record_distributions))
+                    observed["venv"] = replace(
+                        observed["venv"], pipenv_lock_sources=matched_lock)
+        except (D4RuntimeTreeDenied, D4RuntimeSourceDenied,
+                D4PipenvLockDenied, OSError):
             raise GatewayError(
                 "runner_unavailable", "D4 operator source selection unavailable."
             ) from None
@@ -952,6 +969,9 @@ class WorkspaceService:
             from .lbe_runtime_tree import (
                 D4RuntimeTreeDenied, inspect_d4_pipenv_installed_record_sources,
             )
+            from .lbe_pipenv_lock_sources import (
+                D4PipenvLockDenied, inspect_d4_pipenv_lock_sources,
+            )
             try:
                 project = str(self.get(name).gateway._root_path) + "/py-pipenv"
                 observed = inspect_d4_pipenv_installed_record_sources(
@@ -959,7 +979,16 @@ class WorkspaceService:
                     expected_venv_manifest=venv_manifest,
                     expected_distributions=expected_venv_record_distributions,
                 )
-            except (D4RuntimeTreeDenied, OSError):
+                lock_hash = dict(candidate.source_sha256)[
+                    "py-pipenv/Pipfile.lock"]
+                locked = inspect_d4_pipenv_lock_sources(
+                    project_root=project,
+                    expected_lock_sha256=lock_hash,
+                    expected_distributions=expected_venv_record_distributions,
+                )
+                if locked.selected_installed_distributions != observed.distributions:
+                    raise D4PipenvLockDenied("Pipenv lock and site selection diverged")
+            except (D4RuntimeTreeDenied, D4PipenvLockDenied, OSError):
                 raise GatewayError(
                     "runner_unavailable",
                     "D4 first-party Pipenv installed source RECORD incomplete."

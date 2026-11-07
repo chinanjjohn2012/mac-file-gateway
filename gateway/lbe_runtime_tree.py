@@ -10,6 +10,8 @@ used, nor an OS CPU/RAM resource domain. No receipt confers Exec authority.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+
+from .lbe_pipenv_lock_sources import D4PipenvLockSourceObservation
 from email.parser import Parser
 import base64
 import csv
@@ -282,6 +284,7 @@ class D4OperatorSourceManifest:
     # Optional separately selected first-party site RECORD receipt. A source
     # selection without one remains OBSERVED_ONLY, never silently approved.
     pipenv_record_sources: D4PipenvRecordSourceObservation | None = None
+    pipenv_lock_sources: D4PipenvLockSourceObservation | None = None
     trusted_operator_attested: bool = False
     manifest_independently_approved: bool = False
     actual_loaded_source_graph_proven: bool = False

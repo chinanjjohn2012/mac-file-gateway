@@ -3129,6 +3129,11 @@ def _d4_record_site_fixture(workspace):
     writer = csv.writer(text, lineterminator="\n")
     writer.writerows(rows)
     record.write_bytes(text.getvalue().encode("utf-8"))
+    # RECORD-selected Pipenv source must be traceable to the exact pinned
+    # first-party lock default/develop entries, not only a self-made RECORD.
+    (workspace / "py-pipenv/Pipfile.lock").write_bytes(
+        b'{"_meta":{"hash":{"sha256":"' + b"a" * 64
+        + b'"}},"default":{"example-pkg":{"version":"==1.0"}},"develop":{}}\n')
     return site, pkg, dist, record
 
 
@@ -3304,6 +3309,12 @@ def test_d4_service_observes_pipenv_records_in_real_source_bundle(
         venv.observed_source_identity_sha256)
     assert receipt.actual_loaded_source_graph_proven is False
     assert receipt.native_launch_allowed is False
+    locked = venv.pipenv_lock_sources
+    assert locked is not None
+    assert locked.locked_distributions == (("example-pkg", "1.0"),)
+    assert locked.selected_installed_distributions == (("example-pkg", "1.0"),)
+    assert locked.actual_loaded_source_graph_proven is False
+    assert locked.native_launch_allowed is False
     assert venv.manifest_independently_approved is False
     assert venv.native_launch_allowed is False
     with pytest.raises(GatewayError) as denied:
@@ -3467,3 +3478,61 @@ def test_d4_go_module_version_cannot_exceed_pinned_P007_toolchain(
             service._prepare_d4_r003_fixture_candidate(
                 "a", "go-project", ["go", "vet", "./..."])
         assert denied.value.code == "command_not_allowed"
+
+
+
+@pytest.mark.parametrize("invalid", [
+    b'"version":"==2.0"', b'"version":">=1.0"',
+    b'"version":"==1.0","path":"../outside"',
+])
+def test_d4_service_pipenv_record_mismatched_pinned_lock_refused_no_spawn(
+        product_service, monkeypatch, invalid):
+    """Real service must not call a lock/RECORD mismatch an approved source."""
+    service, workspace = product_service
+    _d4_record_site_fixture(workspace)
+    lock = workspace / "py-pipenv/Pipfile.lock"
+    lock.write_bytes(lock.read_bytes().replace(b'"version":"==1.0"', invalid))
+    operator = workspace.parent.parent / "operator-lock-mismatch"
+    (operator / "bin").mkdir(parents=True)
+    (operator / "lib/python").mkdir(parents=True)
+    (operator / "bin/pipenv").write_bytes(b"inert script")
+    (operator / "lib/python/stdlib.py").write_bytes(b"x = 1\n")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no native child permitted")))
+        with pytest.raises(GatewayError) as denied:
+            service._observe_d4_r003_operator_provisioner(
+                "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+                provisioner_root=str(operator),
+                expected_venv_record_distributions=(("example-pkg", "1.0"),))
+    assert denied.value.code == "runner_unavailable"
+    with pytest.raises(GatewayError) as apply:
+        service.invoke_exec(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"], dry_run=False)
+    assert apply.value.code == "exec_cleanup_proof_required"
+
+
+def test_d4_service_pipenv_lock_denied_before_staging_private_runner(
+        product_service):
+    """No stage files should appear for a mismatched locked package."""
+    from gateway.lbe_runtime_tree import observe_d4_pipenv_venv_manifest
+
+    service, workspace = product_service
+    _d4_record_site_fixture(workspace)
+    project = workspace / "py-pipenv"
+    lock = project / "Pipfile.lock"
+    lock.write_bytes(lock.read_bytes().replace(b"==1.0", b"==2.0"))
+    source = observe_d4_pipenv_venv_manifest(project_root=str(project))
+    private = workspace.parent.parent
+    provisioner = private.parent / (private.name + "-uncreated-lock-operator")
+    with pytest.raises(GatewayError) as denied:
+        service._assemble_d4_r003_source_only_runner(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+            private_root=str(private), provisioner_root=str(provisioner),
+            staged_manifests={"bin": (("", None),), "lib": (("", None),)},
+            venv_manifest=source.proposed_manifest,
+            expected_venv_identity_sha256=source.observed_source_identity_sha256,
+            expected_venv_record_distributions=(("example-pkg", "1.0"),))
+    assert denied.value.code == "runner_unavailable"
+    assert not (private / "bin").exists()
+    assert not (private / "home").exists()

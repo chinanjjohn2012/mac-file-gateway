@@ -1968,8 +1968,9 @@ def test_d4_product_stages_real_runtime_bytes_then_prepares_six_recipes(
         assert runner.native_launch_allowed is False
         with pytest.raises(Exception, match="NOT_AUTHORIZED"):
             require_d4_native_runner_admission(runner, recipe)
-        result = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher).run(
-            candidate.plan, product_attempt=marker)
+        result = LbeWorker(
+            DirectChildOwner(), launcher=marker._macos_boundary.launch).run(
+                candidate.plan, product_attempt=marker)
         assert result["status"] == "launch_failed"
         assert result["executed"] is False
         with pytest.raises(GatewayError) as denied:
@@ -2152,8 +2153,9 @@ def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
         else:
             assert graph.private_native_images == ()
         if record_drift is None:
-            result = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher).run(
-                candidate.plan, product_attempt=marker)
+            result = LbeWorker(
+                DirectChildOwner(), launcher=marker._macos_boundary.launch).run(
+                    candidate.plan, product_attempt=marker)
             assert result["status"] == "launch_failed"
             assert result["executed"] is False
         else:
@@ -2436,8 +2438,9 @@ def test_d4_actual_static_selected_native_set_and_one_use_worker(
         assert recipe.native_launch_allowed is False
         with pytest.raises(D4NativeLoaderSetDenied, match="NOT_AUTHORIZED"):
             authorize_d4_native_from_loader_set(native)
-        no_child = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher).run(
-            candidate.plan, product_attempt=marker)
+        no_child = LbeWorker(
+            DirectChildOwner(), launcher=marker._macos_boundary.launch).run(
+                candidate.plan, product_attempt=marker)
         assert no_child["status"] == "launch_failed"
         assert no_child["executed"] is False
         with pytest.raises(GatewayError) as refused:

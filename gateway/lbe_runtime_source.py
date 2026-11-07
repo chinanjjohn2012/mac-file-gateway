@@ -305,9 +305,14 @@ def inspect_d4_runtime_sources(
         }:
             raise D4RuntimeSourceDenied("missing exact Pipenv source input set")
         hashes = {k: _hash_expected(v, k) for k,v in expected_hashes.items()}
+        # ctx.gateway._root_path is the Workspace root, NOT the selected
+        # project cwd. Public v2 pipenv selection is pinned to py-pipenv.
+        # Inspect precisely this project, never the enclosing Workspace.
+        pipenv_project = _child(project, candidate.plan.cwd)
+        _stat_private_directory(pipenv_project, root)
         try:
             observed = inspect_private_pipenv_fixture_t0(
-                project_root=project,
+                project_root=pipenv_project,
                 expected_pipfile_sha256=hashes["Pipfile"],
                 expected_lock_sha256=hashes["Pipfile.lock"],
                 expected_pyvenv_cfg_sha256=hashes["pyvenv.cfg"],
@@ -321,18 +326,18 @@ def inspect_d4_runtime_sources(
             raise D4RuntimeSourceDenied("staged Pipenv entrypoint drifted")
         env = dict(_ENV_CONSTANT_PIPENV)
         env.update({
-            "PATH": root + "/bin:" + project + "/.venv/bin:/usr/bin:/bin",
-            "PIPENV_PIPFILE": project + "/Pipfile",
+            "PATH": root + "/bin:" + pipenv_project + "/.venv/bin:/usr/bin:/bin",
+            "PIPENV_PIPFILE": pipenv_project + "/Pipfile",
             "HOME": _child(root, "home"),
             "TMPDIR": _child(root, "tmp"),
         })
         try:
             check_pipenv_environment_t0(
-                project_root=project, private_root=root,
+                project_root=pipenv_project, private_root=root,
                 pipenv_bin=root + "/bin", pipenv_entrypoint=pipenv_entry,
-                pipfile=project + "/Pipfile",
-                venv_root=project + "/.venv",
-                selected_python=project + "/.venv/bin/python",
+                pipfile=pipenv_project + "/Pipfile",
+                venv_root=pipenv_project + "/.venv",
+                selected_python=pipenv_project + "/.venv/bin/python",
                 home=env["HOME"], temporary=env["TMPDIR"],
                 pipfile_lock_sha256=observed.pipfile_lock_sha256,
                 pipenv_sha256=staged_pipenv_sha,

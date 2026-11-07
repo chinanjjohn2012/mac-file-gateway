@@ -92,6 +92,7 @@ class D4RuntimeSourceObservation:
     observed_kernel: str
     observed_machine: str
     staged_source_trees: tuple[tuple[str, str, int, int], ...] = ()
+    selected_venv_home: str | None = None
     status: str = "ACTUAL_STAGED_SOURCE_ONLY_NO_EXECUTION_AUTHORITY"
     staged_file_bytes_checked: bool = True
     child_environment_constructed: bool = True
@@ -247,6 +248,75 @@ def _private_file_hash(
         os.close(dir_fd)
 
 
+
+def _inspect_private_pyvenv_selectors(
+    *, private_root: str, project_root: str, expected_sha256: str,
+) -> str:
+    """Observe the REAL selected pyvenv.cfg without running Python.
+
+    The current R003 first-party Pipenv fixture supports only a base home
+    under the already pinned private bin tree and excludes system site
+    packages. Unknown venv selectors fail closed; broader upstream Python
+    setups need their own reviewed source-selection fixture. This proves
+    config BYTES/FD identity, not CPython's actual imported source graph.
+    """
+    parent_fd = _open_private_directory(project_root + "/.venv", private_root)
+    try:
+        fd = os.open("pyvenv.cfg", os.O_RDONLY | os.O_NOFOLLOW
+                     | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent_fd)
+        try:
+            before = os.fstat(fd)
+            if (not stat.S_ISREG(before.st_mode)
+                    or before.st_uid != os.getuid()
+                    or before.st_nlink != 1 or before.st_mode & 0o022
+                    or not 0 < before.st_size <= 4096):
+                raise D4RuntimeSourceDenied("private venv configuration not qualified")
+            raw = bytearray()
+            while len(raw) < before.st_size:
+                data = os.read(fd, min(4096, before.st_size - len(raw)))
+                if not data:
+                    raise D4RuntimeSourceDenied("private venv config truncated")
+                raw.extend(data)
+            after = os.fstat(fd)
+            fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns",
+                      "st_ctime_ns", "st_mode", "st_uid", "st_nlink")
+            if (any(getattr(before, key) != getattr(after, key)
+                    for key in fields)
+                    or hashlib.sha256(raw).hexdigest() != expected_sha256):
+                raise D4RuntimeSourceDenied("private venv config source drifted")
+        finally:
+            os.close(fd)
+    except OSError:
+        raise D4RuntimeSourceDenied("private venv config inaccessible") from None
+    finally:
+        os.close(parent_fd)
+    try:
+        contents = bytes(raw).decode("ascii")
+    except UnicodeDecodeError:
+        raise D4RuntimeSourceDenied("private venv config must be ASCII") from None
+    if any(c in contents for c in ("\\", "\r", "\x00", "\t")):
+        raise D4RuntimeSourceDenied("private venv config contains unsafe selector")
+    selectors: dict[str, str] = {}
+    for line in contents.split("\n"):
+        if not line:
+            continue
+        key, separator, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if (not separator or key not in (
+                "home", "include-system-site-packages", "version")
+                or not value or key in selectors):
+            raise D4RuntimeSourceDenied("unknown or duplicate venv selector")
+        selectors[key] = value
+    home = _child(private_root, "bin")
+    if (selectors.get("home") != home
+            or selectors.get("include-system-site-packages") != "false"
+            or ("version" in selectors and re.fullmatch(
+                r"[0-9]+(?:\.[0-9]+){1,2}", selectors["version"]) is None)):
+        raise D4RuntimeSourceDenied("venv loader home or host-site policy unqualified")
+    _stat_private_directory(home, private_root)
+    return home
+
+
 def inspect_d4_runtime_sources(
     ctx: "WorkspaceContext", candidate: D4FixtureCandidate, *,
     private_root: str, expected_hashes: dict[str, str],
@@ -286,6 +356,7 @@ def inspect_d4_runtime_sources(
         raise D4RuntimeSourceDenied("first-party input changed during staging")
 
     _parent_selector_guard()
+    selected_venv_home: str | None = None
     for path in ("home", "tmp"):
         _stat_private_directory(_child(root, path), root)
     if candidate.plan.cwd == "go-project" and candidate.plan.runner == "direct":
@@ -353,6 +424,9 @@ def inspect_d4_runtime_sources(
             )
         except (LbePipenvFixtureT0Denied, OSError):
             raise D4RuntimeSourceDenied("actual Pipenv staged files are not qualified") from None
+        selected_venv_home = _inspect_private_pyvenv_selectors(
+            private_root=root, project_root=pipenv_project,
+            expected_sha256=hashes["pyvenv.cfg"])
         pipenv_entry = _child(root, "bin/pipenv")
         staged_pipenv_sha = _private_file_hash(
             pipenv_entry, root,
@@ -468,6 +542,7 @@ def inspect_d4_runtime_sources(
         observed_kernel=kernel.sysname,
         observed_machine=kernel.machine,
         staged_source_trees=tuple(tree_receipts),
+        selected_venv_home=selected_venv_home,
         bounded_staged_file_set_checked=expected_trees is not None,
     )
 

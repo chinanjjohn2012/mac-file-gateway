@@ -41,7 +41,11 @@ def product_service(tmp_path: Path):
     (pipenv / "Pipfile").write_bytes(b"[packages]\n")
     (pipenv / "Pipfile.lock").write_bytes(
         b'{"_meta":{"hash":{"sha256":"' + b"a" * 64 + b'"}}}\n')
-    (pipenv / ".venv" / "pyvenv.cfg").write_bytes(b"home = private\n")
+    # The future Pipenv source-only profile selects ONLY the privately staged
+    # bin home; never a host base interpreter or system site-packages.
+    (pipenv / ".venv" / "pyvenv.cfg").write_bytes(
+        ("home = " + str(tmp_path / "private" / "bin")
+         + "\ninclude-system-site-packages = false\n").encode("ascii"))
     (pipenv / ".venv" / "bin" / "python").write_bytes(b"fixed test-only bytes\n")
     (pipenv / ".venv" / "bin" / "python").chmod(0o700)
     go = workspace / "go-project"
@@ -2537,3 +2541,72 @@ def test_d4_private_dylib_recheck_burns_one_use_attempt_before_launcher(
                 candidate.plan, product_attempt=marker)
         assert denied.value.code == "attempt_replay_denied"
     assert launched == []
+
+
+@pytest.mark.parametrize("bad_config", [
+    "outside_home", "relative_home", "system_site_true", "missing_system_site",
+    "duplicate_home", "executable_selector", "command_selector",
+    "invalid_version", "unrecognized_selector",
+])
+def test_d4_pipenv_source_rejects_unqualified_pyvenv_loader_selectors(
+        product_service, monkeypatch, bad_config):
+    """A pinned hash of an unsafe pyvenv.cfg is NOT imported-source authority."""
+    import hashlib
+
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        root, kind="pipenv")
+    cfg = root / "py-pipenv" / ".venv" / "pyvenv.cfg"
+    valid_home = private + "/bin"
+    safe = ("home = " + valid_home
+            + "\ninclude-system-site-packages = false\n")
+    variants = {
+        "outside_home": "home = /usr/local/bin\ninclude-system-site-packages = false\n",
+        "relative_home": "home = ../bin\ninclude-system-site-packages = false\n",
+        "system_site_true": "home = " + valid_home
+                            + "\ninclude-system-site-packages = true\n",
+        "missing_system_site": "home = " + valid_home + "\n",
+        "duplicate_home": safe + "home = /usr/local/bin\n",
+        "executable_selector": safe + "executable = /usr/local/bin/python\n",
+        "command_selector": safe + "command = /usr/local/bin/python -m venv\n",
+        "invalid_version": safe + "version = surprise\n",
+        "unrecognized_selector": safe + "anything = host\n",
+    }
+    data = variants[bad_config].encode("ascii")
+    cfg.write_bytes(data)
+    hashes["pyvenv.cfg"] = hashlib.sha256(data).hexdigest()
+    def no_spawn(*_args, **_kwargs):
+        raise AssertionError("unqualified venv source may never spawn")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", no_spawn)
+        m.setattr(os, "kill", no_spawn)
+        with pytest.raises(GatewayError) as denied:
+            service._inspect_d4_r003_staged_runtime(
+                "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes)
+    assert denied.value.code == "runner_unavailable"
+    with pytest.raises(GatewayError) as public:
+        service.invoke_exec(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+            dry_run=False)
+    assert public.value.code == "exec_cleanup_proof_required"
+
+
+def test_d4_pipenv_source_pins_private_home_without_claiming_import_attestation(
+        product_service, monkeypatch):
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        root, kind="pipenv")
+    def no_spawn(*_args, **_kwargs):
+        raise AssertionError("private config snapshot cannot grant T1")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", no_spawn)
+        observed = service._inspect_d4_r003_staged_runtime(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+            private_root=private, expected_hashes=hashes)
+    assert observed.selected_venv_home == private + "/bin"
+    assert observed.actual_import_graph_attested is False
+    assert observed.owner_native_t1_grant is False
+    assert observed.native_launch_allowed is False

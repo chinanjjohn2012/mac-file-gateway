@@ -21,6 +21,7 @@ from .lbe_product_fixture import (
 from .lbe_runtime_source import (
     D4RuntimeSourceObservation, D4RuntimeSourceDenied,
     _canonical, _child, _below, _stat_private_directory,
+    _ENV_CONSTANT_GO, _ENV_CONSTANT_PIPENV, _ENV_CONSTANT_PYTHON_DIRECT,
 )
 from .lbe_worker import LbeWorkPlan, LbeWorker, LbeWorkerError
 
@@ -221,6 +222,40 @@ def prepare_d4_native_launch_recipe(
     else:
         if env.get("PYTHONNOUSERSITE") != "1":
             raise D4NativeRecipeDenied("Python environment no longer closed")
+
+    # An allowlist of suspicious names is incomplete. Compare the ENTIRE
+    # environment to the exact same internal recipe used during native
+    # source inspection, including safe empty GOFLAGS and exact PATH order.
+    if observed.kind == "go":
+        required_env = dict(_ENV_CONSTANT_GO)
+        required_env.update({
+            "GOROOT": root + "/go",
+            "PATH": root + "/go/bin:/usr/bin:/bin",
+            "HOME": root + "/home",
+            "TMPDIR": root + "/tmp",
+            "GOPATH": root + "/gopath",
+            "GOMODCACHE": root + "/modcache",
+            "GOCACHE": root + "/gocache",
+            "GOTMPDIR": root + "/gotmp",
+        })
+    elif observed.kind == "pipenv":
+        required_env = dict(_ENV_CONSTANT_PIPENV)
+        required_env.update({
+            "PATH": (root + "/bin:" + project_dir +
+                     "/.venv/bin:/usr/bin:/bin"),
+            "PIPENV_PIPFILE": project_dir + "/Pipfile",
+            "HOME": root + "/home",
+            "TMPDIR": root + "/tmp",
+        })
+    else:
+        required_env = dict(_ENV_CONSTANT_PYTHON_DIRECT)
+        required_env.update({
+            "PATH": root + "/bin:/usr/bin:/bin",
+            "HOME": root + "/home",
+            "TMPDIR": root + "/tmp",
+        })
+    if observed.closed_child_environment != tuple(sorted(required_env.items())):
+        raise D4NativeRecipeDenied("constructed child environment not exact")
 
     spec_argv = (executable,) + plan.effective_argv[1:]
     if type(spec_argv) is not tuple or len(spec_argv) > 64:

@@ -1621,3 +1621,42 @@ def test_d4_go_recipe_rejects_untrusted_nonempty_goflags_even_if_observation_for
             prepare_d4_native_launch_recipe(
                 service.get("a"), candidate, forged, private_root=private)
     assert service.info()["exec_policy"]["available"] is False
+
+
+@pytest.mark.parametrize("kind,cwd,argv,bad_key,bad_value", [
+    ("go", "go-project", ["go", "test", "./..."],
+     "LD_PRELOAD", "/outside/host_inject"),
+    ("go", "go-project", ["go", "vet", "./..."],
+     "PATH", "/outside/untrusted:/usr/bin:/bin"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"],
+     "PIPENV_PYTHON", "/outside/interpreter"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"],
+     "PATH", "/outside/host/untrusted"),
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"],
+     "LD_LIBRARY_PATH", "/outside/library"),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"],
+     "PYTHONINSPECT", "1"),
+])
+def test_d4_native_recipe_rejects_any_unapproved_child_environment_key_or_path(
+        product_service, monkeypatch, kind, cwd, argv, bad_key, bad_value):
+    from gateway.lbe_launch_recipe import (
+        D4NativeRecipeDenied, prepare_d4_native_launch_recipe,
+    )
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    trees = _d4_staged_trees(workspace, kind)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, _marker, observed = service._prepare_d4_r003_staged_attempt(
+            "a", cwd, argv, private_root=private,
+            expected_hashes=hashes, expected_trees=trees)
+        env = dict(observed.closed_child_environment)
+        env[bad_key] = bad_value
+        forged = replace(observed, closed_child_environment=tuple(sorted(env.items())))
+        with pytest.raises(D4NativeRecipeDenied):
+            prepare_d4_native_launch_recipe(
+                service.get("a"), candidate, forged, private_root=private)
+    assert service.info()["exec_policy"]["available"] is False

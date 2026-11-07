@@ -2723,6 +2723,6 @@ def test_d4_fixture_inventory_bounds_entries_before_bulk_materialization(
         m.setattr(product, "_MAX_SRC_ENTRIES", 8)
         m.setattr(os, "listdir", lambda *_a, **_kw: (
             _ for _ in ()).throw(AssertionError("bulk listdir forbidden")))
-        with pytest.raises(D4FixtureDenied, match="too many entries"):
+        with pytest.raises(D4FixtureDenied, match="first-party D4 source identity unavailable"):
             product.check_d4_r003_fixture(
                 service.get("a"), candidate.plan)

@@ -273,6 +273,23 @@ def check_d4_r003_fixture(ctx: "WorkspaceContext",
         raise D4FixtureDenied("first-party D4 source identity unavailable") from None
     finally:
         os.close(root_fd)
+    # This is a trusted internal source inventory, not the public file API.
+    # However, explicit Workspace exclusions and disallowed path names still
+    # apply to every selected first-party source. Use is_file=False because
+    # go.mod and Pipfile.lock are valid internal fixture inputs even if not
+    # exposed by the public text-file extension policy. The fixed private
+    # .venv binary/interpreter tree is deliberately inspected with nofollow
+    # FDs despite being protected from public File API browsing.
+    for source_name, _digest in selected:
+        if source_name.startswith(".venv/"):
+            continue
+        parts = (plan.cwd, *source_name.split("/"))
+        try:
+            allowed = ctx.gateway._allowed(parts, is_file=False)
+        except Exception:
+            raise D4FixtureDenied("source Workspace path policy unavailable") from None
+        if allowed is not True:
+            raise D4FixtureDenied("selected fixture source is excluded")
     return D4FixtureCandidate(
         plan=plan,
         source_sha256=tuple((plan.cwd + "/" + name, digest)

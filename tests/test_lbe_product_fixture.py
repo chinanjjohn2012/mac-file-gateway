@@ -361,3 +361,33 @@ def test_d4_attempt_marker_not_a_client_or_native_authority(product_service):
         service.invoke_exec("a", "go-project", ["go", "test", "./..."],
                             dry_run=False)
     assert public.value.code == "exec_cleanup_proof_required"
+
+@pytest.mark.parametrize("cwd,argv,excluded", [
+    ("py-direct", ["python", "-m", "compileall", "-q", "./src"],
+     ("py-direct", "src", "main.py")),
+    ("py-pipenv", ["python", "-m", "pytest", "-q"],
+     ("py-pipenv", "Pipfile.lock")),
+    ("go-project", ["go", "test", "./..."],
+     ("go-project", "go.mod")),
+])
+@pytest.mark.parametrize("blocked_answer", [False, 1, "yes"])
+def test_d4_first_party_candidate_respects_workspace_source_excludes(
+        product_service, monkeypatch, cwd, argv, excluded, blocked_answer):
+    service, _root = product_service
+    ctx = service.get("a")
+    previous = ctx.gateway._allowed
+    called = []
+
+    def selective_policy(parts, *, is_file):
+        if tuple(parts) == excluded:
+            called.append((tuple(parts), is_file))
+            return blocked_answer
+        return previous(parts, is_file=is_file)
+
+    with monkeypatch.context() as m:
+        m.setattr(ctx.gateway, "_allowed", selective_policy)
+        with pytest.raises(GatewayError) as exc:
+            service._prepare_d4_r003_fixture_candidate("a", cwd, argv)
+        assert exc.value.code == "command_not_allowed"
+    assert called == [(excluded, False)]
+    assert service.info()["exec_policy"]["available"] is False

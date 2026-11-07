@@ -762,6 +762,7 @@ class WorkspaceService:
             name, cwd, argv, timeout_seconds=timeout_seconds)
         from .lbe_runtime_tree import (
             D4RuntimeTreeDenied, observe_d4_operator_source_manifest,
+            observe_d4_pipenv_venv_manifest,
         )
         from .lbe_runtime_source import _canonical, D4RuntimeSourceDenied
 
@@ -781,6 +782,12 @@ class WorkspaceService:
                     provisioner_root=source, kind=kind)
                 for kind in kinds
             }
+            if candidate.plan.cwd == "py-pipenv":
+                # Unlike bin/lib, .venv belongs to the FIRST-PARTY
+                # Workspace, not the operator. A whole imported-source
+                # manifest is reviewable without import or execution.
+                observed["venv"] = observe_d4_pipenv_venv_manifest(
+                    project_root=workspace + "/py-pipenv")
         except (D4RuntimeTreeDenied, D4RuntimeSourceDenied, OSError):
             raise GatewayError(
                 "runner_unavailable", "D4 operator source selection unavailable."
@@ -805,6 +812,7 @@ class WorkspaceService:
         staged_manifests: dict[str, tuple[tuple[str, str | None], ...]],
         venv_manifest: tuple[tuple[str, str | None], ...] | None = None,
         expected_source_identities: dict[str, str] | None = None,
+        expected_venv_identity_sha256: str | None = None,
         timeout_seconds: int = 60,
     ):
         """Assemble the real six-command private runtime, never launch it.
@@ -852,6 +860,44 @@ class WorkspaceService:
             raise GatewayError(
                 "runner_unavailable",
                 "D4 operator source identity selection is incomplete.")
+        # The reviewed first-party Pipenv .venv tree is distinct from
+        # operator-owned bin/lib. Its complete identity is checked before
+        # materializing any source and again after materialization. Even a
+        # matching identity is NOT imported-source attestation or T1 consent.
+        if (expected_venv_identity_sha256 is not None
+                and (flavor != "pipenv"
+                     or type(expected_venv_identity_sha256) is not str
+                     or len(expected_venv_identity_sha256) != 64
+                     or expected_venv_identity_sha256 == "0" * 64
+                     or any(ch not in "0123456789abcdef"
+                            for ch in expected_venv_identity_sha256))):
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 first-party virtualenv identity selection is incomplete.")
+
+        def check_venv_identity() -> None:
+            if expected_venv_identity_sha256 is None:
+                return
+            from .lbe_runtime_tree import (
+                D4RuntimeTreeDenied, inspect_d4_closed_staged_tree,
+            )
+            try:
+                project = str(self.get(name).gateway._root_path) + "/py-pipenv"
+                seen = inspect_d4_closed_staged_tree(
+                    private_root=private_root,
+                    staged_root=project + "/.venv",
+                    expected=venv_manifest,
+                )
+            except (D4RuntimeTreeDenied, OSError):
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 private virtualenv source not qualified.") from None
+            if seen.observed_identity_sha256 != expected_venv_identity_sha256:
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 private virtualenv source identity changed.")
+
+        check_venv_identity()
         from .lbe_runtime_stage import (
             D4RuntimeStageDenied, create_d4_fresh_runner_scratch,
         )
@@ -867,6 +913,9 @@ class WorkspaceService:
                     expected_source_identities[kind]
                     if expected_source_identities is not None else None),
                 timeout_seconds=timeout_seconds))
+        # Bin/lib or Go staging may take time. The pinned first-party venv
+        # identity MUST still match before preparing any child environment.
+        check_venv_identity()
         try:
             scratch = create_d4_fresh_runner_scratch(
                 private_root=private_root, kind=flavor)
@@ -955,6 +1004,7 @@ class WorkspaceService:
             raise GatewayError(
                 "runner_unavailable", "D4 private native dylib source unqualified."
             ) from None
+        check_venv_identity()
         return (*prepared, graph, tuple(stage_receipts))
 
     def _prepare_d4_r003_selected_macho_source(

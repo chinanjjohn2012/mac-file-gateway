@@ -263,21 +263,17 @@ class D4OperatorSourceManifest:
     native_launch_allowed: bool = False
 
 
-def observe_d4_operator_source_manifest(
-    *, provisioner_root: str, kind: str,
+def _observe_d4_selected_source_manifest(
+    *, source_root: str, selected_name: str, kind: str, status: str,
 ) -> D4OperatorSourceManifest:
-    """Build a reviewable manifest from actual operator source, without spawn.
+    """Observe a precise preselected file tree; NEVER infer approval.
 
-    The existing assembler requires exact independent expected manifests.
-    This read-only producer eliminates an ad-hoc rglob/hash script while
-    retaining nofollow FD traversal, total size/entry caps, inode-drift
-    checks and the existing downstream snapshot verifier. It is NEVER an
-    identity or trust attestation of the operator, and never auto-approves
-    the result for staging or execution.
+    Both the operator's go/bin/lib and the first-party Pipenv .venv use the
+    SAME bounded nofollow source stream and full second tree verification.
+    The validated bytes are only a proposed source identity at this instant,
+    not an independently approved manifest, an import/loader closure or T1.
     """
-    if type(kind) is not str or kind not in {"go", "bin", "lib"}:
-        raise D4RuntimeTreeDenied("unsupported operator source tree kind")
-    parts = _parts(provisioner_root, "operator provisioner root")
+    parts = _parts(source_root, "selected source parent")
     rows: list[tuple[str, str | None]] = []
     files, total_bytes = 0, 0
 
@@ -350,7 +346,7 @@ def observe_d4_operator_source_manifest(
                 os.close(fd)
                 fd = child
             _identity(fd, directory=True)
-            selected = os.open(kind, _DIR_FLAGS, dir_fd=fd)
+            selected = os.open(selected_name, _DIR_FLAGS, dir_fd=fd)
             try:
                 walk(selected, "", 0)
             finally:
@@ -362,8 +358,8 @@ def observe_d4_operator_source_manifest(
         # staged-tree inspector, including metadata and all paths. This
         # catches drift between initial observation and manifest delivery.
         verified = inspect_d4_closed_staged_tree(
-            private_root=provisioner_root,
-            staged_root=provisioner_root + "/" + kind,
+            private_root=source_root,
+            staged_root=source_root + "/" + selected_name,
             expected=proposed,
         )
     except (OSError, ValueError) as exc:
@@ -376,4 +372,34 @@ def observe_d4_operator_source_manifest(
         observed_source_identity_sha256=verified.observed_identity_sha256,
         entry_count=verified.entry_count,
         file_count=files, total_file_bytes=total_bytes,
+        status=status,
+    )
+
+
+def observe_d4_operator_source_manifest(
+    *, provisioner_root: str, kind: str,
+) -> D4OperatorSourceManifest:
+    """Expose reviewable go/bin/lib operator bytes without self-approval."""
+    if type(kind) is not str or kind not in {"go", "bin", "lib"}:
+        raise D4RuntimeTreeDenied("unsupported operator source tree kind")
+    return _observe_d4_selected_source_manifest(
+        source_root=provisioner_root, selected_name=kind, kind=kind,
+        status="OBSERVED_OPERATOR_SOURCE_ONLY_NOT_ATTESTED",
+    )
+
+
+def observe_d4_pipenv_venv_manifest(
+    *, project_root: str,
+) -> D4OperatorSourceManifest:
+    """Observe real first-party .venv files, including sites, without import.
+
+    This source tree is IN THE WORKSPACE, not the operator provisioner.
+    Safe first-party selection, expected exact path and unchanged source
+    identity must still be checked by WorkspaceService before/after use.
+    Even an exact manifest does NOT prove CPython's effective import paths,
+    executable-resolution closure, complete seed/site modules, nor T1 rights.
+    """
+    return _observe_d4_selected_source_manifest(
+        source_root=project_root, selected_name=".venv", kind="venv",
+        status="OBSERVED_FIRST_PARTY_VENV_ONLY_NOT_ATTESTED",
     )

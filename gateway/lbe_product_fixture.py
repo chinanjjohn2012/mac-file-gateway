@@ -325,21 +325,34 @@ def _directory_identity(fd: int) -> tuple[int, ...]:
 
 
 def _inventory_begin(fd: int) -> tuple[tuple[int, ...], tuple[str, ...]]:
+    """Read selected first-party names with an EARLY materialization bound.
+
+    The previous listdir(fd) allocated the entire directory before checking
+    the entry ceiling. A hostile large Workspace directory could exhaust
+    memory before source admission rejected it. Reuse the selected pinned FD
+    and stop scanning at the ceiling; this is still only a first-party T0
+    source inventory and never grants a real process.
+    """
     identity = _directory_identity(fd)
-    names = tuple(sorted(os.listdir(fd)))
-    if len(names) > _MAX_SRC_ENTRIES:
-        raise D4FixtureDenied("source directory has too many entries")
-    if any(type(n) is not str or n in ("", ".", "..") or "/" in n
-           or any(ord(c) < 33 or ord(c) >= 127 for c in n)
-           for n in names):
-        raise D4FixtureDenied("source directory contains an unsafe entry")
-    return identity, names
+    names: list[str] = []
+    with os.scandir(fd) as entries:
+        for entry in entries:
+            if len(names) >= _MAX_SRC_ENTRIES:
+                raise D4FixtureDenied("source directory has too many entries")
+            name = entry.name
+            if (type(name) is not str or name in ("", ".", "..")
+                    or "/" in name
+                    or any(ord(c) < 33 or ord(c) >= 127 for c in name)):
+                raise D4FixtureDenied(
+                    "source directory contains an unsafe entry")
+            names.append(name)
+    return identity, tuple(sorted(names))
 
 
 def _inventory_end(fd: int, identity: tuple[int, ...],
                    names: tuple[str, ...]) -> None:
-    if (_directory_identity(fd) != identity
-            or tuple(sorted(os.listdir(fd))) != names):
+    end_identity, end_names = _inventory_begin(fd)
+    if end_identity != identity or end_names != names:
         raise D4FixtureDenied("source directory changed while inspecting")
 
 

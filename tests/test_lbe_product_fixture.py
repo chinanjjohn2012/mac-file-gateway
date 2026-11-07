@@ -1444,6 +1444,10 @@ def test_d4_all_six_commands_produce_private_source_only_native_recipe(
         assert recipe.resolved_spawn_argv[1:] == candidate.plan.effective_argv[1:]
         assert recipe.original_timeout_seconds == 120
         assert len(recipe.selected_source_fingerprint) == 64
+        assert recipe.selected_image_sha256 == tuple(
+            sorted(observation.staged_executables))
+        assert recipe.selected_venv_home == (
+            private + "/bin" if kind == "pipenv" else None)
         assert recipe.native_launch_allowed is False
         assert recipe.real_runner_qualified is False
         assert recipe.actual_loaded_source_graph_proven is False

@@ -64,6 +64,10 @@ class D4NativeLaunchRecipe:
     selected_source_fingerprint: str
     canonical_output_path: str | None
     original_timeout_seconds: int
+    # The full service-selected toolchain/interpreter set, not just the
+    # primary Popen path. Receipts remain NONOPERATIVE source claims.
+    selected_image_sha256: tuple[tuple[str, str], ...] = ()
+    selected_venv_home: str | None = None
     required_limits: tuple[tuple[str, int], ...] = _PROPOSED_LIMITS
     status: str = _STATUS
     real_runner_qualified: bool = False
@@ -193,10 +197,42 @@ def prepare_d4_native_launch_recipe(
                    or type(x[3]) is not int or x[3] < 0
                    for x in receipts)):
         raise D4NativeRecipeDenied("closed source-tree receipt incomplete")
+    # A trusted source-only recipe must retain all required source identities:
+    # Go requires go + compile + link; Pipenv requires the exact private
+    # selected interpreter as well as the script the kernel will start.
+    # Merely retaining the primary executable would drop reviewed source
+    # obligations before the eventual (separately gated) native boundary.
+    if observed.kind == "go":
+        expected_labels = {
+            "go/bin/go", "go/pkg/tool/darwin_arm64/compile",
+            "go/pkg/tool/darwin_arm64/link",
+        }
+    elif observed.kind == "pipenv":
+        expected_labels = {"bin/pipenv", "py-pipenv/.venv/bin/python"}
+    else:
+        expected_labels = {"bin/python"}
     if (type(observed.staged_executables) is not tuple
-            or expected_label not in {row[0] for row in observed.staged_executables
-                                      if type(row) is tuple and len(row) == 2}):
-        raise D4NativeRecipeDenied("staged executable not selected")
+            or len(observed.staged_executables) != len(expected_labels)
+            or any(type(row) is not tuple or len(row) != 2
+                   or type(row[0]) is not str or type(row[1]) is not str
+                   or len(row[1]) != 64 or row[1] == "0" * 64
+                   or any(ch not in "0123456789abcdef" for ch in row[1])
+                   for row in observed.staged_executables)):
+        raise D4NativeRecipeDenied("staged executable identity incomplete")
+    selected_images = dict(observed.staged_executables)
+    if (len(selected_images) != len(expected_labels)
+            or set(selected_images) != expected_labels
+            or expected_label not in selected_images):
+        raise D4NativeRecipeDenied("staged executable set changed")
+    if observed.kind == "pipenv":
+        if (type(observed.selected_venv_home) is not str
+                or observed.selected_venv_home != root + "/bin"
+                or selected_images["py-pipenv/.venv/bin/python"]
+                != dict(candidate.source_sha256).get(
+                    "py-pipenv/.venv/bin/python")):
+            raise D4NativeRecipeDenied("private Pipenv Python source not bound")
+    elif observed.selected_venv_home is not None:
+        raise D4NativeRecipeDenied("unexpected virtualenv source selection")
     if (type(observed.closed_child_environment) is not tuple
             or not observed.closed_child_environment):
         raise D4NativeRecipeDenied("closed environment unavailable")
@@ -265,7 +301,8 @@ def prepare_d4_native_launch_recipe(
     # SHA of a receipt is NOT an OS-loaded source, image, or authority proof.
     material = (ctx.name, plan, candidate.source_sha256,
                 candidate.source_identity, candidate.directory_identity,
-                receipts, observed.staged_executables, spec_argv,
+                receipts, tuple(sorted(selected_images.items())),
+                observed.selected_venv_home, spec_argv,
                 project_dir, tuple(sorted(env.items())))
     fingerprint = hashlib.sha256(repr(material).encode("utf-8")).hexdigest()
     return D4NativeLaunchRecipe(
@@ -278,6 +315,8 @@ def prepare_d4_native_launch_recipe(
         selected_source_fingerprint=fingerprint,
         canonical_output_path=output,
         original_timeout_seconds=plan.timeout_seconds,
+        selected_image_sha256=tuple(sorted(selected_images.items())),
+        selected_venv_home=observed.selected_venv_home,
     )
 
 

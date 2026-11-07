@@ -380,6 +380,70 @@ def _pipenv_selected_sources(project_fd: int) -> tuple[tuple, ...]:
     return tuple(sorted(selected, key=lambda row: row[0]))
 
 
+def _qualify_go_module_snapshot(
+    project_fd: int, pinned: tuple,
+) -> None:
+    """Reject unresolved Go module or toolchain selectors before any launch.
+
+    This check is deliberately limited to a private, no-external-module
+    first-party fixture. Unknown `require`, `replace`, `toolchain` and
+    workspace directives must STOP until actual module graph/loader source
+    provenance is independently reviewed. It is NOT a Go parser, actual
+    GOROOT/stdlib proof, Go execution eligibility, or an OS egress control.
+    """
+    fd = os.open("go.mod", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+                 | os.O_NONBLOCK, dir_fd=project_fd)
+    try:
+        before = _require_controlled(fd, directory=False)
+        if not 0 < before.st_size <= 64 * 1024:
+            raise D4FixtureDenied("Go module declaration exceeds fixed fixture")
+        raw = bytearray()
+        while len(raw) < before.st_size:
+            chunk = os.read(fd, min(65536, before.st_size - len(raw)))
+            if not chunk:
+                raise D4FixtureDenied("Go module changed during validation")
+            raw.extend(chunk)
+        after = _require_controlled(fd, directory=False)
+        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns",
+                  "st_ctime_ns", "st_mode", "st_uid", "st_nlink")
+        identity = tuple(getattr(before, key) for key in fields)
+        if (identity != tuple(getattr(after, key) for key in fields)
+                or identity != pinned[2]
+                or hashlib.sha256(raw).hexdigest() != pinned[1]):
+            raise D4FixtureDenied("Go module identity changed after inventory")
+    finally:
+        os.close(fd)
+    try:
+        source = bytes(raw).decode("ascii")
+    except UnicodeDecodeError:
+        raise D4FixtureDenied("Go module has non-ASCII unsupported directives") from None
+    if any(c in source for c in ("\x00", "\r", "\\", "\t")):
+        raise D4FixtureDenied("Go module is not an exact simple fixture")
+    module_count, go_count = 0, 0
+    for line in source.split("\n"):
+        if not line:
+            continue
+        if line.startswith("module "):
+            path = line[len("module "):]
+            # Local replace, relative imports and quote/space escaped paths
+            # cannot be qualified through this one-module fixture parser.
+            if (re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", path) is None
+                    or any(part in ("", ".", "..") for part in path.split("/"))
+                    or "." not in path.split("/")[0]):
+                raise D4FixtureDenied("Go module path is not first-party scoped")
+            module_count += 1
+        elif line.startswith("go "):
+            if re.fullmatch(r"1\.[0-9]+(?:\.[0-9]+)?",
+                            line[len("go "):]) is None:
+                raise D4FixtureDenied("Go version directive is invalid")
+            go_count += 1
+        else:
+            raise D4FixtureDenied(
+                "unqualified Go dependency, workspace or toolchain directive")
+    if module_count != 1 or go_count != 1:
+        raise D4FixtureDenied("Go module must contain one module and go version")
+
+
 def _go_selected_sources(project_fd: int) -> tuple[tuple, ...]:
     identity, names = _inventory_begin(project_fd)
     if not {"go.mod", "cmd", "bin"}.issubset(names):
@@ -403,6 +467,8 @@ def _go_selected_sources(project_fd: int) -> tuple[tuple, ...]:
             # Do not silently omit extra Go packages, go.work, go:embed data,
             # tool hooks, hidden module/replace sources or output shadows.
             raise D4FixtureDenied("unlisted Go module or build input")
+    _qualify_go_module_snapshot(
+        project_fd, next(row for row in selected if row[0] == "go.mod"))
     _inventory_end(project_fd, identity, names)
     if "cmd/app/main.go" not in {row[0] for row in selected}:
         raise D4FixtureDenied("fixed Go app entrypoint is missing")

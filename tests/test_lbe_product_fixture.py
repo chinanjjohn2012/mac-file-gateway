@@ -730,3 +730,94 @@ def test_d4_pipenv_tests_directory_is_included_before_one_use_marker(
             AssertionError("Stale Pipenv test cannot run"))).run(
             c.plan, product_attempt=marker)
     assert denied.value.code == "attempt_replay_denied"
+
+
+@pytest.mark.parametrize("additional", [
+    b"require example.com/other v1.2.3\n",
+    b"replace example.com/other => ../outside\n",
+    b"toolchain go1.99.0\n",
+    b"exclude example.com/old v1.1.0\n",
+    b"retract v0.1.0\n",
+    b"replace (\n  example.com/a => ../../a\n)\n",
+    b"go 1.28\n",
+    b"module another.test/example\n",
+    b"// go:generate untrusted\n",
+    b"\x00unsafe\n",
+])
+def test_d4_go_minimal_module_rejects_unqualified_graph_directives(
+        product_service, additional):
+    service, root = product_service
+    (root / "go-project" / "go.mod").write_bytes(
+        b"module firstparty.test/app\ngo 1.27\n" + additional)
+    with pytest.raises(GatewayError) as denied:
+        service._prepare_d4_r003_fixture_candidate(
+            "a", "go-project", ["go", "test", "./..."])
+    assert denied.value.code == "command_not_allowed"
+
+
+@pytest.mark.parametrize("module", [
+    b"module ../outside\ngo 1.27\n",
+    b"module example.com/../outside\ngo 1.27\n",
+    b"module \n go 1.27\n",
+    b"module firstparty.test/app\n",
+    b"go 1.27\n",
+    b"module firstparty.test/app\ngo 1.invalid\n",
+    b"module firstparty.test/app\r\ngo 1.27\n",
+    b"module firstparty.test/app\t\ngo 1.27\n",
+    b"module firstparty.test/app\ngo 1.27\n" + b"A" * 65536,
+])
+def test_d4_go_minimal_module_rejects_malformed_or_oversized_source(
+        product_service, module):
+    service, root = product_service
+    (root / "go-project" / "go.mod").write_bytes(module)
+    with pytest.raises(GatewayError) as denied:
+        service._prepare_d4_r003_fixture_candidate(
+            "a", "go-project", ["go", "vet", "./..."])
+    assert denied.value.code == "command_not_allowed"
+
+
+def test_d4_go_module_changes_between_inventory_and_validation_rejected(
+        product_service, monkeypatch):
+    import gateway.lbe_product_fixture as guarded
+
+    service, root = product_service
+    module = root / "go-project" / "go.mod"
+    real_file_digest = guarded._file_digest
+    modified = []
+
+    def after_initial_hash(parent_fd, name, **kwargs):
+        result = real_file_digest(parent_fd, name, **kwargs)
+        if name == "go.mod" and not modified:
+            # The other files still exist, but the actual module data is now
+            # different from the pinned first-party bytes.
+            module.write_bytes(
+                b"module firstparty.test/app\ngo 1.27\n"
+                b"replace fake.dev/x => ../outside\n")
+            modified.append(True)
+        return result
+
+    with monkeypatch.context() as m:
+        m.setattr(guarded, "_file_digest", after_initial_hash)
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_fixture_candidate(
+                "a", "go-project", ["go", "test", "./..."])
+    assert denied.value.code == "command_not_allowed"
+    assert modified == [True]
+
+
+def test_d4_go_qualified_simple_module_has_no_native_authority(
+        product_service, monkeypatch):
+    service, _root = product_service
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_k: (
+            _ for _ in ()).throw(AssertionError("no Go execution allowed")))
+        c = service._prepare_d4_r003_fixture_candidate(
+            "a", "go-project", ["go", "test", "./..."])
+        assert c.native_launch_allowed is False
+        assert c.actual_loaded_sources_proven is False
+        assert c.owner_approval_attested is False
+        with pytest.raises(GatewayError) as denied:
+            service.invoke_exec(
+                "a", "go-project", ["go", "test", "./..."],
+                dry_run=False)
+    assert denied.value.code == "exec_cleanup_proof_required"

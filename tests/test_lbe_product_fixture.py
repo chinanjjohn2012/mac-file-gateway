@@ -2241,3 +2241,166 @@ def test_d4_service_macho_loader_rejects_non_macho_even_with_exact_source_hash(
                 expected_hashes=hashes, expected_trees=trees)
     assert denied.value.code == "runner_unavailable"
     assert service.info()["exec_policy"]["available"] is False
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+])
+def test_d4_actual_static_selected_native_set_and_one_use_worker(
+        product_service, monkeypatch, kind, cwd, argv):
+    import hashlib
+    import struct
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker
+    from gateway.lbe_native_loader_set import (
+        D4NativeLoaderSetDenied, authorize_d4_native_from_loader_set,
+    )
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+
+    def mach_o(data_name):
+        name = ("/usr/lib/" + data_name + ".dylib").encode("ascii") + b"\x00"
+        command_size = (24 + len(name) + 3) & ~3
+        load = (struct.pack("<III", 0x0C, command_size, 24)
+                + b"\x00" * 12 + name
+                + b"\x00" * (command_size - 24 - len(name)))
+        return (struct.pack("<IIIIIIII",
+                            0xFEEDFACF, 0x0100000C, 0, 2,
+                            1, len(load), 0, 0) + load)
+
+    if kind == "go":
+        selected = (
+            ("go", Path(private) / "go/bin/go"),
+            ("compile", Path(private) / "go/pkg/tool/darwin_arm64/compile"),
+            ("link", Path(private) / "go/pkg/tool/darwin_arm64/link"),
+        )
+    elif kind == "pipenv":
+        selected = (("python", workspace / "py-pipenv/.venv/bin/python"),)
+    else:
+        selected = (("python", Path(private) / "bin/python"),)
+
+    for key, file_path in selected:
+        file_bytes = mach_o(key)
+        file_path.write_bytes(file_bytes)
+        hashes[key] = hashlib.sha256(file_bytes).hexdigest()
+    trees = _d4_staged_trees(workspace, kind)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no Mach-O executed")))
+        candidate, marker, _observed, recipe, host, native = (
+            service._prepare_d4_r003_selected_loader_set(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees=trees))
+        assert native.runtime_kind == kind
+        assert len(native.static_selected_executables) == (
+            3 if kind == "go" else 1)
+        assert all(item.selected_cpu == "arm64"
+                   and item.native_launch_allowed is False
+                   for _label, item in native.static_selected_executables)
+        assert native.actual_loaded_source_graph_proven is False
+        assert native.native_launch_allowed is False
+        assert host.native_launch_allowed is False
+        assert recipe.native_launch_allowed is False
+        with pytest.raises(D4NativeLoaderSetDenied, match="NOT_AUTHORIZED"):
+            authorize_d4_native_from_loader_set(native)
+        no_child = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher).run(
+            candidate.plan, product_attempt=marker)
+        assert no_child["status"] == "launch_failed"
+        assert no_child["executed"] is False
+        with pytest.raises(GatewayError) as refused:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert refused.value.code == "exec_cleanup_proof_required"
+
+
+def test_d4_go_compiler_invalid_macho_blocks_full_selected_loader_set(
+        product_service, monkeypatch):
+    import hashlib
+    import struct
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="go")
+    tool_paths = {
+        "go": Path(private) / "go/bin/go",
+        "compile": Path(private) / "go/pkg/tool/darwin_arm64/compile",
+        "link": Path(private) / "go/pkg/tool/darwin_arm64/link",
+    }
+    header = struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C,
+                         0, 2, 0, 0, 0, 0)
+    for key, file_path in tool_paths.items():
+        value = (b"bad compiler binary but SHA matches"
+                 if key == "compile" else header)
+        file_path.write_bytes(value)
+        hashes[key] = hashlib.sha256(value).hexdigest()
+    trees = _d4_staged_trees(workspace, "go")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_selected_loader_set(
+                "a", "go-project", ["go", "test", "./..."],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees)
+    assert denied.value.code == "runner_unavailable"
+    assert service.info()["exec_policy"]["available"] is False
+
+
+def test_d4_selected_loader_set_changes_after_marker_burn_denied_before_child(
+        product_service, monkeypatch):
+    import hashlib
+    import struct
+    from gateway import lbe_native_loader_set
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="python_direct")
+    interpreter = Path(private) / "bin/python"
+    value = struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C,
+                        0, 2, 0, 0, 0, 0)
+    interpreter.write_bytes(value)
+    hashes["python"] = hashlib.sha256(value).hexdigest()
+    trees = _d4_staged_trees(workspace, "python_direct")
+    called = []
+    def impossible(_plan):
+        called.append(True)
+        raise AssertionError("untrusted loader recheck never launches")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, marker, _observed, _recipe, _host, loader_set = (
+            service._prepare_d4_r003_selected_loader_set(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees))
+        # The independently pinned selected-Mach-O observation, not just
+        # first-party and host snapshots, must be consumed once before Worker.
+        m.setattr(lbe_native_loader_set, "inspect_d4_native_loader_set",
+                  lambda *_a, **_kw: replace(
+                      loader_set, unresolved_declared_install_names=("changed",)))
+        with pytest.raises(LbeWorkerError) as denied:
+            LbeWorker(DirectChildOwner(), launcher=impossible).run(
+                candidate.plan, product_attempt=marker)
+        assert denied.value.code == "attempt_replay_denied"
+        with pytest.raises(LbeWorkerError) as replay:
+            LbeWorker(DirectChildOwner(), launcher=impossible).run(
+                candidate.plan, product_attempt=marker)
+        assert replay.value.code == "attempt_replay_denied"
+    assert called == []
+
+
+def test_d4_generic_callback_cannot_claim_selected_loader_set(
+        product_service):
+    service, _workspace = product_service
+    _candidate, marker = service._prepare_d4_r003_attempt(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    with pytest.raises(D4FixtureDenied):
+        marker.attach_macho_loader_set(lambda *_: None)

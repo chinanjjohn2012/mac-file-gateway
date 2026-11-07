@@ -878,6 +878,48 @@ class WorkspaceService:
             ) from None
         return (*prepared, loader)
 
+    def _prepare_d4_r003_selected_loader_set(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, expected_hashes: dict[str, str],
+        expected_trees: dict[str, tuple[tuple[str, str | None], ...]],
+        timeout_seconds: int = 60,
+    ):
+        """Service-owned native binary set inspection and one-use recheck.
+
+        Go selects actual go + compile + link, Python Direct selects its
+        private interpreter, and Pipenv selects the private interpreter
+        targeted by the verified #! script. No imports/commands are run:
+        direct dyld declarations still cannot prove the real loaded graph.
+        The snapshot recheck is attached only to the internal one-use
+        Worker source marker and adds no positive Exec authority.
+        """
+        candidate, marker, observed, recipe, runner = (
+            self._prepare_d4_r003_runner_preflight(
+                name, cwd, argv, private_root=private_root,
+                expected_hashes=expected_hashes,
+                expected_trees=expected_trees,
+                timeout_seconds=timeout_seconds,
+            ))
+        from .lbe_native_loader_set import (
+            D4NativeLoaderSetDenied, D4NativeLoaderSetRecheck,
+            inspect_d4_native_loader_set,
+        )
+        from .lbe_product_fixture import D4FixtureDenied
+
+        try:
+            loader_set = inspect_d4_native_loader_set(
+                observed, recipe, private_root=private_root)
+            bound = D4NativeLoaderSetRecheck(
+                self.get(name), candidate.plan, observed, recipe,
+                loader_set, private_root=private_root)
+            marker.attach_macho_loader_set(bound)
+        except (D4NativeLoaderSetDenied, D4FixtureDenied):
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 selected ARM64 native binary source set unavailable.",
+            ) from None
+        return candidate, marker, observed, recipe, runner, loader_set
+
     def require_git(self, name: str, command: str) -> WorkspaceContext:
         """Independent authorization, always repeated in sync Worker."""
         ctx = self.get(name)

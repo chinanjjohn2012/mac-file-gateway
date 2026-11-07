@@ -94,7 +94,7 @@ class D4OneUseAttemptMarker:
     is outside this in-memory primitive.
     """
     __slots__ = ("_candidate", "_ctx", "_pid", "_lock",
-                 "_consumed", "_staged", "_runner")
+                 "_consumed", "_staged", "_runner", "_macho_set")
 
     def __init__(self, candidate: D4FixtureCandidate,
                  ctx: "WorkspaceContext", *,
@@ -160,6 +160,7 @@ class D4OneUseAttemptMarker:
         self._ctx = ctx
         self._staged = staged_source
         self._runner = None
+        self._macho_set = None
         self._pid = os.getpid()
         self._lock = threading.Lock()
         self._consumed = False
@@ -178,6 +179,26 @@ class D4OneUseAttemptMarker:
             except Exception:
                 raise D4FixtureDenied("Runner recheck binding drift") from None
             self._runner = runner_recheck
+
+    def attach_macho_loader_set(self, binding: object) -> None:
+        """Attach one live service-selected native binary loader-set recheck.
+
+        This static source recheck is NOT a trust grant. It is only called
+        once by the internal v2 WorkspaceService, and cannot be supplied
+        as a generic callback from REST/MCP or a forged record.
+        """
+        from .lbe_native_loader_set import D4NativeLoaderSetRecheck
+
+        if type(binding) is not D4NativeLoaderSetRecheck:
+            raise D4FixtureDenied("Mach-O loader-set binding must be internal")
+        with self._lock:
+            if self._consumed or self._macho_set is not None:
+                raise D4FixtureDenied("Mach-O loader-set already bound or consumed")
+            try:
+                binding.check_binding(self._ctx, self._candidate.plan)
+            except Exception:
+                raise D4FixtureDenied("loader-set prelaunch binding drift") from None
+            self._macho_set = binding
 
     def consume_for(self, plan: LbeWorkPlan) -> None:
         """Burn once, then recheck source and plan BEFORE possible spawn."""
@@ -207,6 +228,8 @@ class D4OneUseAttemptMarker:
                 self._staged.recheck_for(self._ctx, self._candidate)
             if self._runner is not None:
                 self._runner.recheck_for(self._ctx, self._candidate.plan)
+            if self._macho_set is not None:
+                self._macho_set.recheck_for(self._ctx, self._candidate.plan)
         except D4FixtureDenied:
             raise
         except Exception:

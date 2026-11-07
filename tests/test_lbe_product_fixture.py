@@ -1997,20 +1997,31 @@ def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
     from gateway.lbe_direct_owner import DirectChildOwner
     from gateway.lbe_worker import LbeWorker
 
+    import struct
+
+    def private_macho(label):
+        install = ("/usr/lib/" + label + ".dylib").encode("ascii") + b"\x00"
+        size = (24 + len(install) + 3) & ~3
+        cmd = (struct.pack("<III", 0x0C, size, 24) + b"\x00" * 12
+               + install + b"\x00" * (size - 24 - len(install)))
+        return struct.pack(
+            "<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2,
+            1, len(cmd), 0, 0) + cmd
+
     service, workspace = product_service
     private = workspace.parent.parent
     provisioner = private.parent / (private.name + "-operator")
     if kind == "go":
         trees_data = {"go": {
-            "bin/go": b"inert-Go",
-            "pkg/tool/darwin_arm64/compile": b"inert-compile",
-            "pkg/tool/darwin_arm64/link": b"inert-link",
+            "bin/go": private_macho("Go"),
+            "pkg/tool/darwin_arm64/compile": private_macho("Compile"),
+            "pkg/tool/darwin_arm64/link": private_macho("Link"),
             "src/runtime/runtime.go": b"package runtime\n",
         }}
         needed_scratch = {"home", "tmp", "gopath", "modcache", "gocache", "gotmp"}
     elif kind == "python_direct":
         trees_data = {
-            "bin": {"python": b"inert-private-Python"},
+            "bin": {"python": private_macho("Python")},
             "lib": {"python/stdlib.py": b"x=1\n"},
         }
         needed_scratch = {"home", "tmp"}
@@ -2035,6 +2046,11 @@ def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
             f.write_bytes(data)
             f.chmod(0o600 if name.endswith((".py", ".go")) else 0o700)
         manifests[source_kind] = _d4_tree_expected(root)
+    if kind == "pipenv":
+        # The Pipenv executable is an inspected #! script; the kernel's
+        # selected private Python interpreter must ALSO be Mach-O ARM64.
+        private_python = workspace / "py-pipenv" / ".venv/bin/python"
+        private_python.write_bytes(private_macho("PipenvPython"))
     venv_manifest = (
         _d4_tree_expected(workspace / "py-pipenv" / ".venv")
         if kind == "pipenv" else None)
@@ -2042,7 +2058,7 @@ def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
         m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
         m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
             _ for _ in ()).throw(AssertionError("no native child in T0")))
-        candidate, marker, observed, recipe, runner, receipts = (
+        candidate, marker, observed, recipe, runner, native, receipts = (
             service._assemble_d4_r003_source_only_runner(
                 "a", cwd, argv, private_root=str(private),
                 provisioner_root=str(provisioner),
@@ -2060,6 +2076,13 @@ def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
         assert recipe.native_launch_allowed is False
         assert runner.native_launch_allowed is False
         assert runner.physical_whole_child_cpu_memory_attached is False
+        assert native.native_launch_allowed is False
+        assert native.actual_loaded_source_graph_proven is False
+        assert len(native.static_selected_executables) == (
+            3 if kind == "go" else 1)
+        assert all(item.selected_cpu == "arm64"
+                   and item.native_launch_allowed is False
+                   for _, item in native.static_selected_executables)
         result = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher).run(
             candidate.plan, product_attempt=marker)
         assert result["status"] == "launch_failed"
@@ -2404,3 +2427,44 @@ def test_d4_generic_callback_cannot_claim_selected_loader_set(
         "a", "py-direct", ["python", "-m", "pytest", "-q"])
     with pytest.raises(D4FixtureDenied):
         marker.attach_macho_loader_set(lambda *_: None)
+
+
+def test_d4_product_bundle_rejects_hash_matched_non_macho_go_compiler(
+        product_service, monkeypatch):
+    import struct
+    from gateway.core import GatewayError
+
+    service, workspace = product_service
+    private = workspace.parent.parent
+    source = private.parent / (private.name + "-operator")
+    go_root = source / "go"
+    fields = {
+        "bin/go": struct.pack(
+            "<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0),
+        "pkg/tool/darwin_arm64/compile": b"bad compiler, exact hash still selected",
+        "pkg/tool/darwin_arm64/link": struct.pack(
+            "<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0),
+        "src/runtime/runtime.go": b"package runtime\n",
+    }
+    go_root.mkdir(parents=True)
+    for name, data in fields.items():
+        file = go_root / name
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_bytes(data)
+        file.chmod(0o600 if name.endswith(".go") else 0o700)
+    manifests = {"go": _d4_tree_expected(go_root)}
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("bad toolchain cannot spawn")))
+        with pytest.raises(GatewayError) as denied:
+            service._assemble_d4_r003_source_only_runner(
+                "a", "go-project", ["go", "test", "./..."],
+                private_root=str(private), provisioner_root=str(source),
+                staged_manifests=manifests)
+        assert denied.value.code == "runner_unavailable"
+        assert service.info()["exec_policy"]["available"] is False
+        with pytest.raises(GatewayError) as public:
+            service.invoke_exec("a", "go-project", ["go", "test", "./..."],
+                                dry_run=False)
+        assert public.value.code == "exec_cleanup_proof_required"

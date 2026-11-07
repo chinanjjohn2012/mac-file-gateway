@@ -756,7 +756,9 @@ class WorkspaceService:
         toolchain or bin/lib source trees. This creates non-reusable private
         staged directories and fresh HOME/TMP/caches, derives selected
         executable hashes from the proven staged source set, then traverses
-        the same service-owned D4 recipe/one-use/Runner source preflight.
+        the same service-owned D4 recipe/one-use/Runner and selected native
+        Mach-O loader-set preflight. Non-Mach-O and wrong-architecture
+        toolchain binaries fail before any possible native execution.
         Source manifests are NOT independent provider/image/owner attestation.
         Any failure leaves partial bytes in the disposable private runner;
         no rollback, unsafe path overwrite, native child or retry occurs.
@@ -828,7 +830,12 @@ class WorkspaceService:
         expected_trees.update({name: (("", None),) for name in scratch})
         if flavor == "pipenv":
             expected_trees["venv"] = venv_manifest
-        prepared = self._prepare_d4_r003_runner_preflight(
+        # The primary product source preparation NOW requires the same
+        # actual pinned ARM64 image/header and one-use loader-set recheck as
+        # the separate source inspector, for every selected Go compiler/linker
+        # and the exact selected Python interpreter. Static declarations do
+        # not establish dyld resolution or native execution authorization.
+        prepared = self._prepare_d4_r003_selected_loader_set(
             name, cwd, argv, private_root=private_root,
             expected_hashes=expected_hashes,
             expected_trees=expected_trees,

@@ -273,3 +273,130 @@ def test_runner_scratch_denies_wrong_kind_without_writes(tmp_path):
     with pytest.raises(D4RuntimeStageDenied):
         create_d4_fresh_runner_scratch(private_root=str(root), kind="external")
     assert not list(root.iterdir())
+
+
+@pytest.mark.parametrize("kind", ["go", "bin", "lib"])
+def test_operator_source_manifest_exports_exact_real_bytes_for_approved_stage(
+        tmp_path, monkeypatch, kind):
+    """Operator observation helps prepare sources, but is NOT approval/T1."""
+    from gateway.lbe_runtime_tree import observe_d4_operator_source_manifest
+
+    private, source, externally_known_fixture = _stage_fixture(
+        tmp_path, kind=kind)
+    with monkeypatch.context() as m:
+        def no_native(*_args, **_kwargs):
+            raise AssertionError("manifest observation must never spawn")
+        m.setattr(subprocess, "Popen", no_native)
+        m.setattr(os, "listdir", no_native)
+        proposed = observe_d4_operator_source_manifest(
+            provisioner_root=str(source.parent), kind=kind)
+        assert proposed.kind == kind
+        assert proposed.proposed_manifest == tuple(sorted(externally_known_fixture))
+        assert proposed.file_count == sum(
+            sha is not None for _, sha in externally_known_fixture)
+        assert proposed.entry_count == len(externally_known_fixture)
+        assert len(proposed.observed_source_identity_sha256) == 64
+        assert proposed.trusted_operator_attested is False
+        assert proposed.manifest_independently_approved is False
+        assert proposed.actual_loaded_source_graph_proven is False
+        assert proposed.native_launch_allowed is False
+        # Explicit test fixture approval; real operation must separately
+        # review and pin these contents. The API does not self-approve them.
+        done = stage_d4_operator_runtime_tree(
+            private_root=str(private),
+            provisioner_root=str(source.parent), kind=kind,
+            expected=externally_known_fixture)
+    assert done.files == proposed.file_count
+    assert done.native_launch_allowed is False
+    assert not (private / "home").exists()
+
+
+@pytest.mark.parametrize("mutation", [
+    "symlink_file", "symlink_directory", "hardlink_file", "writable_source",
+    "pth", "special_fifo", "invalid_provisioner", "unknown_kind",
+])
+def test_operator_source_manifest_rejects_unqualified_live_inputs(
+        tmp_path, mutation):
+    from gateway.lbe_runtime_tree import (
+        D4RuntimeTreeDenied, observe_d4_operator_source_manifest,
+    )
+
+    _private, source, _expected = _stage_fixture(tmp_path)
+    kwargs = {"provisioner_root": str(source.parent), "kind": "go"}
+    if mutation == "symlink_file":
+        (source / "bin/go").unlink()
+        (source / "bin/go").symlink_to("/bin/sh")
+    elif mutation == "symlink_directory":
+        (source / "bin").rename(source / "real-bin")
+        (source / "bin").symlink_to(source / "real-bin")
+    elif mutation == "hardlink_file":
+        os.link(source / "bin/go", source / "bin/go-clone")
+    elif mutation == "writable_source":
+        (source / "src/runtime").chmod(0o777)
+    elif mutation == "pth":
+        (source / "src/runtime/bootstrap.pth").write_bytes(b"import os\n")
+    elif mutation == "special_fifo":
+        os.mkfifo(source / "bin/pipe")
+    elif mutation == "invalid_provisioner":
+        alias = tmp_path / "alias"
+        alias.symlink_to(source.parent)
+        kwargs["provisioner_root"] = str(alias)
+    else:
+        kwargs["kind"] = "python_direct"
+    with pytest.raises(D4RuntimeTreeDenied):
+        observe_d4_operator_source_manifest(**kwargs)
+
+
+def test_operator_source_manifest_rejects_modified_inode_during_read(
+        tmp_path, monkeypatch):
+    from gateway.lbe_runtime_tree import (
+        D4RuntimeTreeDenied, observe_d4_operator_source_manifest,
+    )
+    _private, source, _expected = _stage_fixture(tmp_path)
+    real_read = os.read
+    changed = []
+    def rewrite_during_read(fd, count):
+        data = real_read(fd, count)
+        if data == b"inert Go runtime entrypoint" and not changed:
+            (source / "bin/go").write_bytes(b"changed whilst observed")
+            changed.append(True)
+        return data
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "read", rewrite_during_read)
+        with pytest.raises(D4RuntimeTreeDenied):
+            observe_d4_operator_source_manifest(
+                provisioner_root=str(source.parent), kind="go")
+    assert changed
+
+
+def test_operator_manifest_entry_budget_refuses_unbounded_source_scan(
+        tmp_path, monkeypatch):
+    import gateway.lbe_runtime_tree as tree
+
+    _private, source, _expected = _stage_fixture(tmp_path)
+    for n in range(20):
+        (source / "bin" / f"extra-{n}.txt").write_bytes(b"unused")
+    def no_listdir(*_args, **_kwargs):
+        raise AssertionError("unbounded listdir not allowed")
+    with monkeypatch.context() as m:
+        m.setattr(os, "listdir", no_listdir)
+        m.setattr(tree, "_MAX_ENTRIES", 8)
+        with pytest.raises(tree.D4RuntimeTreeDenied):
+            tree.observe_d4_operator_source_manifest(
+                provisioner_root=str(source.parent), kind="go")
+
+
+def test_operator_reviewed_manifest_rejects_after_observation_source_drift(
+        tmp_path):
+    from gateway.lbe_runtime_tree import observe_d4_operator_source_manifest
+
+    private, source, _expected = _stage_fixture(tmp_path)
+    offered = observe_d4_operator_source_manifest(
+        provisioner_root=str(source.parent), kind="go")
+    (source / "src/runtime/runtime.go").write_bytes(b"package changed\n")
+    with pytest.raises(D4RuntimeStageDenied):
+        stage_d4_operator_runtime_tree(
+            private_root=str(private), provisioner_root=str(source.parent),
+            kind="go", expected=offered.proposed_manifest)
+    assert not (private / "go").exists()

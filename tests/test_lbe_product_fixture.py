@@ -2726,3 +2726,69 @@ def test_d4_fixture_inventory_bounds_entries_before_bulk_materialization(
         with pytest.raises(D4FixtureDenied, match="first-party D4 source identity unavailable"):
             product.check_d4_r003_fixture(
                 service.get("a"), candidate.plan)
+
+
+@pytest.mark.parametrize("cwd,argv,kinds", [
+    ("go-project", ["go", "test", "./..."], ("go",)),
+    ("go-project", ["go", "vet", "./..."], ("go",)),
+    ("go-project", ["go", "build", "-o", "bin/app", "./cmd/app"],
+     ("go",)),
+    ("py-direct", ["python", "-m", "pytest", "-q"], ("bin", "lib")),
+    ("py-direct", ["python", "-m", "compileall", "-q", "./src"],
+     ("bin", "lib")),
+    ("py-pipenv", ["python", "-m", "pytest", "-q"], ("bin", "lib")),
+])
+def test_d4_service_observes_operator_sources_for_six_reviewable_recipes(
+        product_service, monkeypatch, cwd, argv, kinds):
+    """The actual WorkspaceService can prepare reviewable source manifests.
+
+    No operator, image, manifest signature or native permission is claimed.
+    The caller must separately review any manifest before staging.
+    """
+    import hashlib
+
+    service, workspace = product_service
+    operator = workspace.parent.parent / "operator-source"
+    for kind in kinds:
+        folder = operator / kind
+        folder.mkdir(parents=True, exist_ok=True)
+        if kind == "go":
+            selected = folder / "bin/go"
+            selected.parent.mkdir()
+        elif kind == "bin":
+            selected = folder / ("pipenv" if cwd == "py-pipenv" else "python")
+        else:
+            selected = folder / "python/stdlib.py"
+            selected.parent.mkdir()
+        selected.write_bytes(("inert-" + kind).encode("ascii"))
+        selected.chmod(0o700 if kind != "lib" else 0o600)
+    def no_spawn(*_args, **_kwargs):
+        raise AssertionError("operator source observation cannot execute")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", no_spawn)
+        observed = service._observe_d4_r003_operator_provisioner(
+            "a", cwd, argv, provisioner_root=str(operator))
+    assert set(observed) == set(kinds)
+    for kind in kinds:
+        item = observed[kind]
+        selected = "bin/go" if kind == "go" else (
+            "pipenv" if kind == "bin" and cwd == "py-pipenv" else
+            "python" if kind == "bin" else "python/stdlib.py")
+        assert (selected, hashlib.sha256(
+            ("inert-" + kind).encode("ascii")).hexdigest()) in item.proposed_manifest
+        assert item.manifest_independently_approved is False
+        assert item.trusted_operator_attested is False
+        assert item.native_launch_allowed is False
+    with pytest.raises(GatewayError) as denied:
+        service.invoke_exec("a", cwd, argv, dry_run=False)
+    assert denied.value.code == "exec_cleanup_proof_required"
+
+
+def test_d4_service_operator_source_selection_does_not_self_approve_workspace(
+        product_service):
+    service, workspace = product_service
+    with pytest.raises(GatewayError) as denied:
+        service._observe_d4_r003_operator_provisioner(
+            "a", "py-direct", ["python", "-m", "pytest", "-q"],
+            provisioner_root=str(workspace / "py-direct"))
+    assert denied.value.code == "runner_unavailable"

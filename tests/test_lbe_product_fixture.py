@@ -3382,3 +3382,17 @@ def test_d4_go_source_regular_comment_and_string_are_not_embed_directives(
         "a", "go-project", ["go", "test", "./..."])
     assert candidate.native_launch_allowed is False
     assert candidate.actual_loaded_sources_proven is False
+
+
+
+def test_d4_go_embed_input_crlf_and_tab_indented_directive_denied(product_service):
+    """Compiler may process tab-indented directives with CRLF line endings."""
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/main.go").write_bytes(
+        b"package main\r\nimport _ \"embed\"\r\n"
+        b"\t//go:embed missing.txt\r\nvar data string\r\n"
+        b"func main() {}\r\n")
+    with pytest.raises(GatewayError) as denied:
+        service._prepare_d4_r003_fixture_candidate(
+            "a", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"])
+    assert denied.value.code == "command_not_allowed"

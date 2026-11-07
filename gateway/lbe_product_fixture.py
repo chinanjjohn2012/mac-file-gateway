@@ -39,6 +39,11 @@ _MAX_TREE_DEPTH = 5
 _PY_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\.py\Z")
 _GO_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*\.go\Z")
 _DIR_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*\Z")
+# go:embed makes the compiler consume non-.go resource bytes, which the
+# intentionally narrow first-party Go fixture does NOT yet inventory.
+# This bounded source-only scan is conservative, not a Go lexical parser
+# or proof of all Go compiler/stdlib/generated-source inputs.
+_UNQUALIFIED_GO_EMBED = re.compile(rb"(?m)^[ \t]*//go:embed(?:[ \t\r]|$)")
 
 # Exact requested argv and effective argv must BOTH be checked: user-supplied
 # `pipenv run` is not equivalent to an internal selected Pipenv runner.
@@ -287,6 +292,7 @@ def _file_digest(
     parent_fd: int, name: str, *,
     max_bytes: int = _MAX_SOURCE_BYTES,
     executable: bool = False,
+    check_go_embedded_inputs: bool = False,
 ) -> tuple[str, tuple[int, ...]]:
     """Read selected bytes by nofollow FD, including a bounded Python binary."""
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -298,6 +304,10 @@ def _file_digest(
         if executable and not metadata.st_mode & stat.S_IXUSR:
             raise D4FixtureDenied("selected interpreter is not owner executable")
         digest = hashlib.sha256()
+        # The ordinary file bound is 1 MiB. Only selected first-party .go
+        # text is retained for this extra compiler-input directive gate.
+        # Read exclusively through the already checked nofollow descriptor.
+        go_bytes = bytearray() if check_go_embedded_inputs else None
         read_bytes = 0
         while read_bytes < metadata.st_size:
             data = os.read(fd, min(65536, metadata.st_size - read_bytes))
@@ -305,6 +315,8 @@ def _file_digest(
                 raise D4FixtureDenied("fixture source changed while reading")
             read_bytes += len(data)
             digest.update(data)
+            if go_bytes is not None:
+                go_bytes.extend(data)
         after = _require_controlled(fd, directory=False)
         fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns",
                   "st_ctime_ns", "st_mode", "st_uid", "st_nlink")
@@ -312,6 +324,14 @@ def _file_digest(
         after_identity = tuple(getattr(after, key) for key in fields)
         if before_identity != after_identity:
             raise D4FixtureDenied("fixture inode or permissions changed during read")
+        if (go_bytes is not None
+                and _UNQUALIFIED_GO_EMBED.search(go_bytes) is not None):
+            # //go:embed compiler directives may open files not part of the
+            # accepted .go-only package tree. Do not label such a source
+            # snapshot complete until those paths and Go semantics are
+            # explicitly reviewed. Reject before any source-only recipe.
+            raise D4FixtureDenied(
+                "Go compile-time embedded source is not in the pinned fixture")
         return digest.hexdigest(), before_identity
     finally:
         os.close(fd)
@@ -404,7 +424,8 @@ def _walk_code_dir(parent_fd: int, name: str, *,
                 continue
             if (kind == "py" and _PY_NAME.fullmatch(entry)
                     or kind == "go" and _GO_NAME.fullmatch(entry)):
-                row = (prefix + "/" + entry, *_file_digest(fd, entry))
+                row = (prefix + "/" + entry, *_file_digest(
+                    fd, entry, check_go_embedded_inputs=(kind == "go")))
                 _budget_add(row, budget)
                 selected.append(row)
                 continue
@@ -576,7 +597,9 @@ def _go_selected_sources(
     selected: list[tuple] = []
     for name in names:
         if name in ("go.mod", "go.sum") or _GO_NAME.fullmatch(name):
-            row = (name, *_file_digest(project_fd, name))
+            row = (name, *_file_digest(
+                project_fd, name,
+                check_go_embedded_inputs=(name not in ("go.mod", "go.sum"))))
             _budget_add(row, budget)
             selected.append(row)
         elif name in ("cmd", "internal", "pkg"):

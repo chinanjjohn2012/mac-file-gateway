@@ -1214,8 +1214,16 @@ def _d4_tree_expected(path):
 
 def _d4_staged_trees(root, kind):
     private = root.parent.parent
+    scratch = {
+        name: _d4_tree_expected(private / name)
+        for name in ("home", "tmp")
+    }
     if kind == "go":
-        return {"go": _d4_tree_expected(private / "go")}
+        scratch.update({
+            name: _d4_tree_expected(private / name)
+            for name in ("gopath", "modcache", "gocache", "gotmp")
+        })
+        return {"go": _d4_tree_expected(private / "go"), **scratch}
     if kind != "pipenv":
         raise AssertionError("invalid private source kind")
     (private / "lib").mkdir(exist_ok=True)
@@ -1223,6 +1231,7 @@ def _d4_staged_trees(root, kind):
         "venv": _d4_tree_expected(root / "py-pipenv" / ".venv"),
         "bin": _d4_tree_expected(private / "bin"),
         "lib": _d4_tree_expected(private / "lib"),
+        **scratch,
     }
 
 
@@ -1248,7 +1257,7 @@ def test_d4_product_stage_binds_entire_staged_source_tree_to_worker(
             "a", cwd, argv, private_root=private, expected_hashes=hashes,
             expected_trees=trees)
         assert observation.bounded_staged_file_set_checked is True
-        assert len(observation.staged_source_trees) == (1 if kind == "go" else 3)
+        assert len(observation.staged_source_trees) == (7 if kind == "go" else 5)
         assert all(entry_count > 0 and len(digest) == 64
                    for _label, digest, entry_count, _total in
                    observation.staged_source_trees)
@@ -1271,6 +1280,10 @@ def test_d4_product_stage_binds_entire_staged_source_tree_to_worker(
     ("go", "go/pkg/tool/darwin_arm64/new_tool"),
     ("pipenv", "lib/shadow.py"),
     ("pipenv", "projects/a/py-pipenv/.venv/lib/site.py"),
+    ("go", "gocache/unknown-built-package.a"),
+    ("go", "modcache/unlisted-module.go"),
+    ("pipenv", "home/.pipenv_unapproved"),
+    ("pipenv", "tmp/unqualified-site.py"),
 ])
 def test_d4_product_staged_tree_extra_source_denied_before_launcher(
         product_service, monkeypatch, kind, added_path):
@@ -1334,5 +1347,37 @@ def test_d4_product_stage_rejects_trusted_manifest_with_pth_startup_code(
             service._inspect_d4_r003_staged_runtime(
                 "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
                 private_root=private, expected_hashes=hashes,
+                expected_trees=trees)
+    assert denied.value.code == "runner_unavailable"
+
+
+@pytest.mark.parametrize("kind,name", [
+    ("go", "gopath"),
+    ("go", "modcache"),
+    ("go", "gocache"),
+    ("go", "gotmp"),
+    ("go", "home"),
+    ("go", "tmp"),
+    ("pipenv", "home"),
+    ("pipenv", "tmp"),
+])
+def test_d4_product_denies_prepopulated_native_scratch_even_with_approved_digest(
+        product_service, monkeypatch, kind, name):
+    # Hashing a cache can never establish that foreign generated modules or
+    # startup files are allowed. Preexisting scratch inputs must be absent.
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind=kind)
+    extra = root.parent.parent / name / "preexisting.txt"
+    extra.write_bytes(b"prepopulated scratch is not an approved source")
+    trees = _d4_staged_trees(root, kind)
+    assert any(row[0] == "preexisting.txt" for row in trees[name])
+    cwd = "go-project" if kind == "go" else "py-pipenv"
+    argv = (["go", "test", "./..."] if kind == "go"
+            else ["python", "-m", "pytest", "-q"])
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        with pytest.raises(GatewayError) as denied:
+            service._inspect_d4_r003_staged_runtime(
+                "a", cwd, argv, private_root=private, expected_hashes=hashes,
                 expected_trees=trees)
     assert denied.value.code == "runner_unavailable"

@@ -366,16 +366,34 @@ def inspect_d4_runtime_sources(
         # resolution and never authorizes a Popen.
         if type(expected_trees) is not dict:
             raise D4RuntimeSourceDenied("staged source manifest must be exact")
+        # Besides executable and site roots, Go and Pipenv can select
+        # first-party or foreign source from persistent caches, HOME or TMP.
+        # Require fresh, empty private scratch/input roots at this boundary,
+        # not a caller-approved hash of an arbitrary prepopulated cache.
+        scratch_roots = (
+            ("home", root + "/home"), ("tmp", root + "/tmp"),
+        )
         if kind == "go":
-            tree_roots = (("go", root + "/go"),)
+            scratch_roots += (
+                ("gopath", root + "/gopath"),
+                ("modcache", root + "/modcache"),
+                ("gocache", root + "/gocache"),
+                ("gotmp", root + "/gotmp"),
+            )
+            tree_roots = (("go", root + "/go"),) + scratch_roots
         else:
             tree_roots = (
                 ("bin", root + "/bin"),
                 ("lib", root + "/lib"),
                 ("venv", pipenv_project + "/.venv"),
-            )
+            ) + scratch_roots
         if set(expected_trees) != {name for name, _path in tree_roots}:
             raise D4RuntimeSourceDenied("missing staged Go/Pipenv source roots")
+        for name, _location in scratch_roots:
+            if (type(expected_trees[name]) is not tuple
+                    or expected_trees[name] != (("", None),)):
+                raise D4RuntimeSourceDenied(
+                    "unqualified nonempty runner scratch or cache input")
         for name, staged_root in tree_roots:
             try:
                 snapshot = inspect_d4_closed_staged_tree(

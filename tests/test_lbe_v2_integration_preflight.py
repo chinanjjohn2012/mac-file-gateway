@@ -2120,12 +2120,17 @@ def test_r006_workspace_discovery_distinguishes_preview_from_positive_exec(
             assert svc.info()["exec_policy"]["available"] is False
             with TestClient(create_multi_app(svc, enable_mcp=False),
                             base_url="http://127.0.0.1:8765") as client:
-                for endpoint in ("/info", "/health"):
-                    response = client.get(endpoint)
-                    assert response.status_code == 200
-                    actual = {w["id"]: w
-                              for w in response.json()["workspaces"]}
-                    assert actual == by_id
+                info_response = client.get("/info")
+                assert info_response.status_code == 200
+                actual = {w["id"]: w
+                          for w in info_response.json()["workspaces"]}
+                assert actual == by_id
+                # /health intentionally exposes the shared exec_policy,
+                # not the complete per-Workspace /info response body.
+                health_response = client.get("/health")
+                assert health_response.status_code == 200
+                assert health_response.json()["exec_policy"] == (
+                    info_response.json()["exec_policy"])
             with pytest.raises(GatewayError) as denied:
                 svc.invoke_exec("a", "go-project", ["go", "test", "./..."],
                                 dry_run=False)

@@ -202,7 +202,9 @@ def prepare_d4_native_launch_recipe(
     env = dict(observed.closed_child_environment)
     if (len(env) != len(observed.closed_child_environment)
             or any(type(k) is not str or type(v) is not str
-                   or not k or not v or "\x00" in k or "\x00" in v
+                   or not k or (not v and not (
+                       observed.kind == "go" and k == "GOFLAGS"))
+                   or "\x00" in k or "\x00" in v
                    for k,v in observed.closed_child_environment)
             or any(k in env for k in ("PYTHONPATH", "GITHUB_TOKEN", "GOFLAGS_EXTRA",
                                      "DYLD_INSERT_LIBRARIES"))):
@@ -212,8 +214,9 @@ def prepare_d4_native_launch_recipe(
             or not env.get("PATH", "").startswith(root + "/")):
         raise D4NativeRecipeDenied("unqualified child environment")
     if observed.kind == "go":
-        if (env.get("GOTOOLCHAIN") != "local" or env.get("GOPROXY") != "off"
-                or env.get("GOWORK") != "off" or env.get("CGO_ENABLED") != "0"):
+        if (env.get("GOFLAGS") != "" or env.get("GOTOOLCHAIN") != "local"
+                or env.get("GOPROXY") != "off" or env.get("GOWORK") != "off"
+                or env.get("CGO_ENABLED") != "0"):
             raise D4NativeRecipeDenied("Go environment no longer closed")
     else:
         if env.get("PYTHONNOUSERSITE") != "1":

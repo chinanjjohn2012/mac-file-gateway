@@ -1447,6 +1447,8 @@ def test_d4_all_six_commands_produce_private_source_only_native_recipe(
         assert dict(recipe.required_limits)["memory_mib_max"] == 4096
         assert dict(recipe.closed_child_environment)["HOME"] == private + "/home"
         assert "GITHUB_TOKEN" not in dict(recipe.closed_child_environment)
+        if kind == "go":
+            assert dict(recipe.closed_child_environment)["GOFLAGS"] == ""
         if kind == "go" and argv[1] == "build":
             assert recipe.canonical_output_path == str(
                 workspace / "go-project" / "bin" / "app")
@@ -1528,7 +1530,8 @@ def test_d4_recipe_rejects_timeout_outside_original_child_budget(
                 ["python", "-m", "compileall", "-q", "./src"],
                 private_root=private, expected_hashes=hashes,
                 expected_trees=trees, timeout_seconds=timeout)
-    assert denied.value.code in {"runner_unavailable", "invalid_argument"}
+    assert denied.value.code in {
+        "runner_unavailable", "invalid_argument", "command_not_allowed"}
 
 
 def test_d4_native_recipe_rejects_forged_observation_and_cannot_mint_grant(
@@ -1592,3 +1595,29 @@ def test_d4_python_direct_worker_prelaunch_rechecks_real_private_python(
                 candidate.plan, product_attempt=marker)
         assert denied.value.code == "attempt_replay_denied"
     assert called == []
+
+
+def test_d4_go_recipe_rejects_untrusted_nonempty_goflags_even_if_observation_forged(
+        product_service, monkeypatch):
+    from gateway.lbe_launch_recipe import (
+        D4NativeRecipeDenied, prepare_d4_native_launch_recipe,
+    )
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(workspace, kind="go")
+    trees = _d4_staged_trees(workspace, "go")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, _marker, observed = service._prepare_d4_r003_staged_attempt(
+            "a", "go-project", ["go", "test", "./..."],
+            private_root=private, expected_hashes=hashes,
+            expected_trees=trees,
+        )
+        env = dict(observed.closed_child_environment)
+        assert env["GOFLAGS"] == ""
+        env["GOFLAGS"] = "-toolexec=/outside/forbidden"
+        forged = replace(observed, closed_child_environment=tuple(sorted(env.items())))
+        with pytest.raises(D4NativeRecipeDenied, match="Go environment"):
+            prepare_d4_native_launch_recipe(
+                service.get("a"), candidate, forged, private_root=private)
+    assert service.info()["exec_policy"]["available"] is False

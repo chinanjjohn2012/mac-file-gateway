@@ -3953,24 +3953,59 @@ def test_d4_go_darwin_arm64_source_selection_ignores_unbuilt_platform_imports(
     assert not (workspace / "go-project/bin/app").exists()
 
 
-@pytest.mark.parametrize("source", [
-    b'//go:build darwin\n\npackage main\nimport "fmt"\n',
-    b'// +build darwin,arm64\n\npackage main\n',
-    b'//go:build linux || darwin\n\npackage main\n',
+@pytest.mark.parametrize("filename,source,active", [
+    ("platform.go", b'//go:build darwin && arm64\n\npackage main\n'
+     b'import "fmt"\n', True),
+    ("platform_darwin.go", b'// +build darwin,arm64\n\npackage main\n'
+     b'import "fmt"\n', True),
+    ("platform.go", b'//go:build linux\n\npackage main\n'
+     b'import "unreviewed.example/linux"\n', False),
+    ("platform.go", b'//go:build windows || amd64\n\npackage main\n'
+     b'import "unreviewed.example/win"\n', False),
 ])
-def test_d4_go_active_explicit_build_tags_require_real_build_constraint_parser(
+def test_d4_go_real_service_explicit_build_tags_select_only_target_sources(
+        product_service, filename, source, active):
+    from gateway.lbe_go_import_sources import inspect_d4_go_direct_import_sources
+
+    service, workspace = product_service
+    selected_path = workspace / "go-project/cmd/app" / filename
+    selected_path.write_bytes(source)
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "vet", "./..."])
+    snapshot = {name for name, _ in candidate.source_sha256}
+    assert "go-project/cmd/app/" + filename in snapshot
+    receipt = inspect_d4_go_direct_import_sources(
+        service.get("a"), candidate,
+        staged_go_manifest=(("src/fmt/print.go", "a" * 64),))
+    if active:
+        assert receipt.selected_imports == ("fmt",)
+        assert receipt.inactive_first_party_sources == ()
+    else:
+        assert receipt.selected_imports == ()
+        assert receipt.inactive_first_party_sources == (
+            "go-project/cmd/app/" + filename,)
+    assert receipt.build_constraint_closure_proven is False
+    assert receipt.actual_loaded_source_graph_proven is False
+    assert receipt.native_launch_allowed is False
+
+
+@pytest.mark.parametrize("source", [
+    b'//go:build darwin && unreviewed_tool_tag\n\npackage main\n',
+    b'//go:build (darwin\n\npackage main\n',
+    b'//go:build darwin\n// +build linux\n\npackage main\n',
+])
+def test_d4_go_real_service_refuses_unqualified_build_tag_sources(
         product_service, source):
     from gateway.lbe_go_import_sources import (
         inspect_d4_go_direct_import_sources, D4GoImportSourceDenied,
     )
     service, workspace = product_service
-    (workspace / "go-project/cmd/app/platform_darwin.go").write_bytes(source)
+    (workspace / "go-project/cmd/app/platform.go").write_bytes(source)
     candidate = service._prepare_d4_r003_fixture_candidate(
         "a", "go-project", ["go", "vet", "./..."])
     with pytest.raises(D4GoImportSourceDenied):
         inspect_d4_go_direct_import_sources(
-            service.get("a"), candidate,
-            staged_go_manifest=(("src/fmt/print.go", "a" * 64),))
+            service.get("a"), candidate, staged_go_manifest=())
 
 
 def test_d4_go_only_non_target_local_package_is_not_falsely_qualified(

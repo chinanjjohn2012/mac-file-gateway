@@ -2,7 +2,8 @@
 import pytest
 
 from gateway.lbe_go_import_sources import (
-    _direct_imports, _darwin_arm64_filename_selected, D4GoImportSourceDenied,
+    _direct_imports, _darwin_arm64_filename_selected,
+    _darwin_arm64_explicit_selected, D4GoImportSourceDenied,
 )
 
 
@@ -57,3 +58,44 @@ def test_d4_go_filename_implicit_constraints_are_darwin_arm64_only(
 def test_d4_go_filename_policy_refuses_non_source_inputs(bad):
     with pytest.raises(D4GoImportSourceDenied):
         _darwin_arm64_filename_selected(bad)
+
+
+
+@pytest.mark.parametrize("content,included", [
+    (b'package main\n', True),
+    (b'//go:build darwin && arm64\n\npackage main\n', True),
+    (b'//go:build darwin && !cgo\n\npackage main\n', True),
+    (b'//go:build (darwin || linux) && arm64\n\npackage main\n', True),
+    (b'//go:build unix && gc && go1.27\n\npackage main\n', True),
+    (b'//go:build windows\n\npackage main\n', False),
+    (b'//go:build linux || amd64\n\npackage main\n', False),
+    (b'//go:build go1.28\n\npackage main\n', False),
+    (b'// +build darwin,arm64\n\npackage main\n', True),
+    (b'// +build linux darwin\n\npackage main\n', True),
+    (b'// +build linux,arm64\n\npackage main\n', False),
+    (b'//go:build darwin && arm64\n// +build darwin,arm64\n\npackage main\n',
+     True),
+    (b'//go:build windows\n// +build windows\n\npackage main\n', False),
+])
+def test_d4_go_explicit_build_tag_selection_for_fixed_darwin_arm64(
+        content, included):
+    assert _darwin_arm64_explicit_selected(content) is included
+
+
+@pytest.mark.parametrize("content", [
+    b'//go:build darwin || custom_hook\n\npackage main\n',
+    b'//go:build arm64.v8\n\npackage main\n',
+    b'//go:build race\n\npackage main\n',
+    b'//go:build darwin &&\n\npackage main\n',
+    b'//go:build (darwin\n\npackage main\n',
+    b'//go:build darwin arm64\n\npackage main\n',
+    b'//go:build darwin && arm64 && && gc\n\npackage main\n',
+    b'//go:build darwin\n//go:build arm64\n\npackage main\n',
+    b'//go:build darwin\n// +build linux\n\npackage main\n',
+    b'// +build darwin,,arm64\n\npackage main\n',
+    b'package main\n//go:build darwin\n',
+    b'//go:build darwin\nfunc bad() {}\npackage main\n',
+])
+def test_d4_go_unknown_or_ambiguous_explicit_build_constraints_denied(content):
+    with pytest.raises(D4GoImportSourceDenied):
+        _darwin_arm64_explicit_selected(content)

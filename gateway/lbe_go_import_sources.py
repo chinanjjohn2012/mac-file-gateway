@@ -64,9 +64,169 @@ _GOARCH = frozenset((
     "mips64", "mips64le", "ppc64", "ppc64le", "riscv64",
     "s390x", "wasm",
 ))
-_EXPLICIT_BUILD_TAG = re.compile(
-    rb"(?m)^[ \t]*//[ \t]*(?:go:build|\+build)(?:[ \t]|$)"
+_MODERN_BUILD = re.compile(rb"(?m)^[ \t]*//go:build[ \t]+([^\r\n]+)")
+_LEGACY_BUILD = re.compile(rb"(?m)^[ \t]*//[ \t]+\+build[ \t]+([^\r\n]+)")
+_BUILD_DIRECTIVE = re.compile(
+    rb"(?m)^[ \t]*//[ \t]*(?:go:build|\+build)(?:[ \t\r]|$)"
 )
+_BUILD_TOKEN = re.compile(rb"&&|\|\||!|\(|\)|[A-Za-z0-9_.]+")
+_MAX_BUILD_TOKENS = 128
+
+
+def _tag_on_target(name: bytes) -> bool:
+    """Only evaluate fixed, independently known Go 1.27.3 darwin/arm64 tags."""
+    try:
+        tag = name.decode("ascii")
+    except UnicodeError:
+        raise D4GoImportSourceDenied("unknown Go build tag") from None
+    if tag in _GOOS:
+        return tag == "darwin"
+    if tag in _GOARCH:
+        return tag == "arm64"
+    if tag == "unix" or tag == "gc":
+        return True
+    if tag == "cgo":
+        return False  # closed R003 effective environment sets CGO_ENABLED=0
+    if re.fullmatch(r"go1\.[0-9]{1,2}", tag):
+        return 1 <= int(tag[4:]) <= 27
+    # Arbitrary -tags, architecture tool tags, experiments and release
+    # candidate tags cannot be interpreted by this bounded static source.
+    raise D4GoImportSourceDenied("Go custom/tool build tag not qualified")
+
+
+def _eval_modern_go_build(value: bytes) -> bool:
+    """Safe bounded Go //go:build expression subset: !, &&, ||, parentheses."""
+    if not 0 < len(value) <= 512:
+        raise D4GoImportSourceDenied("Go build expression out of bound")
+    tokens: list[bytes] = []
+    pos = 0
+    while pos < len(value):
+        if value[pos] in b" \t":
+            pos += 1
+            continue
+        match = _BUILD_TOKEN.match(value, pos)
+        if match is None or len(tokens) >= _MAX_BUILD_TOKENS:
+            raise D4GoImportSourceDenied("unknown Go build expression syntax")
+        tokens.append(match.group(0))
+        pos = match.end()
+    if not tokens:
+        raise D4GoImportSourceDenied("missing Go build expression")
+    position = 0
+
+    def parse_atom(depth: int) -> bool:
+        nonlocal position
+        if depth > 20 or position >= len(tokens):
+            raise D4GoImportSourceDenied("Go build expression nesting/arity invalid")
+        token = tokens[position]
+        position += 1
+        if token == b"!":
+            return not parse_atom(depth + 1)
+        if token == b"(":
+            value = parse_or(depth + 1)
+            if position >= len(tokens) or tokens[position] != b")":
+                raise D4GoImportSourceDenied("unclosed Go build expression")
+            position += 1
+            return value
+        if token in (b")", b"&&", b"||"):
+            raise D4GoImportSourceDenied("invalid Go build expression atom")
+        return _tag_on_target(token)
+
+    def parse_and(depth: int) -> bool:
+        nonlocal position
+        value = parse_atom(depth)
+        while position < len(tokens) and tokens[position] == b"&&":
+            position += 1
+            next_value = parse_atom(depth)
+            value = value and next_value
+        return value
+
+    def parse_or(depth: int) -> bool:
+        nonlocal position
+        value = parse_and(depth)
+        while position < len(tokens) and tokens[position] == b"||":
+            position += 1
+            next_value = parse_and(depth)
+            value = value or next_value
+        return value
+
+    selected = parse_or(0)
+    if position != len(tokens):
+        raise D4GoImportSourceDenied("Go build expression trailing tokens")
+    return selected
+
+
+def _eval_legacy_go_build(lines: list[bytes]) -> bool:
+    """Legacy +build lines: AND lines, OR fields, comma-AND signed tags."""
+    if not 1 <= len(lines) <= 16:
+        raise D4GoImportSourceDenied("Go legacy build line count invalid")
+    accepted = True
+    for line in lines:
+        if not 0 < len(line) <= 512:
+            raise D4GoImportSourceDenied("Go legacy build line too long")
+        clauses = line.split()
+        if not clauses or len(clauses) > 32:
+            raise D4GoImportSourceDenied("Go legacy build clause count invalid")
+        line_accepted = False
+        for clause in clauses:
+            atoms = clause.split(b",")
+            if not atoms or len(atoms) > 32:
+                raise D4GoImportSourceDenied("Go legacy comma list invalid")
+            clause_accepted = True
+            for atom in atoms:
+                if not atom:
+                    raise D4GoImportSourceDenied("empty Go legacy build tag")
+                negated = atom.startswith(b"!")
+                term = atom[1:] if negated else atom
+                if not re.fullmatch(rb"[A-Za-z0-9_.]+", term):
+                    raise D4GoImportSourceDenied("invalid Go legacy build tag")
+                tag = _tag_on_target(term)
+                clause_accepted = clause_accepted and (not tag if negated else tag)
+            line_accepted = line_accepted or clause_accepted
+        accepted = accepted and line_accepted
+    return accepted
+
+
+def _darwin_arm64_explicit_selected(raw: bytes) -> bool:
+    """Recognize bounded explicit Go build tags without running Go.
+
+    Every declared tag is checked, even in a dead boolean branch. Unsupported
+    tool/custom tags, wrong placement and contradictory modern/legacy
+    directions fail closed. This is static first-party source selection,
+    NOT compiler-verified actual loaded-source, release/tool tag or T1 proof.
+    """
+    modern = _MODERN_BUILD.findall(raw)
+    legacy = _LEGACY_BUILD.findall(raw)
+    directives = _BUILD_DIRECTIVE.findall(raw)
+    if len(directives) != len(modern) + len(legacy):
+        raise D4GoImportSourceDenied("ambiguous Go build directive")
+    if len(modern) > 1 or len(legacy) > 16:
+        raise D4GoImportSourceDenied("duplicate Go build directives")
+    if not directives:
+        return True
+    # A directive must precede the first actual package clause, with only
+    # empty lines and Go comments before it. Reject ambiguous layout rather
+    # than pretending to reproduce the Go lexer or generated inputs.
+    header = raw.splitlines()
+    seen_code = False
+    for line in header:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(b"package "):
+            seen_code = True
+            continue
+        if (stripped.startswith(b"//go:build")
+                or stripped.startswith(b"// +build")) and seen_code:
+            raise D4GoImportSourceDenied("Go build tag after package clause")
+        if not seen_code and not stripped.startswith(b"//"):
+            raise D4GoImportSourceDenied("unqualified Go build directive header")
+    # Allow exactly one modern expression plus optional old +build lines.
+    modern_selected = _eval_modern_go_build(modern[0]) if modern else None
+    legacy_selected = _eval_legacy_go_build(legacy) if legacy else None
+    if (modern_selected is not None and legacy_selected is not None
+            and modern_selected != legacy_selected):
+        raise D4GoImportSourceDenied("divergent Go modern and legacy build tags")
+    return modern_selected if modern_selected is not None else legacy_selected
 
 
 def _darwin_arm64_filename_selected(relative: str) -> bool:
@@ -289,12 +449,9 @@ def inspect_d4_go_direct_import_sources(
                 if not _darwin_arm64_filename_selected(path):
                     inactive_go_sources.append(path)
                     continue
-                if _EXPLICIT_BUILD_TAG.search(raw) is not None:
-                    # Evaluating //go:build, +build, release/tool/custom tags
-                    # using this narrow lexical parser would be dishonest.
-                    # Fail closed instead of claiming actual build closure.
-                    raise D4GoImportSourceDenied(
-                        "selected Go source has unresolved build constraints")
+                if not _darwin_arm64_explicit_selected(raw):
+                    inactive_go_sources.append(path)
+                    continue
                 active_go_sources.append(path)
                 full_imports.update(_direct_imports(raw))
         finally:

@@ -361,6 +361,68 @@ def inspect_d4_runtime_sources(
     )
 
 
+
+class D4StagedSourceRecheck:
+    """Concrete source/closed-env recheck for one Worker attempt.
+
+    Only a trusted internal WorkspaceService may assemble this with its
+    previously checked live context and source candidate. This does NOT
+    carry any grant, even if an attacker were able to construct it locally.
+    It repeats the actual staged file, first-party and environment
+    inspection after the Worker burns the one-use attempt and before its
+    launcher. Full imported-source/OS isolation/approval remain absent.
+    """
+    __slots__ = ("_ctx", "_candidate", "_root", "_hashes", "_observed")
+
+    def __init__(self, ctx: "WorkspaceContext",
+                 candidate: D4FixtureCandidate, *,
+                 private_root: str, expected_hashes: dict[str, str],
+                 observed: D4RuntimeSourceObservation) -> None:
+        from .workspaces import WorkspaceContext
+
+        if (type(ctx) is not WorkspaceContext
+                or type(candidate) is not D4FixtureCandidate
+                or type(observed) is not D4RuntimeSourceObservation
+                or observed.native_launch_allowed is not False
+                or observed.owner_native_t1_grant is not False
+                or observed.actual_import_graph_attested is not False
+                or observed.physical_resource_domain_attached is not False
+                or candidate.plan.workspace != ctx.name
+                or observed.workspace != ctx.name
+                or observed.requested_argv != candidate.plan.requested_argv
+                or observed.effective_argv != candidate.plan.effective_argv
+                or type(expected_hashes) is not dict):
+            raise D4RuntimeSourceDenied("invalid staged-source binding")
+        root = _canonical(private_root, "private_root")
+        pairs = tuple(sorted(expected_hashes.items()))
+        if any(type(k) is not str or type(v) is not str
+               or _SHA.fullmatch(v) is None for k,v in pairs):
+            raise D4RuntimeSourceDenied("invalid pinned staged-source digests")
+        self._ctx = ctx
+        self._candidate = candidate
+        self._root = root
+        self._hashes = pairs
+        self._observed = observed
+
+    def check_binding(self, ctx: "WorkspaceContext",
+                      candidate: D4FixtureCandidate) -> None:
+        if ctx is not self._ctx or candidate is not self._candidate:
+            raise D4RuntimeSourceDenied("staged-source context drifted")
+
+    def recheck_for(self, ctx: "WorkspaceContext",
+                    candidate: D4FixtureCandidate) -> None:
+        self.check_binding(ctx, candidate)
+        latest = inspect_d4_runtime_sources(
+            self._ctx, self._candidate,
+            private_root=self._root,
+            expected_hashes=dict(self._hashes),
+        )
+        if latest != self._observed:
+            raise D4RuntimeSourceDenied(
+                "staged-source or child-environment changed before Worker launch")
+
+
+
 def authorize_d4_native_from_observation(_evidence: object) -> None:
     """Hard denial even for a forged/fully populated source-only observation."""
     raise D4RuntimeSourceDenied(

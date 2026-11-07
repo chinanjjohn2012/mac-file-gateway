@@ -574,6 +574,46 @@ class WorkspaceService:
                 self._active_operations -= 1
                 self._lifecycle.notify_all()
 
+    def _prepare_d4_r003_staged_attempt(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, expected_hashes: dict[str, str],
+        timeout_seconds: int = 60,
+    ):
+        """Bind actual staged source/env observations to a one-use Worker.
+
+        The internal source-only attempt remains non-authorizing. It must
+        recheck first-party and staged binaries, parent execution selectors,
+        and the constructed closed child environment after atomic attempt
+        consumption and before any possible child launch. Missing Runner
+        image, loaded-source closure, resource witness, owner approval and
+        operative F1 exception always leave Go/Pipenv native execution DENIED.
+        """
+        observed = self._inspect_d4_r003_staged_runtime(
+            name, cwd, argv, private_root=private_root,
+            expected_hashes=expected_hashes,
+            timeout_seconds=timeout_seconds,
+        )
+        candidate = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        ctx = self.get(name)
+        from .lbe_product_fixture import D4OneUseAttemptMarker
+        from .lbe_runtime_source import (
+            D4RuntimeSourceDenied, D4StagedSourceRecheck,
+        )
+
+        try:
+            binding = D4StagedSourceRecheck(
+                ctx, candidate, private_root=private_root,
+                expected_hashes=expected_hashes, observed=observed)
+            marker = D4OneUseAttemptMarker(
+                candidate, ctx, staged_source=binding)
+        except D4RuntimeSourceDenied:
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 staged source recheck binding unavailable.",
+            ) from None
+        return candidate, marker, observed
+
     def require_git(self, name: str, command: str) -> WorkspaceContext:
         """Independent authorization, always repeated in sync Worker."""
         ctx = self.get(name)

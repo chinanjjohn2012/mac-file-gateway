@@ -39,7 +39,8 @@ def product_service(tmp_path: Path):
     pipenv = workspace / "py-pipenv"
     (pipenv / ".venv" / "bin").mkdir(parents=True)
     (pipenv / "Pipfile").write_bytes(b"[packages]\n")
-    (pipenv / "Pipfile.lock").write_bytes(b"{}\n")
+    (pipenv / "Pipfile.lock").write_bytes(
+        b'{"_meta":{"hash":{"sha256":"' + b"a" * 64 + b'"}}}\n')
     (pipenv / ".venv" / "pyvenv.cfg").write_bytes(b"home = private\n")
     (pipenv / ".venv" / "bin" / "python").write_bytes(b"fixed test-only bytes\n")
     (pipenv / ".venv" / "bin" / "python").chmod(0o700)
@@ -1096,4 +1097,103 @@ def test_d4_staged_runtime_not_client_mintable_or_executable_on_python_direct(
                 "a", "py-direct", ["python", "-m", "pytest", "-q"],
                 private_root=private, expected_hashes=hashes)
     assert denied.value.code == "runner_unavailable"
+    assert service.info()["exec_policy"]["available"] is False
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+])
+def test_d4_staged_source_binding_rechecks_real_selected_files_before_worker(
+        product_service, monkeypatch, kind, cwd, argv):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind=kind)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_k: (
+            _ for _ in ()).throw(AssertionError("No actual T1 child allowed")))
+        candidate, marker, observed = service._prepare_d4_r003_staged_attempt(
+            "a", cwd, argv, private_root=private, expected_hashes=hashes)
+        assert observed.native_launch_allowed is False
+        worker = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher)
+        first = worker.run(candidate.plan, product_attempt=marker)
+        assert first["status"] == "launch_failed"
+        assert first["executed"] is False
+        with pytest.raises(LbeWorkerError) as denied:
+            worker.run(candidate.plan, product_attempt=marker)
+        assert denied.value.code == "attempt_replay_denied"
+
+
+@pytest.mark.parametrize("kind,argv,changed", [
+    ("go", ["go", "test", "./..."], "go/bin/go"),
+    ("go", ["go", "vet", "./..."], "go/pkg/tool/darwin_arm64/link"),
+    ("pipenv", ["python", "-m", "pytest", "-q"], "bin/pipenv"),
+])
+def test_d4_staged_source_drift_burns_original_attempt_without_any_launch(
+        product_service, monkeypatch, kind, argv, changed):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind=kind)
+    cwd = "go-project" if kind == "go" else "py-pipenv"
+    launcher_calls = []
+    def forbidden(_plan):
+        launcher_calls.append(True)
+        raise AssertionError("Staged-source drift must not reach launcher")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, marker, observation = service._prepare_d4_r003_staged_attempt(
+            "a", cwd, argv, private_root=private, expected_hashes=hashes)
+        assert observation.native_launch_allowed is False
+        (root.parent.parent / changed).write_bytes(
+            b"replaced staged bytes without any native execution")
+        worker = LbeWorker(DirectChildOwner(), launcher=forbidden)
+        with pytest.raises(LbeWorkerError) as denied:
+            worker.run(candidate.plan, product_attempt=marker)
+        assert denied.value.code == "attempt_replay_denied"
+        with pytest.raises(LbeWorkerError) as replay:
+            worker.run(candidate.plan, product_attempt=marker)
+        assert replay.value.code == "attempt_replay_denied"
+    assert launcher_calls == []
+
+
+def test_d4_live_parent_go_selector_after_staging_denies_before_launcher(
+        product_service, monkeypatch):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind="go")
+    seen = []
+    def forbidden(_plan):
+        seen.append(True)
+        raise AssertionError("Changed parent environment may not launch")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, marker, _observed = service._prepare_d4_r003_staged_attempt(
+            "a", "go-project", ["go", "test", "./..."],
+            private_root=private, expected_hashes=hashes)
+        os.environ["GOFLAGS"] = "-toolexec=/outside/host"
+        with pytest.raises(LbeWorkerError) as denied:
+            LbeWorker(DirectChildOwner(), launcher=forbidden).run(
+                candidate.plan, product_attempt=marker)
+        assert denied.value.code == "attempt_replay_denied"
+    assert seen == []
+
+
+def test_d4_user_supplied_staged_callback_cannot_replace_internal_recheck(
+        product_service):
+    from gateway.lbe_product_fixture import D4OneUseAttemptMarker
+    service, _root = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    with pytest.raises(D4FixtureDenied):
+        D4OneUseAttemptMarker(
+            candidate, service.get("a"), staged_source=lambda *_: None)
     assert service.info()["exec_policy"]["available"] is False

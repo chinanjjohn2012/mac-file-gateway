@@ -93,10 +93,12 @@ class D4OneUseAttemptMarker:
     post-check pathname-race qualification. Crash/restart replay protection
     is outside this in-memory primitive.
     """
-    __slots__ = ("_candidate", "_ctx", "_pid", "_lock", "_consumed")
+    __slots__ = ("_candidate", "_ctx", "_pid", "_lock",
+                 "_consumed", "_staged")
 
     def __init__(self, candidate: D4FixtureCandidate,
-                 ctx: "WorkspaceContext") -> None:
+                 ctx: "WorkspaceContext", *,
+                 staged_source: object = None) -> None:
         from .workspaces import WorkspaceContext
 
         if (type(candidate) is not D4FixtureCandidate
@@ -147,8 +149,16 @@ class D4OneUseAttemptMarker:
             seen_directories.add(entry[0])
         if candidate.plan.cwd not in seen_directories:
             raise D4FixtureDenied("candidate project directory is unqualified")
+        if staged_source is not None:
+            # No generic callback or client-crafted predicate may stand in
+            # for this exact internally inspected source recheck.
+            from .lbe_runtime_source import D4StagedSourceRecheck
+            if type(staged_source) is not D4StagedSourceRecheck:
+                raise D4FixtureDenied("staged-source recheck must be internal")
+            staged_source.check_binding(ctx, candidate)
         self._candidate = candidate
         self._ctx = ctx
+        self._staged = staged_source
         self._pid = os.getpid()
         self._lock = threading.Lock()
         self._consumed = False
@@ -177,6 +187,8 @@ class D4OneUseAttemptMarker:
                     or current.source_identity != self._candidate.source_identity
                     or current.directory_identity != self._candidate.directory_identity):
                 raise D4FixtureDenied("selected first-party source changed before launch")
+            if self._staged is not None:
+                self._staged.recheck_for(self._ctx, self._candidate)
         except D4FixtureDenied:
             raise
         except Exception:

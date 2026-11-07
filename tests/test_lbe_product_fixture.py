@@ -3134,6 +3134,8 @@ def _d4_record_site_fixture(workspace):
     (workspace / "py-pipenv/Pipfile.lock").write_bytes(
         b'{"_meta":{"hash":{"sha256":"' + b"a" * 64
         + b'"}},"default":{"example-pkg":{"version":"==1.0"}},"develop":{}}\n')
+    (workspace / "py-pipenv/Pipfile").write_bytes(
+        b'[packages]\nexample-pkg = "==1.0"\n')
     return site, pkg, dist, record
 
 
@@ -3313,6 +3315,11 @@ def test_d4_service_observes_pipenv_records_in_real_source_bundle(
     assert locked is not None
     assert locked.locked_distributions == (("example-pkg", "1.0"),)
     assert locked.selected_installed_distributions == (("example-pkg", "1.0"),)
+    assert locked.direct_pipfile_requirements_checked is True
+    assert locked.pipfile_sha256 == dict(
+        service._prepare_d4_r003_fixture_candidate(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"]).source_sha256)[
+                "py-pipenv/Pipfile"]
     assert locked.actual_loaded_source_graph_proven is False
     assert locked.native_launch_allowed is False
     assert venv.manifest_independently_approved is False
@@ -3654,3 +3661,34 @@ def test_d4_service_strict_p007_direct_import_failure_before_operator_copy(
     assert denied.value.code == "runner_unavailable"
     assert not (private / "go").exists()
     assert not (private / "home").exists()
+
+
+
+@pytest.mark.parametrize("content", [
+    b'[packages]\nexample-pkg = "==2.0"\n',
+    b'[packages]\nexample-pkg = {path="../outside"}\n',
+    b'[dev-packages]\nexample-pkg = "==1.0"\n',
+])
+def test_d4_service_pipfile_to_lock_to_record_mismatch_denied(
+        product_service, monkeypatch, content):
+    service, workspace = product_service
+    _d4_record_site_fixture(workspace)
+    (workspace / "py-pipenv/Pipfile").write_bytes(content)
+    operator = workspace.parent.parent / "operator-pipfile-intent-mismatch"
+    (operator / "bin").mkdir(parents=True)
+    (operator / "bin/pipenv").write_bytes(b"inert")
+    (operator / "lib/python").mkdir(parents=True)
+    (operator / "lib/python/stdlib.py").write_bytes(b"source = 1\n")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no Pipenv execution allowed")))
+        with pytest.raises(GatewayError) as rejected:
+            service._observe_d4_r003_operator_provisioner(
+                "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+                provisioner_root=str(operator),
+                expected_venv_record_distributions=(("example-pkg", "1.0"),))
+    assert rejected.value.code == "runner_unavailable"
+    with pytest.raises(GatewayError) as public:
+        service.invoke_exec(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"], dry_run=False)
+    assert public.value.code == "exec_cleanup_proof_required"

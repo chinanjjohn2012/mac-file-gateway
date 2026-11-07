@@ -812,6 +812,8 @@ class WorkspaceService:
                     matched_lock = inspect_d4_pipenv_lock_sources(
                         project_root=workspace + "/py-pipenv",
                         expected_lock_sha256=lock_hash,
+                        expected_pipfile_sha256=dict(candidate.source_sha256)[
+                            "py-pipenv/Pipfile"],
                         expected_distributions=(
                             expected_venv_record_distributions))
                     observed["venv"] = replace(
@@ -1007,6 +1009,8 @@ class WorkspaceService:
                 locked = inspect_d4_pipenv_lock_sources(
                     project_root=project,
                     expected_lock_sha256=lock_hash,
+                    expected_pipfile_sha256=dict(candidate.source_sha256)[
+                        "py-pipenv/Pipfile"],
                     expected_distributions=expected_venv_record_distributions,
                 )
                 if locked.selected_installed_distributions != observed.distributions:

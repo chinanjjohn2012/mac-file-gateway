@@ -89,3 +89,57 @@ def test_lock_input_provenance_mutation_fails_closed(tmp_path, change):
         inspect_d4_pipenv_lock_sources(
             project_root=str(root), expected_lock_sha256=digest,
             expected_distributions=(("example-pkg", "1.0"),))
+
+
+
+@pytest.mark.parametrize("pipfile,expected_success", [
+    ('[packages]\nexample-pkg = "==1.0"\n', True),
+    ('[packages]\nexample-pkg = "*"\n', True),
+    ('[packages]\nexample-pkg = "==2.0"\n', False),
+    ('[packages]\nunknown = "==1.0"\n', False),
+    ('[packages]\nexample-pkg = {path="../foreign"}\n', False),
+    ('[packages]\nexample-pkg = {version="==1.0",index="other"}\n', False),
+    ('[dev-packages]\nexample-pkg = "==1.0"\n', False),
+    ('[packages]\n', False),
+])
+def test_real_pipfile_intent_matches_exact_lock_and_record(
+        tmp_path, pipfile, expected_success):
+    root, lock_digest = _fixture(tmp_path)
+    raw = pipfile.encode("ascii")
+    (root / "Pipfile").write_bytes(raw)
+    expected = hashlib.sha256(raw).hexdigest()
+    kwargs = dict(project_root=str(root), expected_lock_sha256=lock_digest,
+                  expected_pipfile_sha256=expected,
+                  expected_distributions=(("example-pkg", "1.0"),))
+    if expected_success:
+        receipt = inspect_d4_pipenv_lock_sources(**kwargs)
+        assert receipt.pipfile_sha256 == expected
+        assert receipt.direct_pipfile_requirements_checked is True
+        assert receipt.native_launch_allowed is False
+    else:
+        with pytest.raises(D4PipenvLockDenied):
+            inspect_d4_pipenv_lock_sources(**kwargs)
+
+
+@pytest.mark.parametrize("tamper", ["rewrite", "symlink", "hardlink", "wrong_hash"])
+def test_pipfile_source_change_or_unowned_leaf_denied(tmp_path, tamper):
+    root, lock_digest = _fixture(tmp_path)
+    pipfile = root / "Pipfile"
+    pipfile.write_bytes(b'[packages]\nexample-pkg="==1.0"\n')
+    expected = hashlib.sha256(pipfile.read_bytes()).hexdigest()
+    if tamper == "rewrite":
+        pipfile.write_bytes(b'[packages]\nexample-pkg="==2.0"\n')
+    elif tamper == "symlink":
+        other = tmp_path / "foreign-pipfile"
+        other.write_bytes(pipfile.read_bytes())
+        pipfile.unlink()
+        pipfile.symlink_to(other)
+    elif tamper == "hardlink":
+        os.link(pipfile, tmp_path / "linked-pipfile")
+    elif tamper == "wrong_hash":
+        expected = "f" * 64
+    with pytest.raises(D4PipenvLockDenied):
+        inspect_d4_pipenv_lock_sources(
+            project_root=str(root), expected_lock_sha256=lock_digest,
+            expected_pipfile_sha256=expected,
+            expected_distributions=(("example-pkg", "1.0"),))

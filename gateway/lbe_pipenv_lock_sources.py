@@ -12,6 +12,7 @@ import json
 import os
 import re
 import stat
+import tomllib
 
 
 class D4PipenvLockDenied(ValueError):
@@ -32,6 +33,8 @@ class D4PipenvLockSourceObservation:
     lock_sha256: str
     locked_distributions: tuple[tuple[str, str], ...]
     selected_installed_distributions: tuple[tuple[str, str], ...]
+    pipfile_sha256: str | None = None
+    direct_pipfile_requirements_checked: bool = False
     status: str = "PINNED_LOCK_REQUIREMENTS_MATCH_SELECTED_SITE_NOT_IMPORT_PROOF"
     publisher_attested: bool = False
     actual_loaded_source_graph_proven: bool = False
@@ -47,7 +50,9 @@ def _pairs_unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def _lock_bytes(project_root: str) -> bytes:
+def _lock_bytes(project_root: str, *, file_name: str = "Pipfile.lock") -> bytes:
+    if file_name not in ("Pipfile", "Pipfile.lock"):
+        raise D4PipenvLockDenied("unqualified project source file")
     if (type(project_root) is not str or not 2 <= len(project_root) <= 2048
             or not project_root.startswith("/") or "\\" in project_root
             or any(ord(c) < 33 or ord(c) >= 127 for c in project_root)):
@@ -65,7 +70,7 @@ def _lock_bytes(project_root: str) -> bytes:
         if (not stat.S_ISDIR(root.st_mode) or root.st_uid != os.getuid()
                 or root.st_mode & 0o022):
             raise D4PipenvLockDenied("Pipenv project root unqualified")
-        leaf = os.open("Pipfile.lock", _FILE, dir_fd=fd)
+        leaf = os.open(file_name, _FILE, dir_fd=fd)
         try:
             before = os.fstat(leaf)
             if (not stat.S_ISREG(before.st_mode)
@@ -92,9 +97,65 @@ def _lock_bytes(project_root: str) -> bytes:
         os.close(fd)
 
 
+def _check_pipfile_intent(raw: bytes, lock: dict) -> None:
+    """Compare selected direct user requirements with corresponding lock groups.
+
+    This is intentionally limited to fixed simple version declarations; a
+    Pipfile with URL, VCS, editable, extras, marker or index overrides is not
+    qualified by the safe fixture. Installed transitive/seed packages remain
+    separately selected by the real RECORD source inspector.
+    """
+    try:
+        parsed = tomllib.loads(raw.decode("utf-8", "strict"))
+    except (UnicodeError, ValueError, TypeError):
+        raise D4PipenvLockDenied("unqualified Pipfile TOML") from None
+    if type(parsed) is not dict:
+        raise D4PipenvLockDenied("Pipfile source declaration missing")
+    direct_count = 0
+    for section, lock_section in (("packages", "default"),
+                                  ("dev-packages", "develop")):
+        members = parsed.get(section, {})
+        if type(members) is not dict:
+            raise D4PipenvLockDenied("Pipfile dependency section invalid")
+        expected = lock.get(lock_section, {})
+        if type(expected) is not dict:
+            raise D4PipenvLockDenied("Pipenv lock section invalid")
+        lock_by_name = {}
+        for raw_name, spec in expected.items():
+            if type(raw_name) is not str or type(spec) is not dict:
+                raise D4PipenvLockDenied("Pipenv lock dependency invalid")
+            name = re.sub(r"[-_.]+", "-", raw_name).lower()
+            if name in lock_by_name:
+                raise D4PipenvLockDenied("colliding lock dependency names")
+            lock_by_name[name] = spec.get("version")
+        seen = set()
+        for raw_name, request in members.items():
+            if type(raw_name) is not str:
+                raise D4PipenvLockDenied("Pipfile package name invalid")
+            name = re.sub(r"[-_.]+", "-", raw_name).lower()
+            if _NAME.fullmatch(name) is None or name in seen:
+                raise D4PipenvLockDenied("ambiguous Pipfile package name")
+            seen.add(name)
+            if type(request) is dict and set(request) == {"version"}:
+                request = request["version"]
+            if (type(request) is not str or
+                    (request != "*" and
+                     (not request.startswith("==") or
+                      _VERSION.fullmatch(request[2:]) is None))):
+                raise D4PipenvLockDenied("unqualified Pipfile direct package source")
+            actual = lock_by_name.get(name)
+            if (type(actual) is not str or not actual.startswith("==") or
+                    (request != "*" and request != actual)):
+                raise D4PipenvLockDenied("Pipfile direct dependency not locked")
+            direct_count += 1
+    if direct_count == 0:
+        raise D4PipenvLockDenied("empty Pipfile cannot qualify locked site")
+
+
 def inspect_d4_pipenv_lock_sources(
     *, project_root: str, expected_lock_sha256: str,
     expected_distributions: tuple[tuple[str, str], ...],
+    expected_pipfile_sha256: str | None = None,
 ) -> D4PipenvLockSourceObservation:
     """Compare actual nofollow lock bytes against selected RECORD identities.
 
@@ -158,8 +219,21 @@ def inspect_d4_pipenv_lock_sources(
     if not found or any((name, version) not in expected_distributions
                         for name, version in found.items()):
         raise D4PipenvLockDenied("Pipfile.lock dependencies mismatch installed site")
+    pipfile_sha256 = None
+    if expected_pipfile_sha256 is not None:
+        if (type(expected_pipfile_sha256) is not str
+                or _SHA.fullmatch(expected_pipfile_sha256) is None
+                or expected_pipfile_sha256 == "0" * 64):
+            raise D4PipenvLockDenied("unqualified selected Pipfile digest")
+        pipfile = _lock_bytes(project_root, file_name="Pipfile")
+        pipfile_sha256 = hashlib.sha256(pipfile).hexdigest()
+        if pipfile_sha256 != expected_pipfile_sha256:
+            raise D4PipenvLockDenied("Pipfile bytes differ from source selection")
+        _check_pipfile_intent(pipfile, lock)
     return D4PipenvLockSourceObservation(
         lock_sha256=digest,
         locked_distributions=tuple(sorted(found.items())),
         selected_installed_distributions=expected_distributions,
+        pipfile_sha256=pipfile_sha256,
+        direct_pipfile_requirements_checked=pipfile_sha256 is not None,
     )

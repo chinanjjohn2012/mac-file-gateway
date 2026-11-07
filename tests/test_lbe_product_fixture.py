@@ -272,7 +272,7 @@ def test_d4_one_use_marker_consumed_before_any_possible_child(product_service):
     service, _root = product_service
     candidate = service._prepare_d4_r003_fixture_candidate(
         "a", "py-direct", ["python", "-m", "pytest", "-q"])
-    marker = D4OneUseAttemptMarker(candidate)
+    marker = D4OneUseAttemptMarker(candidate, service.get("a"))
     worker = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher)
     first = worker.run(candidate.plan, product_attempt=marker)
     assert first["status"] == "launch_failed"
@@ -290,7 +290,7 @@ def test_d4_one_use_marker_denies_concurrent_same_attempt(product_service):
     service, _root = product_service
     candidate = service._prepare_d4_r003_fixture_candidate(
         "a", "py-direct", ["python", "-m", "pytest", "-q"])
-    marker = D4OneUseAttemptMarker(candidate)
+    marker = D4OneUseAttemptMarker(candidate, service.get("a"))
     worker = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher)
     gate = threading.Barrier(2)
     outcomes = []
@@ -322,7 +322,7 @@ def test_d4_one_use_marker_burns_on_mismatch_or_cancel(product_service):
     candidate = service._prepare_d4_r003_fixture_candidate(
         "a", "py-direct", ["python", "-m", "pytest", "-q"])
     worker = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher)
-    marker = D4OneUseAttemptMarker(candidate)
+    marker = D4OneUseAttemptMarker(candidate, service.get("a"))
     with pytest.raises(LbeWorkerError) as mismatch:
         worker.run(replace(candidate.plan, timeout_seconds=119),
                    product_attempt=marker)
@@ -331,7 +331,7 @@ def test_d4_one_use_marker_burns_on_mismatch_or_cancel(product_service):
         worker.run(candidate.plan, product_attempt=marker)
     assert replay.value.code == "attempt_replay_denied"
 
-    separate = D4OneUseAttemptMarker(candidate)
+    separate = D4OneUseAttemptMarker(candidate, service.get("a"))
     cancelled = threading.Event()
     cancelled.set()
     with pytest.raises(LbeWorkerError) as stopped:
@@ -352,7 +352,7 @@ def test_d4_attempt_marker_not_a_client_or_native_authority(product_service):
     candidate = service._prepare_d4_r003_fixture_candidate(
         "a", "go-project", ["go", "test", "./..."])
     with pytest.raises(D4FixtureDenied):
-        D4OneUseAttemptMarker(object())
+        D4OneUseAttemptMarker(object(), service.get("a"))
     worker = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher)
     with pytest.raises(LbeWorkerError) as bad_input:
         worker.run(candidate.plan, product_attempt=object())
@@ -391,3 +391,128 @@ def test_d4_first_party_candidate_respects_workspace_source_excludes(
         assert exc.value.code == "command_not_allowed"
     assert called == [(excluded, False)]
     assert service.info()["exec_policy"]["available"] is False
+
+
+@pytest.mark.parametrize("cwd,argv", _ROWS)
+def test_d4_service_bound_attempt_rechecks_all_six_without_native(
+        product_service, monkeypatch, cwd, argv):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker
+
+    service, _root = product_service
+    candidate, marker = service._prepare_d4_r003_attempt(
+        "a", cwd, argv, timeout_seconds=120)
+    assert len(candidate.source_sha256) == len(candidate.source_identity)
+    assert all(len(identity) == 8 for _, identity in candidate.source_identity)
+
+    def never_popen(*args, **kwargs):
+        raise AssertionError("D4 SAFE T0 cannot launch any native child")
+
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", never_popen)
+        worker = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher)
+        result = worker.run(candidate.plan, product_attempt=marker)
+    assert result["status"] == "launch_failed"
+    assert result["executed"] is False
+    assert result["cleanup_proven"] is False
+
+
+@pytest.mark.parametrize("cwd,argv,relative", [
+    ("py-direct", ["python", "-m", "compileall", "-q", "./src"], "src/main.py"),
+    ("py-pipenv", ["python", "-m", "pytest", "-q"], "Pipfile.lock"),
+    ("go-project", ["go", "test", "./..."], "go.mod"),
+    ("go-project", ["go", "build", "-o", "bin/app", "./cmd/app"], "cmd/app/main.go"),
+])
+def test_d4_bound_attempt_rejects_modified_source_before_launcher(
+        product_service, cwd, argv, relative):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    candidate, marker = service._prepare_d4_r003_attempt("a", cwd, argv)
+    target = root / cwd / relative
+    old_bytes = target.read_bytes()
+    target.write_bytes(old_bytes + b"# stale source\n")
+    launched = []
+    def forbidden(_plan):
+        launched.append(True)
+        raise AssertionError("stale source must not reach launcher")
+
+    worker = LbeWorker(DirectChildOwner(), launcher=forbidden)
+    with pytest.raises(LbeWorkerError) as exc:
+        worker.run(candidate.plan, product_attempt=marker)
+    assert exc.value.code == "attempt_replay_denied"
+    assert launched == []
+    # Source drift burns the exact attempt once; restoring bytes cannot
+    # reuse its previous authorization candidate or child reservation.
+    target.write_bytes(old_bytes)
+    with pytest.raises(LbeWorkerError) as replay:
+        worker.run(candidate.plan, product_attempt=marker)
+    assert replay.value.code == "attempt_replay_denied"
+
+
+def test_d4_source_identity_rejects_in_place_same_byte_inode_replacement(
+        product_service):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    candidate, marker = service._prepare_d4_r003_attempt(
+        "a", "py-direct",
+        ["python", "-m", "compileall", "-q", "./src"])
+    selected = root / "py-direct" / "src" / "main.py"
+    before = selected.read_bytes()
+    selected.unlink()
+    selected.write_bytes(before)
+    launched = []
+    def forbidden(_plan):
+        launched.append(True)
+        raise AssertionError("source inode replacement must not launch")
+    with pytest.raises(LbeWorkerError) as exc:
+        LbeWorker(DirectChildOwner(), launcher=forbidden).run(
+            candidate.plan, product_attempt=marker)
+    assert exc.value.code == "attempt_replay_denied"
+    assert launched == []
+
+
+def test_d4_marker_fails_closed_on_wrong_workspace_and_wrong_context(
+        product_service):
+    from gateway.lbe_product_fixture import D4OneUseAttemptMarker
+    service, _root = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    with pytest.raises(D4FixtureDenied):
+        D4OneUseAttemptMarker(candidate, object())
+    with pytest.raises(D4FixtureDenied):
+        D4OneUseAttemptMarker(replace(candidate, source_identity=()),
+                             service.get("a"))
+    with pytest.raises(D4FixtureDenied):
+        D4OneUseAttemptMarker(replace(candidate, status="NATIVE_AUTHORIZED"),
+                             service.get("a"))
+
+
+def test_d4_marker_recomputes_plan_selection_and_burns_on_policy_drift(
+        product_service, monkeypatch):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, _root = product_service
+    candidate, marker = service._prepare_d4_r003_attempt(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    ctx = service.get("a")
+    original = ctx.gateway._allowed
+    def changed(parts, *, is_file):
+        if tuple(parts) == ("py-direct", "src", "main.py"):
+            return False
+        return original(parts, is_file=is_file)
+    launched = []
+    def forbidden(_plan):
+        launched.append(True)
+        raise AssertionError("policy drift cannot reach launcher")
+    with monkeypatch.context() as m:
+        m.setattr(ctx.gateway, "_allowed", changed)
+        with pytest.raises(LbeWorkerError) as exc:
+            LbeWorker(DirectChildOwner(), launcher=forbidden).run(
+                candidate.plan, product_attempt=marker)
+    assert exc.value.code == "attempt_replay_denied"
+    assert launched == []

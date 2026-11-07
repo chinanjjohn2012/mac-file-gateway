@@ -62,6 +62,7 @@ class D4FixtureCandidate:
 
     plan: LbeWorkPlan
     source_sha256: tuple[tuple[str, str], ...]
+    source_identity: tuple[tuple[str, tuple[int, ...]], ...] = ()
     profile_id: str = PROFILE_ID
     profile_git_blob: str = PROFILE_GIT_BLOB
     status: str = _STATUS
@@ -74,33 +75,93 @@ class D4FixtureCandidate:
 
 
 class D4OneUseAttemptMarker:
-    """Atomic deny-replay primitive for a checked first-party source candidate.
+    """One-use, live-Workspace-bound source-check marker, NOT Exec authority.
 
-    NOT a grant/owner consent or verification of actual loaded source,
-    macOS runner, credentials or resource enforcement. Public Direct/REST/MCP
-    cannot supply this local object, and the current service never mints one
-    as execution authority. One use is burned before possible reservation/
-    Popen, including invalid plan, cancellation and busy. Does not survive
-    Gateway crash or remove the operator's duplicate-effects risk.
+    The real service alone prepares the candidate+context pair. On the first
+    consumption we atomically burn the marker, then re-plan and re-read every
+    selected first-party source from the pinned Workspace before any Worker
+    reservation or possible launcher. A changed byte/inode/mode/owner or
+    runner/argv selection fails closed; no retry on failure. This is NOT
+    third-party loaded-source, OS resource, credential, owner-consent or
+    post-check pathname-race qualification. Crash/restart replay protection
+    is outside this in-memory primitive.
     """
-    __slots__ = ("_candidate", "_pid", "_lock", "_consumed")
+    __slots__ = ("_candidate", "_ctx", "_pid", "_lock", "_consumed")
 
-    def __init__(self, candidate: D4FixtureCandidate) -> None:
-        if type(candidate) is not D4FixtureCandidate:
-            raise D4FixtureDenied("only checked candidate is eligible")
+    def __init__(self, candidate: D4FixtureCandidate,
+                 ctx: "WorkspaceContext") -> None:
+        from .workspaces import WorkspaceContext
+
+        if (type(candidate) is not D4FixtureCandidate
+                or type(ctx) is not WorkspaceContext
+                or type(candidate.plan) is not LbeWorkPlan
+                or candidate.plan.workspace != ctx.name
+                or candidate.profile_id != PROFILE_ID
+                or candidate.profile_git_blob != PROFILE_GIT_BLOB
+                or candidate.status != _STATUS
+                or candidate.native_launch_allowed is not False
+                or candidate.actual_loaded_sources_proven is not False
+                or candidate.runner_qualified is not False
+                or candidate.resource_enforcement_proven is not False
+                or candidate.owner_approval_attested is not False):
+            raise D4FixtureDenied("only exact no-authority service source candidate allowed")
+        try:
+            LbeWorker._check_plan(candidate.plan)
+        except LbeWorkerError:
+            raise D4FixtureDenied("candidate plan is invalid") from None
+        if (type(candidate.source_sha256) is not tuple
+                or type(candidate.source_identity) is not tuple
+                or len(candidate.source_sha256) == 0
+                or len(candidate.source_sha256) != len(candidate.source_identity)):
+            raise D4FixtureDenied("candidate source inventory is not qualified")
+        for item, recorded in zip(candidate.source_sha256,
+                                  candidate.source_identity):
+            if (type(item) is not tuple or len(item) != 2
+                    or type(item[0]) is not str
+                    or type(item[1]) is not str
+                    or len(item[1]) != 64
+                    or any(ch not in "0123456789abcdef" for ch in item[1])
+                    or type(recorded) is not tuple or len(recorded) != 2
+                    or recorded[0] != item[0]
+                    or type(recorded[1]) is not tuple
+                    or len(recorded[1]) != 8
+                    or any(type(v) is not int for v in recorded[1])):
+                raise D4FixtureDenied("candidate source identity is malformed")
         self._candidate = candidate
+        self._ctx = ctx
         self._pid = os.getpid()
         self._lock = threading.Lock()
         self._consumed = False
 
     def consume_for(self, plan: LbeWorkPlan) -> None:
-        """Burn before any possible native spawn, even on mismatched input."""
+        """Burn once, then recheck source and plan BEFORE possible spawn."""
         with self._lock:
             if self._consumed:
                 raise D4FixtureDenied("product attempt already consumed")
             self._consumed = True
-            if os.getpid() != self._pid or plan is not self._candidate.plan:
-                raise D4FixtureDenied("product attempt plan identity changed")
+        if os.getpid() != self._pid or plan is not self._candidate.plan:
+            raise D4FixtureDenied("product attempt plan identity changed")
+        try:
+            from .lbe_plan import prepare_lbe_work_plan
+
+            fresh_plan = prepare_lbe_work_plan(
+                self._ctx, cwd=plan.cwd, argv=list(plan.requested_argv),
+                timeout_seconds=plan.timeout_seconds,
+            )
+            # Recomputed plan values are all exact primitives validated by
+            # the shared LbeWorker and lbe_plan; no untrusted comparator.
+            if fresh_plan != plan:
+                raise D4FixtureDenied("product plan changed before launch")
+            current = check_d4_r003_fixture(self._ctx, fresh_plan)
+            if (current.source_sha256 != self._candidate.source_sha256
+                    or current.source_identity != self._candidate.source_identity):
+                raise D4FixtureDenied("selected first-party source changed before launch")
+        except D4FixtureDenied:
+            raise
+        except Exception:
+            # All these checks are source-only and pre-Popen; normalize
+            # errors without leaking paths or assuming a child existed.
+            raise D4FixtureDenied("product prelaunch source recheck unavailable") from None
 
 
 def _require_controlled(fd: int, *, directory: bool) -> os.stat_result:
@@ -125,12 +186,12 @@ def _open_dir(parent_fd: int, name: str) -> int:
         raise
 
 
-def _file_digest(parent_fd: int, name: str) -> str:
+def _file_digest(parent_fd: int, name: str) -> tuple[str, tuple[int, ...]]:
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
                  | os.O_NONBLOCK, dir_fd=parent_fd)
     try:
         metadata = _require_controlled(fd, directory=False)
-        if not 0 <= metadata.st_size <= _MAX_SOURCE_BYTES:
+        if not 0 < metadata.st_size <= _MAX_SOURCE_BYTES:
             raise D4FixtureDenied("fixture input exceeds source-size bound")
         digest = hashlib.sha256()
         read_bytes = 0
@@ -143,17 +204,18 @@ def _file_digest(parent_fd: int, name: str) -> str:
                 raise D4FixtureDenied("fixture input changed or grew beyond bound")
             digest.update(data)
         after = _require_controlled(fd, directory=False)
-        if ((metadata.st_dev, metadata.st_ino, metadata.st_size,
-             metadata.st_mtime_ns, metadata.st_ctime_ns)
-                != (after.st_dev, after.st_ino, after.st_size,
-                    after.st_mtime_ns, after.st_ctime_ns)):
-            raise D4FixtureDenied("fixture source changed during read")
-        return digest.hexdigest()
+        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns",
+                  "st_ctime_ns", "st_mode", "st_uid", "st_nlink")
+        before_identity = tuple(getattr(metadata, key) for key in fields)
+        after_identity = tuple(getattr(after, key) for key in fields)
+        if before_identity != after_identity:
+            raise D4FixtureDenied("fixture inode or permissions changed during read")
+        return digest.hexdigest(), before_identity
     finally:
         os.close(fd)
 
 
-def _python_selected_sources(project_fd: int) -> tuple[tuple[str, str], ...]:
+def _python_selected_sources(project_fd: int) -> tuple[tuple[str, str, tuple[int, ...]], ...]:
     src_fd = _open_dir(project_fd, "src")
     try:
         names = os.listdir(src_fd)
@@ -170,7 +232,7 @@ def _python_selected_sources(project_fd: int) -> tuple[tuple[str, str], ...]:
                 finally:
                     os.close(cache_fd)
             elif _PY_NAME.fullmatch(name):
-                selected.append(("src/" + name, _file_digest(src_fd, name)))
+                selected.append(("src/" + name, *_file_digest(src_fd, name)))
             else:
                 # No unreviewed subdirectories, symlink traversal, .pth, or
                 # generated import inputs in this fixed compileall fixture.
@@ -182,17 +244,17 @@ def _python_selected_sources(project_fd: int) -> tuple[tuple[str, str], ...]:
         os.close(src_fd)
 
 
-def _pipenv_selected_sources(project_fd: int) -> tuple[tuple[str, str], ...]:
+def _pipenv_selected_sources(project_fd: int) -> tuple[tuple[str, str, tuple[int, ...]], ...]:
     selected = [
-        ("Pipfile", _file_digest(project_fd, "Pipfile")),
-        ("Pipfile.lock", _file_digest(project_fd, "Pipfile.lock")),
+        ("Pipfile", *_file_digest(project_fd, "Pipfile")),
+        ("Pipfile.lock", *_file_digest(project_fd, "Pipfile.lock")),
     ]
     venv_fd = _open_dir(project_fd, ".venv")
     try:
-        selected.append((".venv/pyvenv.cfg", _file_digest(venv_fd, "pyvenv.cfg")))
+        selected.append((".venv/pyvenv.cfg", *_file_digest(venv_fd, "pyvenv.cfg")))
         bin_fd = _open_dir(venv_fd, "bin")
         try:
-            selected.append((".venv/bin/python", _file_digest(bin_fd, "python")))
+            selected.append((".venv/bin/python", *_file_digest(bin_fd, "python")))
         finally:
             os.close(bin_fd)
     finally:
@@ -200,13 +262,13 @@ def _pipenv_selected_sources(project_fd: int) -> tuple[tuple[str, str], ...]:
     return tuple(selected)
 
 
-def _go_selected_sources(project_fd: int) -> tuple[tuple[str, str], ...]:
-    selected = [("go.mod", _file_digest(project_fd, "go.mod"))]
+def _go_selected_sources(project_fd: int) -> tuple[tuple[str, str, tuple[int, ...]], ...]:
+    selected = [("go.mod", *_file_digest(project_fd, "go.mod"))]
     cmd_fd = _open_dir(project_fd, "cmd")
     try:
         app_fd = _open_dir(cmd_fd, "app")
         try:
-            selected.append(("cmd/app/main.go", _file_digest(app_fd, "main.go")))
+            selected.append(("cmd/app/main.go", *_file_digest(app_fd, "main.go")))
         finally:
             os.close(app_fd)
     finally:
@@ -280,7 +342,7 @@ def check_d4_r003_fixture(ctx: "WorkspaceContext",
     # exposed by the public text-file extension policy. The fixed private
     # .venv binary/interpreter tree is deliberately inspected with nofollow
     # FDs despite being protected from public File API browsing.
-    for source_name, _digest in selected:
+    for source_name, _digest, _identity in selected:
         if source_name.startswith(".venv/"):
             continue
         parts = (plan.cwd, *source_name.split("/"))
@@ -293,5 +355,7 @@ def check_d4_r003_fixture(ctx: "WorkspaceContext",
     return D4FixtureCandidate(
         plan=plan,
         source_sha256=tuple((plan.cwd + "/" + name, digest)
-                            for name, digest in selected),
+                            for name, digest, _identity in selected),
+        source_identity=tuple((plan.cwd + "/" + name, identity)
+                              for name, _digest, identity in selected),
     )

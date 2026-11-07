@@ -510,6 +510,24 @@ class WorkspaceService:
                 self._active_operations -= 1
                 self._lifecycle.notify_all()
 
+    def _prepare_d4_r003_attempt(
+        self, name: str, cwd: str, argv: list[str],
+        timeout_seconds: int = 60,
+    ):
+        """Source-only, one-use internal attempt; never an Exec grant.
+
+        This returns the same live service's first-party candidate and a
+        context-bound, atomic marker. The Worker verifies the marker again
+        just before reservation/launch. Neither this private method nor a
+        token can change the operative F1 or NativeLauncher Go/Pipenv DENY.
+        """
+        candidate = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        from .lbe_product_fixture import D4OneUseAttemptMarker
+
+        # get() rechecks service-closing state after source inspection.
+        return candidate, D4OneUseAttemptMarker(candidate, self.get(name))
+
     def require_git(self, name: str, command: str) -> WorkspaceContext:
         """Independent authorization, always repeated in sync Worker."""
         ctx = self.get(name)

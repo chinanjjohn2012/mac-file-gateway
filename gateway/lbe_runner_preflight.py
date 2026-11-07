@@ -185,6 +185,55 @@ def observe_d4_runner_preflight(
     )
 
 
+
+class D4RunnerSourceRecheck:
+    """Bind live runner observations to one source-only Worker attempt.
+
+    The service creates this from the current Workspace, exact candidate,
+    selected recipe and actual host observation. The Worker burns the
+    one-use attempt and repeats the ACTUAL inode/UID/kernel/rlimit/ambient
+    credential and proxy observation before its launcher is ever invoked.
+    Drift denies; equal observations do not authorize execution and do not
+    attest any full-descendant resource domain or GitHub image identity.
+    """
+    __slots__ = ("_ctx", "_plan", "_recipe", "_observation", "_root")
+
+    def __init__(self, ctx: "WorkspaceContext", plan: object,
+                 recipe: D4NativeLaunchRecipe,
+                 observed: D4ObservedRunnerPreflight, *, private_root: str):
+        from .lbe_worker import LbeWorkPlan
+        from .workspaces import WorkspaceContext
+
+        if (type(ctx) is not WorkspaceContext or type(plan) is not LbeWorkPlan
+                or type(recipe) is not D4NativeLaunchRecipe
+                or type(observed) is not D4ObservedRunnerPreflight
+                or plan.workspace != ctx.name
+                or recipe.workspace != ctx.name
+                or observed.workspace != ctx.name
+                or recipe.requested_argv != plan.requested_argv
+                or recipe.service_effective_argv != plan.effective_argv
+                or observed.source_fingerprint != recipe.selected_source_fingerprint
+                or recipe.native_launch_allowed is not False
+                or observed.native_launch_allowed is not False):
+            raise D4RunnerProbeDenied("runner one-use binding unavailable")
+        self._root = _canonical(private_root, "private runner root")
+        self._ctx = ctx
+        self._plan = plan
+        self._recipe = recipe
+        self._observation = observed
+
+    def check_binding(self, ctx: "WorkspaceContext", plan: object) -> None:
+        if ctx is not self._ctx or plan is not self._plan:
+            raise D4RunnerProbeDenied("runner source context no longer identical")
+
+    def recheck_for(self, ctx: "WorkspaceContext", plan: object) -> None:
+        self.check_binding(ctx, plan)
+        latest = observe_d4_runner_preflight(
+            self._ctx, self._recipe, private_root=self._root)
+        if latest != self._observation:
+            raise D4RunnerProbeDenied(
+                "actual observed runner environment changed before Worker")
+
 def require_d4_native_runner_admission(
     _observation: object, _recipe: object,
 ) -> None:

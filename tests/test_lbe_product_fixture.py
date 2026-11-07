@@ -2096,3 +2096,63 @@ def test_d4_pipenv_bundle_without_venv_sources_denied_before_staging(
             staged_manifests={"bin": (("", None),), "lib": (("", None),)})
     assert denied.value.code == "runner_unavailable"
     assert not (private / "bin").exists()
+
+
+@pytest.mark.parametrize("kind,cwd,argv,drift", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"],
+     "ambient_proxy"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"],
+     "soft_cpu_limit"),
+    ("go", "go-project", ["go", "test", "./..."],
+     "ambient_proxy"),
+])
+def test_d4_real_runner_observation_rechecked_once_after_marker_burn(
+        product_service, monkeypatch, kind, cwd, argv, drift):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+    from gateway import lbe_runner_preflight
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    trees = _d4_staged_trees(workspace, kind)
+    launched = []
+    def forbidden(_plan):
+        launched.append(True)
+        raise AssertionError("Changed real Runner state must never launch")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, marker, _observed, recipe, runner = (
+            service._prepare_d4_r003_runner_preflight(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees=trees))
+        assert runner.native_launch_allowed is False
+        assert recipe.native_launch_allowed is False
+        if drift == "ambient_proxy":
+            os.environ["HTTPS_PROXY"] = "http://untrusted-proxy.invalid"
+        else:
+            m.setattr(lbe_runner_preflight.resource, "getrlimit",
+                      lambda _kind: (10, 10))
+        with pytest.raises(LbeWorkerError) as denied:
+            LbeWorker(DirectChildOwner(), launcher=forbidden).run(
+                candidate.plan, product_attempt=marker)
+        assert denied.value.code == "attempt_replay_denied"
+        with pytest.raises(LbeWorkerError) as replay:
+            LbeWorker(DirectChildOwner(), launcher=forbidden).run(
+                candidate.plan, product_attempt=marker)
+        assert replay.value.code == "attempt_replay_denied"
+    assert launched == []
+
+
+def test_d4_runner_source_recheck_cannot_be_attached_from_generic_callback(
+        product_service):
+    from gateway.lbe_product_fixture import D4OneUseAttemptMarker
+
+    service, _workspace = product_service
+    candidate, marker = service._prepare_d4_r003_attempt(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    assert type(marker) is D4OneUseAttemptMarker
+    with pytest.raises(D4FixtureDenied):
+        marker.attach_runner_source(lambda *_args: None)
+    assert candidate.native_launch_allowed is False
+    assert service.info()["exec_policy"]["available"] is False

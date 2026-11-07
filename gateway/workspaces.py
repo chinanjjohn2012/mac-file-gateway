@@ -675,13 +675,19 @@ class WorkspaceService:
                 timeout_seconds=timeout_seconds,
             ))
         from .lbe_runner_preflight import (
-            D4RunnerProbeDenied, observe_d4_runner_preflight,
+            D4RunnerProbeDenied, D4RunnerSourceRecheck,
+            observe_d4_runner_preflight,
         )
+        from .lbe_product_fixture import D4FixtureDenied
 
         try:
+            ctx = self.get(name)
             runner = observe_d4_runner_preflight(
-                self.get(name), recipe, private_root=private_root)
-        except D4RunnerProbeDenied:
+                ctx, recipe, private_root=private_root)
+            bound = D4RunnerSourceRecheck(
+                ctx, candidate.plan, recipe, runner, private_root=private_root)
+            marker.attach_runner_source(bound)
+        except (D4RunnerProbeDenied, D4FixtureDenied):
             raise GatewayError(
                 "runner_unavailable",
                 "D4 trusted host resource/source preflight unavailable.",

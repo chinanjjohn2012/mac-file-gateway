@@ -94,7 +94,7 @@ class D4OneUseAttemptMarker:
     is outside this in-memory primitive.
     """
     __slots__ = ("_candidate", "_ctx", "_pid", "_lock",
-                 "_consumed", "_staged")
+                 "_consumed", "_staged", "_runner")
 
     def __init__(self, candidate: D4FixtureCandidate,
                  ctx: "WorkspaceContext", *,
@@ -159,9 +159,25 @@ class D4OneUseAttemptMarker:
         self._candidate = candidate
         self._ctx = ctx
         self._staged = staged_source
+        self._runner = None
         self._pid = os.getpid()
         self._lock = threading.Lock()
         self._consumed = False
+
+    def attach_runner_source(self, runner_recheck: object) -> None:
+        """Attach one service-owned live Runner source recheck before use."""
+        from .lbe_runner_preflight import D4RunnerSourceRecheck
+
+        if type(runner_recheck) is not D4RunnerSourceRecheck:
+            raise D4FixtureDenied("Runner recheck must be a real service binding")
+        with self._lock:
+            if self._consumed or self._runner is not None:
+                raise D4FixtureDenied("Runner recheck already attached or consumed")
+            try:
+                runner_recheck.check_binding(self._ctx, self._candidate.plan)
+            except Exception:
+                raise D4FixtureDenied("Runner recheck binding drift") from None
+            self._runner = runner_recheck
 
     def consume_for(self, plan: LbeWorkPlan) -> None:
         """Burn once, then recheck source and plan BEFORE possible spawn."""
@@ -189,6 +205,8 @@ class D4OneUseAttemptMarker:
                 raise D4FixtureDenied("selected first-party source changed before launch")
             if self._staged is not None:
                 self._staged.recheck_for(self._ctx, self._candidate)
+            if self._runner is not None:
+                self._runner.recheck_for(self._ctx, self._candidate.plan)
         except D4FixtureDenied:
             raise
         except Exception:

@@ -4397,3 +4397,108 @@ def test_d4_macos_runner_rejects_generic_replacement_of_service_boundary(
     with pytest.raises(D4FixtureDenied):
         marker.attach_macos_runner_boundary(lambda *_args: True)
     assert service.info()["exec_policy"]["available"] is False
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go", "go-project", ["go", "test", "./..."]),
+])
+@pytest.mark.parametrize("replacement", ["callable", "other_method", "forged"])
+def test_d4_worker_rejects_unbound_macos_runner_callback_before_reservation(
+        product_service, monkeypatch, kind, cwd, argv, replacement):
+    """A service-bound one-use marker cannot approve a different launcher."""
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    trees = _d4_staged_trees(workspace, kind)
+    calls = []
+
+    def forbidden(*_args, **_kwargs):
+        calls.append("native_or_unbound")
+        raise AssertionError("unapproved launch callback was invoked")
+
+    class ForgedCallback:
+        def __getattribute__(self, name):
+            if name in ("__self__", "__func__"):
+                raise AssertionError("hostile callback descriptor observed")
+            return object.__getattribute__(self, name)
+
+        def __call__(self, _plan):
+            return forbidden()
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", forbidden)
+        candidate, marker, _source, _recipe, _host = (
+            service._prepare_d4_r003_runner_preflight(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees=trees))
+        boundary = marker._macos_boundary
+        assert boundary is not None
+        if replacement == "callable":
+            launcher = forbidden
+        elif replacement == "other_method":
+            launcher = boundary.recheck_for
+        else:
+            launcher = ForgedCallback()
+        owner = DirectChildOwner()
+        with pytest.raises(LbeWorkerError) as denied:
+            LbeWorker(owner, launcher=launcher).run(
+                candidate.plan, product_attempt=marker)
+        assert denied.value.code == "invalid_worker_dependency"
+        assert denied.value.process_may_be_running is False
+        assert owner.snapshot()["reserved_slots"] == 0
+        assert owner.snapshot()["unavailable"] is False
+        with pytest.raises(LbeWorkerError) as replay:
+            LbeWorker(owner, launcher=boundary.launch).run(
+                candidate.plan, product_attempt=marker)
+        assert replay.value.code == "attempt_replay_denied"
+        assert calls == []
+
+
+def test_d4_worker_keeps_exact_bound_launcher_if_drain_factory_changes_field(
+        product_service, monkeypatch):
+    """A changed Worker attribute during drain setup cannot switch a callback."""
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_pipe_drain import BoundedPipeDrain
+    from gateway.lbe_worker import LbeWorker
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="python_direct")
+    trees = _d4_staged_trees(workspace, "python_direct")
+    calls = []
+
+    def forbidden(*_args, **_kwargs):
+        calls.append("unbound")
+        raise AssertionError("changed launcher attribute was executed")
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", forbidden)
+        candidate, marker, _source, _recipe, _host = (
+            service._prepare_d4_r003_runner_preflight(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees))
+        owner = DirectChildOwner()
+        worker = None
+
+        def replace_during_drain(capture):
+            worker._launcher = forbidden
+            return BoundedPipeDrain(capture)
+
+        worker = LbeWorker(
+            owner, launcher=marker._macos_boundary.launch,
+            drain_factory=replace_during_drain)
+        outcome = worker.run(candidate.plan, product_attempt=marker)
+        assert outcome["status"] == "launch_failed"
+        assert outcome["executed"] is False
+        assert outcome["process_may_be_running"] is False
+        assert owner.snapshot()["reserved_slots"] == 0
+        assert owner.snapshot()["unavailable"] is False
+        assert calls == []

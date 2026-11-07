@@ -60,6 +60,7 @@ class D4MachOLoaderObservation:
     selected_sha256: str
     selected_cpu: str
     selected_format: str
+    selected_file_type: str
     declared_direct_libraries: tuple[str, ...]
     declared_rpaths: tuple[str, ...]
     declared_dylinker: tuple[str, ...]
@@ -140,7 +141,7 @@ def _load_name(command: bytes, minimum: int) -> str:
 
 def _parse_commands(
     fd: int, total_size: int, slice_offset: int, slice_size: int,
-) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], bool]:
+) -> tuple[int, tuple[str, ...], tuple[str, ...], tuple[str, ...], bool]:
     header = _read_at(fd, slice_offset, 32, total_size)
     if header[:4] != _MH64_LE:
         raise D4MachOLoaderDenied("selected architecture is not little-endian Mach-O64")
@@ -181,7 +182,7 @@ def _parse_commands(
         cursor += cmdsize
     if cursor != len(raw):
         raise D4MachOLoaderDenied("Mach-O load command table not fully consumed")
-    return tuple(libs), tuple(rpaths), tuple(dylinker), signature
+    return file_type, tuple(libs), tuple(rpaths), tuple(dylinker), signature
 
 
 def inspect_d4_selected_macho_loader(
@@ -218,8 +219,12 @@ def inspect_d4_selected_macho_loader(
                 or not 32 <= before.st_size <= _MAX_FILE):
             raise D4MachOLoaderDenied("unqualified native executable inode")
         offset, size, format_name = _selected_slice(fd, before.st_size)
-        libs, rpaths, dyld, signature = _parse_commands(
+        file_type, libs, rpaths, dyld, signature = _parse_commands(
             fd, before.st_size, offset, size)
+        # Source-only image role: executable tools must be MH_EXECUTE (2),
+        # private linked libraries MH_DYLIB (6), never MH_BUNDLE (8).
+        if file_type != (2 if require_execute_bit else 6):
+            raise D4MachOLoaderDenied("Mach-O selected image role/type mismatch")
         hashed = hashlib.sha256()
         remaining = before.st_size
         while remaining:
@@ -242,6 +247,7 @@ def inspect_d4_selected_macho_loader(
             selected_relative_executable=selected[len(root) + 1:],
             selected_sha256=expected_sha256,
             selected_cpu="arm64", selected_format=format_name,
+            selected_file_type=("MH_EXECUTE" if require_execute_bit else "MH_DYLIB"),
             declared_direct_libraries=libs,
             declared_rpaths=rpaths,
             declared_dylinker=dyld,

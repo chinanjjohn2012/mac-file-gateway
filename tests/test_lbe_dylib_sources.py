@@ -30,11 +30,11 @@ def _cmd(cmd: int, text: str, base: int = 24) -> bytes:
             + b"\x00" * (size - base - len(value)))
 
 
-def _image(*, libs=(), rpaths=()) -> bytes:
+def _image(*, libs=(), rpaths=(), file_type=2) -> bytes:
     commands = tuple(_cmd(0x0C, name) for name in libs) + tuple(
         _cmd(0x8000001C, name, 12) for name in rpaths)
     return (
-        struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2,
+        struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, file_type,
                     len(commands), sum(len(x) for x in commands), 0, 0)
         + b"".join(commands))
 
@@ -53,8 +53,8 @@ def _fixture(tmp_path: Path, *, rpath: bool = False):
         head = _image(libs=("@loader_path/../lib/libA.dylib",))
     payloads = {
         first: head,
-        a: _image(libs=("@loader_path/libB.dylib",)),
-        b: _image(libs=("/usr/lib/libSystem.B.dylib",)),
+        a: _image(libs=("@loader_path/libB.dylib",), file_type=6),
+        b: _image(libs=("/usr/lib/libSystem.B.dylib",), file_type=6),
     }
     for path, data in payloads.items():
         path.write_bytes(data)
@@ -193,7 +193,7 @@ def test_private_macho_dylibs_non_executable_regular_files_remain_valid(
 def test_private_dylib_inherits_main_rpath_for_nested_static_candidate(tmp_path):
     """Inherited runpaths can locate nested candidates, not prove dyld loads."""
     private, a, _b, selected, expected = _fixture(tmp_path, rpath=True)
-    nested = _image(libs=("@rpath/libB.dylib",))
+    nested = _image(libs=("@rpath/libB.dylib",), file_type=6)
     a.write_bytes(nested)
     expected = (("lib/libA.dylib", hashlib.sha256(nested).hexdigest()),
                 expected[1])

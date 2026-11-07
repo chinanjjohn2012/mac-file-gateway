@@ -85,6 +85,7 @@ def test_macho_static_arm64_declarations_are_actual_bytes_not_loader_proof(
             selected_executable=str(executable), expected_sha256=digest)
     assert observed.selected_relative_executable == "bin/selected"
     assert observed.selected_cpu == "arm64"
+    assert observed.selected_file_type == "MH_EXECUTE"
     assert observed.selected_format == ("FAT_32" if fat else "THIN_64")
     assert observed.selected_sha256 == digest
     assert "/usr/lib/libSystem.B.dylib" in observed.declared_direct_libraries
@@ -200,3 +201,32 @@ def test_macho_unsafe_rpath_is_recorded_as_unresolved_not_a_qualification(
     assert "/private/tmp/foreign.dylib" in result.unresolved_install_names
     assert result.native_launch_allowed is False
     assert result.full_loaded_source_graph_attested is False
+
+@pytest.mark.parametrize("incorrect_type", [6, 8])
+def test_macho_primary_rejects_library_or_bundle_even_if_executable(
+        tmp_path, incorrect_type):
+    root, executable, digest = _private_binary(
+        tmp_path, _thin(file_type=incorrect_type))
+    with pytest.raises(D4MachOLoaderDenied, match="role/type mismatch"):
+        inspect_d4_selected_macho_loader(
+            private_root=str(root), selected_executable=str(executable),
+            expected_sha256=digest)
+
+
+def test_macho_library_accepts_pinned_nonexecuting_dylib_but_not_executable_or_bundle(
+        tmp_path):
+    root, file, digest = _private_binary(tmp_path, _thin(file_type=6))
+    file.chmod(0o600)
+    observation = inspect_d4_selected_macho_loader(
+        private_root=str(root), selected_executable=str(file),
+        expected_sha256=digest, require_execute_bit=False)
+    assert observation.selected_file_type == "MH_DYLIB"
+    assert observation.native_launch_allowed is False
+    for illegal in (2, 8):
+        payload = _thin(file_type=illegal)
+        file.write_bytes(payload)
+        with pytest.raises(D4MachOLoaderDenied, match="role/type mismatch"):
+            inspect_d4_selected_macho_loader(
+                private_root=str(root), selected_executable=str(file),
+                expected_sha256=hashlib.sha256(payload).hexdigest(),
+                require_execute_bit=False)

@@ -1999,14 +1999,14 @@ def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
 
     import struct
 
-    def private_macho(label, *, install_name=None):
+    def private_macho(label, *, install_name=None, file_type=2):
         install = (install_name or ("/usr/lib/" + label + ".dylib")).encode(
             "ascii") + b"\x00"
         size = (24 + len(install) + 3) & ~3
         cmd = (struct.pack("<III", 0x0C, size, 24) + b"\x00" * 12
                + install + b"\x00" * (size - 24 - len(install)))
         return struct.pack(
-            "<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2,
+            "<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, file_type,
             1, len(cmd), 0, 0) + cmd
 
     service, workspace = product_service
@@ -2026,7 +2026,7 @@ def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
                 "Python", install_name="@loader_path/../lib/libPrivate.dylib")},
             "lib": {
                 "python/stdlib.py": b"x=1\n",
-                "libPrivate.dylib": private_macho("PrivateLib"),
+                "libPrivate.dylib": private_macho("PrivateLib", file_type=6),
             },
         }
         needed_scratch = {"home", "tmp"}
@@ -2497,20 +2497,20 @@ def test_d4_private_dylib_recheck_burns_one_use_attempt_before_launcher(
     (provisioner / "bin").mkdir(parents=True)
     (provisioner / "lib").mkdir()
 
-    def macho(name):
+    def macho(name, *, file_type=2):
         path = name.encode("ascii") + b"\x00"
         size = (24 + len(path) + 3) & ~3
         command = (struct.pack("<III", 0x0C, size, 24)
                    + b"\x00" * 12 + path
                    + b"\x00" * (size - 24 - len(path)))
         return (struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C,
-                            0, 2, 1, len(command), 0, 0) + command)
+                            0, file_type, 1, len(command), 0, 0) + command)
 
     (provisioner / "bin/python").write_bytes(
         macho("@loader_path/../lib/libPrivate.dylib"))
     (provisioner / "bin/python").chmod(0o700)
     (provisioner / "lib/libPrivate.dylib").write_bytes(
-        macho("/usr/lib/libSystem.B.dylib"))
+        macho("/usr/lib/libSystem.B.dylib", file_type=6))
     (provisioner / "lib/libPrivate.dylib").chmod(0o600)
     manifests = {
         "bin": _d4_tree_expected(provisioner / "bin"),

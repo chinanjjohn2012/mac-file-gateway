@@ -814,6 +814,7 @@ class WorkspaceService:
         expected_source_identities: dict[str, str] | None = None,
         expected_venv_identity_sha256: str | None = None,
         require_go_p007_stage_source: bool = False,
+        expected_venv_record_distributions: tuple[tuple[str, str], ...] | None = None,
         timeout_seconds: int = 60,
     ):
         """Assemble the real six-command private runtime, never launch it.
@@ -902,6 +903,18 @@ class WorkspaceService:
                 "runner_unavailable",
                 "D4 first-party virtualenv identity selection is incomplete.")
 
+        # RECORD checks are a SOURCE-only installed-file admission gate.
+        # An independently selected exact distribution list is mandatory;
+        # RECORD itself is not publisher/source authenticity or import closure.
+        # Validate all shape/role prerequisites BEFORE any staging directories.
+        if (expected_venv_record_distributions is not None
+                and (flavor != "pipenv"
+                     or expected_venv_identity_sha256 is None
+                     or venv_manifest is None)):
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 installed virtualenv record selection incomplete.")
+
         def check_venv_identity() -> None:
             if expected_venv_identity_sha256 is None:
                 return
@@ -924,7 +937,32 @@ class WorkspaceService:
                     "runner_unavailable",
                     "D4 private virtualenv source identity changed.")
 
+        def check_venv_records() -> None:
+            if expected_venv_record_distributions is None:
+                return
+            from .lbe_runtime_tree import (
+                D4RuntimeTreeDenied, inspect_d4_pipenv_installed_record_sources,
+            )
+            try:
+                project = str(self.get(name).gateway._root_path) + "/py-pipenv"
+                observed = inspect_d4_pipenv_installed_record_sources(
+                    project_root=project,
+                    expected_venv_manifest=venv_manifest,
+                    expected_distributions=expected_venv_record_distributions,
+                )
+            except (D4RuntimeTreeDenied, OSError):
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 first-party Pipenv installed source RECORD incomplete."
+                ) from None
+            if (observed.venv_identity_sha256
+                    != expected_venv_identity_sha256):
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 first-party Pipenv installed source tree changed.")
+
         check_venv_identity()
+        check_venv_records()
         from .lbe_runtime_stage import (
             D4RuntimeStageDenied, create_d4_fresh_runner_scratch,
         )
@@ -943,6 +981,7 @@ class WorkspaceService:
         # Bin/lib or Go staging may take time. The pinned first-party venv
         # identity MUST still match before preparing any child environment.
         check_venv_identity()
+        check_venv_records()
         try:
             scratch = create_d4_fresh_runner_scratch(
                 private_root=private_root, kind=flavor)
@@ -1032,6 +1071,7 @@ class WorkspaceService:
                 "runner_unavailable", "D4 private native dylib source unqualified."
             ) from None
         check_venv_identity()
+        check_venv_records()
         return (*prepared, graph, tuple(stage_receipts))
 
     def _prepare_d4_r003_selected_macho_source(

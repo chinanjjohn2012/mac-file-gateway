@@ -10,7 +10,11 @@ used, nor an OS CPU/RAM resource domain. No receipt confers Exec authority.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from email.parser import Parser
+import base64
+import csv
 import hashlib
+import io
 import os
 import re
 import stat
@@ -463,4 +467,225 @@ def observe_d4_pipenv_venv_manifest(
     return _observe_d4_selected_source_manifest(
         source_root=project_root, selected_name=".venv", kind="venv",
         status="OBSERVED_FIRST_PARTY_VENV_ONLY_NOT_ATTESTED",
+    )
+
+
+
+@dataclass(frozen=True, slots=True)
+class D4PipenvRecordSourceObservation:
+    """Closed actual installed-site RECORD bytes, not a dynamic import proof."""
+    distributions: tuple[tuple[str, str], ...]
+    record_members_checked: int
+    importable_members_checked: int
+    venv_identity_sha256: str
+    record_manifest_sha256: str
+    status: str = "RECORD_LISTED_SITE_BYTES_NOT_IMPORT_CLOSURE"
+    actual_loaded_source_graph_proven: bool = False
+    external_source_provenance_attested: bool = False
+    native_launch_allowed: bool = False
+
+
+def _d4_venv_member(
+    root_fd: int, relative: str, *, limit: int,
+) -> tuple[bytes | None, int]:
+    """Nofollow checked size and optional bounded bytes, never import/exec.
+
+    Positive limit reads metadata/RECORD; zero obtains only a controlled
+    file descriptor size (full bytes are hashed by both whole-tree scans).
+    """
+    parts = _rel(relative)
+    parent = os.dup(root_fd)
+    try:
+        _identity(parent, directory=True)
+        for part in parts[:-1]:
+            child = os.open(part, _DIR_FLAGS, dir_fd=parent)
+            os.close(parent)
+            parent = child
+            _identity(parent, directory=True)
+        fd = os.open(parts[-1], _FILE_FLAGS, dir_fd=parent)
+        try:
+            before = _identity(fd, directory=False)
+            size = before[2]
+            if size < 0 or (limit and size > limit):
+                raise D4RuntimeTreeDenied("installed RECORD source size unqualified")
+            if not limit:
+                return None, size
+            chunks = []
+            count = 0
+            while count < size:
+                part = os.read(fd, min(65536, size - count))
+                if not part:
+                    raise D4RuntimeTreeDenied("installed RECORD source truncated")
+                chunks.append(part)
+                count += len(part)
+            if _identity(fd, directory=False) != before:
+                raise D4RuntimeTreeDenied("installed RECORD source inode drift")
+            return b"".join(chunks), size
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent)
+
+
+def inspect_d4_pipenv_installed_record_sources(
+    *, project_root: str,
+    expected_venv_manifest: tuple[tuple[str, str | None], ...],
+    expected_distributions: tuple[tuple[str, str], ...],
+) -> D4PipenvRecordSourceObservation:
+    """Verify every installed first-party .venv site file is RECORD-listed.
+
+    This checks the complete *actual* Python 3.13 site-packages physical
+    source bytes against independently supplied full .venv manifest AND
+    exact caller-provided distribution identities. RECORD itself is
+    self-reported installation metadata: no wheel publisher attestation,
+    actual sys.path resolution, dynamic import closure or native approval.
+    A bare RECORD or unverifiable missing/extra file is never accepted.
+    """
+    if (type(expected_distributions) is not tuple
+            or not 1 <= len(expected_distributions) <= 64
+            or any(
+                type(row) is not tuple or len(row) != 2
+                or type(row[0]) is not str
+                or type(row[1]) is not str
+                or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", row[0]) is None
+                or re.fullmatch(r"[0-9][A-Za-z0-9.+_-]{0,63}", row[1]) is None
+                for row in expected_distributions)
+            or tuple(sorted(set(expected_distributions)))
+            != expected_distributions):
+        raise D4RuntimeTreeDenied("unapproved installed distribution identity set")
+    wanted = _manifest(expected_venv_manifest)
+    site = "lib/python3.13/site-packages"
+    prefix = site + "/"
+    if site not in wanted or wanted[site] is not None:
+        raise D4RuntimeTreeDenied("selected CPython 3.13 site-packages missing")
+    # More than one Python runtime site root is an unqualified shadow path.
+    if any(
+        name.startswith("lib/python") and "/site-packages" in name
+        and not (name == site or name.startswith(prefix))
+        for name in wanted
+    ):
+        raise D4RuntimeTreeDenied("additional Python site source unqualified")
+    files = {name for name, sha in wanted.items() if sha is not None
+             and name.startswith(prefix)}
+    if len(files) > _MAX_ENTRIES:
+        raise D4RuntimeTreeDenied("installed site sources exceed limit")
+    # Some archives can themselves be imported at runtime; the current
+    # no-import contract deliberately excludes all such unqualified sites.
+    if any(name.lower().endswith((".zip", ".egg", ".whl", ".pyc", ".pth"))
+           for name in files):
+        raise D4RuntimeTreeDenied("unqualified import archive or startup file")
+    records = sorted(
+        name for name in files
+        if name.endswith(".dist-info/RECORD")
+        and len(name[len(prefix):].split("/")) == 2
+    )
+    if not records or len(records) != len(expected_distributions):
+        raise D4RuntimeTreeDenied("installed distribution RECORD set incomplete")
+    first = inspect_d4_closed_staged_tree(
+        private_root=project_root,
+        staged_root=project_root + "/.venv",
+        expected=expected_venv_manifest,
+    )
+    expected = set(expected_distributions)
+    covered: set[str] = set()
+    seen_distributions: set[tuple[str, str]] = set()
+    digest = hashlib.sha256()
+    record_members = 0
+    try:
+        fd = _root_fd(_parts(project_root, "first-party project root"),
+                      _parts(project_root + "/.venv", "first-party venv root"))
+        try:
+            for record_path in records:
+                distribution_root = record_path.rsplit("/", 1)[0]
+                metadata_path = distribution_root + "/METADATA"
+                if metadata_path not in files:
+                    raise D4RuntimeTreeDenied("installed METADATA missing")
+                metadata_bytes, _ = _d4_venv_member(
+                    fd, metadata_path, limit=524288)
+                if hashlib.sha256(metadata_bytes).hexdigest() != wanted[metadata_path]:
+                    raise D4RuntimeTreeDenied("installed METADATA drifted")
+                message = Parser().parsestr(metadata_bytes.decode("utf-8", "strict"))
+                names = message.get_all("Name") or []
+                versions = message.get_all("Version") or []
+                if len(names) != 1 or len(versions) != 1:
+                    raise D4RuntimeTreeDenied("ambiguous installed distribution metadata")
+                name = re.sub(r"[-_.]+", "-", names[0]).lower()
+                version = versions[0]
+                if ((name, version) not in expected
+                        or (name, version) in seen_distributions
+                        or distribution_root.rsplit("/", 1)[-1] != (
+                            name.replace("-", "_") + "-" + version + ".dist-info")):
+                    raise D4RuntimeTreeDenied(
+                        "unapproved installed distribution metadata")
+                seen_distributions.add((name, version))
+                record_bytes, _ = _d4_venv_member(
+                    fd, record_path, limit=4000000)
+                if hashlib.sha256(record_bytes).hexdigest() != wanted[record_path]:
+                    raise D4RuntimeTreeDenied("installed RECORD changed during read")
+                rows = csv.reader(io.StringIO(record_bytes.decode("utf-8", "strict")),
+                                  strict=True)
+                own_record = False
+                per_record = 0
+                for row in rows:
+                    if len(row) != 3 or per_record >= _MAX_ENTRIES:
+                        raise D4RuntimeTreeDenied("invalid installed RECORD row")
+                    relative, checksum, size_text = row
+                    _rel(relative)
+                    full = prefix + relative
+                    if full not in files or full in covered:
+                        raise D4RuntimeTreeDenied(
+                            "unlisted or duplicated installed RECORD source")
+                    if full == record_path:
+                        if checksum or size_text:
+                            raise D4RuntimeTreeDenied("RECORD self hash must be blank")
+                        own_record = True
+                        size = 0
+                    else:
+                        known = wanted[full]
+                        if (not checksum.startswith("sha256=")
+                                or not size_text.isdecimal()
+                                or size_text.startswith("0") and size_text != "0"):
+                            raise D4RuntimeTreeDenied("installed RECORD hash or size absent")
+                        correct = base64.urlsafe_b64encode(
+                            bytes.fromhex(known)).rstrip(b"=").decode("ascii")
+                        if checksum != "sha256=" + correct:
+                            raise D4RuntimeTreeDenied("installed RECORD hash mismatched")
+                        _, size = _d4_venv_member(fd, full, limit=0)
+                        if size != int(size_text):
+                            raise D4RuntimeTreeDenied("installed RECORD size mismatched")
+                    covered.add(full)
+                    digest.update(full.encode("ascii"))
+                    digest.update(b"\x00")
+                    digest.update(wanted[full].encode("ascii"))
+                    digest.update(b"\x00")
+                    digest.update(str(size).encode("ascii"))
+                    digest.update(b"\n")
+                    per_record += 1
+                    record_members += 1
+                if not own_record:
+                    raise D4RuntimeTreeDenied("installed RECORD self row missing")
+        finally:
+            os.close(fd)
+    except (OSError, ValueError, UnicodeError, csv.Error) as exc:
+        if type(exc) is D4RuntimeTreeDenied:
+            raise
+        raise D4RuntimeTreeDenied(
+            "installed RECORD source observation unavailable") from None
+    if seen_distributions != expected or covered != files:
+        raise D4RuntimeTreeDenied("unlisted first-party site distribution files")
+    after = inspect_d4_closed_staged_tree(
+        private_root=project_root,
+        staged_root=project_root + "/.venv",
+        expected=expected_venv_manifest,
+    )
+    if after != first:
+        raise D4RuntimeTreeDenied("installed record/site identity drifted")
+    importable = sum(name.endswith((".py", ".pyi", ".so", ".dylib", ".pyd"))
+                     for name in files)
+    return D4PipenvRecordSourceObservation(
+        distributions=expected_distributions,
+        record_members_checked=record_members,
+        importable_members_checked=importable,
+        venv_identity_sha256=first.observed_identity_sha256,
+        record_manifest_sha256=digest.hexdigest(),
     )

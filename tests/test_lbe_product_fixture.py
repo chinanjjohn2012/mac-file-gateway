@@ -2610,3 +2610,115 @@ def test_d4_pipenv_source_pins_private_home_without_claiming_import_attestation(
     assert observed.actual_import_graph_attested is False
     assert observed.owner_native_t1_grant is False
     assert observed.native_launch_allowed is False
+
+
+@pytest.mark.parametrize("kind,cwd,argv,mutation", [
+    ("go", "go-project", ["go", "test", "./..."], "missing_compile"),
+    ("go", "go-project", ["go", "vet", "./..."], "renamed_link"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"],
+     "missing_interpreter"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"],
+     "wrong_interpreter"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"],
+     "host_venv_home"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"],
+     "missing_venv_home"),
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"],
+     "unlisted_binary"),
+])
+def test_d4_native_recipe_pins_all_selected_toolchain_and_interpreter_entries(
+        product_service, monkeypatch, kind, cwd, argv, mutation):
+    """A real nonexecuting launch recipe must not lose secondary image identity.
+
+    The validated live D4 source observation contains Go's compile/link tools
+    or Pipenv's selected Python interpreter and private venv base home. No
+    caller-mutable source-only dataclass may silently drop these requirements.
+    """
+    from gateway.lbe_launch_recipe import (
+        D4NativeRecipeDenied, prepare_d4_native_launch_recipe,
+    )
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    expected_trees = _d4_staged_trees(workspace, kind)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("SOURCE/T0 must not start a native child")
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", forbidden)
+        candidate, _marker, observed, _recipe = (
+            service._prepare_d4_r003_native_recipe(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees=expected_trees))
+        chosen = list(observed.staged_executables)
+        if mutation == "missing_compile":
+            chosen = [row for row in chosen if not row[0].endswith("/compile")]
+            altered = replace(observed, staged_executables=tuple(chosen))
+        elif mutation == "renamed_link":
+            chosen = [(("go/pkg/tool/darwin_arm64/surprise" if
+                        label.endswith("/link") else label), digest)
+                      for label, digest in chosen]
+            altered = replace(observed, staged_executables=tuple(chosen))
+        elif mutation == "missing_interpreter":
+            chosen = [row for row in chosen if not row[0].endswith(
+                "/.venv/bin/python")]
+            altered = replace(observed, staged_executables=tuple(chosen))
+        elif mutation == "wrong_interpreter":
+            chosen = [(label, "e" * 64 if label.endswith(
+                "/.venv/bin/python") else digest)
+                      for label, digest in chosen]
+            altered = replace(observed, staged_executables=tuple(chosen))
+        elif mutation == "host_venv_home":
+            altered = replace(observed, selected_venv_home="/usr/local/bin")
+        elif mutation == "missing_venv_home":
+            altered = replace(observed, selected_venv_home=None)
+        else:
+            chosen.append(("lib/foreign-interpreter", "f" * 64))
+            altered = replace(observed, staged_executables=tuple(chosen))
+        with pytest.raises(D4NativeRecipeDenied):
+            prepare_d4_native_launch_recipe(
+                service.get("a"), candidate, altered, private_root=private)
+
+
+def test_d4_native_recipe_retains_exact_private_pipenv_base_home(
+        product_service, monkeypatch):
+    """The selected real pyvenv.cfg home must survive into the bound recipe."""
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="pipenv")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no T1 launch")))
+        _candidate, _marker, observed, recipe = (
+            service._prepare_d4_r003_native_recipe(
+                "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=_d4_staged_trees(workspace, "pipenv")))
+    assert observed.selected_venv_home == private + "/bin"
+    assert recipe.selected_venv_home == observed.selected_venv_home
+    assert recipe.native_launch_allowed is False
+
+
+def test_d4_fixture_inventory_bounds_entries_before_bulk_materialization(
+        product_service, monkeypatch):
+    """A hostile source directory must not force an unlimited listdir result."""
+    import gateway.lbe_product_fixture as product
+
+    service, workspace = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    for index in range(12):
+        (workspace / "py-direct/src" / ("extra_%02d.py" % index)).write_bytes(
+            b"source = 1\\n")
+
+    with monkeypatch.context() as m:
+        m.setattr(product, "_MAX_SRC_ENTRIES", 8)
+        m.setattr(os, "listdir", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("bulk listdir forbidden")))
+        with pytest.raises(D4FixtureDenied, match="too many entries"):
+            product.check_d4_r003_fixture(
+                service.get("a"), candidate.plan)

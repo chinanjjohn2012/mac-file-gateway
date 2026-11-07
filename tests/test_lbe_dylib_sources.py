@@ -247,3 +247,105 @@ def test_private_dylib_unqualified_rpath_is_explicit_gap(tmp_path):
     assert "LC_RPATH:@loader_path/../../unqualified" in (
         graph.unresolved_dynamic_loader_names)
     assert graph.native_launch_allowed is False
+
+
+def _shared_library_context_fixture(tmp_path: Path, *, bad_second: bool):
+    """One selected dylib with different inherited @rpath loader contexts."""
+    private = tmp_path / "private-contexts"
+    binary = private / "bin/python"
+    left = private / "lib/libLeft.dylib"
+    right = private / "lib/libRight.dylib"
+    shared = private / "lib/libShared.dylib"
+    leaf = private / "lib/safe/libLeaf.dylib"
+    data = {
+        # DFS uses a LIFO stack; the left (pinned) branch is checked first.
+        binary: _image(libs=(
+            "@loader_path/../lib/libRight.dylib",
+            "@loader_path/../lib/libLeft.dylib",
+        )),
+        left: _image(
+            libs=("@loader_path/libShared.dylib",),
+            rpaths=("@loader_path/safe",),
+            file_type=6,
+        ),
+        right: _image(
+            libs=("@loader_path/libShared.dylib",),
+            rpaths=("@loader_path/not-pinned" if bad_second
+                    else "@loader_path/safe",),
+            file_type=6,
+        ),
+        shared: _image(libs=("@rpath/libLeaf.dylib",), file_type=6),
+        leaf: _image(libs=("/usr/lib/libSystem.B.dylib",), file_type=6),
+    }
+    for filename, value in data.items():
+        filename.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        filename.write_bytes(value)
+        filename.chmod(0o700 if filename == binary else 0o600)
+    image = inspect_d4_selected_macho_loader(
+        private_root=str(private), selected_executable=str(binary),
+        expected_sha256=hashlib.sha256(data[binary]).hexdigest())
+    selected = D4NativeLoaderSetObservation(
+        runtime_kind="python_direct",
+        static_selected_executables=(("bin/python", image),),
+        unresolved_declared_install_names=image.unresolved_install_names)
+    expected = tuple(
+        sorted((str(filename.relative_to(private)),
+                hashlib.sha256(value).hexdigest())
+               for filename, value in data.items() if filename != binary))
+    return private, selected, expected
+
+
+@pytest.mark.parametrize("bad_second", [False, True])
+def test_private_library_shared_contexts_preserve_inherited_runpath_evidence(
+        tmp_path, monkeypatch, bad_second):
+    """A shared dylib path cannot hide an unqualified second inherited path."""
+    private, selected, expected = _shared_library_context_fixture(
+        tmp_path, bad_second=bad_second)
+    def no_spawn(*_args, **_kwargs):
+        raise AssertionError("private Mach-O context inspection is T0 only")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", no_spawn)
+        m.setattr(os, "kill", no_spawn)
+        observed = inspect_d4_private_dylib_candidates(
+            selected, private_root=str(private),
+            expected_private_dylibs=expected)
+    assert tuple(name for name, _ in observed.private_native_images) == (
+        "lib/libLeft.dylib", "lib/libRight.dylib",
+        "lib/libShared.dylib", "lib/safe/libLeaf.dylib")
+    if bad_second:
+        assert "@rpath/libLeaf.dylib" in observed.unresolved_dynamic_loader_names
+    else:
+        assert observed.unresolved_dynamic_loader_names == ()
+    assert observed.actual_dyld_resolution_verified is False
+    assert observed.native_launch_allowed is False
+
+
+def test_private_library_context_limit_fails_closed_without_native_child(
+        tmp_path, monkeypatch):
+    import gateway.lbe_dylib_sources as module
+    private, selected, expected = _shared_library_context_fixture(
+        tmp_path, bad_second=False)
+    def no_spawn(*_args, **_kwargs):
+        raise AssertionError("bounded library graph may never spawn")
+    with monkeypatch.context() as m:
+        m.setattr(module, "_MAX_CONTEXTS", 2)
+        m.setattr(subprocess, "Popen", no_spawn)
+        with pytest.raises(D4PrivateDylibDenied, match="contexts exceed bound"):
+            inspect_d4_private_dylib_candidates(
+                selected, private_root=str(private),
+                expected_private_dylibs=expected)
+
+
+def test_private_library_cycle_is_bounded_by_context_and_has_no_exec_power(
+        tmp_path):
+    private, _a, b, selected, expected = _fixture(tmp_path)
+    cycle = _image(libs=("@loader_path/libA.dylib",), file_type=6)
+    b.write_bytes(cycle)
+    expected = (expected[0], ("lib/libB.dylib",
+                              hashlib.sha256(cycle).hexdigest()))
+    observed = inspect_d4_private_dylib_candidates(
+        selected, private_root=str(private),
+        expected_private_dylibs=expected)
+    assert len(observed.private_native_images) == 2
+    assert observed.unresolved_dynamic_loader_names == ()
+    assert observed.native_launch_allowed is False

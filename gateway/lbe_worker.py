@@ -239,6 +239,9 @@ class LbeWorker:
         an attachment failure retains wait() ownership and latches admission.
         """
         self._check_plan(plan)
+        # Retain the exact launcher selected before rechecks or drain setup:
+        # no injected callback may switch it between validation and invocation.
+        launcher = self._launcher
         if cancelled is not None and type(cancelled) is not threading.Event:
             raise LbeWorkerError("invalid_argument")
         if product_attempt is not None:
@@ -255,6 +258,13 @@ class LbeWorker:
                 product_attempt.consume_for(plan)
             except D4FixtureDenied:
                 raise LbeWorkerError("attempt_replay_denied") from None
+            # A prepared macOS Runner cannot lend its one-use source receipt
+            # to a different launcher, even another bound method. Old fake
+            # source-only T0 markers confer no executable authority.
+            try:
+                product_attempt.require_bound_launcher(launcher)
+            except D4FixtureDenied:
+                raise LbeWorkerError("invalid_worker_dependency") from None
         if cancelled is not None and cancelled.is_set():
             raise LbeWorkerError("waiter_disconnected")
         try:
@@ -292,7 +302,7 @@ class LbeWorker:
             raise LbeWorkerError("waiter_disconnected")
 
         try:
-            child = self._launcher(plan)
+            child = launcher(plan)
         except LbeNoChildStarted:
             # Explicit, reviewed launcher-side negative witness only.
             # Ordinary OSError/InterruptedError etc. cannot prove no child.

@@ -248,6 +248,30 @@ class D4OneUseAttemptMarker:
                 raise D4FixtureDenied("macOS Runner source identity drift") from None
             self._macos_boundary = binding
 
+    def require_bound_launcher(self, launcher: object) -> None:
+        """Only this service-owned macOS Runner's launch method may execute.
+
+        This remains a non-authorizing source-only check. An R003 marker with
+        an attached Runner cannot be used with a generic callback, a forged
+        method or a different Worker launcher. Older source-only fake T0
+        markers without this Runner retain their nonoperative test behavior.
+        """
+        from types import MethodType
+        from .lbe_macos_runner import D4MacOSRunnerLaunchBoundary
+
+        boundary = self._macos_boundary
+        if boundary is None:
+            return
+        if (type(boundary) is not D4MacOSRunnerLaunchBoundary
+                or type(launcher) is not MethodType
+                or launcher.__self__ is not boundary
+                or launcher.__func__ is not D4MacOSRunnerLaunchBoundary.launch):
+            raise D4FixtureDenied("macOS Runner launch callback is not bound")
+        try:
+            boundary.check_binding(self._ctx, self._candidate.plan)
+        except Exception:
+            raise D4FixtureDenied("macOS Runner launch binding drift") from None
+
     def attach_macho_loader_set(self, binding: object) -> None:
         """Attach one live service-selected native binary loader-set recheck.
 

@@ -9,7 +9,7 @@ used, nor an OS CPU/RAM resource domain. No receipt confers Exec authority.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import os
 import re
@@ -36,6 +36,19 @@ _FIELDS = ("st_dev", "st_ino", "st_size", "st_mtime_ns",
 # claim that other files cannot import foreign code.
 _UNQUALIFIED_STARTUP = frozenset({
     "sitecustomize.py", "usercustomize.py", "__pycache__",
+})
+# Immutable PR101 P007 source-only Go 1.27.3 darwin-arm64 archive->stage
+# CONTENT inventory. The P007 archive SHA is separate, and matching its
+# canonical stage digest does NOT attest upstream publisher, provenance,
+# loaded compiler/stdlib/modules, or native Go qualification.
+# Reference: tools/lbe_p007_go_source_inventory.py, P007 PINNED_*.
+_P007_GO_STAGE_FILE_COUNT = 15657
+_P007_GO_STAGE_SHA256 = (
+    "e43f516501f4e9b07de05dd470ffdab0b4c2acc086acf1e282d39c40fb00dc6a"
+)
+_P007_GO_CRITICAL_FILES = frozenset({
+    "VERSION", "bin/go", "pkg/tool/darwin_arm64/compile",
+    "pkg/tool/darwin_arm64/link", "src/runtime/proc.go",
 })
 
 
@@ -257,6 +270,11 @@ class D4OperatorSourceManifest:
     file_count: int
     total_file_bytes: int
     status: str = "OBSERVED_OPERATOR_SOURCE_ONLY_NOT_ATTESTED"
+    # P007 sorts the COMPLETE "SHA256  ./go/path" lines, not filenames.
+    # This is only a reproducible source-byte comparison. The actual P007
+    # Go archive and loader graph are NOT verified by this receipt.
+    go_p007_stage_manifest_sha256: str | None = None
+    go_1_27_3_p007_stage_manifest_matched: bool = False
     trusted_operator_attested: bool = False
     manifest_independently_approved: bool = False
     actual_loaded_source_graph_proven: bool = False
@@ -376,15 +394,49 @@ def _observe_d4_selected_source_manifest(
     )
 
 
+def _d4_p007_go_stage_digest(
+    proposed: tuple[tuple[str, str | None], ...],
+) -> str:
+    """Reproduce the P007 canonical archive-to-stage manifest algorithm.
+
+    The full bounded source tree has ALREADY been nofollow and content/owner
+    checked. Compute the SHA-prefixed line sort over regular files ONLY;
+    the Go archive P007 input included the leading go/ root in each path.
+    This cannot authorize a Go process or establish compiler imports.
+    """
+    lines = sorted(
+        digest + "  ./go/" + name
+        for name, digest in proposed if digest is not None
+    )
+    return hashlib.sha256(("\n".join(lines) + "\n").encode("ascii")).hexdigest()
+
+
 def observe_d4_operator_source_manifest(
     *, provisioner_root: str, kind: str,
 ) -> D4OperatorSourceManifest:
     """Expose reviewable go/bin/lib operator bytes without self-approval."""
     if type(kind) is not str or kind not in {"go", "bin", "lib"}:
         raise D4RuntimeTreeDenied("unsupported operator source tree kind")
-    return _observe_d4_selected_source_manifest(
+    observed = _observe_d4_selected_source_manifest(
         source_root=provisioner_root, selected_name=kind, kind=kind,
         status="OBSERVED_OPERATOR_SOURCE_ONLY_NOT_ATTESTED",
+    )
+    if kind != "go":
+        return observed
+    stage_sha = _d4_p007_go_stage_digest(observed.proposed_manifest)
+    file_names = {
+        name for name, digest in observed.proposed_manifest
+        if digest is not None
+    }
+    matches_exact_release = (
+        observed.file_count == _P007_GO_STAGE_FILE_COUNT
+        and _P007_GO_CRITICAL_FILES.issubset(file_names)
+        and stage_sha == _P007_GO_STAGE_SHA256
+    )
+    return replace(
+        observed,
+        go_p007_stage_manifest_sha256=stage_sha,
+        go_1_27_3_p007_stage_manifest_matched=matches_exact_release,
     )
 
 

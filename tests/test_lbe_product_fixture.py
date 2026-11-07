@@ -44,7 +44,7 @@ def product_service(tmp_path: Path):
     # The future Pipenv source-only profile selects ONLY the privately staged
     # bin home; never a host base interpreter or system site-packages.
     (pipenv / ".venv" / "pyvenv.cfg").write_bytes(
-        ("home = " + str(tmp_path / "private" / "bin")
+        ("home = " + str(tmp_path / "bin")
          + "\ninclude-system-site-packages = false\n").encode("ascii"))
     (pipenv / ".venv" / "bin" / "python").write_bytes(b"fixed test-only bytes\n")
     (pipenv / ".venv" / "bin" / "python").chmod(0o700)

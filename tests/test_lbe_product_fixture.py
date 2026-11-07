@@ -3692,3 +3692,121 @@ def test_d4_service_pipfile_to_lock_to_record_mismatch_denied(
         service.invoke_exec(
             "a", "py-pipenv", ["python", "-m", "pytest", "-q"], dry_run=False)
     assert public.value.code == "exec_cleanup_proof_required"
+
+
+
+def test_d4_actual_service_selects_python_first_party_import_edges_without_spawn(
+        product_service, monkeypatch):
+    """Real candidate binds import AST to the already hashed first-party files."""
+    service, workspace = product_service
+    package = workspace / "py-direct/src/pkg"
+    package.mkdir()
+    (package / "__init__.py").write_bytes(b"# selected package\n")
+    (package / "util.py").write_bytes(b"value = 42\n")
+    (package / "entry.py").write_bytes(
+        b"from .util import value\nimport os\n")
+    argv = ["python", "-m", "compileall", "-q", "./src"]
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("T0 cannot run Python")))
+        candidate = service._prepare_d4_r003_fixture_candidate(
+            "a", "py-direct", argv)
+        receipt = candidate.python_import_sources
+        assert receipt is not None
+        assert receipt.first_party_import_edges == (
+            ("src/pkg/entry.py", "src/pkg/util.py"),)
+        assert "os" in receipt.unresolved_external_imports
+        assert receipt.actual_sys_path_proven is False
+        assert receipt.actual_loaded_source_graph_proven is False
+        assert receipt.native_launch_allowed is False
+        with pytest.raises(GatewayError) as denied:
+            service.invoke_exec("a", "py-direct", argv, dry_run=False)
+        assert denied.value.code == "exec_cleanup_proof_required"
+
+
+def test_d4_actual_pipenv_without_tests_has_empty_truthful_python_import_receipt(
+        product_service):
+    service, _workspace = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-pipenv", ["python", "-m", "pytest", "-q"])
+    receipt = candidate.python_import_sources
+    assert receipt is not None
+    assert receipt.selected_source_files == ()
+    assert receipt.imported_external_sources_proven is False
+    assert receipt.native_launch_allowed is False
+
+
+@pytest.mark.parametrize("source", [
+    b"from ..escape import secret\n",
+    b"import src.missing\n",
+    b"from .missing import value\n",
+    b"def broken(:\n",
+])
+def test_d4_actual_service_refuses_unsafe_python_selected_imports(
+        product_service, monkeypatch, source):
+    service, workspace = product_service
+    (workspace / "py-direct/src/main.py").write_bytes(source)
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("T0 no Python subprocess")))
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_fixture_candidate(
+                "a", "py-direct",
+                ["python", "-m", "compileall", "-q", "./src"])
+        assert denied.value.code == "command_not_allowed"
+        with pytest.raises(GatewayError) as public:
+            service.invoke_exec(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                dry_run=False)
+        assert public.value.code == "exec_cleanup_proof_required"
+
+
+def test_d4_python_source_recheck_catches_same_bytes_new_inode(
+        product_service):
+    from gateway.lbe_python_import_sources import (
+        D4PythonImportDenied, inspect_d4_python_first_party_import_sources,
+    )
+
+    service, workspace = product_service
+    source = workspace / "py-direct/src/main.py"
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct",
+        ["python", "-m", "compileall", "-q", "./src"])
+    replacement = source.with_name("replacement.py")
+    replacement.write_bytes(source.read_bytes())
+    os.replace(replacement, source)
+    with pytest.raises(D4PythonImportDenied):
+        inspect_d4_python_first_party_import_sources(
+            service.get("a"), candidate)
+
+
+def test_d4_python_source_recheck_catches_replaced_package_directory(
+        product_service):
+    from gateway.lbe_python_import_sources import (
+        D4PythonImportDenied, inspect_d4_python_first_party_import_sources,
+    )
+
+    service, workspace = product_service
+    src_dir = workspace / "py-direct/src"
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    old = src_dir.with_name("renamed")
+    os.rename(src_dir, old)
+    src_dir.mkdir()
+    (src_dir / "main.py").write_bytes((old / "main.py").read_bytes())
+    with pytest.raises(D4PythonImportDenied):
+        inspect_d4_python_first_party_import_sources(service.get("a"), candidate)
+
+
+def test_d4_python_dynamic_import_recorded_as_unqualified_source(
+        product_service):
+    service, workspace = product_service
+    (workspace / "py-direct/src/main.py").write_bytes(
+        b"import importlib\nimportlib.import_module('external')\n")
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    receipt = candidate.python_import_sources
+    assert receipt.dynamic_import_sites == ("src/main.py",)
+    assert receipt.unresolved_external_imports == ("importlib",)
+    assert receipt.dynamic_import_closure_proven is False
+    assert receipt.native_launch_allowed is False

@@ -21,6 +21,7 @@ from .lbe_worker import LbeWorkPlan, LbeWorker, LbeWorkerError
 
 if TYPE_CHECKING:
     from .workspaces import WorkspaceContext
+    from .lbe_python_import_sources import D4PythonSourceImportObservation
 
 
 class D4FixtureDenied(ValueError):
@@ -83,6 +84,7 @@ class D4FixtureCandidate:
     source_sha256: tuple[tuple[str, str], ...]
     source_identity: tuple[tuple[str, tuple[int, ...]], ...] = ()
     directory_identity: tuple[tuple[str, tuple[int, ...]], ...] = ()
+    python_import_sources: "D4PythonSourceImportObservation | None" = None
     profile_id: str = PROFILE_ID
     profile_git_blob: str = PROFILE_GIT_BLOB
     status: str = _STATUS

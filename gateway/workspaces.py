@@ -6,7 +6,7 @@ separate synchronous Worker admission, never reflective file dispatch.
 from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import os
 import sys
@@ -498,9 +498,20 @@ class WorkspaceService:
 
             plan = prepare_lbe_work_plan(
                 ctx, cwd=cwd, argv=argv, timeout_seconds=timeout_seconds)
+            from .lbe_python_import_sources import (
+                D4PythonImportDenied, inspect_d4_python_first_party_import_sources,
+            )
             try:
-                return check_d4_r003_fixture(ctx, plan)
-            except D4FixtureDenied:
+                candidate = check_d4_r003_fixture(ctx, plan)
+                if candidate.plan.cwd in ("py-direct", "py-pipenv"):
+                    # Actual pinned first-party import edges are a bounded,
+                    # nonexecuting source observation. Third-party/sys.path
+                    # and dynamic import identities remain unqualified.
+                    imports = inspect_d4_python_first_party_import_sources(
+                        ctx, candidate)
+                    candidate = replace(candidate, python_import_sources=imports)
+                return candidate
+            except (D4FixtureDenied, D4PythonImportDenied):
                 raise GatewayError(
                     "command_not_allowed",
                     "D4 first-party fixture is not qualified for this plan.",

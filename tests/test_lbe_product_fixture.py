@@ -1992,18 +1992,20 @@ def test_d4_service_staging_cannot_select_foreign_source_kind(
     assert not (private / "bin").exists()
 
 
-@pytest.mark.parametrize("kind,cwd,argv,strict_p007", [
-    ("go", "go-project", ["go", "test", "./..."], False),
-    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"], False),
-    ("go", "go-project", ["go", "test", "./..."], True),
-    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"], True),
-    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"], False),
+@pytest.mark.parametrize("kind,cwd,argv,strict_p007,strict_record", [
+    ("go", "go-project", ["go", "test", "./..."], False, False),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"], False, False),
+    ("go", "go-project", ["go", "test", "./..."], True, False),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"], True, False),
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"], False, False),
     ("python_direct", "py-direct",
-     ["python", "-m", "compileall", "-q", "./src"], False),
-    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"], False),
+     ["python", "-m", "compileall", "-q", "./src"], False, False),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"], False, False),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"], False, True),
 ])
 def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
-        product_service, monkeypatch, kind, cwd, argv, strict_p007):
+        product_service, monkeypatch, kind, cwd, argv, strict_p007,
+        strict_record):
     from gateway.lbe_direct_owner import DirectChildOwner
     from gateway.lbe_worker import LbeWorker
 
@@ -2067,6 +2069,8 @@ def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
         # selected private Python interpreter must ALSO be Mach-O ARM64.
         private_python = workspace / "py-pipenv" / ".venv/bin/python"
         private_python.write_bytes(private_macho("PipenvPython"))
+        if strict_record:
+            _d4_record_site_fixture(workspace)
     venv_manifest = (
         _d4_tree_expected(workspace / "py-pipenv" / ".venv")
         if kind == "pipenv" else None)
@@ -2114,7 +2118,9 @@ def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
                 expected_venv_identity_sha256=(
                     offered["venv"].observed_source_identity_sha256
                     if kind == "pipenv" else None),
-                require_go_p007_stage_source=strict_p007))
+                require_go_p007_stage_source=strict_p007,
+                expected_venv_record_distributions=(
+                    (("example-pkg", "1.0"),) if strict_record else None)))
         assert candidate.plan.requested_argv == tuple(argv)
         assert len(receipts) == len(manifests)
         assert all(x.staged_files_verified and not x.native_launch_allowed
@@ -3056,3 +3062,175 @@ def test_d4_p007_strict_profile_cannot_select_other_runner_or_truthy_flag(
     assert expected_error in str(denied.value)
     assert not (private / "go").exists()
     assert not (private / "bin").exists()
+
+
+
+def _d4_record_site_fixture(workspace):
+    """Inert first-party test distribution with a complete real RECORD."""
+    import base64
+    import csv
+    import io
+    import hashlib
+
+    site = workspace / "py-pipenv/.venv/lib/python3.13/site-packages"
+    pkg = site / "example_pkg"
+    dist = site / "example_pkg-1.0.dist-info"
+    pkg.mkdir(parents=True, exist_ok=True)
+    dist.mkdir()
+    (pkg / "__init__.py").write_bytes(b"from .entry import answer\n")
+    (pkg / "entry.py").write_bytes(b"answer = 42\n")
+    (dist / "METADATA").write_bytes(b"Name: example-pkg\nVersion: 1.0\n")
+    record = dist / "RECORD"
+    rows = []
+    for member in (pkg / "__init__.py", pkg / "entry.py", dist / "METADATA"):
+        data = member.read_bytes()
+        sha = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(
+            b"=").decode("ascii")
+        rows.append((member.relative_to(site).as_posix(), "sha256=" + sha,
+                     str(len(data))))
+    rows.append(("example_pkg-1.0.dist-info/RECORD", "", ""))
+    text = io.StringIO()
+    writer = csv.writer(text, lineterminator="\n")
+    writer.writerows(rows)
+    record.write_bytes(text.getvalue().encode("utf-8"))
+    return site, pkg, dist, record
+
+
+def test_d4_product_pipenv_record_source_observer_prepares_closed_site(
+        product_service, monkeypatch):
+    from gateway.lbe_runtime_tree import (
+        observe_d4_pipenv_venv_manifest,
+        inspect_d4_pipenv_installed_record_sources,
+    )
+
+    service, workspace = product_service
+    site, _pkg, _dist, _record = _d4_record_site_fixture(workspace)
+    project = workspace / "py-pipenv"
+    assert site.is_dir()
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("source-only cannot spawn")))
+        observed = observe_d4_pipenv_venv_manifest(project_root=str(project))
+        record_view = inspect_d4_pipenv_installed_record_sources(
+            project_root=str(project), expected_venv_manifest=observed.proposed_manifest,
+            expected_distributions=(("example-pkg", "1.0"),))
+    assert record_view.distributions == (("example-pkg", "1.0"),)
+    assert record_view.record_members_checked == 4
+    assert record_view.importable_members_checked == 2
+    assert record_view.venv_identity_sha256 == (
+        observed.observed_source_identity_sha256)
+    assert len(record_view.record_manifest_sha256) == 64
+    assert record_view.status == "RECORD_LISTED_SITE_BYTES_NOT_IMPORT_CLOSURE"
+    assert record_view.actual_loaded_source_graph_proven is False
+    assert record_view.external_source_provenance_attested is False
+    assert record_view.native_launch_allowed is False
+    with pytest.raises(GatewayError) as denied:
+        service.invoke_exec(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+            dry_run=False)
+    assert denied.value.code == "exec_cleanup_proof_required"
+
+
+@pytest.mark.parametrize("mutation", [
+    "missing_record", "unlisted_py", "unlisted_resource",
+    "record_bad_hash", "record_bad_size", "record_traversal",
+    "record_absolute", "record_duplicate", "metadata_version",
+    "unlisted_zip", "unlisted_other_dist", "record_missing_member",
+])
+def test_d4_pipenv_record_source_rejects_unlisted_or_forged_site(
+        product_service, mutation):
+    from gateway.lbe_runtime_tree import (
+        D4RuntimeTreeDenied, observe_d4_pipenv_venv_manifest,
+        inspect_d4_pipenv_installed_record_sources,
+    )
+
+    _service, workspace = product_service
+    _site, pkg, dist, record = _d4_record_site_fixture(workspace)
+    body = record.read_text("utf-8")
+    if mutation == "missing_record":
+        record.unlink()
+    elif mutation == "unlisted_py":
+        (pkg / "injected.py").write_text("import os\n", "utf-8")
+    elif mutation == "unlisted_resource":
+        (pkg / "payload.json").write_text("{}", "utf-8")
+    elif mutation == "record_bad_hash":
+        record.write_text(body.replace("sha256=", "sha256=AAAA", 1), "utf-8")
+    elif mutation == "record_bad_size":
+        line = next(line for line in body.splitlines() if "entry.py" in line)
+        record.write_text(body.replace(line, line.rsplit(",", 1)[0] + ",999"),
+                          "utf-8")
+    elif mutation == "record_traversal":
+        record.write_text(body.replace("example_pkg/entry.py",
+                                       "../example_pkg/entry.py"), "utf-8")
+    elif mutation == "record_absolute":
+        record.write_text(body.replace("example_pkg/entry.py",
+                                       "/etc/passwd"), "utf-8")
+    elif mutation == "record_duplicate":
+        record.write_text(body + body.splitlines()[0] + "\n", "utf-8")
+    elif mutation == "metadata_version":
+        (dist / "METADATA").write_bytes(b"Name: example-pkg\nVersion: 2.0\n")
+    elif mutation == "unlisted_zip":
+        (pkg / "other.zip").write_bytes(b"PK\x03\x04")
+    elif mutation == "unlisted_other_dist":
+        foreign = _site / "extra-1.0.dist-info"
+        foreign.mkdir()
+        (foreign / "METADATA").write_bytes(b"Name: extra\nVersion: 1.0\n")
+    elif mutation == "record_missing_member":
+        record.write_text(body.replace(
+            next(x for x in body.splitlines() if "entry.py" in x) + "\n", ""),
+            "utf-8")
+    observed = observe_d4_pipenv_venv_manifest(
+        project_root=str(workspace / "py-pipenv"))
+    with pytest.raises(D4RuntimeTreeDenied):
+        inspect_d4_pipenv_installed_record_sources(
+            project_root=str(workspace / "py-pipenv"),
+            expected_venv_manifest=observed.proposed_manifest,
+            expected_distributions=(("example-pkg", "1.0"),))
+
+
+@pytest.mark.parametrize("wrong", [
+    None, [], {}, True, "example-pkg==1.0", (), (("example-pkg", "2.0"),),
+    (("example-pkg", "1.0"), ("other", "1.0")),
+])
+def test_d4_pipenv_record_sources_require_explicit_distribution_identity(
+        product_service, wrong):
+    from gateway.lbe_runtime_tree import (
+        D4RuntimeTreeDenied, observe_d4_pipenv_venv_manifest,
+        inspect_d4_pipenv_installed_record_sources,
+    )
+
+    _service, workspace = product_service
+    _d4_record_site_fixture(workspace)
+    project = str(workspace / "py-pipenv")
+    source = observe_d4_pipenv_venv_manifest(project_root=project)
+    with pytest.raises(D4RuntimeTreeDenied):
+        inspect_d4_pipenv_installed_record_sources(
+            project_root=project,
+            expected_venv_manifest=source.proposed_manifest,
+            expected_distributions=wrong)
+
+
+def test_d4_strict_pipenv_record_selection_denies_before_operator_copy(
+        product_service):
+    from gateway.lbe_runtime_tree import (
+        observe_d4_pipenv_venv_manifest,
+    )
+
+    service, workspace = product_service
+    private = workspace.parent.parent
+    provisioner = private.parent / (private.name + "-operator")
+    project = workspace / "py-pipenv"
+    site, pkg, _dist, _record = _d4_record_site_fixture(workspace)
+    source = observe_d4_pipenv_venv_manifest(project_root=str(project))
+    (pkg / "unrecorded.py").write_text("import os\n", "utf-8")
+    with pytest.raises(GatewayError) as denied:
+        service._assemble_d4_r003_source_only_runner(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+            private_root=str(private), provisioner_root=str(provisioner),
+            staged_manifests={"bin": (("", None),), "lib": (("", None),)},
+            venv_manifest=source.proposed_manifest,
+            expected_venv_identity_sha256=source.observed_source_identity_sha256,
+            expected_venv_record_distributions=(("example-pkg", "1.0"),))
+    assert denied.value.code == "runner_unavailable"
+    assert not (private / "bin").exists()
+    assert not (private / "home").exists()

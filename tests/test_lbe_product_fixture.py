@@ -3330,11 +3330,55 @@ def test_d4_service_record_selection_denies_wrong_command_without_source_access(
     assert not operator.exists()
 
 
-def test_d4_pipenv_record_one_use_marker_rejects_generic_callback(product_service):
-    from gateway.lbe_product_fixture import D4FixtureDenied
 
-    service, _workspace = product_service
-    _candidate, marker = service._prepare_d4_r003_attempt(
-        "a", "py-pipenv", ["python", "-m", "pytest", "-q"])
-    with pytest.raises(D4FixtureDenied):
-        marker.attach_pipenv_record_sources(lambda *_a: True)
+
+@pytest.mark.parametrize("argv", [
+    ["go", "test", "./..."],
+    ["go", "vet", "./..."],
+    ["go", "build", "-o", "bin/app", "./cmd/app"],
+])
+@pytest.mark.parametrize("location", ["main", "nested", "module_root"])
+def test_d4_go_embed_directive_rejects_uninventoried_compiler_input(
+        product_service, monkeypatch, argv, location):
+    """Go embed directives can read additional files absent from the fixture.
+
+    A selected .go byte can request a resource at compile-time. Merely
+    rejecting extra directory entries without inspecting the directives
+    creates a falsely complete source candidate for ALL fixed Go verbs.
+    """
+    service, workspace = product_service
+    go = workspace / "go-project"
+    if location == "main":
+        selected = go / "cmd/app/main.go"
+    elif location == "nested":
+        selected = go / "pkg/snapshot/resource.go"
+        selected.parent.mkdir(parents=True)
+    else:
+        selected = go / "entry.go"
+    selected.write_bytes(
+        b"package main\nimport _ \"embed\"\n"
+        b"//go:embed hidden.txt\nvar hidden string\n"
+        b"func main() {}\n")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("source inspection cannot spawn")))
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_fixture_candidate(
+                "a", "go-project", argv)
+        assert denied.value.code == "command_not_allowed"
+        with pytest.raises(GatewayError) as apply:
+            service.invoke_exec("a", "go-project", argv, dry_run=False)
+        assert apply.value.code == "exec_cleanup_proof_required"
+
+
+def test_d4_go_source_regular_comment_and_string_are_not_embed_directives(
+        product_service):
+    """Ordinary source remains a supported first-party Go candidate."""
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/main.go").write_bytes(
+        b"package main\n// go:embed in an ordinary comment is not a directive\n"
+        b"func main() { _ = \"//go:embed literal\" }\n")
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    assert candidate.native_launch_allowed is False
+    assert candidate.actual_loaded_sources_proven is False

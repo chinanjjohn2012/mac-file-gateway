@@ -34,6 +34,9 @@ class D4PrivateDylibDenied(ValueError):
 
 _MAX_LIBRARIES = 64
 _MAX_DEPTH = 8
+# A pinned dylib can be reached through DIFFERENT inherited @rpath chains.
+# Bound traversal by (image, effective runpaths), not only by pathname.
+_MAX_CONTEXTS = 128
 _SYSTEM_PREFIXES = ("/usr/lib/", "/System/Library/")
 
 
@@ -143,7 +146,7 @@ def inspect_d4_private_dylib_candidates(
             # This is not another copy of the selected native source: it
             # was already hashed in the pinned selected-executable set.
             pending = [(main, main, original, 0, ())]
-            observed_paths: set[str] = set()
+            processed_contexts: set[tuple[str, tuple[str, ...]]] = set()
             while pending:
                 caller, main_exe, image, depth, inherited_paths = pending.pop()
                 if depth > _MAX_DEPTH:
@@ -159,6 +162,16 @@ def inspect_d4_private_dylib_candidates(
                 # This remains a conservative lexical candidate superset,
                 # NOT observed real dyld resolution or source authority.
                 runpaths = tuple(dict.fromkeys((*own_paths, *inherited_paths)))
+                # One dylib path is NOT one loader context. Inspect it again
+                # when a different parent chain supplies different runpaths,
+                # or an unresolved nested @rpath could be silently omitted.
+                context = (caller, runpaths)
+                if context in processed_contexts:
+                    continue
+                processed_contexts.add(context)
+                if len(processed_contexts) > _MAX_CONTEXTS:
+                    raise D4PrivateDylibDenied(
+                        "private dylib loader contexts exceed bound")
                 for name in image.declared_direct_libraries:
                     if any(name.startswith(prefix)
                            for prefix in _SYSTEM_PREFIXES):
@@ -175,11 +188,11 @@ def inspect_d4_private_dylib_candidates(
                         if target is None or target not in approved:
                             unresolved.add(name)
                             continue
-                    if target in observed_paths:
-                        continue
-                    observed_paths.add(target)
-                    if len(observed_paths) > _MAX_LIBRARIES:
+                    if target not in images and len(images) >= _MAX_LIBRARIES:
                         raise D4PrivateDylibDenied("private loader source count exceeded")
+                    # Re-read the same real inode in each newly observed
+                    # context to catch drift; the bounded context cache below
+                    # avoids both infinite cycles and arbitrary repeat scans.
                     parsed = inspect_d4_selected_macho_loader(
                         private_root=root, selected_executable=target,
                         expected_sha256=approved[target],

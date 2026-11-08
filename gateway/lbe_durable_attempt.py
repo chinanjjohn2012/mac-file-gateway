@@ -96,6 +96,8 @@ class D4AttemptIdentity:
             raise D4DurableAttemptDenied("wrong fixed R006 design reviews")
         if self.image_version != "20261104.0514.1":
             raise D4DurableAttemptDenied("unreviewed macOS image version")
+        if self.os_build != "24H232":
+            raise D4DurableAttemptDenied("unreviewed macOS build")
         return self
 
 

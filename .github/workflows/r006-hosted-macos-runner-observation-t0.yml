@@ -9,6 +9,10 @@ on:
       - "tests/test_d4_r006_host_source_collect_t0.py"
       - "tests/test_d4_r006_host_observation_t0.py"
       - "gateway/lbe_durable_attempt.py"
+      - "gateway/lbe_owner_grant.py"
+      - "gateway/lbe_r006_macos_allowlist.py"
+      - "tools/d4_r006_host_allowlist_verify_t0.py"
+      - "tests/test_lbe_r006_macos_allowlist.py"
       - "gateway/workspaces.py"
       - "docs/MULTI_WORKSPACE_EXEC_LBE_R006_DURABLE_ATTEMPT_CHECKPOINT.md"
       - "MANIFEST.sha256"
@@ -40,3 +44,7 @@ jobs:
         run: python3 -I -S tools/d4_r006_host_observation_t0.py
       - name: Collect bounded macOS host-file candidates for later review only
         run: python3 -I -S tools/d4_r006_host_source_collect_t0.py
+      - name: Recheck prior-run fixed ImageVersion and selected host-file hashes
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 -I -S tools/d4_r006_host_allowlist_verify_t0.py

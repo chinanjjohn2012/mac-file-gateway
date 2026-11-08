@@ -19,6 +19,10 @@ import time
 from datetime import datetime, timezone
 
 from .lbe_durable_attempt import D4AttemptIdentity
+from .lbe_r006_macos_allowlist import (
+    IMAGE_VERSION, OS_BUILD,
+    R006_HOST_SOURCE_FINGERPRINT, R006_RUNNER_PROFILE_FINGERPRINT,
+)
 
 _REPO = "chinanjjohn2012/mac-file-gateway"
 _PR = 114
@@ -190,10 +194,16 @@ def verify_d4_owner_github_comment_t0(api_response: bytes) -> D4VerifiedOwnerGra
     timeout = _positive_int(p["timeout_seconds"], "timeout")
     if timeout > 120:
         raise D4OwnerGrantDenied("timeout exceeds R006 original-child ceiling")
-    if p["image_os"] != "macos15" or type(p["image_version"]) is not str or _IMAGE.fullmatch(p["image_version"]) is None:
+    if (p["image_os"] != "macos15" or p["image_version"] != IMAGE_VERSION
+            or type(p["image_version"]) is not str
+            or _IMAGE.fullmatch(p["image_version"]) is None):
         raise D4OwnerGrantDenied("unqualified macOS image")
-    if type(p["os_build"]) is not str or _OS_BUILD.fullmatch(p["os_build"]) is None:
-        raise D4OwnerGrantDenied("invalid macOS build")
+    if (p["os_build"] != OS_BUILD or type(p["os_build"]) is not str
+            or _OS_BUILD.fullmatch(p["os_build"]) is None):
+        raise D4OwnerGrantDenied("unqualified macOS build")
+    if (p["source_fingerprint"] != R006_HOST_SOURCE_FINGERPRINT
+            or p["runner_fingerprint"] != R006_RUNNER_PROFILE_FINGERPRINT):
+        raise D4OwnerGrantDenied("owner grant uses wrong fixed host/source profile")
     if type(p["workspace"]) is not str or _WORKSPACE.fullmatch(p["workspace"]) is None:
         raise D4OwnerGrantDenied("invalid Workspace")
     if (type(p["cwd"]) is not str or not p["cwd"] or len(p["cwd"]) > 240

@@ -10,6 +10,9 @@ from gateway.lbe_owner_grant import (
     D4OwnerGrantDenied, D4VerifiedOwnerGrant,
     verify_d4_owner_github_comment_t0,
 )
+from gateway.lbe_r006_macos_allowlist import (
+    R006_HOST_SOURCE_FINGERPRINT, R006_RUNNER_PROFILE_FINGERPRINT,
+)
 
 B = "PRR_kwDOU5v3IM8AAAABWq0I_w"
 C = "PRR_kwDOU5v3IM8AAAABWq0iKA"
@@ -31,8 +34,10 @@ def payload(now):
         "c_code_review_id": "PRR_currentSpecReview123",
         "github_run_id": 42445537246, "github_run_attempt": 1,
         "image_os": "macos15", "image_version": "20261104.0514.1",
-        "os_build": "24G90", "source_fingerprint": S,
-        "runner_fingerprint": S, "workspace": "a", "cwd": "py-direct",
+        "os_build": "24H232",
+        "source_fingerprint": R006_HOST_SOURCE_FINGERPRINT,
+        "runner_fingerprint": R006_RUNNER_PROFILE_FINGERPRINT,
+        "workspace": "a", "cwd": "py-direct",
         "runner": "direct", "requested_argv_sha256": S,
         "effective_argv_sha256": S, "timeout_seconds": 120,
         "nonce": "c" * 64, "expires_at": expiry,

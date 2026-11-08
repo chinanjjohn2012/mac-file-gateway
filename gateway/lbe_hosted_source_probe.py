@@ -40,6 +40,9 @@ class D4HostedSelectedSourceObservation:
 
     root_identity: tuple[int, ...]
     selected: tuple[tuple[str, str, tuple[int, ...]], ...]
+    # Include / and EVERY absolute ancestor above source_root. A second
+    # one-use observation must match these identities as well as the leaf.
+    root_ancestor_identities: tuple[tuple[int, ...], ...]
     source_file_bytes_verified: bool = True
     full_boot_image_identity_attested: bool = False
     actual_loaded_source_graph_attested: bool = False
@@ -81,18 +84,67 @@ def _relative(path: object) -> tuple[str, ...]:
     return tuple(parts)
 
 
-def _pinned_root(root: tuple[str, ...]) -> int:
-    fd = os.open("/", _DIR)
+def _root_ancestor_identity(fd: int) -> tuple[int, ...]:
+    """Stable path-component ownership, type and mode evidence.
+
+    Shared system /tmp is sometimes root-owned and sticky (01777).
+    Only that sticky root-owned case is tolerated as an intermediate
+    parent; all other group/world-writable ancestors fail. The FINAL
+    selected source root still requires the stricter _identity() rule.
+    Directory mtime is not included: unrelated new children under a
+    shared system parent must not create a false inode/mode drift.
+    """
+    st = os.fstat(fd)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid not in (0, os.getuid()):
+        raise D4HostedSourceDenied("untrusted source-root ancestor")
+    if (st.st_mode & 0o022
+            and not (st.st_uid == 0 and st.st_mode & stat.S_ISVTX)):
+        raise D4HostedSourceDenied("writable source-root ancestor")
+    return (st.st_dev, st.st_ino, st.st_mode, st.st_uid)
+
+
+def _pinned_root(root: tuple[str, ...],
+                 ) -> tuple[list[int], tuple[tuple[int, ...], ...]]:
+    """Retain ALL /-to-root FDs, including parents outside source_root."""
+    chain = [os.open("/", _DIR)]
     try:
+        seen = [_root_ancestor_identity(chain[0])]
         for component in root:
-            child = os.open(component, _DIR, dir_fd=fd)
-            os.close(fd)
-            fd = child
-        _identity(fd, directory=True)
-        return fd
+            child = os.open(component, _DIR, dir_fd=chain[-1])
+            chain.append(child)
+            seen.append(_root_ancestor_identity(child))
+        # The last component is a private, non-writable selected root.
+        _identity(chain[-1], directory=True)
+        return chain, tuple(seen)
     except BaseException:
-        os.close(fd)
+        for fd in reversed(chain):
+            os.close(fd)
         raise
+
+
+def _verify_root_chain(chain: list[int],
+                       original: tuple[tuple[int, ...], ...],
+                       components: tuple[str, ...]) -> None:
+    """Reject parent mode/inode drift AND a changed absolute path binding.
+
+    Re-opening every named component from its pinned parent detects a
+    vanished/replaced path even while an old leaf FD still hashes correctly.
+    This check is a bounded prelaunch sample, NOT atomic pathname spawn or
+    cryptographic proof of a full booted image.
+    """
+    if len(chain) != len(components) + 1 or len(original) != len(chain):
+        raise D4HostedSourceDenied("source-root ancestor chain incomplete")
+    if any(_root_ancestor_identity(fd) != before
+           for fd, before in zip(chain, original)):
+        raise D4HostedSourceDenied("absolute source-root ancestor changed")
+    for parent, component, before in zip(chain, components, original[1:]):
+        reopened = os.open(component, _DIR, dir_fd=parent)
+        try:
+            if _root_ancestor_identity(reopened) != before:
+                raise D4HostedSourceDenied(
+                    "absolute source-root name no longer identifies inode")
+        finally:
+            os.close(reopened)
 
 
 def _source_bytes(root_fd: int, parts: tuple[str, ...],
@@ -162,8 +214,10 @@ def inspect_d4_hosted_selected_source_files(
     if names != tuple(sorted(set(names))):
         raise D4HostedSourceDenied("source manifest order or duplicates invalid")
     try:
-        fd = _pinned_root(root_parts)
+        root_chain, ancestry = _pinned_root(root_parts)
         try:
+            fd = root_chain[-1]
+            _verify_root_chain(root_chain, ancestry, root_parts)
             identity = _identity(fd, directory=True)
             observed: list[tuple[str, str, tuple[int, ...]]] = []
             total = 0
@@ -173,12 +227,18 @@ def inspect_d4_hosted_selected_source_files(
                 if total > _MAX_TOTAL_BYTES:
                     raise D4HostedSourceDenied("selected source aggregate too large")
                 observed.append((name, found, inode))
+                # The external parent can mutate while os.read consumes the
+                # pinned leaf: check it BEFORE producing a valid receipt.
+                _verify_root_chain(root_chain, ancestry, root_parts)
             if _identity(fd, directory=True) != identity:
                 raise D4HostedSourceDenied("source root changed during scan")
+            _verify_root_chain(root_chain, ancestry, root_parts)
             return D4HostedSelectedSourceObservation(
-                root_identity=identity, selected=tuple(observed))
+                root_identity=identity, selected=tuple(observed),
+                root_ancestor_identities=ancestry)
         finally:
-            os.close(fd)
+            for fd in reversed(root_chain):
+                os.close(fd)
     except OSError:
         raise D4HostedSourceDenied(
             "selected host source path or descriptor unavailable") from None

@@ -4845,3 +4845,64 @@ def test_d4_assembled_service_fail_closed_without_reserved_child(
                 with service._lifecycle:
                     service._exec_active.remove("a")
     assert calls == []
+
+
+@pytest.mark.parametrize("source_kind", ["python", "go"])
+def test_d4_pinned_import_reader_denies_parent_mode_drift_during_read(
+        product_service, monkeypatch, source_kind):
+    """Source parent becoming writable DURING FD read must never qualify.
+
+    This uses the real pinned source reader (not a fake return receipt).
+    Restoring the original directory mode is only test teardown; it does not
+    turn the already observed in-read anomaly into a valid source witness.
+    """
+    from gateway.lbe_python_import_sources import (
+        D4PythonImportDenied, inspect_d4_python_first_party_import_sources,
+    )
+    from gateway.lbe_go_import_sources import (
+        D4GoImportSourceDenied, inspect_d4_go_direct_import_sources,
+    )
+
+    service, workspace = product_service
+    if source_kind == "python":
+        target = workspace / "py-direct/src/main.py"
+        candidate = service._prepare_d4_r003_fixture_candidate(
+            "a", "py-direct", ["python", "-m", "pytest", "-q"])
+        expected_error = D4PythonImportDenied
+    else:
+        target = workspace / "go-project/cmd/app/main.go"
+        candidate = service._prepare_d4_r003_fixture_candidate(
+            "a", "go-project", ["go", "test", "./..."])
+        expected_error = D4GoImportSourceDenied
+    parent = target.parent
+    parent_mode = parent.stat().st_mode & 0o777
+    target_ino = target.stat().st_ino
+    target_dev = target.stat().st_dev
+    mutated = []
+    original_read = os.read
+
+    def corrupt_parent_during_source_read(fd, count):
+        data = original_read(fd, count)
+        st = os.fstat(fd)
+        if not mutated and st.st_ino == target_ino and st.st_dev == target_dev:
+            os.chmod(parent, 0o777)
+            mutated.append(True)
+        return data
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "read", corrupt_parent_during_source_read)
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no child permitted")))
+        try:
+            with pytest.raises(expected_error):
+                if source_kind == "python":
+                    inspect_d4_python_first_party_import_sources(
+                        service.get("a"), candidate)
+                else:
+                    inspect_d4_go_direct_import_sources(
+                        service.get("a"), candidate,
+                        staged_go_manifest=())
+        finally:
+            os.chmod(parent, parent_mode)
+    assert mutated == [True]
+    assert service._lbe_owner.snapshot()["reserved_slots"] == 0

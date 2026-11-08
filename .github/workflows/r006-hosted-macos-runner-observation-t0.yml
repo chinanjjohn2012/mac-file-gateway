@@ -5,6 +5,8 @@ on:
     paths:
       - ".github/workflows/r006-hosted-macos-runner-observation-t0.yml"
       - "tools/d4_r006_host_observation_t0.py"
+      - "tools/d4_r006_host_source_collect_t0.py"
+      - "tests/test_d4_r006_host_source_collect_t0.py"
       - "tests/test_d4_r006_host_observation_t0.py"
       - "gateway/lbe_durable_attempt.py"
       - "gateway/workspaces.py"
@@ -36,3 +38,5 @@ jobs:
           G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: python3 -I -S tools/d4_r006_host_observation_t0.py
+      - name: Collect bounded macOS host-file candidates for later review only
+        run: python3 -I -S tools/d4_r006_host_source_collect_t0.py

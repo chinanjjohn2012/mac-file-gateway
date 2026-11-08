@@ -15,6 +15,7 @@ import hashlib
 import os
 import re
 import stat
+import threading
 
 
 class D4HostedSourceDenied(ValueError):
@@ -186,7 +187,7 @@ def inspect_d4_hosted_selected_source_files(
 class D4HostedSelectedSourceRecheck:
     """One observed set, independently re-read before a future launch."""
 
-    __slots__ = ("_root", "_expected", "_previous", "_used")
+    __slots__ = ("_root", "_expected", "_previous", "_used", "_lock")
 
     def __init__(self, *, source_root: str,
                  expected: tuple[tuple[str, str], ...]):
@@ -195,12 +196,14 @@ class D4HostedSelectedSourceRecheck:
         self._root = source_root
         self._expected = expected
         self._used = False
+        self._lock = threading.Lock()
 
     def recheck_once(self) -> None:
         # Burn before IO; error or drift never permits retry.
-        if self._used:
-            raise D4HostedSourceDenied("selected host source receipt replayed")
-        self._used = True
+        with self._lock:
+            if self._used:
+                raise D4HostedSourceDenied("selected host source receipt replayed")
+            self._used = True
         observed = inspect_d4_hosted_selected_source_files(
             source_root=self._root, expected=self._expected)
         if observed != self._previous:

@@ -1,6 +1,7 @@
 """Actual read-only pinned host-source measurements, never native T1."""
 from dataclasses import replace
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 import os
 import subprocess
 import threading
@@ -143,3 +144,20 @@ def test_forged_observation_fields_are_not_an_authority(tmp_path):
     # A mutable/forged dataclass is not a proof: no production authorizer
     # accepts this record, and only an instance-owned live recheck is useful.
     assert not observed.native_launch_allowed
+
+
+def test_one_use_host_receipt_concurrent_callers_burn_exactly_once(tmp_path):
+    root, parent, file, entry = _staged(tmp_path)
+    binding = D4HostedSelectedSourceRecheck(
+        source_root=str(root), expected=entry)
+
+    def compete(_index):
+        try:
+            binding.recheck_once()
+            return "first"
+        except D4HostedSourceDenied:
+            return "rejected"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(compete, range(2)))
+    assert sorted(results) == ["first", "rejected"]

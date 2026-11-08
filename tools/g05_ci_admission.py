@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import importlib.machinery
 import os
 from pathlib import Path
@@ -226,7 +227,7 @@ def verify_project_import_root(root: Path, tracked: set[str]) -> str:
     return "gateway/__init__.py"
 
 
-def admit(root: Path, expected_head: str) -> None:
+def admit(root: Path, expected_head: str) -> dict[str, object]:
     head, tree, tracked = verify_checkout(root, expected_head)
     head_count = verify_head_tree(root, tracked)
     count = verify_manifest(root, tracked)
@@ -252,14 +253,67 @@ def admit(root: Path, expected_head: str) -> None:
     print("G05_THIRD_PARTY_DEPENDENCY_PROVENANCE=NOT_ATTESTED")
     print("G05_DEVELOPER_LOCAL_WORKTREE=NOT_OBSERVED")
     print("G05_INTEGRATION_STATUS=NOT_TESTED")
+    return {
+        "marker": "MFG_G05_R006_RECEIPT_V1",
+        "repo": "chinanjjohn2012/mac-file-gateway",
+        "pr": 114,
+        "head_sha": head,
+        "head_tree": tree,
+        "manifest_sha256": hashlib.sha256(
+            (root / "MANIFEST.sha256").read_bytes()).hexdigest(),
+    }
+
+
+
+def write_receipt(root: Path, target: str, evidence: dict[str, object]) -> None:
+    """Persist one private receipt OUTSIDE checkout after complete G05 PASS."""
+    if type(target) is not str or not target.startswith("/") or len(target) > 1024:
+        raise AdmissionError("receipt path must be a bounded absolute path")
+    path = Path(target)
+    parent = path.parent
+    if path.name in {"", ".", ".."} or not parent.is_dir() or parent.is_symlink():
+        raise AdmissionError("receipt parent is unavailable or unsafe")
+    try:
+        if parent.resolve().is_relative_to(root.resolve()):
+            raise AdmissionError("receipt must stay outside the tracked checkout")
+    except RuntimeError:
+        raise AdmissionError("receipt parent cannot be resolved") from None
+    raw = (json.dumps(evidence, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True) + "\n").encode("ascii")
+    fd = parent_fd = -1
+    try:
+        parent_fd = os.open(
+            parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        fd = os.open(
+            path.name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600, dir_fd=parent_fd)
+        offset = 0
+        while offset < len(raw):
+            written = os.write(fd, raw[offset:])
+            if written <= 0:
+                raise AdmissionError("receipt write was incomplete")
+            offset += written
+        os.fsync(fd)
+        os.fsync(parent_fd)
+    except FileExistsError:
+        raise AdmissionError("receipt already exists") from None
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if parent_fd >= 0:
+            os.close(parent_fd)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expected-head", required=True)
+    parser.add_argument("--receipt")
     args = parser.parse_args(argv)
     try:
-        admit(Path.cwd(), args.expected_head)
+        evidence = admit(Path.cwd(), args.expected_head)
+        if args.receipt:
+            write_receipt(Path.cwd(), args.receipt, evidence)
     except (AdmissionError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
         print("G05_REPOSITORY_ADMISSION=FAIL", file=sys.stderr)
         print("G05_R01_GATE=INCOMPLETE", file=sys.stderr)

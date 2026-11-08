@@ -13,6 +13,8 @@ on:
       - "gateway/lbe_r006_macos_allowlist.py"
       - "gateway/lbe_owner_grant_bootstrap.py"
       - "gateway/lbe_r006_review_gate.py"
+      - "gateway/lbe_r006_runtime_identity.py"
+      - "tests/test_lbe_r006_runtime_identity.py"
       - "gateway/lbe_r006_trusted_bootstrap.py"
       - "tests/test_lbe_r006_trusted_bootstrap.py"
       - "tools/d4_r006_host_allowlist_verify_t0.py"
@@ -40,7 +42,7 @@ jobs:
       - name: Check HEAD Tree and Manifest before other imports
         env:
           G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: python3 -I -S tools/g05_ci_admission.py --expected-head "$G05_EXPECTED_HEAD"
+        run: python3 -I -S tools/g05_ci_admission.py --expected-head "$G05_EXPECTED_HEAD" --receipt "$RUNNER_TEMP/r006-g05-receipt.json"
       - name: Record actual macOS runtime facts and bounded provider claims T0
         env:
           G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}

@@ -5032,3 +5032,79 @@ def test_d4_service_host_fd_identity_failure_refuses_before_worker_child(
         assert service._lbe_owner.snapshot()["reserved_slots"] == 0
         assert service._lbe_owner.snapshot()["unavailable"] is False
     assert calls == []
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project",
+     ["go", "build", "-o", "bin/app", "./cmd/app"]),
+])
+def test_r006_private_runner_all_six_use_exact_product_recipe_then_replay_denies(
+        product_service, monkeypatch, kind, cwd, argv):
+    from gateway.lbe_hosted_source_probe import D4HostedSelectedSourceObservation
+    from gateway.lbe_owner_grant_bootstrap import D4ConsumedOwnerGrant
+    from gateway.lbe_r006_macos_allowlist import D4R006HostAllowlistObservation
+    from gateway import lbe_r006_native_runner as r006_runner
+    from gateway.lbe_r006_native_runner import D4R006NativeLaunchBoundary
+    from gateway.lbe_worker import LbeNoChildStarted
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    trees = _d4_staged_trees(workspace, kind)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, marker, _observation, recipe = (
+            service._prepare_d4_r003_native_recipe(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees=trees,
+                timeout_seconds=120))
+
+        selected = D4HostedSelectedSourceObservation(
+            root_identity=(1, 2, 3, 4, 5, 0o40755, 0, 1),
+            selected=(("x", "b" * 64,
+                       (1, 2, 1, 4, 5, 0o100444, 0, 1)),),
+            root_ancestor_identities=((1, 2, 0o40755, 0),),
+        )
+        host = D4R006HostAllowlistObservation(
+            system=selected, usr=selected,
+            source_fingerprint=(
+                "7c2b07cc58c98add78ad5ec5aa1b47610eba4345bca0f770565e89503d5990ee"),
+            runner_profile_fingerprint=(
+                "2d5f60e99e1f982b66d2fbe33392b7b5659188d227038511f2024dac79dc08fe"),
+            image_version="20261104.0514.1", macos_version="15.8.2",
+            os_build="24H232",
+        )
+        consumed = object.__new__(D4ConsumedOwnerGrant)
+        m.setattr(
+            D4ConsumedOwnerGrant, "check_binding",
+            lambda self, plan, bound_recipe: None)
+        m.setattr(
+            r006_runner, "verify_r006_fixed_host_allowlist_t0",
+            lambda: host)
+        calls = []
+        fake_child = object()
+
+        def fake_popen(spawn_argv, **kwargs):
+            calls.append((spawn_argv, kwargs))
+            return fake_child
+
+        m.setattr(subprocess, "Popen", fake_popen)
+        boundary = D4R006NativeLaunchBoundary(
+            service.get("a"), candidate.plan, recipe, host, consumed, marker)
+        assert boundary.launch(candidate.plan) is fake_child
+        assert calls[0][0] == list(recipe.resolved_spawn_argv)
+        assert calls[0][1]["cwd"] == recipe.working_directory
+        assert calls[0][1]["env"] == dict(recipe.closed_child_environment)
+        assert calls[0][1]["close_fds"] is True
+        assert calls[0][1]["start_new_session"] is False
+
+        # The same first-party/source marker is already burned before Popen.
+        with pytest.raises(LbeNoChildStarted):
+            boundary.launch(candidate.plan)
+        assert len(calls) == 1

@@ -10,7 +10,7 @@ from gateway.lbe_owner_grant_bootstrap import (
     D4ConsumedOwnerGrant, D4OwnerBootstrapDenied,
 )
 from gateway.lbe_product_fixture import D4FixtureDenied, D4OneUseAttemptMarker
-from gateway.lbe_r006_macos_allowlist import D4R006HostAllowlistObservation
+from gateway.lbe_r006_macos_allowlist import (\n    D4R006HostAllowlistObservation, R006_RUNNER_PROFILE_FINGERPRINT,\n)
 from gateway import lbe_r006_native_runner as mod
 from gateway.lbe_r006_native_runner import (
     D4R006NativeLaunchBoundary, D4R006NativeRunnerDenied,
@@ -20,7 +20,7 @@ from gateway.workspaces import WorkspaceContext
 
 PRODUCT = "d" * 64
 HOST = "7c2b07cc58c98add78ad5ec5aa1b47610eba4345bca0f770565e89503d5990ee"
-RUNNER = "2d5f60e99e1f982b66d2fbe33392b7b5659188d227038511f2024dac79dc08fe"
+RUNNER = R006_RUNNER_PROFILE_FINGERPRINT
 
 def _plan():
     argv=("python","-m","pytest","-q")
@@ -51,7 +51,14 @@ def _host():
     return D4R006HostAllowlistObservation(
         system=obs,usr=obs,source_fingerprint=HOST,
         runner_profile_fingerprint=RUNNER,image_version="20261104.0514.1",
-        macos_version="15.8.2",os_build="24H232")
+        macos_version="15.8.2", os_build="24H232",
+        kernel_sysname="Darwin", machine="arm64",
+        run_id=42445537246, run_attempt=1, job_name="r007-t0",
+        mount_table_fingerprint="f"*64,
+        actual_host_safety_verified=True,
+        no_ambient_credentials_observed=True,
+        no_ambient_proxy_observed=True,
+        no_writable_nonlocal_mounts_observed=True)
 
 def _ctx():
     # Exact type is required; only name is read by constructor in this T0.

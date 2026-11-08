@@ -202,10 +202,21 @@ def bind_verified_owner_grant_t0(
             or run_id <= 0 or run_attempt <= 0):
         raise D4OwnerBootstrapDenied("invalid current run identity")
     if (host.selected_source_bytes_verified is not True
+            or host.actual_host_safety_verified is not True
+            or host.no_ambient_credentials_observed is not True
+            or host.no_ambient_proxy_observed is not True
+            or host.no_writable_nonlocal_mounts_observed is not True
+            or host.kernel_sysname != "Darwin"
+            or host.machine not in ("arm64", "aarch64")
+            or host.run_id != run_id or host.run_attempt != run_attempt
+            or type(host.job_name) is not str or not host.job_name
+            or type(host.mount_table_fingerprint) is not str
+            or len(host.mount_table_fingerprint) != 64
             or host.full_boot_image_attested is not False
             or host.actual_loaded_graph_proven is not False
             or host.native_launch_allowed is not False):
-        raise D4OwnerBootstrapDenied("host observation overclaims qualification")
+        raise D4OwnerBootstrapDenied(
+            "host observation lacks fresh run-bound safety evidence")
     attempt = grant.attempt
     current = (
         base_sha, head_sha, head_tree, manifest_sha256, run_id, run_attempt,

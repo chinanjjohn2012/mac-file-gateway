@@ -68,6 +68,12 @@ class D4R006PreparedAttempt:
                 or recipe.service_effective_argv != candidate.plan.effective_argv
                 or recipe.original_timeout_seconds != candidate.plan.timeout_seconds
                 or host.selected_source_bytes_verified is not True
+                or host.actual_host_safety_verified is not True
+                or host.no_ambient_credentials_observed is not True
+                or host.no_ambient_proxy_observed is not True
+                or host.no_writable_nonlocal_mounts_observed is not True
+                or host.kernel_sysname != "Darwin"
+                or host.machine not in ("arm64", "aarch64")
                 or host.native_launch_allowed is not False):
             raise D4R006NativeRunnerDenied("invalid prepared R006 source candidate")
         self._ctx = ctx
@@ -168,6 +174,12 @@ class D4R006NativeLaunchBoundary:
                 or type(recipe.closed_child_environment) is not tuple
                 or not recipe.closed_child_environment
                 or host.selected_source_bytes_verified is not True
+                or host.actual_host_safety_verified is not True
+                or host.no_ambient_credentials_observed is not True
+                or host.no_ambient_proxy_observed is not True
+                or host.no_writable_nonlocal_mounts_observed is not True
+                or host.kernel_sysname != "Darwin"
+                or host.machine not in ("arm64", "aarch64")
                 or host.full_boot_image_attested is not False
                 or host.actual_loaded_graph_proven is not False
                 or host.native_launch_allowed is not False):

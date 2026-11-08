@@ -61,7 +61,13 @@ def _host():
         source_fingerprint=R006_HOST_SOURCE_FINGERPRINT,
         runner_profile_fingerprint=R006_RUNNER_PROFILE_FINGERPRINT,
         image_version="20261104.0514.1", macos_version="15.8.2",
-        os_build="24H232",
+        os_build="24H232", kernel_sysname="Darwin", machine="arm64",
+        run_id=42445537246, run_attempt=1, job_name="r007-t0",
+        mount_table_fingerprint="f" * 64,
+        actual_host_safety_verified=True,
+        no_ambient_credentials_observed=True,
+        no_ambient_proxy_observed=True,
+        no_writable_nonlocal_mounts_observed=True,
     )
 
 def _verified(monkeypatch):

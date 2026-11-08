@@ -10,8 +10,22 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
+from urllib.parse import urlsplit
 
-R010_DESIGN_ID = "MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-009-CANDIDATE"
+R010_DESIGN_ID = "MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-010-CANDIDATE"
+R010_PREEXEC_SELECTOR_CONTRACT = "R010_OIDC_PREEXEC_SELECTOR_V2"
+R010_JWT_VERIFICATION_CONTRACT = "R010_PROVIDER_JWT_TEMPORAL_VERIFICATION_V1"
+R008_PREEXEC_ALLOWED_KEYS = frozenset({
+    "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "GITHUB_ACTIONS",
+    "GITHUB_EVENT_NAME", "GITHUB_REPOSITORY", "GITHUB_RUN_ID",
+    "GITHUB_RUN_ATTEMPT", "GITHUB_JOB", "G05_EXPECTED_HEAD",
+    "RUNNER_ENVIRONMENT", "RUNNER_OS", "RUNNER_ARCH", "ImageOS",
+    "ImageVersion", "SSH_AUTH_SOCK",
+})
+OIDC_PREEXEC_ADDITIONAL_KEYS = frozenset({
+    "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+})
+PRODUCT_HELPER_ENV_KEYS = frozenset({"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"})
 R010_CHOICE_MARKER = "R010_OWNER_DESIGN_CHOICE_V1"
 R010_GRANT_MARKER = "R010_OWNER_PRODUCT_T1_GRANT_V1"
 R010_STATE_DOMAIN = "R010_EPHEMERAL_JOB_STATE_V1"
@@ -84,6 +98,120 @@ class ImplementationQualification:
     c_t1_review_id: str
     review_target_id: str
     contract_scope_id: str
+    review_sequence_option: str
+    b_review_level: str
+    c_review_level: str
+    b_verdict: str
+    c_verdict: str
+    b_evidence_status: str
+    c_evidence_status: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreexecSelectorBoundary:
+    """In-memory-only simulation of the exact future PREEXEC env handoff."""
+
+    phase: str
+    env_i_used: bool
+    runner_context_source: bool
+    bootstrap_items: tuple[tuple[str, str], ...]
+    product_helper_items: tuple[tuple[str, str], ...]
+    product_child_items: tuple[tuple[str, str], ...]
+    ssh_metadata_only: bool
+    ssh_agent_protocol_calls: int
+    foreign_popen_calls: int
+    pregrant_product_popen_calls: int
+    scrub_before_product_import: bool
+
+
+def _unique_env(items: object) -> dict[str, str]:
+    if type(items) is not tuple or any(
+        type(row) is not tuple or len(row) != 2
+        or type(row[0]) is not str or type(row[1]) is not str
+        for row in items
+    ):
+        raise GateDenied("invalid PREEXEC environment form")
+    keys = [row[0] for row in items]
+    if len(set(keys)) != len(keys):
+        raise GateDenied("duplicate PREEXEC environment key")
+    return dict(items)
+
+
+def validate_preexec_selector_boundary_t0(
+    item: PreexecSelectorBoundary, *,
+    expected_run_id: str, expected_head: str, expected_image: str,
+    expected_job: str, expected_home: str, expected_tmp: str,
+    approved_child_keys: frozenset[str] = PRODUCT_HELPER_ENV_KEYS,
+) -> None:
+    """SAFE T0 ONLY. Never reads an OS env or requests an OIDC token.
+
+    No boolean/input field in this model is trusted runtime authority. The
+    future pinned PREEXEC implementation and B/C native qualification must
+    establish the observations independently before any Popen.
+    """
+    if type(item) is not PreexecSelectorBoundary:
+        raise GateDenied("invalid PREEXEC receipt")
+    if (item.phase != "PREEXEC_HOLD" or item.env_i_used is not True
+            or item.runner_context_source is not True
+            or item.ssh_metadata_only is not True
+            or item.scrub_before_product_import is not True
+            or type(item.ssh_agent_protocol_calls) is not int
+            or item.ssh_agent_protocol_calls != 0
+            or type(item.foreign_popen_calls) is not int
+            or item.foreign_popen_calls != 0
+            or type(item.pregrant_product_popen_calls) is not int
+            or item.pregrant_product_popen_calls != 0):
+        raise GateDenied("PREEXEC stage/selector/zero-Popen boundary violated")
+    bootstrap = _unique_env(item.bootstrap_items)
+    helper = _unique_env(item.product_helper_items)
+    child = _unique_env(item.product_child_items)
+    if set(bootstrap) != (R008_PREEXEC_ALLOWED_KEYS | OIDC_PREEXEC_ADDITIONAL_KEYS):
+        raise GateDenied("PREEXEC bootstrap keys not the exact versioned allowlist")
+    if set(helper) != PRODUCT_HELPER_ENV_KEYS:
+        raise GateDenied("product helper contains extra credential/selector keys")
+    if type(approved_child_keys) is not frozenset or set(child) != approved_child_keys:
+        raise GateDenied("child differs from reviewed closed recipe")
+    expected = {
+        "PATH": "/usr/bin:/bin", "HOME": expected_home,
+        "TMPDIR": expected_tmp, "LANG": "C", "LC_ALL": "C",
+        "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "pull_request",
+        "GITHUB_REPOSITORY": "chinanjjohn2012/mac-file-gateway",
+        "GITHUB_RUN_ID": expected_run_id, "GITHUB_RUN_ATTEMPT": "1",
+        "GITHUB_JOB": expected_job, "G05_EXPECTED_HEAD": expected_head,
+        "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS",
+        "RUNNER_ARCH": "ARM64", "ImageOS": "macos15",
+        "ImageVersion": expected_image,
+    }
+    if any(bootstrap.get(k) != v for k, v in expected.items()):
+        raise GateDenied("PREEXEC expected Job/Head/image identity mismatch")
+    if (not bootstrap["SSH_AUTH_SOCK"].startswith("/")
+            or "\x00" in bootstrap["SSH_AUTH_SOCK"]
+            or ".." in bootstrap["SSH_AUTH_SOCK"].split("/")
+            or len(bootstrap["SSH_AUTH_SOCK"]) > 4096):
+        raise GateDenied("SSH selector not a bounded canonical absolute path")
+    raw_token = bootstrap["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
+    raw_url = bootstrap["ACTIONS_ID_TOKEN_REQUEST_URL"]
+    if not 16 <= len(raw_token) <= 8192 or any(ord(ch) < 33 for ch in raw_token):
+        raise GateDenied("invalid OIDC request bearer selector")
+    try:
+        url = urlsplit(raw_url)
+        hostname = url.hostname
+        port = url.port
+    except ValueError:
+        raise GateDenied("invalid OIDC request URL") from None
+    if (url.scheme != "https" or not hostname
+            or not hostname.endswith(".actions.githubusercontent.com")
+            or url.username is not None or url.password is not None
+            or port is not None or not url.path.startswith("/")
+            or url.fragment or len(raw_url) > 4096):
+        raise GateDenied("unapproved OIDC endpoint/proxy/redirect selector")
+    if any(helper.get(k) != bootstrap[k] for k in PRODUCT_HELPER_ENV_KEYS):
+        raise GateDenied("post-PREEXEC helper environment changed")
+    if any(child.get(k) != bootstrap[k] for k in PRODUCT_HELPER_ENV_KEYS & approved_child_keys):
+        raise GateDenied("reviewed child base environment changed")
+    if any(value in (raw_token, raw_url, bootstrap["SSH_AUTH_SOCK"])
+           for value in (*helper.values(), *child.values())):
+        raise GateDenied("bootstrap credential/SSH selector forwarded")
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +230,89 @@ class ProviderWitness:
     head_sha: str
     runner_environment: str
     job_local_secret_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class JWTVerificationReceipt:
+    """MOCK ONLY. The future verifier must check real signed JWT bytes."""
+
+    token_sha256: str
+    jwks_sha256: str
+    verification_transcript_sha256: str
+    jose_alg: str
+    jose_typ: str
+    jose_kid: str
+    github_jwks_source_verified: bool
+    kid_matches_verified_jwks: bool
+    original_signed_bytes_verified: bool
+    original_jwt_independently_replayable: bool
+    signed_check_run_id: int
+    signed_subject: str
+    expected_subject: str
+    issued_at: int
+    not_before: int
+    expires_at: int
+    verified_at: int
+    grant_checked_at: int
+    current_job_in_progress: bool
+
+
+def validate_provider_freshness_t0(
+    item: JWTVerificationReceipt, *,
+    expected_token_sha256: str,
+    expected_transcript_sha256: str,
+    expected_check_run_id: int,
+) -> None:
+    """Pure mocked receipt oracle, NOT JWT parsing/signature verification.
+
+    T1 MUST reverify actual JWT signed-input bytes against trusted issuer
+    discovery + JWKS and independently inspect the raw bytes nonpublicly.
+    Caller-set booleans cannot create executable authority.
+    """
+    if type(item) is not JWTVerificationReceipt:
+        raise GateDenied("invalid provider verification receipt")
+    for digest in (
+        item.token_sha256, item.jwks_sha256,
+        item.verification_transcript_sha256, expected_token_sha256,
+        expected_transcript_sha256,
+    ):
+        if (type(digest) is not str or len(digest) != 64
+                or any(c not in "0123456789abcdef" for c in digest)):
+            raise GateDenied("invalid attestation evidence digest")
+    if (item.token_sha256 != expected_token_sha256
+            or item.verification_transcript_sha256 != expected_transcript_sha256):
+        raise GateDenied("JWT original/token transcript not bound to grant")
+    if (item.jose_alg != "RS256" or item.jose_typ != "JWT"
+            or type(item.jose_kid) is not str
+            or not 1 <= len(item.jose_kid) <= 128
+            or item.github_jwks_source_verified is not True
+            or item.kid_matches_verified_jwks is not True
+            or item.original_signed_bytes_verified is not True
+            or item.original_jwt_independently_replayable is not True):
+        raise GateDenied("JWT signature/JOSE/JWKS/original evidence not verified")
+    if (type(item.signed_check_run_id) is not int
+            or item.signed_check_run_id != expected_check_run_id
+            or type(item.signed_subject) is not str
+            or not item.signed_subject or item.signed_subject != item.expected_subject
+            or item.current_job_in_progress is not True):
+        raise GateDenied("JWT signed Job/subject/current status mismatch")
+    times = (
+        item.issued_at, item.not_before, item.expires_at,
+        item.verified_at, item.grant_checked_at,
+    )
+    if any(type(t) is not int or t <= 0 for t in times):
+        raise GateDenied("JWT invalid timestamp field")
+    if (item.expires_at <= item.issued_at
+            or item.expires_at - item.issued_at > 600
+            or item.issued_at - item.not_before > 600
+            or item.not_before > item.verified_at + 30
+            or item.issued_at > item.verified_at + 30
+            or item.verified_at - item.issued_at > 120
+            or item.verified_at >= item.expires_at
+            or item.grant_checked_at < item.verified_at
+            or item.grant_checked_at - item.verified_at > 120
+            or item.grant_checked_at >= item.expires_at):
+        raise GateDenied("JWT expired/not-yet-valid/stale/clock window")
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +338,13 @@ class ExecutionGrant:
     c_t1_review_id: str
     review_target_id: str
     contract_scope_id: str
+    host_option: str
+    review_sequence_option: str
+    risk_marker: str
+    b_design_review_id: str
+    c_design_review_id: str
+    oidc_token_sha256: str
+    oidc_verification_transcript_sha256: str
     head_sha: str
     head_tree: str
     manifest_sha256: str
@@ -397,14 +615,59 @@ def validate_execution_grant(
     choice: DesignChoice,
     qualification: ImplementationQualification,
     witness: ProviderWitness,
+    verification: JWTVerificationReceipt,
+    expected_design_blob: str,
+    expected_b_design_review_id: str,
+    expected_c_design_review_id: str,
     expected_job_envelope_key: str,
 ) -> None:
+    """Composed R010 SAFE-T0 version/receipt validation; not live authority."""
+    if type(grant) is not ExecutionGrant or type(qualification) is not ImplementationQualification:
+        raise GateDenied("invalid R010 grant/qualification object")
+    # No digest may rehabilitate an invalid caller-supplied legacy Choice.
+    validate_design_choice(
+        choice,
+        expected_design_blob=expected_design_blob,
+        expected_b_review_id=expected_b_design_review_id,
+        expected_c_review_id=expected_c_design_review_id,
+    )
     if grant.marker in LEGACY_CHOICE_MARKERS or grant.marker != R010_GRANT_MARKER:
         raise GateDenied("legacy/wrong execution grant marker")
-    if grant.design_id != R010_DESIGN_ID or grant.design_blob != choice.design_blob:
-        raise GateDenied("execution grant design mismatch")
+    if (
+        grant.design_id != R010_DESIGN_ID
+        or grant.design_blob != expected_design_blob
+        or grant.design_blob != qualification.design_blob
+        or qualification.design_id != R010_DESIGN_ID
+        or qualification.review_sequence_option != choice.review_sequence_option
+    ):
+        raise GateDenied("execution/qualification design or option mismatch")
     if grant.design_choice_digest != design_choice_digest(choice):
         raise GateDenied("execution grant choice digest mismatch")
+    if (
+        grant.host_option != choice.host_option
+        or grant.review_sequence_option != choice.review_sequence_option
+        or grant.risk_marker != choice.risk_marker
+        or grant.b_design_review_id != expected_b_design_review_id
+        or grant.c_design_review_id != expected_c_design_review_id
+    ):
+        raise GateDenied("execution grant owner choice/review mismatch")
+    expected_review_level = (
+        "ROLE_FULL_SCOPE_PASS" if choice.review_sequence_option == "B0"
+        else "TARGETED_REVIEW_PASS"
+    )
+    if (
+        qualification.b_review_level != expected_review_level
+        or qualification.c_review_level != expected_review_level
+        or qualification.b_verdict != "PASS" or qualification.c_verdict != "PASS"
+        or qualification.b_evidence_status != "SUFFICIENT"
+        or qualification.c_evidence_status != "SUFFICIENT"
+        or not qualification.b_t1_review_id
+        or not qualification.c_t1_review_id
+        or qualification.b_t1_review_id == qualification.c_t1_review_id
+        or qualification.review_target_id != "R010_COMPLETE_PRE_T1_CRITICAL_PATH_V1"
+        or qualification.contract_scope_id != "R010_IMPLEMENTATION_CONTRACT_V1"
+    ):
+        raise GateDenied("B0 FULL-before-T1 / B1 TARGETED qualification mismatch")
     if (
         grant.b_t1_review_id != qualification.b_t1_review_id
         or grant.c_t1_review_id != qualification.c_t1_review_id
@@ -421,11 +684,13 @@ def validate_execution_grant(
         raise GateDenied("wrong execution state domain")
     if grant.job_envelope_key != expected_job_envelope_key:
         raise GateDenied("wrong Job envelope key")
-    if len(grant.command_nonces) != 6 or len(set(grant.command_nonces)) != 6:
+    if (type(grant.command_nonces) is not tuple
+            or len(grant.command_nonces) != 6
+            or len(set(grant.command_nonces)) != 6):
         raise GateDenied("six unique command nonces required")
     validate_provider_witness(
         witness,
-        design_blob=choice.design_blob,
+        design_blob=expected_design_blob,
         head_sha=qualification.head_sha,
         repository="chinanjjohn2012/mac-file-gateway",
         run_id=grant.run_id,
@@ -434,6 +699,12 @@ def validate_execution_grant(
         workflow_ref=grant.workflow_ref,
         workflow_sha=grant.workflow_sha,
         job_local_secret_sha256=grant.job_local_secret_sha256,
+    )
+    validate_provider_freshness_t0(
+        verification,
+        expected_token_sha256=grant.oidc_token_sha256,
+        expected_transcript_sha256=grant.oidc_verification_transcript_sha256,
+        expected_check_run_id=grant.check_run_id,
     )
 
 

@@ -1,4 +1,5 @@
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,8 @@ from tools.r010_authority_chain_t0 import (
     ImplementationQualification,
     JobEnvelope,
     JobState,
+    JWTVerificationReceipt,
+    PreexecSelectorBoundary,
     ProviderWitness,
     R010_CHOICE_MARKER,
     R010_DESIGN_ID,
@@ -25,6 +28,8 @@ from tools.r010_authority_chain_t0 import (
     validate_design_choice,
     validate_execution_grant,
     validate_provider_witness,
+    validate_preexec_selector_boundary_t0,
+    validate_provider_freshness_t0,
 )
 
 DESIGN_BLOB = "a" * 40
@@ -46,6 +51,9 @@ WORKFLOW_SHA = "e" * 40
 SECRET_HASH = hashlib.sha256(b"job-local-secret").hexdigest()
 ENVELOPE_KEY = hashlib.sha256(b"r010-envelope").hexdigest()
 CANONICAL_CONFIG = "/private/tmp/mfg-r010-job-abc/service-config"
+OIDC_TOKEN_DIGEST = "f" * 64
+JWT_TRANSCRIPT_DIGEST = "9" * 64
+JWKS_DIGEST = "8" * 64
 
 
 def choice(marker=R010_CHOICE_MARKER, design_id=R010_DESIGN_ID, blob=DESIGN_BLOB):
@@ -73,6 +81,11 @@ def qualification():
         c_t1_review_id=C_T1,
         review_target_id="R010_COMPLETE_PRE_T1_CRITICAL_PATH_V1",
         contract_scope_id="R010_IMPLEMENTATION_CONTRACT_V1",
+        review_sequence_option="B1",
+        b_review_level="TARGETED_REVIEW_PASS",
+        c_review_level="TARGETED_REVIEW_PASS",
+        b_verdict="PASS", c_verdict="PASS",
+        b_evidence_status="SUFFICIENT", c_evidence_status="SUFFICIENT",
     )
 
 
@@ -94,6 +107,27 @@ def witness(**changes):
     )
     values.update(changes)
     return ProviderWitness(**values)
+
+
+def verification_receipt(**changes):
+    """Synthetic receipt, not actual signed JWT verification."""
+    values = dict(
+        token_sha256=OIDC_TOKEN_DIGEST,
+        jwks_sha256=JWKS_DIGEST,
+        verification_transcript_sha256=JWT_TRANSCRIPT_DIGEST,
+        jose_alg="RS256", jose_typ="JWT", jose_kid="mock-provider-rsa-key-01",
+        github_jwks_source_verified=True, kid_matches_verified_jwks=True,
+        original_signed_bytes_verified=True,
+        original_jwt_independently_replayable=True,
+        signed_check_run_id=CHECK_RUN,
+        signed_subject="repo:chinanjjohn2012/mac-file-gateway:pull_request",
+        expected_subject="repo:chinanjjohn2012/mac-file-gateway:pull_request",
+        issued_at=1_000_000, not_before=999_999, expires_at=1_000_300,
+        verified_at=1_000_015, grant_checked_at=1_000_025,
+        current_job_in_progress=True,
+    )
+    values.update(changes)
+    return JWTVerificationReceipt(**values)
 
 
 def provenance(**changes):
@@ -124,6 +158,13 @@ def grant(**changes):
         c_t1_review_id=C_T1,
         review_target_id=q.review_target_id,
         contract_scope_id=q.contract_scope_id,
+        host_option=ch.host_option,
+        review_sequence_option=ch.review_sequence_option,
+        risk_marker=ch.risk_marker,
+        b_design_review_id=B_DESIGN,
+        c_design_review_id=C_DESIGN,
+        oidc_token_sha256=OIDC_TOKEN_DIGEST,
+        oidc_verification_transcript_sha256=JWT_TRANSCRIPT_DIGEST,
         head_sha=HEAD,
         head_tree=TREE,
         manifest_sha256=MANIFEST,
@@ -284,6 +325,10 @@ def test_execution_grant_binds_only_r010_version_reviews_and_provider_job():
         qualification=qualification(),
         witness=witness(),
         expected_job_envelope_key=ENVELOPE_KEY,
+            verification=verification_receipt(),
+            expected_design_blob=DESIGN_BLOB,
+            expected_b_design_review_id=B_DESIGN,
+            expected_c_design_review_id=C_DESIGN,
     )
     with pytest.raises(GateDenied, match="legacy/wrong"):
         validate_execution_grant(
@@ -292,6 +337,10 @@ def test_execution_grant_binds_only_r010_version_reviews_and_provider_job():
             qualification=qualification(),
             witness=witness(),
             expected_job_envelope_key=ENVELOPE_KEY,
+            verification=verification_receipt(),
+            expected_design_blob=DESIGN_BLOB,
+            expected_b_design_review_id=B_DESIGN,
+            expected_c_design_review_id=C_DESIGN,
         )
     with pytest.raises(GateDenied, match="provider OIDC"):
         validate_execution_grant(
@@ -300,6 +349,10 @@ def test_execution_grant_binds_only_r010_version_reviews_and_provider_job():
             qualification=qualification(),
             witness=witness(check_run_id=CHECK_RUN + 1),
             expected_job_envelope_key=ENVELOPE_KEY,
+            verification=verification_receipt(),
+            expected_design_blob=DESIGN_BLOB,
+            expected_b_design_review_id=B_DESIGN,
+            expected_c_design_review_id=C_DESIGN,
         )
 
 
@@ -476,6 +529,10 @@ def test_r011_red_legacy_design_choice_with_recomputed_new_grant_digest_denied()
             qualification=qualification(),
             witness=witness(),
             expected_job_envelope_key=ENVELOPE_KEY,
+            verification=verification_receipt(),
+            expected_design_blob=DESIGN_BLOB,
+            expected_b_design_review_id=B_DESIGN,
+            expected_c_design_review_id=C_DESIGN,
         )
 
 
@@ -486,6 +543,10 @@ def test_r011_red_qualification_wrong_design_blob_denied():
         validate_execution_grant(
             grant(), choice=choice(), qualification=wrong,
             witness=witness(), expected_job_envelope_key=ENVELOPE_KEY,
+            verification=verification_receipt(),
+            expected_design_blob=DESIGN_BLOB,
+            expected_b_design_review_id=B_DESIGN,
+            expected_c_design_review_id=C_DESIGN,
         )
 
 
@@ -506,3 +567,189 @@ def test_r011_red_contract_mentions_versioned_oidc_preexec_allowlist():
     ).read_text(encoding="ascii")
     assert "R010_OIDC_PREEXEC_SELECTOR_V2" in text
     assert "R010_PROVIDER_JWT_TEMPORAL_VERIFICATION_V1" in text
+
+
+# R011 SAFE T0: true Bootstrap uses the two OIDC selectors ONLY in PREEXEC.
+def _preexec_t0(**adjust):
+    bootstrap = {
+        "PATH": "/usr/bin:/bin", "HOME": "/private/tmp/mfg-r010-private-home",
+        "TMPDIR": "/private/tmp/mfg-r010-private-tmp", "LANG": "C", "LC_ALL": "C",
+        "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "pull_request",
+        "GITHUB_REPOSITORY": "chinanjjohn2012/mac-file-gateway",
+        "GITHUB_RUN_ID": str(RUN), "GITHUB_RUN_ATTEMPT": "1",
+        "GITHUB_JOB": "preexec_hold", "G05_EXPECTED_HEAD": HEAD,
+        "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS",
+        "RUNNER_ARCH": "ARM64", "ImageOS": "macos15",
+        "ImageVersion": "20261104.0514.1",
+        "SSH_AUTH_SOCK": "/private/tmp/ssh-A/agent.sock",
+        "ACTIONS_ID_TOKEN_REQUEST_URL": (
+            "https://pipelinesghubeus15.actions.githubusercontent.com/_apis/oidc/token"
+            "?api-version=2.0"
+        ),
+        "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "private-fake-runner-bearer-only",
+    }
+    from tools.r010_authority_chain_t0 import PRODUCT_HELPER_ENV_KEYS
+    helper = {k: bootstrap[k] for k in PRODUCT_HELPER_ENV_KEYS}
+    child = helper.copy()
+    bootstrap.update(adjust.pop("bootstrap", {}))
+    helper.update(adjust.pop("helper", {}))
+    child.update(adjust.pop("child", {}))
+    values = dict(
+        phase="PREEXEC_HOLD", env_i_used=True, runner_context_source=True,
+        bootstrap_items=tuple(sorted(bootstrap.items())),
+        product_helper_items=tuple(sorted(helper.items())),
+        product_child_items=tuple(sorted(child.items())),
+        ssh_metadata_only=True, ssh_agent_protocol_calls=0,
+        foreign_popen_calls=0, pregrant_product_popen_calls=0,
+        scrub_before_product_import=True,
+    )
+    values.update(adjust)
+    return PreexecSelectorBoundary(**values)
+
+
+def _check_preexec_t0(item):
+    return validate_preexec_selector_boundary_t0(
+        item, expected_run_id=str(RUN), expected_head=HEAD,
+        expected_image="20261104.0514.1", expected_job="preexec_hold",
+        expected_home="/private/tmp/mfg-r010-private-home",
+        expected_tmp="/private/tmp/mfg-r010-private-tmp",
+    )
+
+
+def test_r011_preexec_exact_oidc_keys_not_present_in_product():
+    item = _preexec_t0()
+    _check_preexec_t0(item)
+    parent = dict(item.bootstrap_items)
+    child = dict(item.product_child_items)
+    assert "ACTIONS_ID_TOKEN_REQUEST_TOKEN" in parent
+    assert "ACTIONS_ID_TOKEN_REQUEST_TOKEN" not in child
+    assert "SSH_AUTH_SOCK" not in child
+    assert set(dict(item.product_helper_items)) == {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"}
+
+
+@pytest.mark.parametrize("bad", [
+    dict(bootstrap={"GIT_ASKPASS": "foreign"}),
+    dict(bootstrap={"HTTPS_PROXY": "https://untrusted.example"}),
+    dict(bootstrap={"ACTIONS_ID_TOKEN_REQUEST_TOKEN": ""}),
+    dict(bootstrap={"ACTIONS_ID_TOKEN_REQUEST_URL": "http://evil.example/token"}),
+    dict(bootstrap={"ACTIONS_ID_TOKEN_REQUEST_URL":
+                    "https://evil.actions.githubusercontent.com.evil.example/token"}),
+    dict(bootstrap={"G05_EXPECTED_HEAD": "0" * 40}),
+    dict(helper={"ACTIONS_ID_TOKEN_REQUEST_TOKEN": "private-fake-runner-bearer-only"}),
+    dict(helper={"SSH_AUTH_SOCK": "/private/tmp/ssh-A/agent.sock"}),
+    dict(child={"ACTIONS_ID_TOKEN_REQUEST_URL": "unapproved"}),
+    dict(child={"GIT_ASKPASS": "foreign"}),
+    dict(env_i_used=False), dict(runner_context_source=False),
+    dict(ssh_metadata_only=False), dict(ssh_agent_protocol_calls=1),
+    dict(foreign_popen_calls=1), dict(pregrant_product_popen_calls=1),
+    dict(scrub_before_product_import=False), dict(phase="PRODUCT_CHILD"),
+])
+def test_r011_preexec_oidc_selector_fail_closed(bad):
+    with pytest.raises(GateDenied):
+        _check_preexec_t0(_preexec_t0(**bad))
+
+
+def test_r011_jwt_freshness_model_positive_synthetic():
+    validate_provider_freshness_t0(
+        verification_receipt(), expected_token_sha256=OIDC_TOKEN_DIGEST,
+        expected_transcript_sha256=JWT_TRANSCRIPT_DIGEST,
+        expected_check_run_id=CHECK_RUN,
+    )
+
+
+@pytest.mark.parametrize("bad", [
+    dict(expires_at=1_000_010), dict(expires_at=1_000_015),
+    dict(not_before=1_000_100), dict(issued_at=1_000_100),
+    dict(issued_at=999_000), dict(expires_at=1_002_000),
+    dict(grant_checked_at=1_000_140), dict(grant_checked_at=999_999),
+    dict(jose_alg="HS256"), dict(jose_typ="JOSE"), dict(jose_kid=""),
+    dict(kid_matches_verified_jwks=False),
+    dict(github_jwks_source_verified=False),
+    dict(original_signed_bytes_verified=False),
+    dict(original_jwt_independently_replayable=False),
+    dict(token_sha256="0" * 64),
+    dict(verification_transcript_sha256="0" * 64),
+    dict(signed_check_run_id=CHECK_RUN + 1),
+    dict(signed_subject="repo:unrelated/example:pull_request"),
+    dict(current_job_in_progress=False),
+])
+def test_r011_jwt_expired_wrong_key_or_fake_summary_denied(bad):
+    with pytest.raises(GateDenied):
+        validate_provider_freshness_t0(
+            verification_receipt(**bad), expected_token_sha256=OIDC_TOKEN_DIGEST,
+            expected_transcript_sha256=JWT_TRANSCRIPT_DIGEST,
+            expected_check_run_id=CHECK_RUN,
+        )
+
+
+@pytest.mark.parametrize("bad", [
+    dict(design_blob="f" * 40),
+    dict(design_id="MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-009-CANDIDATE"),
+    dict(review_sequence_option="B0"), dict(b_review_level="NONE"),
+    dict(c_review_level="NONE"), dict(b_verdict="BLOCKED"),
+    dict(c_evidence_status="INSUFFICIENT"),
+    dict(b_t1_review_id=C_T1), dict(contract_scope_id="wrong_scope"),
+])
+def test_r011_grant_requires_current_qualification_and_b0_b1(bad):
+    with pytest.raises(GateDenied):
+        validate_execution_grant(
+            grant(), choice=choice(), qualification=replace(qualification(), **bad),
+            witness=witness(), verification=verification_receipt(),
+            expected_job_envelope_key=ENVELOPE_KEY,
+            expected_design_blob=DESIGN_BLOB,
+            expected_b_design_review_id=B_DESIGN,
+            expected_c_design_review_id=C_DESIGN,
+        )
+
+
+def test_r011_b0_cannot_be_satisfied_by_targeted_t1_reviews():
+    ch = replace(choice(), review_sequence_option="B0")
+    g = replace(grant(), review_sequence_option="B0",
+                design_choice_digest=design_choice_digest(ch))
+    q = replace(qualification(), review_sequence_option="B0")
+    with pytest.raises(GateDenied, match="B0 FULL-before-T1"):
+        validate_execution_grant(
+            g, choice=ch, qualification=q, witness=witness(),
+            verification=verification_receipt(), expected_job_envelope_key=ENVELOPE_KEY,
+            expected_design_blob=DESIGN_BLOB,
+            expected_b_design_review_id=B_DESIGN,
+            expected_c_design_review_id=C_DESIGN,
+        )
+    # Illustration of required FULL metadata; NOT independent real reviews.
+    validate_execution_grant(
+        g, choice=ch,
+        qualification=replace(q, b_review_level="ROLE_FULL_SCOPE_PASS",
+                              c_review_level="ROLE_FULL_SCOPE_PASS"),
+        witness=witness(), verification=verification_receipt(),
+        expected_job_envelope_key=ENVELOPE_KEY,
+        expected_design_blob=DESIGN_BLOB,
+        expected_b_design_review_id=B_DESIGN,
+        expected_c_design_review_id=C_DESIGN,
+    )
+
+
+def test_r011_grant_cannot_accept_unbound_owner_or_receipt():
+    for bad in (
+        dict(host_option="A0"),
+        dict(risk_marker="R010_REAFFIRM_R006_RISK1_9_NO_NEW_HOST_WEAKENING"),
+        dict(b_design_review_id="old-R008-b"),
+        dict(oidc_token_sha256="0" * 64),
+        dict(oidc_verification_transcript_sha256="0" * 64),
+    ):
+        with pytest.raises(GateDenied):
+            validate_execution_grant(
+                grant(**bad), choice=choice(), qualification=qualification(),
+                witness=witness(), verification=verification_receipt(),
+                expected_job_envelope_key=ENVELOPE_KEY,
+                expected_design_blob=DESIGN_BLOB,
+                expected_b_design_review_id=B_DESIGN,
+                expected_c_design_review_id=C_DESIGN,
+            )
+
+
+def test_r011_inmemory_registry_cannot_claim_cross_process_proof():
+    first, second = SharedJobRegistry(), SharedJobRegistry()
+    first.claim_once("same-job")
+    second.claim_once("same-job")
+    assert first.claimed_keys == second.claimed_keys
+    # Only later native O_EXCL/fsync cross-process original evidence can prove it.

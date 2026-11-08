@@ -2,7 +2,10 @@
 
 TASK_ID: MULTI-EXEC-LBE-FIVE-DAY-CANDIDATE-20261105
 MILESTONE_ID: LBE-FIVE-DAY-CORE-PRODUCT-CANDIDATE
-DESIGN_ID: MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-009-CANDIDATE
+DESIGN_ID: MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-010-CANDIDATE
+REVIEW_ROUND: D4-R011-AUTHORITY-CHAIN-DESIGN-010
+PREVIOUS_R010_REVIEWED_DESIGN_BLOB: f0cdeac6887c570e759f549587dcb9980e410253
+PREVIOUS_INTERIM_R010_DESIGN_BLOB: 410dc9d80b2f1d407c0752a9a6d70966fac527ab
 STATUS: PROPOSED_NOT_EFFECTIVE
 PARENT_R009_DESIGN_BLOB: c6ed1388a868e01b51d10722195ea4b9e8ff9af9
 PARENT_R008_DESIGN_BLOB: a9d78a1e07b345a3ec69cb93ac9d5cca8246c3fe
@@ -18,7 +21,9 @@ REVIEW_SEQUENCE_OPTION: UNDECIDED
 R010 is the single normative authority root for any future R010 positive path.
 It preserves the substantive safety properties explicitly listed below, but no
 version-bound Review, Owner Choice or execution Grant from R006/R007/R008/R009
-is automatically upgraded into R010 authority.
+is automatically upgraded into R010 authority. DESIGN-010 is a fresh Blob
+requiring new independent B/C design Reviews: old R010 DESIGN-009 Review
+IDs/Blobs and R008/R009 predecessor results never authorize it.
 
 This file is design-only. It does NOT authorize A1/B1 implementation, OIDC
 requests, SSH-agent access, autofs activation, native Python/Pipenv/Go execution,
@@ -61,7 +66,7 @@ version authority unless this table says RETAINED_SAFETY_ONLY.
 | R008 section 9 R008_OWNER_PRODUCT_T1_GRANT_V1 | SUPERSEDED_DENY | Replaced only by R010_OWNER_PRODUCT_T1_GRANT_V1. |
 | R009 section 3 Job-global lease | RETAINED_AND_TIGHTENED | R010 keeps deterministic create-once envelope and canonical journal, adds provider Job attestation and explicit state-domain provenance. |
 | R009 section 4 local secret continuity | REPLACED | Replaced by provider-signed OIDC check_run_id plus local-secret challenge continuity in section 7. |
-| R009 section 5 SSH selector boundary | RETAINED_AND_TIGHTENED | PREEXEC_HOLD only; stripped before gateway/product helpers; exact status semantics remain. |
+| R009 section 5 SSH selector boundary | REPLACED_FOR_OIDC_PREEXEC_ENV_ONLY | Section 14 explicitly replaces exact R008/R009 PREEXEC bootstrap allowlist with an exact two-selector OIDC exception; strict no-agent-protocol and all downstream no-selector/closed-child requirements remain. |
 | R009 sections 6-7 row success | REPLACED | Replaced by the explicit serial state machine and finite observed acceptance matrix in sections 9-11. |
 | R009 section 8 grant additions | SUPERSEDED_DENY | R010 defines one complete execution grant schema; additive legacy schemas are invalid. |
 | PR98 persistent owner.lock/UNKNOWN behavior | RETAINED for ordinary gateway | R010 PRODUCT_T1 uses a separately reviewed ephemeral Job state domain only under section 8; no persistent state is silently cleared or migrated. |
@@ -160,7 +165,10 @@ The host rules are the R008/R009 safety rules, with these R010 truth claims:
 
 RISK_10 and RISK_11 remain additive to R006 risks 1-9.
 
-The bootstrap selector contract remains exact:
+The future OIDC-capable PREEXEC selector contract is exactly the versioned
+section 14 exception, which supersedes the old R008/R009 exact PREEXEC
+environment list ONLY at that stage. After PREEXEC all older no-credential,
+no-SSH-agent-protocol and closed-child requirements remain:
 - only tiny stdlib PREEXEC_HOLD may initially see SSH_AUTH_SOCK;
 - it may perform metadata-only no-connect socket checks;
 - it strips SSH_AUTH_SOCK before importing gateway/product modules;
@@ -211,7 +219,10 @@ R010 replaces R009 self-attribution with:
 R010_GITHUB_OIDC_CHECK_RUN_V1
 
 The future tracked R010 workflow gives id-token: write ONLY to the dedicated
-PREEXEC_HOLD Job. No other Job in that workflow receives that permission.
+PREEXEC_HOLD Job. This is a JOB-LEVEL permission (not PREEXEC process-only
+isolation): same-UID code could steal runner request selectors. Other Jobs
+must have no such permission. No live permission or request is authorized now.
+Section 14 defines the only proposed compliant PREEXEC process boundary.
 
 Before Owner PRODUCT_T1 grant:
 1. PREEXEC_HOLD creates JOB_LOCAL_SECRET (256 random bits) in the create-once
@@ -431,6 +442,8 @@ It is a fresh direct OWNER comment and must bind at minimum:
 - contract_scope_id=R010_IMPLEMENTATION_CONTRACT_V1;
 - provider_contract=R010_GITHUB_OIDC_CHECK_RUN_V1;
 - OIDC issuer/audience/claims digest/token SHA256;
+- JWT verification transcript SHA256, issuer metadata/JWKS digest, algorithm/kid,
+  signed subject/check_run and verified exp/nbf/iat freshness at grant;
 - github run_id, run_attempt, provider-signed check_run_id;
 - workflow_ref, workflow_sha;
 - runner/image/source/host snapshot identities;
@@ -488,6 +501,17 @@ Before R010 design is handed to B/C, A must produce source-only T0 evidence for:
    - F1/unqualified positive, UNKNOWN, missing owner.lock, wrong source identity,
      unapproved runner => DENY;
    - separately lawful Git/File remain available despite Exec denial.
+9. R011 REQUIRED COMPOSED P2 NEGATIVES
+   - exact OIDC PREEXEC-only env is allowed in the synthetic model;
+     extra GIT_ASKPASS/proxy, missing OIDC request selector, URL spoofing,
+     token/SSH leak into a helper/child, agent protocol use or foreign Popen
+     => DENY.
+   - synthetic verified original JWT receipt with exp/iat/nbf and JOSE/JWKS
+     metadata; expired, stale, future, unknown kid, wrong alg, wrong signed
+     check_run/sub, forged digest, unavailable raw bytes => DENY.
+   - invalid R008 Choice + recomputed R010 Grant digest, mismatched current
+     qualification design ID/Blob and B0+TARGETED-only => DENY.
+   - in-memory SharedJobRegistry is NOT native atomic O_EXCL/fsync evidence.
 
 These T0 models do NOT implement runtime authority and do NOT prove PRODUCT_T1.
 Real OIDC request/signature verification and native child evidence remain
@@ -512,4 +536,172 @@ REVIEW_SEQUENCE_OPTION=UNDECIDED
 PRODUCT_T1=DENY
 INTEGRATION_STATUS=NOT_TESTED
 FULL_CODE_REVIEW_PASS=NOT_ISSUED
+R10_STATUS=BLOCKED
+
+## 14. R011 targeted normative correction: PREEXEC, JWT and composed grant
+
+The following three corrections resolve the PREVIOUS R010 B-targeted design
+P2s only as a NEW design candidate. They do not rewrite the Worker, alter
+R010 original-child-reaped versus descendant-survival results, create
+operative native code, authorize PRODUCT_T1 or infer any B/C PASS.
+
+### 14.1 B114-R010-ST-D009-P2-01: R010_OIDC_PREEXEC_SELECTOR_V2
+
+PRECEDENCE AND EXACT ALLOWLIST:
+- R008 section 3.1 and R009 section 5 exact /usr/bin/env -i PREEXEC
+  environment requirements are SUPERSEDED *for a future OIDC-enabled
+  PREEXEC_HOLD entrypoint only*, never for ordinary legacy/product
+  helpers/Worker/NativeRunner/PRODUCT children.
+- The trusted tracked workflow starts a tiny stdlib-only PREEXEC process
+  under absolute /usr/bin/env -i with EXACTLY the 18 R008 nonempty
+  bootstrap keys and their pre-reviewed exact identities PLUS EXACTLY:
+  ACTIONS_ID_TOKEN_REQUEST_URL=<runner-provided bounded HTTPS endpoint>
+  ACTIONS_ID_TOKEN_REQUEST_TOKEN=<runner-provided nonempty bearer>
+  No other key, token/cloud selector, GIT_ASKPASS, SSH_ASKPASS, KRB5CCNAME,
+  proxy variable, user-provided environment key or config-based selector
+  is allowed. The two added credentials are valid for PREEXEC only.
+- The two OIDC values MUST originate from the current GitHub runner job
+  context; a copied env value or caller assertion is not a provider
+  identity proof, so the independently signed JWT verification below is
+  mandatory. The reviewed custom audience binds exact DESIGN-010 Blob,
+  exact implementation Head and job-local-secret digest; URL, bearer and
+  audience must NOT be influenced by REST/MCP/client, Workspace config,
+  untrusted source files or public API input.
+- Require HTTPS + authenticated hostname and certificate, a reviewed
+  *.actions.githubusercontent.com request endpoint, exact request path
+  shape and size, no arbitrary URL/redirect/proxy, no custom CA and
+  bounded response. Missing/changed/unavailable endpoint or bearer
+  => hard DENY, no fallback to old R008 exact env or untrusted URL.
+- Only this PREEXEC process may receive SSH_AUTH_SOCK and the OIDC
+  request selectors. SSH_AUTH_SOCK is a metadata-only path; zero
+  SSH agent connect/send/recv/list-identity or autofs target activation.
+  No unreviewed helper/process launch, no PRODUCT Popen before the
+  independently authorized Owner execution grant.
+- Before importing gateway/product modules or constructing service,
+  remove SSH_AUTH_SOCK, both ACTIONS_ID_TOKEN_REQUEST_* names, raw JWT
+  and any other credential selector from env, arguments and subprocess
+  inheritance. Keep private source-verified 0600 original evidence
+  under pinned 0700 disposable state only if a later review permits.
+  The post-scrub product-helper nonempty env is EXACTLY:
+  PATH=/usr/bin:/bin, HOME=<reviewed private>, TMPDIR=<reviewed private>,
+  LANG=C, LC_ALL=C. The six future command children have separate exact
+  reviewed recipe environments, never any SSH_AUTH_SOCK, GITHUB_*, RUNNER_*,
+  Image*, ACTIONS_ID_TOKEN_* or unreviewed credential variable.
+  No child may receive the raw selector values under renamed keys.
+  If a safe Go/Pipenv-specific variable is necessary it needs a future
+  explicit, reviewed child recipe; no ambient inheritance fallback.
+- Future implementation must capture actual env construction at each
+  PREEXEC/Helper/WorkspaceService/Worker/Runner/child boundary, ensure
+  all foreign Popen/agent operations are absent and handle scrub failures
+  by DENY. Source-only T0 merely tests synthetic maps and process-call
+  counters and is not runtime evidence.
+- The workflow grants id-token: write at JOB scope only, not per process.
+  Same-UID credential theft and other host secrets remain accepted
+  residual risk, NOT PROVEN ABSENT. No live token is fetched in this round.
+
+### 14.2 B114-R010-ST-D009-P2-02:
+R010_PROVIDER_JWT_TEMPORAL_VERIFICATION_V1
+
+A future separately reviewed verifier MUST validate cryptographic ORIGINAL
+JWT bytes, not a decoded-claims digest, self-reported "signature_verified"
+boolean, public run status or Mock. Before ANY Owner execution grant:
+
+1. Authenticate exact issuer discovery via trusted TLS from
+   https://token.actions.githubusercontent.com/.well-known/openid-configuration .
+   Obtain its issuer-controlled JWKS URI by authenticated metadata, never
+   from attacker-provided JOSE header URLs. Limit response sizes, host,
+   redirects/proxies, time and unknown key rotation. Preserve exact
+   discovery/JWKS hashes for independent replay.
+2. Require JOSE typ=JWT, alg=RS256, a unique known kid matching exactly one
+   RSA issuer JWKS key. Verify RSA PKCS#1 v1.5 SHA-256 signature over the
+   ORIGINAL base64url(header).base64url(payload) bytes. alg=none, HS256,
+   invalid signature, unknown kid, wrong key type, duplicate kid, bad
+   encoding/oversize or untrusted JWKS => DENY.
+3. From the SIGNED payload, verify exact iss, custom aud, reviewed sub
+   (from actual provider/workflow format, never a client guess), repo,
+   run_id, run_attempt, signed check_run_id, workflow_ref, workflow_sha,
+   github-hosted runner, verified Head/source/workflow Job linkage and
+   JOB_LOCAL_SECRET_SHA256 audience binding. Independently check
+   GitHub's actual CURRENT in-progress Job/check-run identity; no
+   self-attributed job ID or public env string is sufficient.
+4. Validate signed integer iat/nbf/exp with trusted wall clock:
+   exp > iat, exp-iat <=600s; at first signature verification require
+   iat <= now+30s and now-iat <=120s, nbf <= now+30s,
+   exp > now. At Owner grant decision reverify the same Job is running,
+   grant_now >= verified_at, grant_now-verified_at <=120s, and
+   grant_now STRICTLY < exp. The <=30s skew is ONLY for iat/nbf,
+   never acceptance of an already expired JWT. Missing/skewed clock,
+   absent claim, expired/not-yet-valid token, stale grant or changed Job
+   => DENY before Popen; new token requires new bound grant evidence.
+5. Retain token SHA256, exact signed-input SHA256, selected JWKS/issuer
+   metadata SHA256, alg/kid/verified signature result, full expected vs
+   observed signed claim fields, verification and owner-check times,
+   provider Job identity, verifier source version and verified transcript
+   digest in one original source-bound sanitized transcript.
+   Raw bearer/JWT bytes must NEVER go in PR comments, CI logs or public
+   artifacts. A digest of a caller-authored transcript is not proof.
+   Independent B/C qualification must be able to replay signature
+   verification on actual ORIGINAL JWT bytes/JWKS via separately approved
+   protected access during a live authorized Job; if no secure,
+   independently inspectable original-byte path is available, STOP and
+   report EVIDENCE_INSUFFICIENT rather than accepting a summary.
+6. Bind original JWT digest and validated transcript digest to exact
+   immutable Owner Choice, implementation/role Reviews, Job/lease,
+   local secret and finite execution grant. Recheck freshness before
+   product Popen. A different source, signed Job claim, clock, key
+   version, transcript or grant is a different attempt and requires
+   a new authorization.
+
+Authoritative external claim reference:
+https://docs.github.com/en/actions/reference/security/oidc
+https://github.blog/changelog/2025-11-13-github-actions-oidc-token-claims-now-include-check_run_id/
+The current model tests no real OIDC network calls or cryptographic JWT.
+
+### 14.3 B114-R010-ST-D009-P2-03: atomic authority composition
+
+1. An independently fetched immutable exact DESIGN-010 Git Blob and both
+   independent B/C new-round design Review IDs define EXPECTED authority
+   values. Caller supplied Choice/Grant fields CANNOT define expectations.
+2. Validate real direct OWNER authorship, immutable comment and current
+   R010_OWNER_DESIGN_CHOICE_V1 marker, exact DESIGN-010 id/blob, B/C
+   design Reviews, A0/A1+B0/B1, fresh R010 risk marker and ephemeral
+   Job state BEFORE inspecting any execution grant digest. A legacy
+   R008/R009 or superseded R010 DESIGN-009 Choice is DENY even with
+   a recomputed matching digest.
+3. Independently verify implementation code review objects and require
+   qualification.design_id/blob EXACTLY DESIGN-010, same current Head/Tree/
+   Manifest and independently verified B+C code Review IDs, matching
+   role/scope/verdict/evidence. For option B0, BOTH current reviews must
+   be ROLE_FULL_SCOPE_PASS BEFORE T1; B1 must have BOTH current
+   TARGETED_REVIEW_PASS for the complete pre-T1 critical path and later
+   new FULL. Current B0/B1 choices remain UNDECIDED.
+4. ONLY THEN validate fresh owner-authored immutable
+   R010_OWNER_PRODUCT_T1_GRANT_V1, exact selected options/risk,
+   B/C design and implementation identity, canonical Choice digest,
+   signed and fresh JWT original-byte transcript, current Job/lease/
+   state/source/nonce. Invalid legacy choice+new grant, wrong qual
+   design/blob, B0 paired with merely TARGETED, changed token digest,
+   wrong risk/host or stale Reviewer ID => pre-Popen DENY.
+5. No T0 caller-created dataclass, faked review metadata, self-asserted
+   verification flag or digest grants production authority. The pure
+   model tests field consistency only; actual GitHub/owner/provider
+   provenance and persistent atomic Journal are NOT_IMPLEMENTED.
+
+### 14.4 B R010 P3 and remaining non-runtime proof limits
+
+SharedJobRegistry's process-local set does NOT prove interprocess atomicity:
+two independent registries can claim identical keys in SAFE T0. Later
+true O_EXCL/fsync, two-process contention, crash/lost ACK, no-state-adoption
+and same-UID credential handling need original authorized evidence and
+independent B/C review. The job-level id-token permission is not
+PREEXEC-only OS isolation. Product host/sandbox guarantees, loaded graph,
+positive native T1, integration, FULL and R10 remain not established.
+
+DESIGN_STATUS=PROPOSED_NOT_EFFECTIVE
+REVIEW_ROUND=D4-R011-AUTHORITY-CHAIN-DESIGN-010
+B_C_NEW_ROUND_REVIEWS=NOT_ISSUED
+A0_B0_DEFAULT_DENY_RETAINED=true
+REAL_PROVIDER_OIDC=NOT_RUN
+PRODUCT_T1=NOT_RUN_NOT_AUTHORIZED
+INTEGRATION_STATUS=NOT_TESTED
 R10_STATUS=BLOCKED

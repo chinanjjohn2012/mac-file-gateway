@@ -243,13 +243,13 @@ def test_wrong_runtime_binding_burns_prepared_candidate_without_durable_record(
     try:
         with pytest.raises(GatewayError):
             service._execute_d4_r006_private_attempt(
-                prepared, _grant(candidate.plan), _reviews(monkeypatch),
+                prepared, _bootstrap(monkeypatch, candidate.plan),
                 base_sha=H, head_sha="e" * 40, head_tree=H,
                 manifest_sha256=M, run_id=42445537246, run_attempt=1)
         assert list((private / "d4-journal").iterdir()) == []
         with pytest.raises(GatewayError):
             service._execute_d4_r006_private_attempt(
-                prepared, _grant(candidate.plan), _reviews(monkeypatch),
+                prepared, _bootstrap(monkeypatch, candidate.plan),
                 base_sha=H, head_sha=H, head_tree=H,
                 manifest_sha256=M, run_id=42445537246, run_attempt=1)
     finally:

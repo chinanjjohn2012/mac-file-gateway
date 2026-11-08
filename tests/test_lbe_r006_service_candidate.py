@@ -1,6 +1,7 @@
 """Safe T0 of private R006 prepare -> owner grant -> durable consume -> Worker."""
 from datetime import datetime, timezone
 import json
+import os
 import time
 
 import pytest
@@ -22,6 +23,7 @@ from gateway.lbe_r006_native_runner import (
 )
 from gateway.lbe_r006_review_gate import D4VerifiedReviewPair
 from gateway.lbe_r006_trusted_bootstrap import D4TrustedBootstrapBundle
+from gateway.lbe_r006_runtime_identity import D4VerifiedRuntimeIdentity
 from gateway.lbe_worker import LbeNoChildStarted
 from gateway.workspaces import ActiveRuntimeInventory, WorkspaceService
 from gateway.workspaces_config import parse_workspace_config
@@ -161,15 +163,22 @@ def _patch_assembly(service, monkeypatch, host):
     return candidate, recipe
 
 
-def _bootstrap(monkeypatch, plan):
+def _bootstrap(monkeypatch, plan, *, head_sha=H):
     grant = _grant(plan)
     reviews = object.__new__(D4VerifiedReviewPair)
     monkeypatch.setattr(
         D4VerifiedReviewPair, "check_grant", lambda self, value: None)
+    runtime = object.__new__(D4VerifiedRuntimeIdentity)
+    for name, value in {
+        "_base_sha": H, "_head_sha": head_sha, "_head_tree": H,
+        "_manifest_sha256": M, "_run_id": 42445537246,
+        "_run_attempt": 1, "_pid": os.getpid(),
+    }.items():
+        object.__setattr__(runtime, name, value)
     bundle = object.__new__(D4TrustedBootstrapBundle)
     monkeypatch.setattr(
         D4TrustedBootstrapBundle, "components",
-        lambda self: (grant, reviews))
+        lambda self: (grant, reviews, runtime))
     return bundle
 
 
@@ -205,24 +214,18 @@ def test_private_candidate_consumes_grant_before_worker_but_public_exec_stays_de
         # entrypoint. Reject before burning the prepared candidate.
         with pytest.raises(GatewayError):
             service._execute_d4_r006_private_attempt(
-                prepared, object(),
-                base_sha=H, head_sha=H, head_tree=H, manifest_sha256=M,
-                run_id=42445537246, run_attempt=1)
+                prepared, object())
         assert list((private / "d4-journal").iterdir()) == []
 
         result = service._execute_d4_r006_private_attempt(
-            prepared, _bootstrap(monkeypatch, candidate.plan),
-            base_sha=H, head_sha=H, head_tree=H, manifest_sha256=M,
-            run_id=42445537246, run_attempt=1)
+            prepared, _bootstrap(monkeypatch, candidate.plan))
         assert result["status"] == "launch_failed"
         assert result["executed"] is False
         assert len(list((private / "d4-journal").iterdir())) == 1
 
         with pytest.raises(GatewayError):
             service._execute_d4_r006_private_attempt(
-                prepared, _bootstrap(monkeypatch, candidate.plan),
-                base_sha=H, head_sha=H, head_tree=H, manifest_sha256=M,
-                run_id=42445537246, run_attempt=1)
+                prepared, _bootstrap(monkeypatch, candidate.plan))
 
         with pytest.raises(GatewayError) as denied:
             service.invoke_exec(
@@ -243,14 +246,11 @@ def test_wrong_runtime_binding_burns_prepared_candidate_without_durable_record(
     try:
         with pytest.raises(GatewayError):
             service._execute_d4_r006_private_attempt(
-                prepared, _bootstrap(monkeypatch, candidate.plan),
-                base_sha=H, head_sha="e" * 40, head_tree=H,
-                manifest_sha256=M, run_id=42445537246, run_attempt=1)
+                prepared, _bootstrap(
+                    monkeypatch, candidate.plan, head_sha="e" * 40))
         assert list((private / "d4-journal").iterdir()) == []
         with pytest.raises(GatewayError):
             service._execute_d4_r006_private_attempt(
-                prepared, _bootstrap(monkeypatch, candidate.plan),
-                base_sha=H, head_sha=H, head_tree=H,
-                manifest_sha256=M, run_id=42445537246, run_attempt=1)
+                prepared, _bootstrap(monkeypatch, candidate.plan))
     finally:
         service.close()

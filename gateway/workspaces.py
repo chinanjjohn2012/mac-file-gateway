@@ -610,8 +610,6 @@ class WorkspaceService:
 
     def _execute_d4_r006_private_attempt(
         self, prepared: object, bootstrap: object, *,
-        base_sha: str, head_sha: str, head_tree: str, manifest_sha256: str,
-        run_id: int, run_attempt: int,
         cancelled: threading.Event | None = None,
     ) -> dict[str, Any]:
         """Consume exact owner grant then run the same prepared private candidate.
@@ -651,13 +649,14 @@ class WorkspaceService:
                 if type(bootstrap) is not D4TrustedBootstrapBundle:
                     raise D4TrustedBootstrapDenied(
                         "R006 execution requires canonical trusted bootstrap")
-                grant, reviews = bootstrap.components()
+                grant, reviews, runtime = bootstrap.components()
                 candidate, marker, recipe, host = prepared.claim(ctx)
                 consumed = self._consume_d4_r006_attempt_source_only(
                     grant, reviews, host, plan, recipe,
-                    base_sha=base_sha, head_sha=head_sha,
-                    head_tree=head_tree, manifest_sha256=manifest_sha256,
-                    run_id=run_id, run_attempt=run_attempt)
+                    base_sha=runtime.base_sha, head_sha=runtime.head_sha,
+                    head_tree=runtime.head_tree,
+                    manifest_sha256=runtime.manifest_sha256,
+                    run_id=runtime.run_id, run_attempt=runtime.run_attempt)
             except (D4R006NativeRunnerDenied, D4TrustedBootstrapDenied):
                 raise GatewayError(
                     "runner_unavailable",

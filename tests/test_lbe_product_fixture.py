@@ -4906,3 +4906,129 @@ def test_d4_pinned_import_reader_denies_parent_mode_drift_during_read(
             os.chmod(parent, parent_mode)
     assert mutated == [True]
     assert service._lbe_owner.snapshot()["reserved_slots"] == 0
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("python_direct", "py-direct", ["python", "-m", "compileall", "-q", "./src"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+])
+def test_d4_service_worker_binds_real_selected_host_fd_source_without_native(
+        product_service, monkeypatch, kind, cwd, argv):
+    """The actual Service->one-use Worker consumes selected-host FD evidence."""
+    import hashlib
+    service, workspace = product_service
+    private, provisioner, manifests = _d4_service_operator_bundle(
+        service, workspace, kind=kind)
+    root = workspace.parent.parent / "host-selected-fixture"
+    root.mkdir(mode=0o700)
+    root.chmod(0o700)
+    selected = root / "dyld-source"
+    raw = b"static selected host source, never executed\\n"
+    selected.write_bytes(raw)
+    selected.chmod(0o600)
+    expected = (("dyld-source", hashlib.sha256(raw).hexdigest()),)
+    calls = []
+
+    def forbidden(*_args, **_kwargs):
+        calls.append(True)
+        raise AssertionError("no native child or OS signal authorized")
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", forbidden)
+        m.setattr(os, "kill", forbidden)
+        m.setattr(os, "killpg", forbidden, raising=False)
+        offered = service._observe_d4_r003_operator_provisioner(
+            "a", cwd, argv, provisioner_root=str(provisioner))
+        identities = {
+            label: view.observed_source_identity_sha256
+            for label, view in offered.items() if label in manifests
+        }
+        venv = offered["venv"].proposed_manifest if kind == "pipenv" else None
+        venv_identity = (offered["venv"].observed_source_identity_sha256
+                         if kind == "pipenv" else None)
+        result = service._exercise_d4_r003_assembled_source_only_worker(
+            "a", cwd, argv, private_root=str(private),
+            provisioner_root=str(provisioner), staged_manifests=manifests,
+            expected_source_identities=identities, venv_manifest=venv,
+            expected_venv_identity_sha256=venv_identity,
+            host_source_root=str(root), host_source_expected=expected)
+        assert result["status"] == "launch_failed"
+        assert result["executed"] is False
+        assert result["process_may_be_running"] is False
+        assert service._exec_active == set()
+        assert service._lbe_owner.snapshot()["reserved_slots"] == 0
+        with pytest.raises(GatewayError) as denied:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert denied.value.code == "exec_cleanup_proof_required"
+    assert calls == []
+
+
+@pytest.mark.parametrize("failure,code", [
+    ("missing_expected", "runner_unavailable"),
+    ("wrong_digest", "runner_unavailable"),
+    ("drift_after_attaching", "attempt_replay_denied"),
+])
+def test_d4_service_host_fd_identity_failure_refuses_before_worker_child(
+        product_service, monkeypatch, failure, code):
+    """Host source changes are rejected by the SAME bound Worker marker."""
+    import hashlib
+    from gateway.lbe_hosted_source_probe import D4HostedSelectedSourceRecheck
+
+    service, workspace = product_service
+    private, provisioner, manifests = _d4_service_operator_bundle(
+        service, workspace, kind="go")
+    root = workspace.parent.parent / "host-selected-fixture"
+    root.mkdir(mode=0o700)
+    root.chmod(0o700)
+    selected = root / "dyld-source"
+    raw = b"static selected host source, never executed\\n"
+    selected.write_bytes(raw)
+    selected.chmod(0o600)
+    expected = (("dyld-source", hashlib.sha256(raw).hexdigest()),)
+    if failure == "wrong_digest":
+        expected = (("dyld-source", "a" * 64),)
+    if failure == "missing_expected":
+        expected = None
+    calls = []
+
+    def forbidden(*_args, **_kwargs):
+        calls.append(True)
+        raise AssertionError("invalid host source may never spawn or signal")
+
+    if failure == "drift_after_attaching":
+        original = D4HostedSelectedSourceRecheck.recheck_once
+
+        def changed_source_before_recheck(this):
+            selected.write_bytes(b"host source changed after initial sample\\n")
+            return original(this)
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", forbidden)
+        m.setattr(os, "kill", forbidden)
+        m.setattr(os, "killpg", forbidden, raising=False)
+        if failure == "drift_after_attaching":
+            m.setattr(D4HostedSelectedSourceRecheck, "recheck_once",
+                      changed_source_before_recheck)
+        offered = service._observe_d4_r003_operator_provisioner(
+            "a", "go-project", ["go", "test", "./..."],
+            provisioner_root=str(provisioner))
+        identity = {"go": offered["go"].observed_source_identity_sha256}
+        with pytest.raises(GatewayError) as denied:
+            service._exercise_d4_r003_assembled_source_only_worker(
+                "a", "go-project", ["go", "test", "./..."],
+                private_root=str(private),
+                provisioner_root=str(provisioner),
+                staged_manifests=manifests,
+                expected_source_identities=identity,
+                host_source_root=str(root), host_source_expected=expected)
+        assert denied.value.code == code
+        assert service._exec_active == set()
+        assert service._lbe_owner.snapshot()["reserved_slots"] == 0
+        assert service._lbe_owner.snapshot()["unavailable"] is False
+    assert calls == []

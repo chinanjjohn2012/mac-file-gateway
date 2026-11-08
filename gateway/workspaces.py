@@ -836,6 +836,8 @@ class WorkspaceService:
         expected_venv_identity_sha256: str | None = None,
         require_go_p007_stage_source: bool = False,
         expected_venv_record_distributions: tuple[tuple[str, str], ...] | None = None,
+        host_source_root: str | None = None,
+        host_source_expected: tuple[tuple[str, str], ...] | None = None,
         timeout_seconds: int = 60,
         cancelled: threading.Event | None = None,
     ) -> dict[str, Any]:
@@ -875,6 +877,13 @@ class WorkspaceService:
             self._exec_active.add(name)
             self._active_operations += 1
         try:
+            # A selected-host source set may be requested ONLY as an exact
+            # pair, never pieced together from client data/default digests.
+            # These bytes do NOT attest the actual boot image or dynamic
+            # runtime loader closure and will not grant native execution.
+            if ((host_source_root is None) != (host_source_expected is None)):
+                raise GatewayError(
+                    "runner_unavailable", "D4 host source binding incomplete.")
             # An independently inspected operator source identity is
             # required even for this NONOPERATIVE path. Matching bytes
             # are not themselves an owner grant or loader trust evidence.
@@ -903,6 +912,20 @@ class WorkspaceService:
             if marker._macho_set is None or marker._dylib is None:
                 raise GatewayError(
                     "runner_unavailable", "D4 assembled loader graph missing.")
+            if host_source_root is not None:
+                from .lbe_hosted_source_probe import (
+                    D4HostedSourceDenied, D4HostedSelectedSourceRecheck,
+                )
+                from .lbe_product_fixture import D4FixtureDenied
+                try:
+                    marker.attach_host_selected_source(
+                        D4HostedSelectedSourceRecheck(
+                            source_root=host_source_root,
+                            expected=host_source_expected))
+                except (D4HostedSourceDenied, D4FixtureDenied):
+                    raise GatewayError(
+                        "runner_unavailable",
+                        "D4 selected-host file source cannot be bound.") from None
             return self._run_d4_r003_bound_source_only_worker(
                 ctx, owner, name, candidate, marker, cancelled=cancelled)
         finally:

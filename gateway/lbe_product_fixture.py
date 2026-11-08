@@ -110,7 +110,7 @@ class D4OneUseAttemptMarker:
     """
     __slots__ = ("_candidate", "_ctx", "_pid", "_lock",
                  "_consumed", "_staged", "_runner", "_macos_boundary",
-                 "_macho_set", "_dylib")
+                 "_macho_set", "_dylib", "_host_selected")
 
     def __init__(self, candidate: D4FixtureCandidate,
                  ctx: "WorkspaceContext", *,
@@ -206,6 +206,7 @@ class D4OneUseAttemptMarker:
         self._macos_boundary = None
         self._macho_set = None
         self._dylib = None
+        self._host_selected = None
         self._pid = os.getpid()
         self._lock = threading.Lock()
         self._consumed = False
@@ -312,6 +313,26 @@ class D4OneUseAttemptMarker:
                 raise D4FixtureDenied("private loader binding drift") from None
             self._dylib = binding
 
+    def attach_host_selected_source(self, binding: object) -> None:
+        """Attach a real selected-host FILE recheck, never an image grant.
+
+        This is permitted only after the actual service has already pinned
+        its own macOS Runner and selected Mach-O/private-dylib rechecks.
+        The receipt is deliberately nonauthorizing: it cannot attest an
+        entire GitHub boot image, dynamic loader graph, or native approval.
+        """
+        from .lbe_hosted_source_probe import D4HostedSelectedSourceRecheck
+
+        if type(binding) is not D4HostedSelectedSourceRecheck:
+            raise D4FixtureDenied("selected-host source must be measured")
+        with self._lock:
+            if (self._consumed or self._host_selected is not None
+                    or self._macos_boundary is None
+                    or self._macho_set is None or self._dylib is None):
+                raise D4FixtureDenied(
+                    "selected-host source cannot bypass Runner preparation")
+            self._host_selected = binding
+
     def consume_for(self, plan: LbeWorkPlan) -> None:
         """Burn once, then recheck source and plan BEFORE possible spawn."""
         with self._lock:
@@ -355,6 +376,10 @@ class D4OneUseAttemptMarker:
                 self._macho_set.recheck_for(self._ctx, self._candidate.plan)
             if self._dylib is not None:
                 self._dylib.recheck_for(self._ctx, self._candidate.plan)
+            if self._host_selected is not None:
+                # Burn-before-read is separately atomic. No Worker child slot
+                # exists until the entire selected-host source set matches.
+                self._host_selected.recheck_once()
         except D4FixtureDenied:
             raise
         except Exception:

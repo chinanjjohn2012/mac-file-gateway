@@ -496,39 +496,42 @@ class WorkspaceService:
                 self._lifecycle.notify_all()
 
     def _consume_d4_r006_attempt_source_only(
-        self, grant: object, host: object, recipe: object,
-        name: str, cwd: str,
-        argv: list[str], timeout_seconds: int, *,
+        self, grant: object, host: object, plan: object, recipe: object, *,
         base_sha: str, head_sha: str, head_tree: str, manifest_sha256: str,
         run_id: int, run_attempt: int,
     ) -> object:
         """Bind and burn an exact future R006 attempt before any reservation.
 
-        NONOPERATIVE source/T0 only. The service itself rebuilds the canonical
-        plan under its lifecycle lock, checks current concurrency eligibility,
-        binds the verified owner decision to current Head/run/host/source, and
-        durably consumes nonce BEFORE a future Worker slot or Popen. This
-        method does not reserve a slot or invoke Runner; positive wiring is a
-        separate reviewed change after code review and exact T1 authorization.
+        NONOPERATIVE source/T0 primitive. The exact plan must already come from
+        this service; it is recomputed and compared under the lifecycle lock.
+        Durable nonce consumption happens before any DirectChildOwner/Worker
+        reservation. Public invoke_exec never calls this method.
         """
         from .lbe_durable_attempt import D4DurableAttemptDenied
+        from .lbe_launch_recipe import D4NativeLaunchRecipe
         from .lbe_owner_grant_bootstrap import (
             D4OwnerBootstrapDenied, _new_consumed_owner_grant,
             bind_verified_owner_grant_t0,
         )
         from .lbe_plan import prepare_lbe_work_plan
+        from .lbe_worker import LbeWorkPlan
         with self._lifecycle:
-            ctx = self.require_exec(name)
+            if type(plan) is not LbeWorkPlan or type(recipe) is not D4NativeLaunchRecipe:
+                raise GatewayError("runner_unavailable", "Untrusted R006 plan/recipe.")
+            ctx = self.require_exec(plan.workspace)
             if self._closing or self.settings.schema_version != 2:
                 raise GatewayError("runner_unavailable", "R006 service unavailable.")
             if self._exec_state is None or self._d4_attempt_journal is None:
                 raise GatewayError("runner_unavailable", "Durable owner ledger unavailable.")
             self._exec_state.require_healthy()
-            if name in self._exec_active or len(self._exec_active) >= 4:
+            if plan.workspace in self._exec_active or len(self._exec_active) >= 4:
                 raise GatewayError("busy", "R006 executable slot is not eligible.")
             try:
-                plan = prepare_lbe_work_plan(
-                    ctx, cwd=cwd, argv=argv, timeout_seconds=timeout_seconds)
+                fresh = prepare_lbe_work_plan(
+                    ctx, cwd=plan.cwd, argv=list(plan.requested_argv),
+                    timeout_seconds=plan.timeout_seconds)
+                if fresh != plan:
+                    raise D4OwnerBootstrapDenied("R006 plan changed before grant consume")
                 bound = bind_verified_owner_grant_t0(
                     grant, host, plan, recipe,
                     base_sha=base_sha, head_sha=head_sha,
@@ -541,6 +544,139 @@ class WorkspaceService:
                 raise GatewayError(
                     "runner_unavailable",
                     "R006 owner/run binding is invalid or already consumed.") from None
+
+    def _prepare_d4_r006_private_attempt(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, provisioner_root: str,
+        staged_manifests: dict[str, tuple[tuple[str, str | None], ...]],
+        venv_manifest: tuple[tuple[str, str | None], ...] | None = None,
+        expected_source_identities: dict[str, str] | None = None,
+        expected_venv_identity_sha256: str | None = None,
+        require_go_p007_stage_source: bool = False,
+        expected_venv_record_distributions: tuple[tuple[str, str], ...] | None = None,
+        timeout_seconds: int = 60,
+        cancelled: threading.Event | None = None,
+    ) -> object:
+        """Stage one exact R006 candidate so an owner can approve its fingerprint.
+
+        This is preparation only: it holds a lifecycle lease, not an Exec
+        slot/DirectChildOwner reservation, and cannot launch. The returned
+        in-process object is one-use and tied to the exact staged recipe and
+        fixed macOS host-source observation.
+        """
+        from .lbe_r006_macos_allowlist import (
+            D4R006HostAllowlistDenied, verify_r006_fixed_host_allowlist_t0,
+        )
+        from .lbe_r006_native_runner import (
+            D4R006NativeRunnerDenied, _new_r006_prepared_attempt,
+        )
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if self.settings.schema_version != 2 or self._exec_state is None:
+                raise GatewayError("runner_unavailable", "R006 preparation unavailable.")
+            self._exec_state.require_healthy()
+            if cancelled is not None and type(cancelled) is not threading.Event:
+                raise GatewayError("invalid_argument", "Invalid internal cancellation token.")
+            if cancelled is not None and cancelled.is_set():
+                raise GatewayError("waiter_disconnected", "R006 preparation cancelled.")
+            if name in self._exec_active or len(self._exec_active) >= 4:
+                raise GatewayError("busy", "R006 Workspace is executing.")
+            self._active_operations += 1
+        try:
+            assembled = self._assemble_d4_r003_source_only_runner(
+                name, cwd, argv, private_root=private_root,
+                provisioner_root=provisioner_root,
+                staged_manifests=staged_manifests,
+                venv_manifest=venv_manifest,
+                expected_source_identities=expected_source_identities,
+                expected_venv_identity_sha256=expected_venv_identity_sha256,
+                require_go_p007_stage_source=require_go_p007_stage_source,
+                expected_venv_record_distributions=(
+                    expected_venv_record_distributions),
+                timeout_seconds=timeout_seconds,
+            )
+            host = verify_r006_fixed_host_allowlist_t0()
+            return _new_r006_prepared_attempt(
+                ctx, assembled[0], assembled[1], assembled[3], host)
+        except (D4R006HostAllowlistDenied, D4R006NativeRunnerDenied, OSError):
+            raise GatewayError(
+                "runner_unavailable", "R006 fixed host/source preparation failed."
+            ) from None
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
+    def _execute_d4_r006_private_attempt(
+        self, prepared: object, grant: object, *,
+        base_sha: str, head_sha: str, head_tree: str, manifest_sha256: str,
+        run_id: int, run_attempt: int,
+        cancelled: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        """Consume exact owner grant then run the same prepared private candidate.
+
+        PRIVATE SOURCE CANDIDATE ONLY: no REST/MCP/config/public invoke_exec
+        route calls this method. A separately authorized native T1 would be
+        required before invoking it outside fake-Popen T0.
+        """
+        from .lbe_r006_native_runner import (
+            D4R006NativeLaunchBoundary, D4R006NativeRunnerDenied,
+            D4R006PreparedAttempt,
+        )
+        from .lbe_worker import LbeWorker, LbeWorkerError
+        with self._lifecycle:
+            if type(prepared) is not D4R006PreparedAttempt:
+                raise GatewayError("runner_unavailable", "Untrusted R006 prepared attempt.")
+            plan = prepared.plan
+            ctx = self.require_exec(plan.workspace)
+            if self.settings.schema_version != 2:
+                raise GatewayError("runner_unavailable", "R006 execution unavailable.")
+            if self._exec_state is None or self._d4_attempt_journal is None:
+                raise GatewayError("runner_unavailable", "R006 durable state unavailable.")
+            self._exec_state.require_healthy()
+            if cancelled is not None and type(cancelled) is not threading.Event:
+                raise GatewayError("invalid_argument", "Invalid internal cancellation token.")
+            if cancelled is not None and cancelled.is_set():
+                raise GatewayError("waiter_disconnected", "R006 request cancelled before grant.")
+            if plan.workspace in self._exec_active or len(self._exec_active) >= 4:
+                raise GatewayError("busy", "R006 executable slot is not eligible.")
+            owner = self._lbe_owner
+            if owner is None:
+                raise GatewayError("exec_state_unavailable", "R006 child owner unavailable.")
+            try:
+                candidate, marker, recipe, host = prepared.claim(ctx)
+                consumed = self._consume_d4_r006_attempt_source_only(
+                    grant, host, plan, recipe,
+                    base_sha=base_sha, head_sha=head_sha,
+                    head_tree=head_tree, manifest_sha256=manifest_sha256,
+                    run_id=run_id, run_attempt=run_attempt)
+            except D4R006NativeRunnerDenied:
+                raise GatewayError(
+                    "runner_unavailable", "R006 prepared attempt is invalid or replayed."
+                ) from None
+            self._exec_active.add(plan.workspace)
+            self._active_operations += 1
+        try:
+            try:
+                boundary = D4R006NativeLaunchBoundary(
+                    ctx, candidate.plan, recipe, host, consumed, marker)
+                result = LbeWorker(owner, launcher=boundary.launch).run(
+                    candidate.plan, cancelled=cancelled)
+            except D4R006NativeRunnerDenied:
+                raise GatewayError(
+                    "runner_unavailable", "R006 native boundary refused before Worker."
+                ) from None
+            except LbeWorkerError as exc:
+                raise GatewayError(
+                    exc.code, "R006 private command could not complete safely.",
+                    details={"process_may_be_running": exc.process_may_be_running},
+                ) from None
+            return {**result, "workspace": plan.workspace}
+        finally:
+            with self._lifecycle:
+                self._exec_active.remove(plan.workspace)
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
 
     def _prepare_d4_r003_fixture_candidate(
         self, name: str, cwd: str, argv: list[str],

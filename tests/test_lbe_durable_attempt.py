@@ -170,6 +170,7 @@ def test_real_service_owner_locked_source_only_journal_restart(tmp_path, monkeyp
         D4ConsumedOwnerGrant, _argv_fingerprint,
     )
     from gateway.lbe_launch_recipe import D4NativeLaunchRecipe
+    from gateway.lbe_plan import prepare_lbe_work_plan
     from gateway.lbe_r006_macos_allowlist import (
         D4R006HostAllowlistObservation,
         R006_HOST_SOURCE_FINGERPRINT, R006_RUNNER_PROFILE_FINGERPRINT,
@@ -252,30 +253,31 @@ def test_real_service_owner_locked_source_only_journal_restart(tmp_path, monkeyp
         image_version="20261104.0514.1", macos_version="15.8.2",
         os_build="24H232",
     )
-    recipe = D4NativeLaunchRecipe(
-        workspace="a",
-        profile_git_blob="f8556b48ab5f4af7390fb015092862a8a87768fb",
-        runner="direct",
-        requested_argv=("python", "-m", "pytest", "-q"),
-        service_effective_argv=("python", "-m", "pytest", "-q"),
-        resolved_executable="/private/bin/python",
-        resolved_spawn_argv=("/private/bin/python", "-m", "pytest", "-q"),
-        working_directory="/private/src",
-        closed_child_environment=(("HOME", "/private/home"),),
-        selected_source_fingerprint=S,
-        canonical_output_path=None,
-        original_timeout_seconds=120,
-    )
     for round in range(2):
         with_service = WorkspaceService(
             settings, config_dir=private,
             inventory=ActiveRuntimeInventory(paths=(runtime,)))
         try:
             assert with_service._exec_state.durability_state == "healthy"
+            plan = prepare_lbe_work_plan(
+                with_service.get("a"), cwd="src",
+                argv=["python", "-m", "pytest", "-q"],
+                timeout_seconds=120)
+            recipe = D4NativeLaunchRecipe(
+                workspace=plan.workspace,
+                profile_git_blob="f8556b48ab5f4af7390fb015092862a8a87768fb",
+                runner=plan.runner, requested_argv=plan.requested_argv,
+                service_effective_argv=plan.effective_argv,
+                resolved_executable="/private/bin/python",
+                resolved_spawn_argv=("/private/bin/python", "-m", "pytest", "-q"),
+                working_directory="/private/src",
+                closed_child_environment=(("HOME", "/private/home"),),
+                selected_source_fingerprint=S, canonical_output_path=None,
+                original_timeout_seconds=plan.timeout_seconds,
+            )
             if round == 0:
                 consumed = with_service._consume_d4_r006_attempt_source_only(
-                    verified, host, recipe, "a", "src",
-                    ["python", "-m", "pytest", "-q"], 120,
+                    verified, host, plan, recipe,
                     base_sha=H, head_sha=H, head_tree=H,
                     manifest_sha256=S, run_id=42445537246,
                     run_attempt=1)
@@ -285,8 +287,7 @@ def test_real_service_owner_locked_source_only_journal_restart(tmp_path, monkeyp
                 # The exact grant remains burned after service restart.
                 with pytest.raises(GatewayError):
                     with_service._consume_d4_r006_attempt_source_only(
-                        verified, host, recipe, "a", "src",
-                        ["python", "-m", "pytest", "-q"], 120,
+                        verified, host, plan, recipe,
                         base_sha=H, head_sha=H, head_tree=H,
                         manifest_sha256=S, run_id=42445537246,
                         run_attempt=1)
@@ -329,8 +330,7 @@ def test_service_without_existing_private_journal_never_creates_one(tmp_path):
     try:
         with pytest.raises(GatewayError):
             service._consume_d4_r006_attempt_source_only(
-                object(), object(), object(), "a", "src",
-                ["python", "-m", "pytest", "-q"], 120,
+                object(), object(), object(), object(),
                 base_sha=H, head_sha=H, head_tree=H,
                 manifest_sha256=S, run_id=1, run_attempt=1)
         assert service._d4_attempt_journal is None

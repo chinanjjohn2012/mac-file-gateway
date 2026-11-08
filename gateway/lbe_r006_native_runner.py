@@ -13,13 +13,16 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from typing import TYPE_CHECKING
 
 from .lbe_launch_recipe import D4NativeLaunchRecipe
 from .lbe_owner_grant_bootstrap import (
     D4ConsumedOwnerGrant, D4OwnerBootstrapDenied,
 )
-from .lbe_product_fixture import D4FixtureDenied, D4OneUseAttemptMarker
+from .lbe_product_fixture import (
+    D4FixtureCandidate, D4FixtureDenied, D4OneUseAttemptMarker,
+)
 from .lbe_r006_macos_allowlist import (
     D4R006HostAllowlistDenied, D4R006HostAllowlistObservation,
     verify_r006_fixed_host_allowlist_t0,
@@ -32,6 +35,97 @@ if TYPE_CHECKING:
 
 class D4R006NativeRunnerDenied(ValueError):
     """R006 private native launch prerequisites are not exact."""
+
+
+_PREPARED_TOKEN = object()
+
+
+class D4R006PreparedAttempt:
+    """One in-process staged candidate awaiting an exact owner grant."""
+
+    __slots__ = ("_ctx", "_candidate", "_marker", "_recipe", "_host",
+                 "_pid", "_lock", "_used")
+
+    def __init__(self, token, ctx: "WorkspaceContext",
+                 candidate: D4FixtureCandidate, marker: D4OneUseAttemptMarker,
+                 recipe: D4NativeLaunchRecipe,
+                 host: D4R006HostAllowlistObservation):
+        from .workspaces import WorkspaceContext
+        if token is not _PREPARED_TOKEN:
+            raise D4R006NativeRunnerDenied(
+                "prepared R006 attempt cannot be directly constructed")
+        if (type(ctx) is not WorkspaceContext
+                or type(candidate) is not D4FixtureCandidate
+                or type(marker) is not D4OneUseAttemptMarker
+                or type(recipe) is not D4NativeLaunchRecipe
+                or type(host) is not D4R006HostAllowlistObservation
+                or marker._candidate is not candidate
+                or marker._ctx is not ctx
+                or candidate.plan is not marker._candidate.plan
+                or recipe.workspace != candidate.plan.workspace
+                or recipe.runner != candidate.plan.runner
+                or recipe.requested_argv != candidate.plan.requested_argv
+                or recipe.service_effective_argv != candidate.plan.effective_argv
+                or recipe.original_timeout_seconds != candidate.plan.timeout_seconds
+                or host.selected_source_bytes_verified is not True
+                or host.native_launch_allowed is not False):
+            raise D4R006NativeRunnerDenied("invalid prepared R006 source candidate")
+        self._ctx = ctx
+        self._candidate = candidate
+        self._marker = marker
+        self._recipe = recipe
+        self._host = host
+        self._pid = os.getpid()
+        self._lock = threading.Lock()
+        self._used = False
+
+    @property
+    def plan(self) -> LbeWorkPlan:
+        return self._candidate.plan
+
+    @property
+    def recipe_fingerprint(self) -> str:
+        return self._recipe.selected_source_fingerprint
+
+    @property
+    def host_source_fingerprint(self) -> str:
+        return self._host.source_fingerprint
+
+    @property
+    def runner_profile_fingerprint(self) -> str:
+        return self._host.runner_profile_fingerprint
+
+    def claim(self, ctx: "WorkspaceContext"):
+        """Burn before owner/runtime binding; any failed execute needs new prep."""
+        with self._lock:
+            if self._used:
+                raise D4R006NativeRunnerDenied("prepared R006 attempt replayed")
+            self._used = True
+        if (os.getpid() != self._pid or ctx is not self._ctx
+                or self._marker._candidate is not self._candidate
+                or self._candidate.plan is not self._recipe_plan()):
+            raise D4R006NativeRunnerDenied("prepared R006 attempt binding changed")
+        return (self._candidate, self._marker, self._recipe, self._host)
+
+    def _recipe_plan(self) -> LbeWorkPlan:
+        plan = self._candidate.plan
+        if (self._recipe.workspace != plan.workspace
+                or self._recipe.runner != plan.runner
+                or self._recipe.requested_argv != plan.requested_argv
+                or self._recipe.service_effective_argv != plan.effective_argv
+                or self._recipe.original_timeout_seconds != plan.timeout_seconds):
+            raise D4R006NativeRunnerDenied("prepared R006 recipe drift")
+        return plan
+
+
+def _new_r006_prepared_attempt(ctx: "WorkspaceContext",
+                              candidate: D4FixtureCandidate,
+                              marker: D4OneUseAttemptMarker,
+                              recipe: D4NativeLaunchRecipe,
+                              host: D4R006HostAllowlistObservation
+                              ) -> D4R006PreparedAttempt:
+    return D4R006PreparedAttempt(
+        _PREPARED_TOKEN, ctx, candidate, marker, recipe, host)
 
 
 class D4R006NativeLaunchBoundary:

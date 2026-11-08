@@ -28,7 +28,7 @@ def _plan():
     argv = ("python", "-m", "pytest", "-q")
     return LbeWorkPlan(
         workspace="a", cwd="py-direct", runner="direct",
-        runner_project="", requested_argv=argv, effective_argv=argv,
+        runner_project="py-direct", requested_argv=argv, effective_argv=argv,
         timeout_seconds=120, planned_go_output=None,
         planned_script_sha256=None, planned_pipfile_sha256=None,
     )

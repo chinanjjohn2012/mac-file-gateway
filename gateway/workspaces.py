@@ -1913,11 +1913,19 @@ class WorkspaceService:
                 and not self._closing
                 and not lbe_state["unavailable"]
                 and not lbe_state["closing"])
-            r006_one_shot_ready = bool(self._r006_pending is not None)
-            v2_available = bool(
-                v2_state_healthy
-                and (self._lbe_positive_authorized or r006_one_shot_ready)
+            pending_plan = (
+                self._r006_pending[0].plan
+                if self._r006_pending is not None else None)
+            r006_one_shot_ready = bool(
+                v2_state_healthy and pending_plan is not None
+                and pending_plan.workspace in eligible_names
+                and self._lbe_owner.can_admit_any(
+                    (pending_plan.workspace,)))
+            ordinary_positive_ready = bool(
+                v2_state_healthy and self._lbe_positive_authorized
                 and self._lbe_owner.can_admit_any(eligible_names))
+            v2_available = bool(
+                ordinary_positive_ready or r006_one_shot_ready)
             # A healthy schema-v2 service may support an entirely
             # nonspawning plan even though positive Exec remains F1-denied.
             # Preview requests share the synchronous request slot gate, not

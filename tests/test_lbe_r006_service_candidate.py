@@ -435,3 +435,62 @@ def test_same_service_rest_then_official_mcp_share_r006_invoke_gate_t0(
         assert service.info()["exec_policy"]["adapter_exposed"] is True
     finally:
         service.close()
+
+
+def test_global_info_does_not_advertise_wrong_workspace_for_pending_one_shot(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: NOW)
+    roots = {}
+    for name in ("a", "b"):
+        root = tmp_path / "projects" / name
+        (root / "py-direct" / "src").mkdir(parents=True)
+        (root / "py-direct" / "src" / "main.py").write_text("x = 1\n")
+        roots[name] = root
+    private = tmp_path / "private-two"
+    private.mkdir(mode=0o700)
+    private.chmod(0o700)
+    (private / "d4-journal").mkdir(mode=0o700)
+    store = ExecStateStore(
+        private / "exec-state",
+        workspace_roots=tuple(str(roots[n]) for n in ("a", "b")))
+    store.close()
+    runtime = tmp_path / "runtime-two"
+    runtime.mkdir()
+    settings = parse_workspace_config({
+        "schema_version": 2,
+        "server": {"port": 8766, "transport": "http"},
+        "workspaces": {
+            "a": {"root": str(roots["a"]),
+                  "exec": {"paths": ["py-direct"]}},
+            "b": {"root": str(roots["b"]),
+                  "exec": {"paths": ["py-direct"]}},
+        },
+    })
+    service = WorkspaceService(
+        settings, config_dir=private,
+        inventory=ActiveRuntimeInventory(paths=(runtime,)))
+    host = _host()
+    candidate, _recipe_value = _patch_assembly(service, monkeypatch, host)
+    prepared = _prepare(service)
+    try:
+        service._install_d4_r006_one_shot(
+            prepared, _bootstrap(monkeypatch, candidate.plan))
+        assert service.info()["exec_policy"]["available"] is True
+        with service._lifecycle:
+            service._exec_active.add("a")
+        try:
+            policy = service.info()["exec_policy"]
+            assert policy["available"] is False
+            assert policy["r006_one_shot_ready"] is False
+            rows = {
+                row["id"]: row for row in service.list_workspaces()["workspaces"]
+            }
+            assert rows["a"]["exec_apply_available"] is False
+            assert rows["b"]["exec_apply_available"] is False
+        finally:
+            with service._lifecycle:
+                service._exec_active.remove("a")
+        assert service.info()["exec_policy"]["available"] is True
+        assert service.info()["exec_policy"]["r006_one_shot_ready"] is True
+    finally:
+        service.close()

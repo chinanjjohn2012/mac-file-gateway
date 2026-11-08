@@ -308,14 +308,19 @@ def _selected_bytes(project_fd: int, relative: str,
     if (not parts or any(re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", p)
                          is None or p in (".", "..") for p in parts)):
         raise D4GoImportSourceDenied("unqualified Go source path")
-    fd = os.dup(project_fd)
+    # Keep every ancestor directory FD pinned for the ENTIRE read. Merely
+    # checking a source leaf before/after the byte stream misses chmod or
+    # ownership/mode drift of an already-open package directory mid-read.
+    ancestor_fds = [os.dup(project_fd)]
+    ancestor_ids: list[tuple[int, ...]] = []
     try:
-        _controlled(fd, directory=True)
+        fd = ancestor_fds[-1]
+        ancestor_ids.append(_controlled(fd, directory=True))
         for part in parts[:-1]:
             next_fd = os.open(part, _DIR, dir_fd=fd)
-            os.close(fd)
+            ancestor_fds.append(next_fd)
             fd = next_fd
-            _controlled(fd, directory=True)
+            ancestor_ids.append(_controlled(fd, directory=True))
         leaf = os.open(parts[-1], _FILE, dir_fd=fd)
         try:
             before = _controlled(leaf, directory=False)
@@ -330,12 +335,16 @@ def _selected_bytes(project_fd: int, relative: str,
             if (_controlled(leaf, directory=False) != before
                     or hashlib.sha256(result).hexdigest() != expected_digest):
                 raise D4GoImportSourceDenied("Go source bytes or inode changed")
+            if any(_controlled(opened, directory=True) != identity
+                   for opened, identity in zip(ancestor_fds, ancestor_ids)):
+                raise D4GoImportSourceDenied(
+                    "Go source parent metadata changed during read")
             return bytes(result)
         finally:
             os.close(leaf)
     finally:
-        os.close(fd)
-
+        for opened in reversed(ancestor_fds):
+            os.close(opened)
 
 def _tokens(raw: bytes) -> list[tuple[str, bytes]]:
     """Conservative bounded lexical tokens; never compile or invoke Go."""

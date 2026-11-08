@@ -64,18 +64,29 @@ def _read_selected(project_fd: int, relative: str, *, project: str,
                          for p in parts)
             or not relative.endswith(".py")):
         raise D4PythonImportDenied("invalid Python selected source path")
-    fd = os.dup(project_fd)
+    # Keep the entire nofollow directory ancestry open until after the
+    # complete file read. In-read chmod/chown/mode drift on a parent is as
+    # disqualifying as a content or file-inode change; a pre-read check
+    # alone cannot witness it.
+    ancestor_fds = [os.dup(project_fd)]
+    ancestor_ids: list[tuple[int, ...]] = []
     try:
-        if _checked_identity(fd, directory=True) != expected_dirs[project]:
+        fd = ancestor_fds[-1]
+        project_id = _checked_identity(fd, directory=True)
+        if project_id != expected_dirs[project]:
             raise D4PythonImportDenied("Python project directory drift")
+        ancestor_ids.append(project_id)
         accumulated = project
         for name in parts[:-1]:
             child = os.open(name, _DIR, dir_fd=fd)
-            os.close(fd)
+            ancestor_fds.append(child)
             fd = child
             accumulated += "/" + name
-            if _checked_identity(fd, directory=True) != expected_dirs[accumulated]:
+            expected = expected_dirs[accumulated]
+            observed = _checked_identity(fd, directory=True)
+            if observed != expected:
                 raise D4PythonImportDenied("Python package directory drift")
+            ancestor_ids.append(observed)
         leaf = os.open(parts[-1], _FILE, dir_fd=fd)
         try:
             before = _checked_identity(leaf, directory=False)
@@ -90,12 +101,16 @@ def _read_selected(project_fd: int, relative: str, *, project: str,
             if (_checked_identity(leaf, directory=False) != before
                     or hashlib.sha256(data).hexdigest() != expected_digest):
                 raise D4PythonImportDenied("Python selected source changed")
+            if any(_checked_identity(opened, directory=True) != identity
+                   for opened, identity in zip(ancestor_fds, ancestor_ids)):
+                raise D4PythonImportDenied(
+                    "Python source parent metadata changed during read")
             return bytes(data)
         finally:
             os.close(leaf)
     finally:
-        os.close(fd)
-
+        for opened in reversed(ancestor_fds):
+            os.close(opened)
 
 def _resolve_first_party(module: str,
                          selected: set[str]) -> str | None:

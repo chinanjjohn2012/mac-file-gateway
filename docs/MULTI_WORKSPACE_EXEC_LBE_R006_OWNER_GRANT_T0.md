@@ -1,28 +1,39 @@
-# R006 owner exact-attempt grant source milestone (SAFE T0, NOT T1)
+# R006 exact owner grant and trusted bootstrap - SAFE T0/source candidate
 
 Fixed authority remains D4 R006 Git Blob
-`b8d8a1cb32fb7130dfa6d00b37831dfddfaad11c` and the two independent
-targeted design reviews on PR #114. The user's nine-risk acceptance has been
-transcribed by A in PR comment 6717010359, but that is deliberately **not** an
-exact owner-authenticated T1 run grant.
+`b8d8a1cb32fb7130dfa6d00b37831dfddfaad11c`. The user's nine-risk acceptance
+is recorded by A in PR #114 comment 6717010359; that record is intentionally
+**not** an exact owner-authenticated PRODUCT_T1 attempt grant.
 
-This milestone defines an exact, canonical, one-attempt grant format for a
-future direct repository-owner GitHub issue comment. The verifier binds owner
-login + OWNER association, PR/comment URL, unedited timestamp, fixed R006
-design and design review IDs, future current code review IDs, Base/Head/Tree,
-Manifest, GitHub run ID/attempt, macOS image version/build, source and runner
-fingerprints, Workspace/cwd/runner, requested/effective argv digests, timeout,
+The executable candidate now defines and verifies a canonical direct
+repository-owner GitHub issue-comment grant. It binds owner identity/OWNER
+association, immutable unedited comment identity, fixed R006 contract and
+design reviews, current B/C FULL code review IDs, Base/Head/Tree/Manifest,
+GitHub Run ID/attempt, fixed macOS image/build and selected-source/runner
+fingerprints, exact Workspace/cwd/runner/argv fingerprints, timeout, one-use
 nonce and short expiry.
 
-The parser performs **no network request** and therefore cannot itself prove
-that arbitrary response bytes came from authenticated GitHub transport. A
-future trusted bootstrap must fetch the exact comment using a service-owned
-authenticated channel; public REST/MCP/client bytes must never be accepted as
-that bootstrap. The returned `D4VerifiedOwnerGrant` cannot be normally
-constructed without the module verifier token, and WorkspaceService now rejects
-a plain `D4AttemptIdentity` at its durable nonce-consumption boundary.
+`gateway/lbe_owner_grant_bootstrap.py` performs the service-owned GitHub
+comment fetch using the fixed public GitHub API URL, system TLS, no ambient
+proxy, no Authorization header, no redirect, bounded JSON and exact response
+URL/content type. Supplied REST/MCP body bytes are never accepted by the
+canonical bootstrap.
 
-No positive F1/D0 exception or macOS Runner/Popen is enabled. Real GitHub owner
-comment fetch, independent provider/image/source qualification, current FULL
-code reviews, same-instance positive integration and exact native T1 remain
-NOT_RUN/NOT_AUTHORIZED.
+`gateway/lbe_r006_trusted_bootstrap.py` then combines that verified owner
+grant with:
+- the current native GitHub B/C FULL review pair from
+  `gateway/lbe_r006_review_gate.py`; and
+- the current private G05 receipt + live GitHub Actions run identity from
+  `gateway/lbe_r006_runtime_identity.py`.
+
+The result is a process-bound `D4TrustedBootstrapBundle`, not a client token.
+It can be paired with one service-created prepared source candidate and
+installed only through a private in-process method. Public Direct/REST/MCP
+requests provide only the existing command arguments.
+
+Durable replay protection is separate: an accepted exact request burns the
+verified grant nonce in the existing-only private `d4-journal` sibling before
+Worker/Popen. Lost ACK, post-accept cancellation and restart do not release it.
+
+No exact owner T1 comment has been issued for the current developing Head.
+Actual PRODUCT_T1 therefore remains NOT_RUN/NOT_AUTHORIZED.

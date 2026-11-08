@@ -82,10 +82,14 @@ def build_multi_mcp(service: WorkspaceService, *, port: int = 8765) -> MCPServer
         ) -> dict[str, Any]:
             """Run an allowlisted command only in an explicitly enabled Workspace.
 
-            F1 allows only validated preview. Apply without independently
-            approved whole-descendant cleanup proof is denied before any
-            Exec Runner or PREPARED intent. No automatic retries or local
-            privilege escalation. Git has separate admission.
+            Ordinary schema-v2 apply is F1-denied. A separately reviewed,
+            exact R006 one-shot may be installed only by trusted in-process
+            bootstrap code; clients cannot supply its owner/review/run
+            evidence. If present, this same tool consumes it through the
+            shared WorkspaceService invoke gate. R006 is best-effort: direct
+            child completion never proves descendant cleanup or rollback.
+            Never automatically retry after a lost response. Git remains
+            independently admitted.
             """
             try:
                 return await invoke_exec_with_cancel(

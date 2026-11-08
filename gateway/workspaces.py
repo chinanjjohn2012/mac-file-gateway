@@ -174,6 +174,9 @@ class WorkspaceService:
         # Healthy no-proof admission is separately gated in B1/C.
         self._exec_state: ExecStateStore | None = None
         self._exec_state_issue: str | None = None
+        # Optional, existing-only R006 durable consumed-nonce witness.
+        # No owner-signed grant, native T1 or public positive exception.
+        self._d4_attempt_journal = None
         # V2-owned ledger, also used by approved hosted Python-only T1.
         # Its construction alone NEVER grants public Exec apply or spawns.
         self._lbe_owner = (DirectChildOwner()
@@ -226,6 +229,30 @@ class WorkspaceService:
                         workspace_roots=tuple(w.root for w in settings.workspaces),
                         existing_only=(settings.schema_version == 2),
                     )
+                    if (settings.schema_version == 2
+                            and self._exec_state.durability_state == "healthy"):
+                        # Never put these records in exec-state: its strict
+                        # boot scan would quarantine unknown filenames. Only
+                        # trust a separately provisioned private sibling.
+                        from .lbe_durable_attempt import (
+                            D4DurableAttemptDenied, D4DurableAttemptJournal,
+                        )
+                        d4_fd = -1
+                        try:
+                            d4_fd = os.open(
+                                "d4-journal", os.O_RDONLY | os.O_DIRECTORY
+                                | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                dir_fd=config_root.fd,
+                            )
+                            self._d4_attempt_journal = D4DurableAttemptJournal(
+                                d4_fd)
+                        except (OSError, D4DurableAttemptDenied):
+                            # Missing/precarious ledger never grants Exec;
+                            # File/Git and lawful v2 preview stay available.
+                            self._d4_attempt_journal = None
+                        finally:
+                            if d4_fd >= 0:
+                                os.close(d4_fd)
                 except (PrivateFileError, GatewayError, OSError, ValueError):
                     self._exec_state_issue = "state_io_unavailable"
             if settings.git_enabled:
@@ -280,6 +307,8 @@ class WorkspaceService:
                         cleanup.callback(self._git_state.close)
                     if self._exec_state is not None:
                         cleanup.callback(self._exec_state.close)
+                    if self._d4_attempt_journal is not None:
+                        cleanup.callback(self._d4_attempt_journal.close)
                     for ctx in self._workspaces.values():
                         cleanup.callback(ctx.pinned_root.close)
                         cleanup.callback(ctx.gateway.close)
@@ -465,6 +494,30 @@ class WorkspaceService:
                 self._exec_active.remove(name)
                 self._active_operations -= 1
                 self._lifecycle.notify_all()
+
+    def _consume_d4_r006_attempt_source_only(self, identity: object) -> str:
+        """Burn a future R006 run identity through the real owner-locked service.
+
+        This private preparation method cannot approve, sign or execute T1.
+        Actual future admission MUST separately authenticate owner consent,
+        verify exact run/attempt/image/source/expiry, and use this same ledger
+        before Worker reservation. Caller-originated packets never grant F1.
+        """
+        from .lbe_durable_attempt import (
+            D4AttemptIdentity, D4DurableAttemptDenied,
+        )
+        with self._lifecycle:
+            if self._closing or self.settings.schema_version != 2:
+                raise GatewayError("runner_unavailable", "R006 service unavailable.")
+            if self._exec_state is None or self._d4_attempt_journal is None:
+                raise GatewayError("runner_unavailable", "Durable owner ledger unavailable.")
+            self._exec_state.require_healthy()
+            if type(identity) is not D4AttemptIdentity:
+                raise GatewayError("runner_unavailable", "Untrusted R006 attempt identity.")
+            try:
+                return self._d4_attempt_journal.consume(identity)
+            except D4DurableAttemptDenied:
+                raise GatewayError("runner_unavailable", "R006 nonce is invalid or consumed.") from None
 
     def _prepare_d4_r003_fixture_candidate(
         self, name: str, cwd: str, argv: list[str],

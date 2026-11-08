@@ -149,3 +149,84 @@ def test_private_owner_mode_and_closed_or_forked_denied(tmp_path, monkeypatch):
             journal.consume(example())
     finally:
         os.close(fd)
+
+def test_real_service_owner_locked_source_only_journal_restart(tmp_path):
+    from gateway.core import GatewayError
+    from gateway.exec_state import ExecStateStore
+    from gateway.workspaces import WorkspaceService, ActiveRuntimeInventory
+    from gateway.workspaces_config import parse_workspace_config
+
+    root = tmp_path / "projects" / "a"
+    root.mkdir(parents=True)
+    (root / "src").mkdir()
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    private.chmod(0o700)
+    (private / "d4-journal").mkdir(mode=0o700)
+    store = ExecStateStore(private / "exec-state",
+                           workspace_roots=(str(root),))
+    store.close()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    settings = parse_workspace_config({
+        "schema_version": 2,
+        "server": {"port": 8765, "transport": "http"},
+        "workspaces": {"a": {"root": str(root), "exec": {"paths": ["src"]}}},
+    })
+    for round in range(2):
+        with_service = WorkspaceService(
+            settings, config_dir=private,
+            inventory=ActiveRuntimeInventory(paths=(runtime,)))
+        try:
+            assert with_service._exec_state.durability_state == "healthy"
+            if round == 0:
+                assert len(with_service._consume_d4_r006_attempt_source_only(
+                    replace(example(), workspace="a"))) == 64
+            else:
+                with pytest.raises(GatewayError):
+                    with_service._consume_d4_r006_attempt_source_only(
+                        replace(example(), workspace="a"))
+            assert with_service._lbe_positive_authorized is False
+            with pytest.raises(GatewayError) as denied:
+                with_service.invoke_exec("a", "src", ["python", "-m", "pytest", "-q"],
+                                         dry_run=False)
+            assert denied.value.code == "exec_cleanup_proof_required"
+        finally:
+            with_service.close()
+    assert len(list((private / "d4-journal").iterdir())) == 1
+    # Strict legacy ExecStateStore boot-scan must not be polluted.
+    assert set(p.name for p in (private / "exec-state").iterdir()) == {"owner.lock"}
+
+
+def test_service_without_existing_private_journal_never_creates_one(tmp_path):
+    from gateway.exec_state import ExecStateStore
+    from gateway.workspaces import WorkspaceService, ActiveRuntimeInventory
+    from gateway.workspaces_config import parse_workspace_config
+    from gateway.core import GatewayError
+
+    root = tmp_path / "projects" / "a"
+    root.mkdir(parents=True)
+    (root / "src").mkdir()
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    store = ExecStateStore(private / "exec-state",
+                           workspace_roots=(str(root),))
+    store.close()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    settings = parse_workspace_config({
+        "schema_version": 2,
+        "server": {"port": 8765, "transport": "http"},
+        "workspaces": {"a": {"root": str(root), "exec": {"paths": ["src"]}}},
+    })
+    service = WorkspaceService(
+        settings, config_dir=private,
+        inventory=ActiveRuntimeInventory(paths=(runtime,)))
+    try:
+        with pytest.raises(GatewayError):
+            service._consume_d4_r006_attempt_source_only(
+                replace(example(), workspace="a"))
+        assert service._d4_attempt_journal is None
+    finally:
+        service.close()
+    assert not (private / "d4-journal").exists()

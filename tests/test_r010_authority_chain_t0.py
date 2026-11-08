@@ -1254,3 +1254,34 @@ def test_r014_normal_scope_cannot_promote_role_pass_or_real_t1_from_mock():
     assert R010_DESIGN_ID == R014_DESIGN_ID
     assert "NEVER-ISSUED" in ch.b_design_review_id.upper()
     assert "NEVER-ISSUED" in ch.c_design_review_id.upper()
+
+
+def test_r014_full_text_audit_current_vs_historical_version_qualifiers():
+    from tools import r010_authority_chain_t0 as current_model
+    blob, text = _r014_exact_source_blob()
+    assert blob == current_model.R010_CURRENT_DESIGN_BLOB
+    # The file cannot embed its own Git Blob. Reviews and Owner must later
+    # refer to it externally by GitHub's exact frozen object identifier.
+    assert blob not in text
+    assert text.count("CURRENT_DESIGN_ID: " + R014_DESIGN_ID) == 1
+    assert "HISTORICAL R012 VERSION CONTEXT" in text
+    assert "HISTORICAL R013 VERSION CONTEXT" in text
+    assert "This section is normative for fresh DESIGN-011" not in text
+    assert "For DESIGN-012 SAFE T0, the ONE frozen" not in text
+    # The operative design/Choice/Grants and JWT audience must all point
+    # to the same post-freeze token, not any former literal DESIGN-011.
+    section3 = text.split("## 3. ", 1)[1].split("## 4. ", 1)[0]
+    section4 = text.split("## 4. ", 1)[1].split("## 5. ", 1)[0]
+    section7 = text.split("## 7. ", 1)[1].split("## 8. ", 1)[0]
+    section141 = text.split("### 14.1", 1)[1].split("### 14.2", 1)[0]
+    section143 = text.split("### 14.3", 1)[1].split("### 14.4", 1)[0]
+    for section in (section3, section4, section7, section141, section143):
+        assert "CURRENT_DESIGN_BLOB" in section
+        assert "EXACTLY DESIGN-011" not in section
+        assert "exact DESIGN-011" not in section
+        assert "exact DESIGN-012" not in section
+    assert "CURRENT_DESIGN_ID" in section3 + section4 + section143
+    assert "## 17. R014 unique CURRENT DESIGN" in text
+    for prior in (R012_DESIGN_BLOB, R013_DESIGN_BLOB):
+        assert prior != blob
+        assert prior in current_model.R010_REVOKED_DESIGN_BLOBS

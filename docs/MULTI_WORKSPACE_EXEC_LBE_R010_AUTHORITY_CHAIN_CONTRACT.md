@@ -784,9 +784,13 @@ R011 B's independent REVIEW_COMPLETE / INSUFFICIENT / BLOCKED verdict on
 the frozen R011 Head identified two model false positives and a canonical
 identity precision defect. R011 C independently issued TARGETED DESIGN PASS
 with endpoint path precision P3. Neither role verdict carries to R012.
-This section is normative for fresh DESIGN-011, supersedes the incomplete
-R011 section 14.1 URL example and strengthens section 10 row classification. It adds
-NO new runtime authority, network test permission or change to F1/R006.
+HISTORICAL R012 VERSION CONTEXT: this section was first normative for the
+then-current DESIGN-011 round and superseded its older R011 section 14.1
+URL example while strengthening section 10 row classification. Its
+DESIGN-011/R012-specific authorization and review references are now
+HISTORICAL ONLY, never current R014 alternatives. The independent technical
+URL/ASCII/row-safety requirements remain retained under section 17.
+It adds NO runtime authority, network test permission or change to F1/R006.
 
 ### 15.1 OIDC URL: R012_GITHUB_RUNNER_PIPELINES_OIDC_BASE_V1
 
@@ -958,9 +962,11 @@ the owner, and the Worker may return status="exited" after calling
 DirectChildOwner.latch_unavailable(reservation). This is a reader/owner
 uncertainty, never a positive next-row admission.
 
-For DESIGN-012 SAFE T0, the ONE frozen OwnedRowObservationT0 already
-binds identical active nonce, owner/Worker attempt, private reservation
-identity and witnessed original-child exit. Extend it to require ALL:
+HISTORICAL R013 VERSION CONTEXT: for the then-current DESIGN-012 SAFE T0,
+the ONE frozen OwnedRowObservationT0 already bound identical active nonce,
+owner/Worker attempt, private reservation identity and witnessed
+original-child exit. The same retained reader-health safety checks for
+R014 require ALL:
 - Worker-produced pipe_reader_failed is exactly False, not silently
   omitted when output_complete=True.
 - The *same private reservation's* BoundedPipeDrain.snapshot reports
@@ -1096,8 +1102,8 @@ R10_STATUS=BLOCKED
 This section is normative for R014, DESIGN-013 and all later steps that
 claim to derive authority from THIS fixed source contract. It resolves
 C114-R013-DESIGN-012-SPEC-01 by superseding ALL inconsistent earlier
-current-version predicates, specifically the original section 1
-"DESIGN-011 fresh", section 14.1 audience, section 14.3 expected ID/Blob
+current-version predicates, specifically any old section 1
+"DESIGN-011 fresh" wording, section 14.1 audience, section 14.3 expected ID/Blob
 and qualification, section 15.4 old "new review" direction, and the
 section 16 former DESIGN-012 current-instance scope. Earlier technical
 safety requirements (F1/R006 refusal, closed PREEXEC, original reaper,

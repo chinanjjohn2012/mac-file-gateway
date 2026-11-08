@@ -18,7 +18,7 @@ R010_DESIGN_ID = "MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-013-CANDIDATE"
 # Exact immutable Git blob of the revised R014 contract file, finalized
 # separately BEFORE pinning this constant. Source-only: not a live authority
 # lookup or an Owner/Review/JWT signature verifier. Never self-hash the doc.
-R010_CURRENT_DESIGN_BLOB = "435bdf92a09d8daa2c4a661f5a4568994eef7998"
+R010_CURRENT_DESIGN_BLOB = "f57e39543a6fe3d64fe99b8669fc7da854b93a64"
 R010_REVOKED_DESIGN_BLOBS = frozenset({
     "1dddfdaa5f610c6c02ba9b81d4d11296d2b36eb3",  # DESIGN-011 R012
     "fa3f756f5876e67ff9434747c855a68fd01e7654",  # DESIGN-012 R013

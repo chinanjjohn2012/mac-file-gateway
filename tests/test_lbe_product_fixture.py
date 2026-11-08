@@ -9,6 +9,7 @@ from dataclasses import replace
 import os
 from pathlib import Path
 import subprocess
+import struct
 import threading
 
 import pytest
@@ -915,6 +916,13 @@ def test_d4_forged_directory_identity_is_not_a_product_authorization(
     assert candidate.native_launch_allowed is False
 
 
+def _d4_inert_arm64_tool(label: str) -> bytes:
+    """Source-only MH_EXECUTE header with ARM64 identity; NEVER runnable code."""
+    return (struct.pack("<IIIIIIII",
+                        0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0)
+            + label.encode("ascii"))
+
+
 def _stage_d4_native_bytes_in_private_runner(root, *, kind):
     import hashlib
 
@@ -932,21 +940,24 @@ def _stage_d4_native_bytes_in_private_runner(root, *, kind):
         for name in ("gopath", "modcache", "gocache", "gotmp"):
             (private / name).mkdir(exist_ok=True)
         return str(private), {
-            "go": stage("go/bin/go", b"staged Go primary test bytes"),
+            "go": stage("go/bin/go", _d4_inert_arm64_tool("go_primary")),
             "compile": stage(
                 "go/pkg/tool/darwin_arm64/compile",
-                b"staged Go compiler test bytes"),
+                _d4_inert_arm64_tool("go_compile")),
             "link": stage(
                 "go/pkg/tool/darwin_arm64/link",
-                b"staged Go linker test bytes"),
+                _d4_inert_arm64_tool("go_link")),
         }
     if kind == "python_direct":
         return str(private), {
-            "python": stage("bin/python", b"staged direct Python test bytes"),
+            "python": stage("bin/python", _d4_inert_arm64_tool("python_direct")),
         }
     if kind != "pipenv":
         raise AssertionError("unsupported test fixture")
     py_project = root / "py-pipenv"
+    selected_python = py_project / ".venv" / "bin" / "python"
+    selected_python.write_bytes(_d4_inert_arm64_tool("pipenv_python"))
+    selected_python.chmod(0o700)
     return str(private), {
         "Pipfile": hashlib.sha256(
             (py_project / "Pipfile").read_bytes()).hexdigest(),
@@ -4278,6 +4289,9 @@ def test_d4_service_macos_runner_launch_boundary_is_bound_but_native_denied(
                 expected_hashes=hashes, expected_trees=trees))
         boundary = marker._macos_boundary
         assert type(boundary) is D4MacOSRunnerLaunchBoundary
+        assert marker._macho_set is not None
+        assert len(marker._macho_set._observed.static_selected_executables) == (
+            3 if kind == "go" else 1)
         intent = boundary.intent
         assert intent.workspace == "a"
         assert intent.runner == candidate.plan.runner
@@ -4627,6 +4641,22 @@ def test_d4_service_owned_worker_requires_real_selected_arm64_loader_set(
     service, workspace = product_service
     private, hashes = _stage_d4_native_bytes_in_private_runner(
         workspace, kind=kind)
+    # Corrupt precisely one selected tool AFTER staging but BEFORE taking
+    # the expected source receipt. The source hash/tree still match: it is
+    # the real Mach-O admission, not generic SHA staging, that must deny.
+    import hashlib
+    if kind == "go":
+        invalid = Path(private) / "go/pkg/tool/darwin_arm64/compile"
+        key = "compile"
+    elif kind == "pipenv":
+        invalid = workspace / "py-pipenv/.venv/bin/python"
+        key = "python"
+    else:
+        invalid = Path(private) / "bin/python"
+        key = "python"
+    invalid_bytes = b"selected file is not ARM64 Mach-O"
+    invalid.write_bytes(invalid_bytes)
+    hashes[key] = hashlib.sha256(invalid_bytes).hexdigest()
     trees = _d4_staged_trees(workspace, kind)
     observed = []
 

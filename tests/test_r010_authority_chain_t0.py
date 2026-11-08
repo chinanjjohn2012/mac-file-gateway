@@ -785,3 +785,37 @@ def test_r011_forged_receipt_cannot_supply_own_expected_subject():
             expected_check_run_id=CHECK_RUN,
             expected_subject=EXPECTED_PROVIDER_SUBJECT,
         )
+
+
+# R012 RED: independent B R011 counterexamples; source-only / no OIDC call.
+@pytest.mark.parametrize("url", [
+    "https://pipelinesghubeus15.actions.githubusercontent.com/unreviewed/path?api-version=2.0",
+    "https://pipelinesghubeus15.actions.githubusercontent.com/_apis/oidc/token?api-version=2.0&unexpected=1",
+    "https://pipelinesghubeus15.actions.githubusercontent.com/_apis/oidc/token?api-version=2.0&api-version=2.0",
+    "https://pipelinesghubeus15.actions.githubusercontent.com/_apis/oidc/token?api-version=2.0&audience=forged",
+    "https://pipelinesghubeus15.actions.githubusercontent.com/_apis/oidc/%74oken?api-version=2.0",
+])
+def test_r012_red_oidc_same_host_wrong_path_query_or_encoding_rejected(url):
+    with pytest.raises(GateDenied):
+        _check_preexec_t0(_preexec_t0(bootstrap={
+            "ACTIONS_ID_TOKEN_REQUEST_URL": url,
+        }))
+
+
+@pytest.mark.parametrize("attempt", ["\u0662", "\uff12", "00", "02", "0", "+2", " 2"])
+def test_r012_red_run_attempt_is_canonical_ascii_positive_integer(attempt):
+    with pytest.raises(GateDenied):
+        _check_preexec_t0(
+            _preexec_t0(bootstrap={"GITHUB_RUN_ATTEMPT": attempt}),
+            expected_run_attempt=attempt,
+        )
+
+
+def test_r012_red_requires_single_owner_worker_observation_model():
+    from tools.r010_authority_chain_t0 import OwnedRowObservationT0
+    assert OwnedRowObservationT0.__dataclass_params__.frozen is True
+
+
+def test_r012_red_requires_reviewed_audience_url_assembly():
+    from tools.r010_authority_chain_t0 import build_oidc_token_url_t0
+    assert callable(build_oidc_token_url_t0)

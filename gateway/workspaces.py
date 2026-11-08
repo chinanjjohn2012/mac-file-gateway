@@ -690,26 +690,12 @@ class WorkspaceService:
             observe_d4_runner_preflight,
         )
         from .lbe_product_fixture import D4FixtureDenied
-        from .lbe_native_loader_set import (
-            D4NativeLoaderSetDenied, D4NativeLoaderSetRecheck,
-            inspect_d4_native_loader_set,
-        )
         from .lbe_macos_runner import (
             D4MacOSRunnerDenied, D4MacOSRunnerLaunchBoundary,
         )
 
         try:
             ctx = self.get(name)
-            # All selected Go go/compile/link and Python interpreter bytes
-            # must pass the real pinned ARM64 Mach-O loader-set inspection
-            # BEFORE reserving a Worker or constructing the host boundary.
-            # A successful static observation is NOT dyld resolution, a
-            # resource-domain witness or an operative native grant.
-            loader = inspect_d4_native_loader_set(
-                observed, recipe, private_root=private_root)
-            marker.attach_macho_loader_set(D4NativeLoaderSetRecheck(
-                ctx, candidate.plan, observed, recipe, loader,
-                private_root=private_root))
             runner = observe_d4_runner_preflight(
                 ctx, recipe, private_root=private_root)
             bound = D4RunnerSourceRecheck(
@@ -724,8 +710,8 @@ class WorkspaceService:
                 ctx, candidate.plan, recipe, runner,
                 private_root=private_root)
             marker.attach_macos_runner_boundary(launch_boundary)
-        except (D4RunnerProbeDenied, D4NativeLoaderSetDenied,
-                D4FixtureDenied, D4MacOSRunnerDenied):
+        except (D4RunnerProbeDenied, D4FixtureDenied,
+                D4MacOSRunnerDenied):
             raise GatewayError(
                 "runner_unavailable",
                 "D4 trusted host resource/source preflight unavailable.",
@@ -774,8 +760,11 @@ class WorkspaceService:
             self._exec_active.add(name)
             self._active_operations += 1
         try:
-            candidate, marker, _source, _recipe, _host = (
-                self._prepare_d4_r003_runner_preflight(
+            # The Worker-serving path must pass the existing strict selected
+            # ARM64 toolchain/interpreter loader-set check; the lower-level
+            # host preflight remains a nonauthorizing observation interface.
+            candidate, marker, _source, _recipe, _host, _loader_set = (
+                self._prepare_d4_r003_selected_loader_set(
                     name, cwd, argv, private_root=private_root,
                     expected_hashes=expected_hashes,
                     expected_trees=expected_trees,

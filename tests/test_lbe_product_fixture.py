@@ -4289,9 +4289,9 @@ def test_d4_service_macos_runner_launch_boundary_is_bound_but_native_denied(
                 expected_hashes=hashes, expected_trees=trees))
         boundary = marker._macos_boundary
         assert type(boundary) is D4MacOSRunnerLaunchBoundary
-        assert marker._macho_set is not None
-        assert len(marker._macho_set._observed.static_selected_executables) == (
-            3 if kind == "go" else 1)
+        # The lower-level host probe is source-only; the service-owned
+        # Worker and the assembly path enforce the complete loader set.
+        assert marker._macho_set is None
         intent = boundary.intent
         assert intent.workspace == "a"
         assert intent.runner == candidate.plan.runner

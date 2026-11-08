@@ -24,6 +24,8 @@ import sys
 
 HEX_SHA = re.compile(r"[0-9a-f]{40}\Z")
 HEX256 = re.compile(r"[0-9a-f]{64}\Z")
+RUN_ID = re.compile(r"[1-9][0-9]{0,18}\\Z")
+JOB_NAME = re.compile(r"[A-Za-z0-9_.-]{1,120}\\Z")
 BLOCKED_ENV = (
     "PYTHONPATH",
     "PYTHONHOME",

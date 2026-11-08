@@ -4693,12 +4693,12 @@ def _d4_service_operator_bundle(service, workspace, *, kind):
             "bin/go": _d4_inert_arm64_tool("go-service"),
             "pkg/tool/darwin_arm64/compile": _d4_inert_arm64_tool("compile-service"),
             "pkg/tool/darwin_arm64/link": _d4_inert_arm64_tool("link-service"),
-            "src/runtime/runtime.go": b"package runtime\\n",
+            "src/runtime/runtime.go": b"package runtime\n",
         }}
     elif kind == "python_direct":
         sources = {
             "bin": {"python": _d4_inert_arm64_tool("python-service")},
-            "lib": {"python/stdlib.py": b"constant = 1\\n"},
+            "lib": {"python/stdlib.py": b"constant = 1\n"},
         }
     elif kind == "pipenv":
         selected = workspace / "py-pipenv/.venv/bin/python"
@@ -4706,8 +4706,8 @@ def _d4_service_operator_bundle(service, workspace, *, kind):
         selected.chmod(0o700)
         sources = {
             "bin": {"pipenv": ("#!" + str(selected) +
-                             "\\n# inert service Pipenv\\n").encode("ascii")},
-            "lib": {"python/stdlib.py": b"constant = 1\\n"},
+                             "\n# inert service Pipenv\n").encode("ascii")},
+            "lib": {"python/stdlib.py": b"constant = 1\n"},
         }
     else:
         raise AssertionError("unknown disposable service fixture")

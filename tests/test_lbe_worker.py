@@ -887,3 +887,63 @@ def test_r012_worker_owner_conflicting_same_fake_attempt_voids_remaining(
         assert result["full_descendant_tree_clean"] == "not_proven"
     finally:
         owner.close()
+
+
+def test_r013_red_both_eof_then_selector_close_fault_cannot_advance_row(monkeypatch):
+    """Real library Worker/Owner/Drain with FakeChild; NO native launch."""
+    from tools.r010_authority_chain_t0 import JobState, RowState
+
+    class FaultAfterBothEofSelector(FakeSelector):
+        def close(self):
+            assert not self.registered, "test fault must occur AFTER both EOFs"
+            super().close()
+            raise OSError("fake selector cleanup fault after EOF")
+
+    fake = FakeChild(exit_code=0)
+    selector = FaultAfterBothEofSelector()
+
+    def launch(_plan):
+        selector.enqueue(91, b"original stdout")
+        selector.enqueue(91, b"")
+        selector.enqueue(92, b"original stderr")
+        selector.enqueue(92, b"")
+        fake.exit.set()
+        return fake
+
+    worker, owner, _ = driver(selector=selector, launch=launch, grace=0.025)
+    def deny_native(*_args, **_kwargs):
+        raise AssertionError("R013 SAFE T0 forbids subprocess and OS signals")
+
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", deny_native)
+            m.setattr(os, "kill", deny_native)
+            m.setattr(os, "killpg", deny_native, raising=False)
+            record = _r012_record_private_owner_observe(m, owner)
+            result = worker.run(plan())
+
+        assert result["status"] == "exited"
+        assert result["executed"] is True
+        assert result["timed_out"] is False
+        assert result["exit_code"] == 0
+        assert result["output_complete"] is True
+        assert result["pipe_reader_failed"] is True
+        assert record["direct_observation"].status == "exited"
+        assert record["direct_observation"].exit_code == 0
+        assert record["reservation"].pipe_drain.snapshot()["pipe_reader_finished"] is True
+        assert owner.snapshot()["unavailable"] is True
+        assert fake.wait_calls == 1
+
+        env = _r010_fake_worker_envelope()
+        assert _r010_finish_from_owned_fake_worker(
+            env, result, owner_record=record, fs_ok=True,
+        ) == RowState.AMBIGUOUS
+        assert env.state == JobState.FAILED
+        assert all(x == RowState.VOID for x in env.row_states[1:])
+        with pytest.raises(Exception, match="not ready"):
+            env.begin_row(1, "next", "next")
+        assert result["process_may_be_running"] is True
+        assert result["cleanup_proven"] is False
+        assert result["full_descendant_tree_clean"] == "not_proven"
+    finally:
+        owner.close()

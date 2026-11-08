@@ -911,3 +911,50 @@ def test_r012_owner_worker_observation_is_immutable_and_non_runtime():
     assert obs.full_descendant_tree_clean == "not_proven"
     with pytest.raises(FrozenInstanceError):
         obs.worker_status = "timed_out"
+
+
+@pytest.mark.parametrize("name,value", [
+    ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "different-fake-bearer"),
+    ("ACTIONS_ID_TOKEN_REQUEST_URL", "different-fake-url"),
+    ("SSH_AUTH_SOCK", "/different/private/ssh.sock"),
+    ("GITHUB_RUN_ID", "99999"),
+    ("RUNNER_OS", "linux"),
+    ("HTTPS_PROXY", "https://some.invalid:9999"),
+    ("PIP_INDEX_URL", "https://some.invalid/simple"),
+    ("AWS_ACCESS_KEY_ID", "fake-key-no-secret"),
+    ("GIT_ASKPASS", "/fake/program"),
+])
+def test_r013_red_child_recipe_override_must_never_enable_credential_names(
+    name, value,
+):
+    from tools.r010_authority_chain_t0 import (
+        PRODUCT_HELPER_ENV_KEYS, validate_preexec_selector_boundary_t0,
+    )
+    fixture = _preexec_t0(child={name: value})
+    with pytest.raises(GateDenied):
+        validate_preexec_selector_boundary_t0(
+            fixture, expected_run_id=str(RUN), expected_run_attempt="1",
+            expected_head=HEAD, expected_image="20261104.0514.1",
+            expected_job="preexec_hold",
+            expected_home="/private/tmp/mfg-r010-private-home",
+            expected_tmp="/private/tmp/mfg-r010-private-tmp",
+            approved_child_keys=PRODUCT_HELPER_ENV_KEYS | frozenset({name}),
+        )
+
+
+def test_r013_preexec_renamed_original_bearer_never_becomes_child_value():
+    from tools.r010_authority_chain_t0 import (
+        PRODUCT_HELPER_ENV_KEYS, validate_preexec_selector_boundary_t0,
+    )
+    fixture = _preexec_t0(child={
+        "UNRELATED_NAME": "private-fake-runner-bearer-only",
+    })
+    with pytest.raises(GateDenied):
+        validate_preexec_selector_boundary_t0(
+            fixture, expected_run_id=str(RUN), expected_run_attempt="1",
+            expected_head=HEAD, expected_image="20261104.0514.1",
+            expected_job="preexec_hold",
+            expected_home="/private/tmp/mfg-r010-private-home",
+            expected_tmp="/private/tmp/mfg-r010-private-tmp",
+            approved_child_keys=PRODUCT_HELPER_ENV_KEYS | frozenset({"UNRELATED_NAME"}),
+        )

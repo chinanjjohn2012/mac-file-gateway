@@ -40,3 +40,26 @@ def test_collect_symlink_and_writable_file_fail_closed(tmp_path):
 def test_collect_missing_and_traversal_never_qualify(tmp_path):
     assert _collect(str(tmp_path / "missing"))["status"] == "UNAVAILABLE"
     assert _collect("/tmp/../etc/passwd")["status"] == "INVALID"
+
+def test_system_version_claim_is_bounded_shape(monkeypatch):
+    import plistlib
+    from tools import d4_r006_host_source_collect_t0 as mod
+
+    data = plistlib.dumps({
+        "ProductName": "macOS",
+        "ProductVersion": "15.8.2",
+        "ProductBuildVersion": "24G90",
+    })
+    class F:
+        def __init__(self): self._done = False
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def read(self, n=-1):
+            if self._done: return b""
+            self._done = True
+            return data
+    monkeypatch.setattr("builtins.open", lambda *a, **k: F())
+    assert mod._system_version_claim() == {
+        "status": "CLAIM_ONLY", "ProductName": "macOS",
+        "ProductVersion": "15.8.2", "ProductBuildVersion": "24G90",
+    }

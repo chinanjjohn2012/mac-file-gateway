@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import plistlib
 import stat
 
 _CANDIDATES = (
@@ -66,11 +67,34 @@ def _collect(path: str) -> dict:
             os.close(fd)
 
 
+def _system_version_claim() -> dict:
+    """Read bounded plist values as claims; the file hash is reported separately."""
+    path = "/System/Library/CoreServices/SystemVersion.plist"
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(16384)
+            if len(raw) == 16384 and f.read(1):
+                return {"status": "OVERSIZED"}
+        item = plistlib.loads(raw)
+        if type(item) is not dict:
+            return {"status": "MALFORMED"}
+        selected = {}
+        for key in ("ProductName", "ProductVersion", "ProductBuildVersion"):
+            value = item.get(key, "")
+            if type(value) is not str or not value or len(value) > 120:
+                return {"status": "MALFORMED"}
+            selected[key] = value
+        return {"status": "CLAIM_ONLY", **selected}
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return {"status": "UNAVAILABLE"}
+
+
 def main() -> int:
     rows = tuple(_collect(path) for path in _CANDIDATES)
     print(json.dumps({
         "profile": "D4_R006_HOST_SOURCE_CANDIDATE_COLLECTION_T0",
         "rows": rows,
+        "system_version_claim": _system_version_claim(),
         "independently_reviewed_allowlist": False,
         "source_qualified": False,
         "native_launch_allowed": False,

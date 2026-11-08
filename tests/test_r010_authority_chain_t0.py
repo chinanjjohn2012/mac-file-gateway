@@ -462,3 +462,47 @@ def test_contract_file_contains_single_r010_authority_root_and_supersession_tabl
         "UNOBSERVED_HOST_SIDE_EFFECTS_NOT_PROVEN_ABSENT",
     ):
         assert required in text
+
+
+# R011 test-first regression: these must be RED under the old R010 model.
+def test_r011_red_legacy_design_choice_with_recomputed_new_grant_digest_denied():
+    from dataclasses import replace
+    old_choice = replace(choice(), marker="R008_OWNER_DESIGN_CHOICE_V1")
+    new_grant = replace(grant(), design_choice_digest=design_choice_digest(old_choice))
+    with pytest.raises(GateDenied):
+        validate_execution_grant(
+            new_grant,
+            choice=old_choice,
+            qualification=qualification(),
+            witness=witness(),
+            expected_job_envelope_key=ENVELOPE_KEY,
+        )
+
+
+def test_r011_red_qualification_wrong_design_blob_denied():
+    from dataclasses import replace
+    wrong = replace(qualification(), design_blob="f" * 40)
+    with pytest.raises(GateDenied):
+        validate_execution_grant(
+            grant(), choice=choice(), qualification=wrong,
+            witness=witness(), expected_job_envelope_key=ENVELOPE_KEY,
+        )
+
+
+def test_r011_red_oidc_preexec_and_jwt_freshness_contract_is_testable():
+    from tools.r010_authority_chain_t0 import (
+        PreexecSelectorBoundary, validate_preexec_selector_boundary_t0,
+        validate_provider_freshness_t0,
+    )
+    assert PreexecSelectorBoundary is not None
+    assert callable(validate_preexec_selector_boundary_t0)
+    assert callable(validate_provider_freshness_t0)
+
+
+def test_r011_red_contract_mentions_versioned_oidc_preexec_allowlist():
+    text = (
+        Path(__file__).resolve().parents[1] /
+        "docs/MULTI_WORKSPACE_EXEC_LBE_R010_AUTHORITY_CHAIN_CONTRACT.md"
+    ).read_text(encoding="ascii")
+    assert "R010_OIDC_PREEXEC_SELECTOR_V2" in text
+    assert "R010_PROVIDER_JWT_TEMPORAL_VERIFICATION_V1" in text

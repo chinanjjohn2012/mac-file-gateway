@@ -75,8 +75,10 @@ class D4AttemptIdentity:
 class D4DurableAttemptJournal:
     """Append-only one-use attempt tombstones in an already secured directory.
 
-    Directory FD must be supplied by an independently owner-locked private
-    ExecStateStore, not chosen by a REST/MCP request or caller-controlled path.
+    Directory FD must be the PRE-EXISTING private d4-journal sibling of
+    ExecStateStore, opened by the same owner-locked trusted bootstrap. NEVER
+    write tombstones in exec-state itself: its strict boot scanner quarantines
+    unknown filenames. The FD is not REST/MCP/client-selected.
     This is one prerequisite to authorization, NOT the authorization source.
     """
 

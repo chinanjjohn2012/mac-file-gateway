@@ -326,7 +326,8 @@ def _success(env, index, nonce):
         output_within_bound=True,
         finite_observed_fs_ok=True,
         original_child_unambiguous=True,
-        process_may_be_running=False,
+        original_child_reaped=True,
+        process_may_be_running=True,
     )
 
 
@@ -346,7 +347,8 @@ def test_rows_are_globally_serial_across_workspaces():
         output_within_bound=True,
         finite_observed_fs_ok=True,
         original_child_unambiguous=True,
-        process_may_be_running=False,
+        original_child_reaped=True,
+        process_may_be_running=True,
     ) == RowState.POSITIVE_SUCCESS
     assert env.expected_row == 1 and env.state == JobState.READY
 
@@ -358,7 +360,9 @@ def test_rows_are_globally_serial_across_workspaces():
         (dict(exit_code=0, stdout_truncated=True), RowState.OBSERVED_ZERO_INVALID),
         (dict(exit_code=0, stderr_eof=False), RowState.OBSERVED_ZERO_INVALID),
         (dict(exit_code=0, finite_observed_fs_ok=False), RowState.OBSERVED_ZERO_INVALID),
-        (dict(exit_code=None, original_child_unambiguous=False), RowState.AMBIGUOUS),
+        (dict(exit_code=None, original_child_unambiguous=False,
+              original_child_reaped=False), RowState.AMBIGUOUS),
+        (dict(exit_code=0, original_child_reaped=False), RowState.AMBIGUOUS),
     ],
 )
 def test_failure_classes_latch_job_and_void_remaining_rows(kwargs, expected):
@@ -374,7 +378,8 @@ def test_failure_classes_latch_job_and_void_remaining_rows(kwargs, expected):
         output_within_bound=True,
         finite_observed_fs_ok=True,
         original_child_unambiguous=True,
-        process_may_be_running=False,
+        original_child_reaped=True,
+        process_may_be_running=True,
     )
     base.update(kwargs)
     assert env.finish_row(0, **base) == expected
@@ -382,6 +387,14 @@ def test_failure_classes_latch_job_and_void_remaining_rows(kwargs, expected):
     assert all(x == RowState.VOID for x in env.row_states[1:])
     with pytest.raises(GateDenied):
         env.begin_row(1, grant().command_nonces[1], grant().command_nonces[1])
+
+
+def test_original_reaped_zero_success_preserves_descendant_risk_warning():
+    env = _envelope()
+    nonce = grant().command_nonces[0]
+    assert _success(env, 0, nonce) == RowState.POSITIVE_SUCCESS
+    assert env.state == JobState.READY
+    assert env.expected_row == 1
 
 
 def test_six_exact_positive_rows_are_required_for_six_command_pass():

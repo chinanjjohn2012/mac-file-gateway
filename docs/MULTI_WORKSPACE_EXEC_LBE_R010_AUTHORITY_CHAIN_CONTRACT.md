@@ -330,13 +330,49 @@ whole-host filesystem confinement.
 ROW_POSITIVE_SUCCESS requires:
 - exact command row/nonce/argv/cwd/runner/recipe;
 - exact provider Job, global lease, host/source identities at final recheck;
-- unambiguous original direct child;
+- a trusted DirectChildOwner reservation-bound original-child reap observation:
+  the private reaper's wait() returned a real integer exit code, and its
+  DirectObservation is status="exited" for that SAME original and attempt;
+- the trusted Worker reports status="exited", executed=true, timed_out=false
+  consistent with the owner observation (not merely a client-supplied status);
 - witnessed real exit_code == 0;
 - stdout_eof=true and stderr_eof=true;
 - stdout_truncated=false and stderr_truncated=false;
 - each stream remains within existing 48000 raw-byte and redacted-char bounds;
-- process_may_be_running=false for original direct child;
 - finite pre/post observed integrity predicates below pass.
+
+Original-child completion and descendant-tree cleanup are distinct facts.
+The owner-only observation above is the future internal
+`original_child_reaped=true` witness; it MUST originate from the trusted
+DirectChildOwner wait()/reap path bound to the same reservation/attempt, NEVER
+from a client, REST/MCP field, normal config or independently editable Worker
+response. A public Worker result of `status="exited"` and `exit_code=0` is
+consistent with that witness, but is not a stand-alone client-grantable proof.
+
+Current Worker truthfully returns `process_may_be_running=true` even after
+confirmed original exit. This is aggregate potential descendant survival,
+NOT a claim that the original direct child is still alive. It MUST NOT
+independently select ROW_AMBIGUOUS when the trusted original reap exists.
+The existing `cleanup_proven=false` and
+`full_descendant_tree_clean="not_proven"` remain unchanged; neither original
+exit nor ROW_POSITIVE_SUCCESS proves descendant cleanup or zero delayed host
+side effects. The finite observed filesystem contract and accepted residual
+risk remain in force. No further row may begin unless the previous row
+satisfies every other positive acceptance predicate.
+
+ROW_CLASSIFICATION_TRUST_BOUNDARY:
+- trusted original reap + nonzero integer exit => ROW_OBSERVED_NONZERO;
+- trusted original reap + zero exit + both EOF/no truncation, bounded output,
+  healthy reader and finite filesystem/artifact acceptance => ROW_POSITIVE_SUCCESS;
+- trusted original reap + zero exit + missing EOF, truncated/excess output,
+  failed reader or observed filesystem/artifact predicate =>
+  ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS;
+- no trusted original reap, lost wait/owner/ACK, cancelled or timed-out waiter,
+  or unqualified original identity/exit => ROW_AMBIGUOUS irrespective of a
+  guessed exit code, response metadata or aggregate process risk.
+All failed rows latch JOB_FAILED_LATCHED, VOID remaining rows and forbid
+subsequent Popen/retry. Cancellation/timeout is never retrospectively upgraded
+by a detached later wait or replayed public response.
 
 If exit_code != 0 => ROW_OBSERVED_NONZERO.
 If exit_code == 0 but EOF/truncation/output bound/observed-integrity/artifact
@@ -432,11 +468,19 @@ Before R010 design is handed to B/C, A must produce source-only T0 evidence for:
    - row 5 cannot start while row 1 is running;
    - only completed positive row i advances expected index.
 6. FAILURE CLASSIFICATION
-   - exit 1 => ROW_OBSERVED_NONZERO + FAILED + remaining VOID;
+   - a real SAFE T0 FakeChild through existing DirectChildOwner/LbeWorker
+     must show status="exited", process_may_be_running=true,
+     cleanup_proven=false and full_descendant_tree_clean="not_proven";
+     trusted fake wait/reap + exit 0 + complete streams/valid finite FS
+     => ROW_POSITIVE_SUCCESS (without changing the public Worker fields);
+   - exit 1 with trusted original reap => ROW_OBSERVED_NONZERO + FAILED + remaining VOID;
    - exit 0 + stdout truncation/no EOF => ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS;
    - exit 0 + invalid Go artifact/observed filesystem predicate => same invalid
      state and no later row;
-   - ambiguous original => ROW_AMBIGUOUS + no later row.
+   - ambiguous/unreaped original, timeout or cancelled waiter =>
+     ROW_AMBIGUOUS + no later row, even if process_may_be_running=true.
+   - a caller-supplied `original_child_reaped` flag without private owner
+     wait/reap provenance is NOT trusted evidence and cannot authorize Popen.
 7. FINITE-OBSERVATION HONESTY
    - outside-root write+delete and source mutate+restore are explicitly modeled
      as NOT_PROVEN_ABSENT, not falsely claimed prevented.

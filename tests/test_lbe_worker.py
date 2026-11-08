@@ -633,3 +633,132 @@ def test_r006_pipenv_runner_requires_pinned_pipfile_hash():
         with pytest.raises(LbeWorkerError, match="invalid_plan"):
             LbeWorker._check_plan(
                 replace(valid, planned_pipfile_sha256=invalid))
+
+
+def _r010_fake_worker_envelope():
+    """NON_RUNTIME Job row with the existing Worker fake-child path."""
+    from tools.r010_authority_chain_t0 import (
+        JobEnvelope, R010_STATE_DOMAIN, SharedJobRegistry, StateProvenance,
+    )
+    state = StateProvenance(
+        state_domain=R010_STATE_DOMAIN, provider_check_run_id=12345,
+        github_hosted_ephemeral=True, workflow_restores_state=False,
+        earlier_positive_gateway_step=False,
+        canonical_root_absent_before_create=True,
+        historic_conflicting_state=False,
+        offline_owner_lock_created=True,
+        existing_only_open_succeeded=True,
+    )
+    return JobEnvelope.create(
+        key="fake-owned-original-t0",
+        requested_config_root="/fake-canonical-r010",
+        canonical_config_root="/fake-canonical-r010",
+        provider_check_run_id=12345, registry=SharedJobRegistry(),
+        state_provenance=state,
+    )
+
+
+def _r010_finish_from_owned_fake_worker(env, result, *, owner_reaped, fs_ok):
+    """Test adapter only: caller/client response cannot assert owner proof."""
+    assert type(result) is dict
+    env.begin_row(0, "fake-row-1", "fake-row-1")
+    return env.finish_row(
+        0, exit_code=result["exit_code"],
+        stdout_eof=result["output_complete"],
+        stderr_eof=result["output_complete"],
+        stdout_truncated=result["stdout_truncated"],
+        stderr_truncated=result["stderr_truncated"],
+        output_within_bound=True, finite_observed_fs_ok=fs_ok,
+        original_child_unambiguous=owner_reaped,
+        original_child_reaped=owner_reaped,
+        process_may_be_running=result["process_may_be_running"],
+    )
+
+
+@pytest.mark.parametrize(
+    "exit_code,streams_eof,fs_ok,expected",
+    [
+        (0, True, True, "ROW_POSITIVE_SUCCESS"),
+        (7, True, True, "ROW_OBSERVED_NONZERO"),
+        (0, False, True, "ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS"),
+        (0, True, False, "ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS"),
+    ],
+)
+def test_r010_worker_fake_child_reap_is_not_descendant_cleanup(
+    monkeypatch, exit_code, streams_eof, fs_ok, expected,
+):
+    """T0 integrates EXISTING owner/worker code with an injected FakeChild."""
+    fake = FakeChild(exit_code=exit_code)
+    selector = FakeSelector()
+
+    def launch(_plan):
+        selector.enqueue(91, b"fake original child output")
+        if streams_eof:
+            selector.enqueue(91, b"")
+            selector.enqueue(92, b"")
+        fake.exit.set()
+        return fake
+
+    worker, owner, _selector = driver(selector=selector, launch=launch, grace=0.025)
+
+    def deny_real_process(*_args, **_kwargs):
+        raise AssertionError("R010 SAFE T0 forbids native launch and signals")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(subprocess, "Popen", deny_real_process)
+            patch.setattr(os, "kill", deny_real_process)
+            patch.setattr(os, "killpg", deny_real_process, raising=False)
+            result = worker.run(plan())
+        assert result["status"] == "exited"
+        assert result["executed"] is True and result["timed_out"] is False
+        assert result["exit_code"] == exit_code
+        assert fake.wait_calls == 1
+        assert owner.snapshot()["running_direct_children"] == 0
+        assert result["process_may_be_running"] is True
+        assert result["cleanup_proven"] is False
+        assert result["full_descendant_tree_clean"] == "not_proven"
+
+        verdict = _r010_finish_from_owned_fake_worker(
+            _r010_fake_worker_envelope(), result,
+            owner_reaped=(fake.wait_calls == 1), fs_ok=fs_ok,
+        )
+        assert verdict.value == expected
+    finally:
+        owner.close()
+
+
+def test_r010_unreaped_fake_timeout_fails_closed_without_signal(monkeypatch):
+    """Timeout has no trusted completed reap; later wait cannot replay row."""
+    from tools.r010_authority_chain_t0 import JobState, RowState
+    fake = FakeChild()
+    worker, owner, selector = driver(launch=lambda _plan: fake, grace=0.025)
+
+    def deny_real_process(*_args, **_kwargs):
+        raise AssertionError("R010 SAFE T0 forbids native launch and signals")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(subprocess, "Popen", deny_real_process)
+            patch.setattr(os, "kill", deny_real_process)
+            patch.setattr(os, "killpg", deny_real_process, raising=False)
+            result = worker.run(plan(timeout=1))
+        assert result["status"] == "timed_out"
+        assert result["exit_code"] is None
+        assert result["process_may_be_running"] is True
+        assert fake.wait_calls == 1
+        assert owner.snapshot()["reserved_slots"] == 1
+        env = _r010_fake_worker_envelope()
+        assert _r010_finish_from_owned_fake_worker(
+            env, result, owner_reaped=False, fs_ok=True,
+        ) == RowState.AMBIGUOUS
+        assert env.state == JobState.FAILED
+        assert all(x == RowState.VOID for x in env.row_states[1:])
+        with pytest.raises(Exception, match="not ready"):
+            env.begin_row(1, "fake-next", "fake-next")
+    finally:
+        selector.enqueue(91, b"")
+        selector.enqueue(92, b"")
+        fake.exit.set()
+        wait_until(lambda: owner.snapshot()["reserved_slots"] == 0)
+        owner.close()

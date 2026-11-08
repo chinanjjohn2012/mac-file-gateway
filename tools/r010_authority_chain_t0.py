@@ -223,11 +223,18 @@ class JobEnvelope:
         output_within_bound: bool,
         finite_observed_fs_ok: bool,
         original_child_unambiguous: bool,
+        original_child_reaped: bool,
         process_may_be_running: bool,
     ) -> RowState:
         if self.state != JobState.RUNNING or index != self.expected_row:
             raise GateDenied("row is not the currently running row")
-        if not original_child_unambiguous or process_may_be_running or exit_code is None:
+        # NON_RUNTIME T0: original_child_reaped models the private
+        # DirectChildOwner wait()/reap observation for THIS attempt. A future
+        # runtime MUST bind an unforgeable owner witness, not use a client flag.
+        # process_may_be_running expresses possible DESCENDANTS, not failure
+        # of the original wait(); it remains truthfully True on normal exit.
+        if (not original_child_unambiguous or original_child_reaped is not True
+                or type(exit_code) is not int):
             result = RowState.AMBIGUOUS
         elif exit_code != 0:
             result = RowState.OBSERVED_NONZERO

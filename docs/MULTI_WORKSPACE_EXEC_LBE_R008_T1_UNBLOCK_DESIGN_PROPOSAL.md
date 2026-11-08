@@ -146,9 +146,16 @@ MUST:
 - lstat the socket path without following a symlink and require S_ISSOCK;
 - require socket uid == current runner uid, no group/other permission bits and
   stable dev/inode/mode/uid/gid/nlink;
-- pin every path ancestor by nofollow directory FD identity and reject ancestor
-  replacement or unsafe writable ancestry outside the accepted runner-private
-  temporary root;
+- resolve from a pinned parent directory with nofollow/fstatat-style metadata
+  checks; no component may be a symlink;
+- require the immediate socket directory and every descendant directory below
+  the platform temp anchor to be runner-owned and not group/other writable;
+- permit a platform temp anchor only when it is the exact pinned root-owned
+  sticky directory mode 01777 (for example /private/tmp) with stable
+  dev/inode/uid/mode; ancestors above that anchor must be root-owned and not
+  group/other writable;
+- bind every ancestor dev/inode/uid/mode identity into the same-Job snapshot
+  and reject replacement or permission drift at the final recheck;
 - hash the path string for the owner-visible host snapshot rather than publish
   the raw path;
 - bind socket path hash plus socket/ancestor metadata into the exact Job host
@@ -215,7 +222,8 @@ must state all of:
 REVIEW_SCOPE: TARGETED
 REVIEW_LEVEL: TARGETED_REVIEW_PASS
 VERDICT: PASS
-EVIDENCE_STATUS: SUFFICIENT_FOR_T1_EXECUTION_QUALIFICATION
+EVIDENCE_STATUS: SUFFICIENT
+EVIDENCE_SCOPE_QUALIFIER: SUFFICIENT_FOR_T1_EXECUTION_QUALIFICATION_ONLY
 INTEGRATION_STATUS: NOT_TESTED
 T1_EXECUTION_QUALIFICATION: PASS
 ROLE_FULL_SCOPE_PASS: NOT_ISSUED
@@ -264,9 +272,13 @@ Its canonical payload MUST bind:
 - host_option exactly A0 or A1;
 - review_sequence_option exactly B0 or B1;
 - risk_acceptance:
-  - A0 => R006_NINE_RESIDUAL_RISKS_ACCEPTED only if still applicable;
-  - A1 => R006_NINE_PLUS_R008_RISK10_RISK11_ACCEPTED;
+  - A0 => R008_A0_NO_NEW_HOST_RISK_ACCEPTANCE;
+  - A1 => R008_A1_R006_RISK1_9_PLUS_RISK10_RISK11_ACCEPTED;
 - created_at == updated_at, direct OWNER human identity.
+
+If later executable authority still depends on the previously accepted R006
+risk 1-9, that acceptance must be independently bound by the executable grant;
+the A0 marker above must never be misread as creating or replacing it.
 
 This design-choice comment is NOT executable authority. A may implement only
 the selected options on a new Head. Any option/risk mismatch is DENY.
@@ -274,8 +286,19 @@ the selected options on a new Head. Any option/risk mismatch is DENY.
 ## 6. Exact single-Job PRODUCT_T1 envelope
 
 If and only if B1 is selected and both exact-Head TARGETED code Reviews PASS,
-one disposable GitHub-hosted macOS 15 ARM64 Job may enter PREEXEC_HOLD. It may
-perform only reviewed safe qualification before owner execution grant.
+a separately user-authorized disposable GitHub-hosted macOS 15 ARM64 Job may
+enter PREEXEC_HOLD. Starting this hold Job authorizes only reviewed safe
+qualification and exact identity publication; it does not authorize a product
+child.
+
+The hold Job obtains its immutable GitHub Job ID from the GitHub Actions Jobs
+API over direct TLS with no ambient proxy or credential header, publishes only
+sanitized run/job/host fingerprints, and remains before the product Popen
+boundary. The later direct OWNER execution comment is created only after this
+Job ID and host snapshot exist. A bounded service-owned GitHub API fetch may
+retrieve that exact comment while the same Job is still in_progress. Timeout,
+Job completion, rerun or changed run_attempt before grant => DENY; there is no
+automatic rerun or grant carry-forward.
 
 The trusted runtime MUST independently authenticate and bind:
 - repo/pr/base/head/tree/Manifest;
@@ -366,6 +389,7 @@ r008_design_choice_comment_id and digest
 host_option,review_sequence_option,risk_acceptance
 b_r008_design_review_id,c_r008_design_review_id
 b_t1_qualification_review_id,c_t1_qualification_review_id
+t1_review_target_id,t1_contract_scope_id
 workflow_id,workflow_path,workflow_ref
 github_run_id,github_run_attempt,github_job_id,github_job_name
 image_os,image_version,os_build
@@ -382,7 +406,8 @@ WorkspaceService shared gate and final native boundary must all reject:
 - missing/wrong R008 design choice;
 - A0 grant under A1 code or B0 grant under B1 code;
 - missing RISK_10/RISK_11 acceptance when A1 is selected;
-- unrelated/missing/old role Review IDs or wrong review target;
+- unrelated/missing/old role Review IDs, wrong REVIEW_SCOPE/REVIEW_LEVEL,
+  wrong t1_review_target_id or t1_contract_scope_id;
 - Base/Head/Tree/Manifest/source/recipe drift;
 - wrong run/attempt/Job/workflow;
 - SSH socket or mount snapshot drift;

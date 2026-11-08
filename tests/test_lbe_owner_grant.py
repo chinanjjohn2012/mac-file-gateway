@@ -122,6 +122,6 @@ def test_expired_future_and_noncanonical_body_denied(monkeypatch):
     with pytest.raises(D4OwnerGrantDenied):
         verify_d4_owner_github_comment_t0(encode(future))
     obj = response(now)
-    obj["body"] = obj["body"].replace(',"authorization"', ', "authorization"')
+    obj["body"] = obj["body"].replace('"authorization":', '"authorization" : ', 1)
     with pytest.raises(D4OwnerGrantDenied):
         verify_d4_owner_github_comment_t0(encode(obj))

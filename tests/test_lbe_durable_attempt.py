@@ -1,8 +1,11 @@
 """Safe T0: durable R006 nonce consumption, no native child."""
 from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from datetime import datetime, timezone
+import json
 import os
 import subprocess
+import time
 
 import pytest
 
@@ -158,11 +161,52 @@ def test_private_owner_mode_and_closed_or_forked_denied(tmp_path, monkeypatch):
     finally:
         os.close(fd)
 
-def test_real_service_owner_locked_source_only_journal_restart(tmp_path):
+def test_real_service_owner_locked_source_only_journal_restart(tmp_path, monkeypatch):
     from gateway.core import GatewayError
     from gateway.exec_state import ExecStateStore
+    from gateway.lbe_owner_grant import verify_d4_owner_github_comment_t0
     from gateway.workspaces import WorkspaceService, ActiveRuntimeInventory
     from gateway.workspaces_config import parse_workspace_config
+
+    now = 1794100000
+    monkeypatch.setattr(time, "time", lambda: now)
+    created = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    expires = datetime.fromtimestamp(now + 900, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    payload = {
+        "authorization": "PRODUCT_T1_ONE_ATTEMPT_ONLY",
+        "risk_acceptance": "R006_NINE_RESIDUAL_RISKS_ACCEPTED",
+        "repo": "chinanjjohn2012/mac-file-gateway", "pr": 114,
+        "base_sha": H, "head_sha": H, "head_tree": H,
+        "manifest_sha256": S, "r006_design_blob": R006,
+        "b_design_review_id": "PRR_kwDOU5v3IM8AAAABWq0I_w",
+        "c_design_review_id": "PRR_kwDOU5v3IM8AAAABWq0iKA",
+        "b_code_review_id": "PRR_currentStandards123",
+        "c_code_review_id": "PRR_currentSpecReview123",
+        "github_run_id": 42445537246, "github_run_attempt": 1,
+        "image_os": "macos15", "image_version": "20261104.0514.1",
+        "os_build": "24G90", "source_fingerprint": S,
+        "runner_fingerprint": S, "workspace": "a", "cwd": "src",
+        "runner": "direct", "requested_argv_sha256": S,
+        "effective_argv_sha256": S, "timeout_seconds": 120,
+        "nonce": "d" * 64, "expires_at": expires,
+    }
+    cid = 7712345678
+    response = {
+        "id": cid,
+        "body": "R006_OWNER_T1_GRANT_V1\n" + json.dumps(
+            payload, sort_keys=True, separators=(",", ":")),
+        "html_url": (
+            "https://github.com/chinanjjohn2012/mac-file-gateway/pull/114"
+            f"#issuecomment-{cid}"),
+        "issue_url": (
+            "https://api.github.com/repos/chinanjjohn2012/mac-file-gateway/issues/114"),
+        "created_at": created, "updated_at": created,
+        "author_association": "OWNER",
+        "user": {"login": "chinanjjohn2012", "type": "User"},
+        "performed_via_github_app": None,
+    }
+    verified = verify_d4_owner_github_comment_t0(
+        json.dumps(response, sort_keys=True, separators=(",", ":")).encode())
 
     root = tmp_path / "projects" / "a"
     root.mkdir(parents=True)
@@ -191,6 +235,13 @@ def test_real_service_owner_locked_source_only_journal_restart(tmp_path):
             with pytest.raises(GatewayError):
                 with_service._consume_d4_r006_attempt_source_only(
                     replace(example(), workspace="a"))
+            if round == 0:
+                assert len(with_service._consume_d4_r006_attempt_source_only(
+                    verified)) == 64
+            else:
+                # The exact verifier-produced grant remains burned after restart.
+                with pytest.raises(GatewayError):
+                    with_service._consume_d4_r006_attempt_source_only(verified)
             assert with_service._lbe_positive_authorized is False
             with pytest.raises(GatewayError) as denied:
                 with_service.invoke_exec("a", "src", ["python", "-m", "pytest", "-q"],

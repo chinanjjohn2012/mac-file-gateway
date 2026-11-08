@@ -24,8 +24,8 @@ import sys
 
 HEX_SHA = re.compile(r"[0-9a-f]{40}\Z")
 HEX256 = re.compile(r"[0-9a-f]{64}\Z")
-RUN_ID = re.compile(r"[1-9][0-9]{0,18}\\Z")
-JOB_NAME = re.compile(r"[A-Za-z0-9_.-]{1,120}\\Z")
+RUN_ID = re.compile(r"[1-9][0-9]{0,18}\Z")
+JOB_NAME = re.compile(r"[A-Za-z0-9_.-]{1,120}\Z")
 BLOCKED_ENV = (
     "PYTHONPATH",
     "PYTHONHOME",
@@ -326,7 +326,6 @@ def admit(root: Path, expected_head: str) -> dict[str, object]:
     print("G05_TRACKED_SHA256_MANIFEST=PASS count=" + str(count))
     print("G05_EXECUTION_IMPORT_ROOT=" + entry)
     print("G05_UNTRACKED_IGNORED_RUNTIME_INPUTS=NONE")
-    print("G05_REPOSITORY_ADMISSION=PASS")
     print("G05_THIRD_PARTY_DEPENDENCY_PROVENANCE=NOT_ATTESTED")
     print("G05_DEVELOPER_LOCAL_WORKTREE=NOT_OBSERVED")
     print("G05_INTEGRATION_STATUS=NOT_TESTED")
@@ -392,6 +391,7 @@ def main(argv: list[str] | None = None) -> int:
         evidence = admit(Path.cwd(), args.expected_head)
         if args.receipt:
             write_receipt(Path.cwd(), args.receipt, evidence)
+        print("G05_REPOSITORY_ADMISSION=PASS")
     except (AdmissionError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
         print("G05_REPOSITORY_ADMISSION=FAIL", file=sys.stderr)
         print("G05_R01_GATE=INCOMPLETE", file=sys.stderr)

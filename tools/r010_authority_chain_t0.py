@@ -139,7 +139,8 @@ def _unique_env(items: object) -> dict[str, str]:
 
 def validate_preexec_selector_boundary_t0(
     item: PreexecSelectorBoundary, *,
-    expected_run_id: str, expected_head: str, expected_image: str,
+    expected_run_id: str, expected_run_attempt: str,
+    expected_head: str, expected_image: str,
     expected_job: str, expected_home: str, expected_tmp: str,
     approved_child_keys: frozenset[str] = PRODUCT_HELPER_ENV_KEYS,
 ) -> None:
@@ -176,12 +177,18 @@ def validate_preexec_selector_boundary_t0(
         "TMPDIR": expected_tmp, "LANG": "C", "LC_ALL": "C",
         "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "pull_request",
         "GITHUB_REPOSITORY": "chinanjjohn2012/mac-file-gateway",
-        "GITHUB_RUN_ID": expected_run_id, "GITHUB_RUN_ATTEMPT": "1",
+        "GITHUB_RUN_ID": expected_run_id,
+        "GITHUB_RUN_ATTEMPT": expected_run_attempt,
         "GITHUB_JOB": expected_job, "G05_EXPECTED_HEAD": expected_head,
         "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS",
         "RUNNER_ARCH": "ARM64", "ImageOS": "macos15",
         "ImageVersion": expected_image,
     }
+    if (type(expected_run_attempt) is not str
+            or not 1 <= len(expected_run_attempt) <= 12
+            or not expected_run_attempt.isdecimal()
+            or expected_run_attempt.startswith("0")):
+        raise GateDenied("unqualified expected run attempt")
     if any(bootstrap.get(k) != v for k, v in expected.items()):
         raise GateDenied("PREEXEC expected Job/Head/image identity mismatch")
     if (not bootstrap["SSH_AUTH_SOCK"].startswith("/")
@@ -248,7 +255,6 @@ class JWTVerificationReceipt:
     original_jwt_independently_replayable: bool
     signed_check_run_id: int
     signed_subject: str
-    expected_subject: str
     issued_at: int
     not_before: int
     expires_at: int
@@ -262,6 +268,7 @@ def validate_provider_freshness_t0(
     expected_token_sha256: str,
     expected_transcript_sha256: str,
     expected_check_run_id: int,
+    expected_subject: str,
 ) -> None:
     """Pure mocked receipt oracle, NOT JWT parsing/signature verification.
 
@@ -292,8 +299,9 @@ def validate_provider_freshness_t0(
         raise GateDenied("JWT signature/JOSE/JWKS/original evidence not verified")
     if (type(item.signed_check_run_id) is not int
             or item.signed_check_run_id != expected_check_run_id
+            or type(expected_subject) is not str or not expected_subject
             or type(item.signed_subject) is not str
-            or not item.signed_subject or item.signed_subject != item.expected_subject
+            or not item.signed_subject or item.signed_subject != expected_subject
             or item.current_job_in_progress is not True):
         raise GateDenied("JWT signed Job/subject/current status mismatch")
     times = (
@@ -619,6 +627,7 @@ def validate_execution_grant(
     expected_design_blob: str,
     expected_b_design_review_id: str,
     expected_c_design_review_id: str,
+    expected_provider_subject: str,
     expected_job_envelope_key: str,
 ) -> None:
     """Composed R010 SAFE-T0 version/receipt validation; not live authority."""
@@ -705,6 +714,7 @@ def validate_execution_grant(
         expected_token_sha256=grant.oidc_token_sha256,
         expected_transcript_sha256=grant.oidc_verification_transcript_sha256,
         expected_check_run_id=grant.check_run_id,
+        expected_subject=expected_provider_subject,
     )
 
 

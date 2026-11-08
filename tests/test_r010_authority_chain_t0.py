@@ -54,6 +54,7 @@ CANONICAL_CONFIG = "/private/tmp/mfg-r010-job-abc/service-config"
 OIDC_TOKEN_DIGEST = "f" * 64
 JWT_TRANSCRIPT_DIGEST = "9" * 64
 JWKS_DIGEST = "8" * 64
+EXPECTED_PROVIDER_SUBJECT = "repo:chinanjjohn2012/mac-file-gateway:pull_request"
 
 
 def choice(marker=R010_CHOICE_MARKER, design_id=R010_DESIGN_ID, blob=DESIGN_BLOB):
@@ -120,8 +121,7 @@ def verification_receipt(**changes):
         original_signed_bytes_verified=True,
         original_jwt_independently_replayable=True,
         signed_check_run_id=CHECK_RUN,
-        signed_subject="repo:chinanjjohn2012/mac-file-gateway:pull_request",
-        expected_subject="repo:chinanjjohn2012/mac-file-gateway:pull_request",
+        signed_subject=EXPECTED_PROVIDER_SUBJECT,
         issued_at=1_000_000, not_before=999_999, expires_at=1_000_300,
         verified_at=1_000_015, grant_checked_at=1_000_025,
         current_job_in_progress=True,
@@ -329,6 +329,7 @@ def test_execution_grant_binds_only_r010_version_reviews_and_provider_job():
             expected_design_blob=DESIGN_BLOB,
             expected_b_design_review_id=B_DESIGN,
             expected_c_design_review_id=C_DESIGN,
+            expected_provider_subject=EXPECTED_PROVIDER_SUBJECT,
     )
     with pytest.raises(GateDenied, match="legacy/wrong"):
         validate_execution_grant(
@@ -341,6 +342,7 @@ def test_execution_grant_binds_only_r010_version_reviews_and_provider_job():
             expected_design_blob=DESIGN_BLOB,
             expected_b_design_review_id=B_DESIGN,
             expected_c_design_review_id=C_DESIGN,
+            expected_provider_subject=EXPECTED_PROVIDER_SUBJECT,
         )
     with pytest.raises(GateDenied, match="provider OIDC"):
         validate_execution_grant(
@@ -353,6 +355,7 @@ def test_execution_grant_binds_only_r010_version_reviews_and_provider_job():
             expected_design_blob=DESIGN_BLOB,
             expected_b_design_review_id=B_DESIGN,
             expected_c_design_review_id=C_DESIGN,
+            expected_provider_subject=EXPECTED_PROVIDER_SUBJECT,
         )
 
 
@@ -533,6 +536,7 @@ def test_r011_red_legacy_design_choice_with_recomputed_new_grant_digest_denied()
             expected_design_blob=DESIGN_BLOB,
             expected_b_design_review_id=B_DESIGN,
             expected_c_design_review_id=C_DESIGN,
+            expected_provider_subject=EXPECTED_PROVIDER_SUBJECT,
         )
 
 
@@ -547,6 +551,7 @@ def test_r011_red_qualification_wrong_design_blob_denied():
             expected_design_blob=DESIGN_BLOB,
             expected_b_design_review_id=B_DESIGN,
             expected_c_design_review_id=C_DESIGN,
+            expected_provider_subject=EXPECTED_PROVIDER_SUBJECT,
         )
 
 
@@ -607,9 +612,10 @@ def _preexec_t0(**adjust):
     return PreexecSelectorBoundary(**values)
 
 
-def _check_preexec_t0(item):
+def _check_preexec_t0(item, *, expected_run_attempt="1"):
     return validate_preexec_selector_boundary_t0(
-        item, expected_run_id=str(RUN), expected_head=HEAD,
+        item, expected_run_id=str(RUN), expected_run_attempt=expected_run_attempt,
+        expected_head=HEAD,
         expected_image="20261104.0514.1", expected_job="preexec_hold",
         expected_home="/private/tmp/mfg-r010-private-home",
         expected_tmp="/private/tmp/mfg-r010-private-tmp",
@@ -654,6 +660,7 @@ def test_r011_jwt_freshness_model_positive_synthetic():
         verification_receipt(), expected_token_sha256=OIDC_TOKEN_DIGEST,
         expected_transcript_sha256=JWT_TRANSCRIPT_DIGEST,
         expected_check_run_id=CHECK_RUN,
+        expected_subject=EXPECTED_PROVIDER_SUBJECT,
     )
 
 
@@ -679,6 +686,7 @@ def test_r011_jwt_expired_wrong_key_or_fake_summary_denied(bad):
             verification_receipt(**bad), expected_token_sha256=OIDC_TOKEN_DIGEST,
             expected_transcript_sha256=JWT_TRANSCRIPT_DIGEST,
             expected_check_run_id=CHECK_RUN,
+        expected_subject=EXPECTED_PROVIDER_SUBJECT,
         )
 
 
@@ -699,6 +707,7 @@ def test_r011_grant_requires_current_qualification_and_b0_b1(bad):
             expected_design_blob=DESIGN_BLOB,
             expected_b_design_review_id=B_DESIGN,
             expected_c_design_review_id=C_DESIGN,
+            expected_provider_subject=EXPECTED_PROVIDER_SUBJECT,
         )
 
 
@@ -714,6 +723,7 @@ def test_r011_b0_cannot_be_satisfied_by_targeted_t1_reviews():
             expected_design_blob=DESIGN_BLOB,
             expected_b_design_review_id=B_DESIGN,
             expected_c_design_review_id=C_DESIGN,
+            expected_provider_subject=EXPECTED_PROVIDER_SUBJECT,
         )
     # Illustration of required FULL metadata; NOT independent real reviews.
     validate_execution_grant(
@@ -725,6 +735,7 @@ def test_r011_b0_cannot_be_satisfied_by_targeted_t1_reviews():
         expected_design_blob=DESIGN_BLOB,
         expected_b_design_review_id=B_DESIGN,
         expected_c_design_review_id=C_DESIGN,
+            expected_provider_subject=EXPECTED_PROVIDER_SUBJECT,
     )
 
 
@@ -744,6 +755,7 @@ def test_r011_grant_cannot_accept_unbound_owner_or_receipt():
                 expected_design_blob=DESIGN_BLOB,
                 expected_b_design_review_id=B_DESIGN,
                 expected_c_design_review_id=C_DESIGN,
+            expected_provider_subject=EXPECTED_PROVIDER_SUBJECT,
             )
 
 
@@ -753,3 +765,23 @@ def test_r011_inmemory_registry_cannot_claim_cross_process_proof():
     second.claim_once("same-job")
     assert first.claimed_keys == second.claimed_keys
     # Only later native O_EXCL/fsync cross-process original evidence can prove it.
+
+
+def test_r011_new_trusted_attempt_must_match_its_own_current_job():
+    observed_attempt_two = _preexec_t0(bootstrap={"GITHUB_RUN_ATTEMPT": "2"})
+    _check_preexec_t0(observed_attempt_two, expected_run_attempt="2")
+    with pytest.raises(GateDenied):
+        _check_preexec_t0(observed_attempt_two, expected_run_attempt="1")
+    with pytest.raises(GateDenied):
+        _check_preexec_t0(observed_attempt_two, expected_run_attempt="02")
+
+
+def test_r011_forged_receipt_cannot_supply_own_expected_subject():
+    forged = verification_receipt(signed_subject="repo:attacker/example:pull_request")
+    with pytest.raises(GateDenied):
+        validate_provider_freshness_t0(
+            forged, expected_token_sha256=OIDC_TOKEN_DIGEST,
+            expected_transcript_sha256=JWT_TRANSCRIPT_DIGEST,
+            expected_check_run_id=CHECK_RUN,
+            expected_subject=EXPECTED_PROVIDER_SUBJECT,
+        )

@@ -705,3 +705,23 @@ REAL_PROVIDER_OIDC=NOT_RUN
 PRODUCT_T1=NOT_RUN_NOT_AUTHORIZED
 INTEGRATION_STATUS=NOT_TESTED
 R10_STATUS=BLOCKED
+
+### 14.5 R011 independently expected identities and retry boundary
+
+The expected signed OIDC subject is pinned from the independently reviewed
+current workflow/provider subject policy and exact Job; it cannot come from
+a JWTVerificationReceipt.expected_subject field, a caller-provided claim
+summary or a value copied from the token itself. A signed subject matching
+a forged caller-authored expectation is DENY. The R011 SAFE T0 model requires
+expected_provider_subject as a SEPARATE trusted comparison input.
+
+Similarly, a valid GitHub re-run has its OWN positive decimal
+GITHUB_RUN_ATTEMPT and a fresh separately authorized Job/Owner binding; a
+literal attempt "1" is not a permanent allowlist. A new run_attempt=2
+may qualify only when the trusted expected attempt is ALSO 2 and the
+reviewed current exact Job/Head/secret/nonce match. A stale attempt=1
+grant or environment copied into attempt=2 is DENY, and leading-zero
+or missing attempt identities are rejected. No attempt is replayable.
+
+These rules change only the NON_RUNTIME source-backed model and proposed
+design; actual Job witness/Owner verification remains NOT_IMPLEMENTED.

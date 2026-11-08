@@ -24,6 +24,9 @@ from .lbe_owner_grant import (
     verify_d4_owner_github_comment_t0,
 )
 from .lbe_r006_macos_allowlist import D4R006HostAllowlistObservation
+from .lbe_r006_review_gate import (
+    D4R006ReviewGateDenied, D4VerifiedReviewPair,
+)
 from .lbe_launch_recipe import D4NativeLaunchRecipe
 from .lbe_worker import LbeWorkPlan, LbeWorker, LbeWorkerError
 
@@ -151,13 +154,21 @@ class D4BoundOwnerGrant:
 
 
 def bind_verified_owner_grant_t0(
-    grant: object, host: object, plan: object, recipe: object, *,
+    grant: object, reviews: object, host: object,
+    plan: object, recipe: object, *,
     base_sha: str, head_sha: str, head_tree: str, manifest_sha256: str,
     run_id: int, run_attempt: int,
 ) -> D4BoundOwnerGrant:
     """Bind verifier output to exact current plan/host/run without execution."""
     if type(grant) is not D4VerifiedOwnerGrant:
         raise D4OwnerBootstrapDenied("unverified owner grant")
+    if type(reviews) is not D4VerifiedReviewPair:
+        raise D4OwnerBootstrapDenied("unverified current B/C code reviews")
+    try:
+        reviews.check_grant(grant)
+    except D4R006ReviewGateDenied:
+        raise D4OwnerBootstrapDenied(
+            "owner grant and current B/C reviews do not match") from None
     if type(host) is not D4R006HostAllowlistObservation:
         raise D4OwnerBootstrapDenied("unverified current host/source observation")
     if type(plan) is not LbeWorkPlan:

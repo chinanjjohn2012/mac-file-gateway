@@ -17,6 +17,7 @@ from gateway.lbe_r006_macos_allowlist import (
     D4R006HostAllowlistObservation, R006_HOST_SOURCE_FINGERPRINT,
     R006_RUNNER_PROFILE_FINGERPRINT,
 )
+from gateway.lbe_r006_review_gate import D4VerifiedReviewPair
 from gateway.lbe_hosted_source_probe import D4HostedSelectedSourceObservation
 from gateway.lbe_launch_recipe import D4NativeLaunchRecipe
 from gateway.lbe_worker import LbeWorkPlan
@@ -96,12 +97,17 @@ def _verified(monkeypatch):
          "issue_url":"https://api.github.com/repos/chinanjjohn2012/mac-file-gateway/issues/114",
          "created_at":created,"updated_at":created,"author_association":"OWNER",
          "user":{"login":"chinanjjohn2012","type":"User"},"performed_via_github_app":None}
-    return verify_d4_owner_github_comment_t0(json.dumps(obj,separators=(",",":")).encode()), plan
+    grant = verify_d4_owner_github_comment_t0(
+        json.dumps(obj,separators=(",",":")).encode())
+    reviews = object.__new__(D4VerifiedReviewPair)
+    monkeypatch.setattr(
+        D4VerifiedReviewPair, "check_grant", lambda self, value: None)
+    return grant, reviews, plan
 
 def test_exact_runtime_binding_remains_nonexecuting(monkeypatch):
-    grant, plan = _verified(monkeypatch)
+    grant, reviews, plan = _verified(monkeypatch)
     bound = bind_verified_owner_grant_t0(
-        grant, _host(), plan, _recipe(plan),
+        grant, reviews, _host(), plan, _recipe(plan),
         base_sha=H, head_sha=H, head_tree=H,
         manifest_sha256=M, run_id=42445537246, run_attempt=1)
     assert bound.attempt.nonce == "c"*64
@@ -111,16 +117,16 @@ def test_exact_runtime_binding_remains_nonexecuting(monkeypatch):
     ("run_id",9),("run_attempt",2),
 ])
 def test_runtime_identity_drift_denied(monkeypatch, field, value):
-    grant, plan = _verified(monkeypatch)
+    grant, reviews, plan = _verified(monkeypatch)
     kw=dict(base_sha=H,head_sha=H,head_tree=H,manifest_sha256=M,
             run_id=42445537246,run_attempt=1)
     kw[field]=value
     with pytest.raises(D4OwnerBootstrapDenied):
         bind_verified_owner_grant_t0(
-            grant, _host(), plan, _recipe(plan), **kw)
+            grant, reviews, _host(), plan, _recipe(plan), **kw)
 
 def test_plan_drift_denied(monkeypatch):
-    grant, plan = _verified(monkeypatch)
+    grant, reviews, plan = _verified(monkeypatch)
     changed = LbeWorkPlan(
         workspace=plan.workspace,cwd=plan.cwd,runner=plan.runner,
         runner_project=plan.runner_project,requested_argv=plan.requested_argv,
@@ -129,7 +135,7 @@ def test_plan_drift_denied(monkeypatch):
         planned_script_sha256=None,planned_pipfile_sha256=None)
     with pytest.raises(D4OwnerBootstrapDenied):
         bind_verified_owner_grant_t0(
-            grant,_host(),changed,_recipe(changed),
+            grant, reviews, _host(), changed, _recipe(changed),
             base_sha=H,head_sha=H,head_tree=H,
             manifest_sha256=M,run_id=42445537246,run_attempt=1)
 
@@ -143,7 +149,7 @@ class _Response:
     def read(self,n): return self.data[:n]
 
 def test_fetch_bootstrap_uses_fixed_public_https_no_auth_header(monkeypatch):
-    grant, _ = _verified(monkeypatch)
+    grant, _reviews, _plan_value = _verified(monkeypatch)
     # Reuse semantic bytes from a known verified object's original fixture is
     # not available; transport behavior is tested with malformed body and must
     # fail only after the fake HTTPS response is consumed.

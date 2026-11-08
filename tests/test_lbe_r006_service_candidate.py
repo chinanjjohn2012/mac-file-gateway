@@ -20,6 +20,7 @@ from gateway import lbe_r006_macos_allowlist as allowlist_mod
 from gateway.lbe_r006_native_runner import (
     D4R006NativeLaunchBoundary, D4R006PreparedAttempt,
 )
+from gateway.lbe_r006_review_gate import D4VerifiedReviewPair
 from gateway.lbe_worker import LbeNoChildStarted
 from gateway.workspaces import ActiveRuntimeInventory, WorkspaceService
 from gateway.workspaces_config import parse_workspace_config
@@ -159,6 +160,13 @@ def _patch_assembly(service, monkeypatch, host):
     return candidate, recipe
 
 
+def _reviews(monkeypatch):
+    reviews = object.__new__(D4VerifiedReviewPair)
+    monkeypatch.setattr(
+        D4VerifiedReviewPair, "check_grant", lambda self, grant: None)
+    return reviews
+
+
 def _prepare(service):
     return service._prepare_d4_r006_private_attempt(
         "a", "py-direct", ["python", "-m", "pytest", "-q"],
@@ -188,7 +196,7 @@ def test_private_candidate_consumes_grant_before_worker_but_public_exec_stays_de
 
     try:
         result = service._execute_d4_r006_private_attempt(
-            prepared, _grant(candidate.plan),
+            prepared, _grant(candidate.plan), _reviews(monkeypatch),
             base_sha=H, head_sha=H, head_tree=H, manifest_sha256=M,
             run_id=42445537246, run_attempt=1)
         assert result["status"] == "launch_failed"
@@ -197,7 +205,7 @@ def test_private_candidate_consumes_grant_before_worker_but_public_exec_stays_de
 
         with pytest.raises(GatewayError):
             service._execute_d4_r006_private_attempt(
-                prepared, _grant(candidate.plan),
+                prepared, _grant(candidate.plan), _reviews(monkeypatch),
                 base_sha=H, head_sha=H, head_tree=H, manifest_sha256=M,
                 run_id=42445537246, run_attempt=1)
 
@@ -220,13 +228,13 @@ def test_wrong_runtime_binding_burns_prepared_candidate_without_durable_record(
     try:
         with pytest.raises(GatewayError):
             service._execute_d4_r006_private_attempt(
-                prepared, _grant(candidate.plan),
+                prepared, _grant(candidate.plan), _reviews(monkeypatch),
                 base_sha=H, head_sha="e" * 40, head_tree=H,
                 manifest_sha256=M, run_id=42445537246, run_attempt=1)
         assert list((private / "d4-journal").iterdir()) == []
         with pytest.raises(GatewayError):
             service._execute_d4_r006_private_attempt(
-                prepared, _grant(candidate.plan),
+                prepared, _grant(candidate.plan), _reviews(monkeypatch),
                 base_sha=H, head_sha=H, head_tree=H,
                 manifest_sha256=M, run_id=42445537246, run_attempt=1)
     finally:

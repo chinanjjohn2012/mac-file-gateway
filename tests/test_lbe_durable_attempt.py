@@ -171,7 +171,8 @@ def test_real_service_owner_locked_source_only_journal_restart(tmp_path, monkeyp
     )
     from gateway.lbe_launch_recipe import D4NativeLaunchRecipe
     from gateway.lbe_plan import prepare_lbe_work_plan
-    from gateway.lbe_r006_macos_allowlist import (
+    from gateway.lbe_r006_review_gate import D4VerifiedReviewPair
+from gateway.lbe_r006_macos_allowlist import (
         D4R006HostAllowlistObservation,
         R006_HOST_SOURCE_FINGERPRINT, R006_RUNNER_PROFILE_FINGERPRINT,
     )
@@ -223,6 +224,9 @@ def test_real_service_owner_locked_source_only_journal_restart(tmp_path, monkeyp
     }
     verified = verify_d4_owner_github_comment_t0(
         json.dumps(response, sort_keys=True, separators=(",", ":")).encode())
+    reviews = object.__new__(D4VerifiedReviewPair)
+    monkeypatch.setattr(
+        D4VerifiedReviewPair, "check_grant", lambda self, grant: None)
 
     root = tmp_path / "projects" / "a"
     root.mkdir(parents=True)
@@ -277,7 +281,7 @@ def test_real_service_owner_locked_source_only_journal_restart(tmp_path, monkeyp
             )
             if round == 0:
                 consumed = with_service._consume_d4_r006_attempt_source_only(
-                    verified, host, plan, recipe,
+                    verified, reviews, host, plan, recipe,
                     base_sha=H, head_sha=H, head_tree=H,
                     manifest_sha256=S, run_id=42445537246,
                     run_attempt=1)
@@ -287,7 +291,7 @@ def test_real_service_owner_locked_source_only_journal_restart(tmp_path, monkeyp
                 # The exact grant remains burned after service restart.
                 with pytest.raises(GatewayError):
                     with_service._consume_d4_r006_attempt_source_only(
-                        verified, host, plan, recipe,
+                        verified, reviews, host, plan, recipe,
                         base_sha=H, head_sha=H, head_tree=H,
                         manifest_sha256=S, run_id=42445537246,
                         run_attempt=1)
@@ -330,7 +334,7 @@ def test_service_without_existing_private_journal_never_creates_one(tmp_path):
     try:
         with pytest.raises(GatewayError):
             service._consume_d4_r006_attempt_source_only(
-                object(), object(), object(), object(),
+                object(), object(), object(), object(), object(),
                 base_sha=H, head_sha=H, head_tree=H,
                 manifest_sha256=S, run_id=1, run_attempt=1)
         assert service._d4_attempt_journal is None

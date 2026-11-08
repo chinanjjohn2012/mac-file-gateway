@@ -496,7 +496,8 @@ class WorkspaceService:
                 self._lifecycle.notify_all()
 
     def _consume_d4_r006_attempt_source_only(
-        self, grant: object, host: object, plan: object, recipe: object, *,
+        self, grant: object, reviews: object, host: object,
+        plan: object, recipe: object, *,
         base_sha: str, head_sha: str, head_tree: str, manifest_sha256: str,
         run_id: int, run_attempt: int,
     ) -> object:
@@ -533,7 +534,7 @@ class WorkspaceService:
                 if fresh != plan:
                     raise D4OwnerBootstrapDenied("R006 plan changed before grant consume")
                 bound = bind_verified_owner_grant_t0(
-                    grant, host, plan, recipe,
+                    grant, reviews, host, plan, recipe,
                     base_sha=base_sha, head_sha=head_sha,
                     head_tree=head_tree, manifest_sha256=manifest_sha256,
                     run_id=run_id, run_attempt=run_attempt)
@@ -608,7 +609,7 @@ class WorkspaceService:
                 self._lifecycle.notify_all()
 
     def _execute_d4_r006_private_attempt(
-        self, prepared: object, grant: object, *,
+        self, prepared: object, grant: object, reviews: object, *,
         base_sha: str, head_sha: str, head_tree: str, manifest_sha256: str,
         run_id: int, run_attempt: int,
         cancelled: threading.Event | None = None,
@@ -646,7 +647,7 @@ class WorkspaceService:
             try:
                 candidate, marker, recipe, host = prepared.claim(ctx)
                 consumed = self._consume_d4_r006_attempt_source_only(
-                    grant, host, plan, recipe,
+                    grant, reviews, host, plan, recipe,
                     base_sha=base_sha, head_sha=head_sha,
                     head_tree=head_tree, manifest_sha256=manifest_sha256,
                     run_id=run_id, run_attempt=run_attempt)

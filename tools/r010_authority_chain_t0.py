@@ -10,9 +10,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
-from urllib.parse import urlsplit
+import re
+from urllib.parse import quote, urlsplit
 
-R010_DESIGN_ID = "MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-010-CANDIDATE"
+R010_DESIGN_ID = "MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-011-CANDIDATE"
+R012_OIDC_ENDPOINT_PROFILE = "R012_GITHUB_RUNNER_PIPELINES_OIDC_BASE_V1"
+R012_OIDC_ENDPOINT_PATH = "/_apis/oidc/token"
+R012_OIDC_ENDPOINT_QUERY = "api-version=2.0"
 R010_PREEXEC_SELECTOR_CONTRACT = "R010_OIDC_PREEXEC_SELECTOR_V2"
 R010_JWT_VERIFICATION_CONTRACT = "R010_PROVIDER_JWT_TEMPORAL_VERIFICATION_V1"
 R008_PREEXEC_ALLOWED_KEYS = frozenset({
@@ -122,6 +126,7 @@ class PreexecSelectorBoundary:
     foreign_popen_calls: int
     pregrant_product_popen_calls: int
     scrub_before_product_import: bool
+    oidc_redirect_count: int = 0  # source-only synthetic; actual HTTP not run
 
 
 def _unique_env(items: object) -> dict[str, str]:
@@ -135,6 +140,57 @@ def _unique_env(items: object) -> dict[str, str]:
     if len(set(keys)) != len(keys):
         raise GateDenied("duplicate PREEXEC environment key")
     return dict(items)
+
+
+def _validated_oidc_base_url_t0(raw_url: object) -> str:
+    """Versioned candidate GitHub Runner profile; NO DNS/TLS/HTTP request.
+
+    GitHub documents the runner-supplied URL and appended audience, NOT a
+    permanent public request-path ABI. This only admits the reviewed
+    /_apis/oidc/token?api-version=2.0 fixture. New provider path/shape must
+    FAIL CLOSED until a newly reviewed profile is approved.
+    """
+    if (type(raw_url) is not str or not 1 <= len(raw_url) <= 4096
+            or any(ord(c) < 33 or ord(c) > 126 for c in raw_url)
+            or "\\" in raw_url):
+        raise GateDenied("unqualified OIDC raw request URL")
+    try:
+        parsed = urlsplit(raw_url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        raise GateDenied("malformed OIDC request URL") from None
+    if (parsed.scheme != "https" or not hostname or port is not None
+            or parsed.username is not None or parsed.password is not None
+            or parsed.fragment or parsed.path != R012_OIDC_ENDPOINT_PATH
+            or parsed.query != R012_OIDC_ENDPOINT_QUERY
+            or parsed.netloc != hostname
+            or re.fullmatch(
+                r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.actions\.githubusercontent\.com",
+                hostname, flags=re.ASCII
+            ) is None):
+        raise GateDenied("OIDC endpoint not in reviewed path/query/host profile")
+    # Direct raw equality forbids percent escapes, duplicate/extra params,
+    # semicolon/path normalization, trailing #, second ? and encoded bypass.
+    canonical = (
+        f"https://{hostname}{R012_OIDC_ENDPOINT_PATH}"
+        f"?{R012_OIDC_ENDPOINT_QUERY}"
+    )
+    if raw_url != canonical:
+        raise GateDenied("noncanonical OIDC endpoint representation")
+    return canonical
+
+
+def build_oidc_token_url_t0(raw_url: str, audience: str) -> str:
+    """Pure offline canonical assembly; this function cannot send a bearer."""
+    base = _validated_oidc_base_url_t0(raw_url)
+    if (type(audience) is not str or re.fullmatch(
+        r"mfg-r010:[0-9a-f]{40}:[0-9a-f]{40}:[0-9a-f]{64}",
+        audience, flags=re.ASCII
+    ) is None):
+        raise GateDenied("unqualified R010 audience")
+    # Exactly one canonical appended audience; URL base already disallows it.
+    return base + "&audience=" + quote(audience, safe="")
 
 
 def validate_preexec_selector_boundary_t0(
@@ -161,7 +217,9 @@ def validate_preexec_selector_boundary_t0(
             or type(item.foreign_popen_calls) is not int
             or item.foreign_popen_calls != 0
             or type(item.pregrant_product_popen_calls) is not int
-            or item.pregrant_product_popen_calls != 0):
+            or item.pregrant_product_popen_calls != 0
+            or type(item.oidc_redirect_count) is not int
+            or item.oidc_redirect_count != 0):
         raise GateDenied("PREEXEC stage/selector/zero-Popen boundary violated")
     bootstrap = _unique_env(item.bootstrap_items)
     helper = _unique_env(item.product_helper_items)
@@ -185,9 +243,8 @@ def validate_preexec_selector_boundary_t0(
         "ImageVersion": expected_image,
     }
     if (type(expected_run_attempt) is not str
-            or not 1 <= len(expected_run_attempt) <= 12
-            or not expected_run_attempt.isdecimal()
-            or expected_run_attempt.startswith("0")):
+            or re.fullmatch(r"[1-9][0-9]{0,11}", expected_run_attempt,
+                            flags=re.ASCII) is None):
         raise GateDenied("unqualified expected run attempt")
     if any(bootstrap.get(k) != v for k, v in expected.items()):
         raise GateDenied("PREEXEC expected Job/Head/image identity mismatch")
@@ -200,18 +257,7 @@ def validate_preexec_selector_boundary_t0(
     raw_url = bootstrap["ACTIONS_ID_TOKEN_REQUEST_URL"]
     if not 16 <= len(raw_token) <= 8192 or any(ord(ch) < 33 for ch in raw_token):
         raise GateDenied("invalid OIDC request bearer selector")
-    try:
-        url = urlsplit(raw_url)
-        hostname = url.hostname
-        port = url.port
-    except ValueError:
-        raise GateDenied("invalid OIDC request URL") from None
-    if (url.scheme != "https" or not hostname
-            or not hostname.endswith(".actions.githubusercontent.com")
-            or url.username is not None or url.password is not None
-            or port is not None or not url.path.startswith("/")
-            or url.fragment or len(raw_url) > 4096):
-        raise GateDenied("unapproved OIDC endpoint/proxy/redirect selector")
+    _validated_oidc_base_url_t0(raw_url)
     if any(helper.get(k) != bootstrap[k] for k in PRODUCT_HELPER_ENV_KEYS):
         raise GateDenied("post-PREEXEC helper environment changed")
     if any(child.get(k) != bootstrap[k] for k in PRODUCT_HELPER_ENV_KEYS & approved_child_keys):
@@ -380,6 +426,42 @@ class SharedJobRegistry:
         self.claimed_keys.add(key)
 
 
+@dataclass(frozen=True, slots=True)
+class OwnedRowObservationT0:
+    """Single synthetic attempt-bound Owner+Worker result. NOT runtime proof.
+
+    In a future reviewed implementation, the owner reservation and identity
+    must be pinned PRIVATE object identities from the SAME DirectChildOwner
+    wait()/reap call and Worker invocation. REST/MCP/client cannot construct
+    a positive record. Here the fields are wholly test-only.
+    """
+
+    attempt_nonce: str
+    owner_attempt_nonce: str
+    worker_attempt_nonce: str
+    owner_reservation: object
+    worker_reservation: object
+    owner_status: str
+    owner_exit_code: int | None
+    original_child_reaped: bool
+    original_child_unambiguous: bool
+    worker_status: str
+    worker_executed: bool
+    worker_timed_out: bool
+    worker_exit_code: int | None
+    worker_cancelled: bool
+    ack_lost: bool
+    stdout_eof: bool
+    stderr_eof: bool
+    stdout_truncated: bool
+    stderr_truncated: bool
+    output_within_bound: bool
+    finite_observed_fs_ok: bool
+    process_may_be_running: bool
+    cleanup_proven: bool
+    full_descendant_tree_clean: str
+
+
 @dataclass(slots=True)
 class JobEnvelope:
     key: str
@@ -390,6 +472,7 @@ class JobEnvelope:
     state: JobState = JobState.PREEXEC_HOLD
     expected_row: int = 0
     burned_nonces: set[str] = field(default_factory=set)
+    active_attempt_nonce: str | None = None
     row_states: list[RowState] = field(
         default_factory=lambda: [RowState.NOT_RUN for _ in SIX_COMMAND_IDS]
     )
@@ -434,49 +517,66 @@ class JobEnvelope:
         if nonce != expected_nonce or nonce in self.burned_nonces:
             raise GateDenied("wrong/duplicate command nonce")
         self.burned_nonces.add(nonce)
+        self.active_attempt_nonce = nonce
         self.row_states[index] = RowState.RUNNING
         self.state = JobState.RUNNING
 
-    def finish_row(
-        self,
-        index: int,
-        *,
-        exit_code: int | None,
-        stdout_eof: bool,
-        stderr_eof: bool,
-        stdout_truncated: bool,
-        stderr_truncated: bool,
-        output_within_bound: bool,
-        finite_observed_fs_ok: bool,
-        original_child_unambiguous: bool,
-        original_child_reaped: bool,
-        process_may_be_running: bool,
-    ) -> RowState:
+    def finish_row(self, index: int, *, observation: OwnedRowObservationT0) -> RowState:
+        """One fail-closed classification of matching private Owner+Worker facts.
+
+        This is a mock policy oracle, NOT credential source or runtime API.
+        The actual Worker never claims descendant cleanup after direct reap.
+        """
         if self.state != JobState.RUNNING or index != self.expected_row:
             raise GateDenied("row is not the currently running row")
-        # NON_RUNTIME T0: original_child_reaped models the private
-        # DirectChildOwner wait()/reap observation for THIS attempt. A future
-        # runtime MUST bind an unforgeable owner witness, not use a client flag.
-        # process_may_be_running expresses possible DESCENDANTS, not failure
-        # of the original wait(); it remains truthfully True on normal exit.
-        if (not original_child_unambiguous or original_child_reaped is not True
-                or type(exit_code) is not int):
+        current = self.active_attempt_nonce
+        valid = (
+            type(observation) is OwnedRowObservationT0
+            and type(current) is str and bool(current)
+            and type(observation.attempt_nonce) is str
+            and observation.attempt_nonce == current
+            and type(observation.owner_attempt_nonce) is str
+            and observation.owner_attempt_nonce == current
+            and type(observation.worker_attempt_nonce) is str
+            and observation.worker_attempt_nonce == current
+            and observation.owner_reservation is not None
+            and observation.owner_reservation is observation.worker_reservation
+            and observation.owner_status == "exited"
+            and observation.original_child_reaped is True
+            and observation.original_child_unambiguous is True
+            and observation.worker_status == "exited"
+            and observation.worker_executed is True
+            and observation.worker_timed_out is False
+            and observation.worker_cancelled is False
+            and observation.ack_lost is False
+            and type(observation.owner_exit_code) is int
+            and type(observation.worker_exit_code) is int
+            and observation.owner_exit_code == observation.worker_exit_code
+            and type(observation.process_may_be_running) is bool
+            and observation.cleanup_proven is False
+            and observation.full_descendant_tree_clean == "not_proven"
+        )
+        if not valid:
+            # Any untrusted/mismatching attempt, cancelled/lost-ACK waiter,
+            # timed-out Worker, missing reap, or disagreement is ambiguous,
+            # even with a forged exit code zero and both streams complete.
             result = RowState.AMBIGUOUS
-        elif exit_code != 0:
+        elif observation.owner_exit_code != 0:
             result = RowState.OBSERVED_NONZERO
         elif not (
-            stdout_eof
-            and stderr_eof
-            and not stdout_truncated
-            and not stderr_truncated
-            and output_within_bound
-            and finite_observed_fs_ok
+            observation.stdout_eof is True
+            and observation.stderr_eof is True
+            and observation.stdout_truncated is False
+            and observation.stderr_truncated is False
+            and observation.output_within_bound is True
+            and observation.finite_observed_fs_ok is True
         ):
             result = RowState.OBSERVED_ZERO_INVALID
         else:
             result = RowState.POSITIVE_SUCCESS
 
         self.row_states[index] = result
+        self.active_attempt_nonce = None
         if result != RowState.POSITIVE_SUCCESS:
             self.state = JobState.FAILED
             self._void_remaining()

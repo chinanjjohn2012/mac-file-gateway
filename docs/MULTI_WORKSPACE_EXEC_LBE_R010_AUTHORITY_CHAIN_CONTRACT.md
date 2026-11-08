@@ -2,8 +2,12 @@
 
 TASK_ID: MULTI-EXEC-LBE-FIVE-DAY-CANDIDATE-20261105
 MILESTONE_ID: LBE-FIVE-DAY-CORE-PRODUCT-CANDIDATE
-DESIGN_ID: MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-010-CANDIDATE
-REVIEW_ROUND: D4-R011-AUTHORITY-CHAIN-DESIGN-010
+DESIGN_ID: MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-011-CANDIDATE
+REVIEW_ROUND: D4-R012-AUTHORITY-CHAIN-DESIGN-011
+PREVIOUS_R011_FIXED_HEAD_SHA: 7cd6be407737be8e0b4f943bf6ac2ffb022f3f08
+PREVIOUS_R011_DESIGN_BLOB: 6b0d9e6f1248f075d927b04c0585f44357e4652c
+PREVIOUS_R011_B_REVIEW: PRR_kwDOU5v3IM8AAAABWsnx5A (BLOCKED, two P2 + one P3)
+PREVIOUS_R011_C_REVIEW: PRR_kwDOU5v3IM8AAAABWsoUvQ (TARGETED PASS, one P3)
 PREVIOUS_R010_REVIEWED_DESIGN_BLOB: f0cdeac6887c570e759f549587dcb9980e410253
 PREVIOUS_INTERIM_R010_DESIGN_BLOB: 410dc9d80b2f1d407c0752a9a6d70966fac527ab
 STATUS: PROPOSED_NOT_EFFECTIVE
@@ -21,7 +25,7 @@ REVIEW_SEQUENCE_OPTION: UNDECIDED
 R010 is the single normative authority root for any future R010 positive path.
 It preserves the substantive safety properties explicitly listed below, but no
 version-bound Review, Owner Choice or execution Grant from R006/R007/R008/R009
-is automatically upgraded into R010 authority. DESIGN-010 is a fresh Blob
+is automatically upgraded into R010 authority. DESIGN-011 is a fresh Blob
 requiring new independent B/C design Reviews: old R010 DESIGN-009 Review
 IDs/Blobs and R008/R009 predecessor results never authorize it.
 
@@ -346,6 +350,11 @@ ROW_POSITIVE_SUCCESS requires:
   DirectObservation is status="exited" for that SAME original and attempt;
 - the trusted Worker reports status="exited", executed=true, timed_out=false
   consistent with the owner observation (not merely a client-supplied status);
+- a single immutable internal Owner+Worker observation bound to the same
+  active one-use row nonce, SAME DirectChildOwner reservation object and
+  SAME original child wait/reap result, with matching integer exit codes;
+  no independent user-fed booleans, alternate attempts, lost ACK or
+  cancellation can create ROW_POSITIVE_SUCCESS;
 - witnessed real exit_code == 0;
 - stdout_eof=true and stderr_eof=true;
 - stdout_truncated=false and stderr_truncated=false;
@@ -563,7 +572,7 @@ PRECEDENCE AND EXACT ALLOWLIST:
 - The two OIDC values MUST originate from the current GitHub runner job
   context; a copied env value or caller assertion is not a provider
   identity proof, so the independently signed JWT verification below is
-  mandatory. The reviewed custom audience binds exact DESIGN-010 Blob,
+  mandatory. The reviewed custom audience binds exact DESIGN-011 Blob,
   exact implementation Head and job-local-secret digest; URL, bearer and
   audience must NOT be influenced by REST/MCP/client, Workspace config,
   untrusted source files or public API input.
@@ -659,17 +668,17 @@ The current model tests no real OIDC network calls or cryptographic JWT.
 
 ### 14.3 B114-R010-ST-D009-P2-03: atomic authority composition
 
-1. An independently fetched immutable exact DESIGN-010 Git Blob and both
+1. An independently fetched immutable exact DESIGN-011 Git Blob and both
    independent B/C new-round design Review IDs define EXPECTED authority
    values. Caller supplied Choice/Grant fields CANNOT define expectations.
 2. Validate real direct OWNER authorship, immutable comment and current
-   R010_OWNER_DESIGN_CHOICE_V1 marker, exact DESIGN-010 id/blob, B/C
+   R010_OWNER_DESIGN_CHOICE_V1 marker, exact DESIGN-011 id/blob, B/C
    design Reviews, A0/A1+B0/B1, fresh R010 risk marker and ephemeral
    Job state BEFORE inspecting any execution grant digest. A legacy
    R008/R009 or superseded R010 DESIGN-009 Choice is DENY even with
    a recomputed matching digest.
 3. Independently verify implementation code review objects and require
-   qualification.design_id/blob EXACTLY DESIGN-010, same current Head/Tree/
+   qualification.design_id/blob EXACTLY DESIGN-011, same current Head/Tree/
    Manifest and independently verified B+C code Review IDs, matching
    role/scope/verdict/evidence. For option B0, BOTH current reviews must
    be ROLE_FULL_SCOPE_PASS BEFORE T1; B1 must have BOTH current
@@ -698,7 +707,7 @@ PREEXEC-only OS isolation. Product host/sandbox guarantees, loaded graph,
 positive native T1, integration, FULL and R10 remain not established.
 
 DESIGN_STATUS=PROPOSED_NOT_EFFECTIVE
-REVIEW_ROUND=D4-R011-AUTHORITY-CHAIN-DESIGN-010
+REVIEW_ROUND=D4-R012-AUTHORITY-CHAIN-DESIGN-011
 B_C_NEW_ROUND_REVIEWS=NOT_ISSUED
 A0_B0_DEFAULT_DENY_RETAINED=true
 REAL_PROVIDER_OIDC=NOT_RUN
@@ -725,3 +734,152 @@ or missing attempt identities are rejected. No attempt is replayable.
 
 These rules change only the NON_RUNTIME source-backed model and proposed
 design; actual Job witness/Owner verification remains NOT_IMPLEMENTED.
+
+
+## 15. R012 minimal targeted correction of R011 B P2-01/P2-02/P3-01
+
+R011 B's independent REVIEW_COMPLETE / INSUFFICIENT / BLOCKED verdict on
+the frozen R011 Head identified two model false positives and a canonical
+identity precision defect. R011 C independently issued TARGETED DESIGN PASS
+with endpoint path precision P3. Neither role verdict carries to R012.
+This section is normative for fresh DESIGN-011, supersedes the incomplete
+R011 section 14.1 URL example and strengthens section 10 row classification. It adds
+NO new runtime authority, network test permission or change to F1/R006.
+
+### 15.1 OIDC URL: R012_GITHUB_RUNNER_PIPELINES_OIDC_BASE_V1
+
+GITHUB DOCUMENTATION FACT: The GitHub Runner provides the complete
+ACTIONS_ID_TOKEN_REQUEST_URL and a separate Bearer selector and the Actions
+toolkit appends an URL-encoded &audience=<...> query. Official documentation
+does NOT promise a permanent provider request path. No T0 test here has a
+live Runner URL or an actual OIDC request. Our existing R011 Fake Runner T0
+fixture uses this candidate backend profile:
+
+  https://<exact-lowercase-single-label>.actions.githubusercontent.com/_apis/oidc/token?api-version=2.0
+
+For this REVIEWED PROFILE V1 ONLY, before any Bearer request or foreign
+subprocess, check strict raw-byte canonical equality after parsing:
+- HTTPS scheme exactly lowercase and a single nonempty ASCII DNS subdomain
+  label [a-z0-9][-a-z0-9]* with no leading/trailing hyphen; exact suffix
+  .actions.githubusercontent.com; no userinfo, unexpected port, IP literal,
+  alternate scheme, host case variation, repeated/doubled dot, backslash
+  or CR/LF/space/control.
+- Path EXACTLY /_apis/oidc/token (case-sensitive, no percent encoding, dot
+  segment, trailing slash, semicolon, extra prefix/suffix or normalization).
+- Original Runner base query EXACTLY api-version=2.0; no original audience,
+  no repeated or unexpected parameters, empty values, alternate order,
+  encoded '=' or '&', overlong/unbounded URL or trailing # / fragments.
+- Construct the **only** outgoing URL from the validated BASE plus
+  "&audience=" and RFC3986 percent-encode every reserved byte of the exact
+  OWNER-bound mfg-r010:<design GitBlob>:<Head>:<JOB_LOCAL_SECRET_SHA256>.
+  Accept only the fixed lower-hex 40/40/64 digest audience shape; do not
+  copy caller-provided audience or append a second audience parameter.
+- In a future independently reviewed network implementation, reject any
+  3xx/Location/redirect, proxy env, custom CA, unreviewed destination,
+  differing TLS certificate hostname or reinterpreted URL **before
+  forwarding the Bearer** to an unapproved endpoint. Redirect handling must
+  be explicitly disabled, not followed and checked only afterward.
+  The current T0 models an oidc_redirect_count=0 assertion and zero real
+  network/credential operations; it does NOT demonstrate live HTTP behavior.
+
+A legitimate provider-side path/shape drift is a deny requiring a NEW
+independent provider observation, reviewed endpoint profile and owner/role
+approval. It is NOT a reason to silently widen a suffix allowlist. The
+candidate is grounded in the fixed R011 Fake Runner fixture and public
+toolkit request-form examples, NOT an assertion that the GitHub production
+service promises this path forever. Inability to establish the exact live
+source URL in the future means PRODUCT_T1=DENY and REAL_PROVIDER_OIDC=NOT_RUN.
+
+Public references for behavior only (not authoritative path guarantees):
+https://docs.github.com/en/actions/reference/security/oidc
+https://github.com/actions/toolkit/tree/main/packages/core
+
+### 15.2 One same-attempt private OriginalChild/Worker outcome
+
+No separate scalar trusted-success flags may be passed to the R012 T0 row
+classifier. Use ONE frozen OwnedRowObservationT0 that models internal
+DirectChildOwner and Worker observations for exactly the in-flight
+JobEnvelope active row nonce. In the *future real implementation* this
+immutable record MUST be minted only inside the trusted owner/Worker
+adapter from the same private DirectChildOwner reservation object; not
+from REST/MCP, config, caller attributes, returned Worker dictionaries
+or a synthetic test dataclass.
+
+The adapter's accepted positive original-child proof requires ALL:
+- owner_attempt_nonce == worker_attempt_nonce == active row nonce;
+- owner_reservation IS worker_reservation (private reference identity,
+  not equivalent caller-supplied string/digest);
+- the DirectChildOwner wait()/reap observation status is exactly "exited",
+  with a non-bool integer exit_code 0 and proven original_child_reaped;
+- Worker outcome status exactly "exited", executed=true, timed_out=false,
+  cancelled=false, ack_lost=false; integer Worker exit_code exactly equals
+  private owner exit_code 0; no stale/different attempt result;
+- BOTH streams actually EOF, no truncation, within bound and reviewed
+  finite filesystem/artifact integrity predicates all pass;
+- original public process_may_be_running may remain true as possible
+  descendant risk. Preserve cleanup_proven=false and
+  full_descendant_tree_clean=not_proven, with no false tree-clean claim.
+
+If two same-reservation original exit results agree but are nonzero,
+ROW_OBSERVED_NONZERO. If true exit0 but EOF, truncation, byte/output bound
+or FS/Go artifact predicate is invalid, ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS.
+If Worker status/timed_out/executed contradicts the owner, a reservation/
+nonce differs, original wait fails, ACK is lost, a request is cancelled, or
+timeout occurs, return ROW_AMBIGUOUS regardless of echoed exit0/EOF;
+latch JOB_FAILED_LATCHED, burn that nonce, VOID all remaining rows, deny
+every later Popen or replay. A subsequent detached/later wait cannot
+retroactively turn a timed-out row positive.
+
+R012 FakeChild T0 now spies on the ACTUAL library
+DirectChildOwner.observe(reservation) and actual LbeWorker.run result for
+one injected FakeChild, then builds the frozen test-only observation from
+that recorded private reservation object plus the Worker result. Poison
+the Worker result (exited->timed_out, executed=false, timed_out=true,
+exit mismatch), owner/worker attempt IDs or private object identity to
+prove fail-closed. Synthetic T0 does NOT implement a truly
+unforgeable production receipt or authorize a real native child.
+
+### 15.3 ASCII run_attempt canonical identity
+
+Use the canonical ASCII-only fullmatch [1-9][0-9]* with existing
+12-character ceiling in this reviewed model. Reject Unicode decimal
+digits, Arabic-Indic digits, fullwidth numerals, leading zeros, empty
+string, signed values, whitespace, float/exponent/hex forms and booleans.
+Then require exact match to the separately verified current GitHub
+Run Attempt numeric identity; a valid retry attempt 2 is not permanently
+forbidden, but old attempt 1 authority never transfers to it. Matching
+two untrusted strings alone remains T0 and cannot authenticate a Job.
+
+### 15.4 T0/CI evidence limits and fresh freeze conditions
+
+The new RED matrix first shows same-approved-host wrong path/query and
+double/encoded params falsely accepted, Unicode decimal attempt falsely
+accepted, and the absence of a combined owner/worker outcome boundary.
+GREEN must prove legitimate profile+audience passes, all wrong same-host
+path/query/encoding/redirect cases fail **before** fake Bearer send, the
+real Worker/Owner injected FakeChild original status and exit0 still pass
+with descendants unproven, and status/nonce/reservation/exit/cancel/lost
+ACK/timeout conflicts latch FAILED and VOID later rows. Existing
+nonzero/zero-invalid, six serial rows and F1/File/Git/REST/MCP regressions
+must remain safe. Only current Head G05+Manifest and original CI count;
+a synthetic GREEN is never real OIDC or native integration.
+
+SECURITY_BOUNDARIES_UNCHANGED:
+- Current operative F1/R006 strict positive Exec DENY.
+- No live OIDC request, id-token:write workflow change, bearer or JWKS
+  network operation, SSH-agent socket access, autofs activation, network
+  canary, real Python/Pipenv/Go PRODUCT_T1, T2/T3 or production action.
+- Owner A0/A1 and B0/B1 choice UNDECIDED; no approved direct R012 owner
+  choice/execution grant, no native T1 qualification, no FULL role review,
+  integration or R10 release authority.
+- New review must independently fix HEAD/BASE/TREE/new DESIGN-011 Git Blob,
+  B/C verdicts separately, and original current-Head CI evidence. Old
+  R011 PASS/BLOCKED never automatically applies.
+
+R012_DESIGN_STATUS=PROPOSED_NOT_EFFECTIVE
+REVIEW_ROUND=D4-R012-AUTHORITY-CHAIN-DESIGN-011
+REAL_OIDC_REQUEST=NOT_RUN
+ORIGINAL_MACOS_PRODUCT_T1=NOT_RUN
+INTEGRATION_STATUS=NOT_TESTED
+FULL_CODE_REVIEW_PASS=NOT_ISSUED
+R10_STATUS=BLOCKED

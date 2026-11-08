@@ -11,6 +11,7 @@ from tools.r010_authority_chain_t0 import (
     ImplementationQualification,
     JobEnvelope,
     JobState,
+    OwnedRowObservationT0,
     JWTVerificationReceipt,
     PreexecSelectorBoundary,
     ProviderWitness,
@@ -23,6 +24,7 @@ from tools.r010_authority_chain_t0 import (
     SharedJobRegistry,
     StateProvenance,
     adjacent_file_git_allowed,
+    build_oidc_token_url_t0,
     design_choice_digest,
     strict_exec_boundary_allows,
     validate_design_choice,
@@ -370,21 +372,42 @@ def _envelope():
     )
 
 
-def _success(env, index, nonce):
-    env.begin_row(index, nonce, nonce)
-    return env.finish_row(
-        index,
-        exit_code=0,
+def _row_observation(nonce, **changes):
+    """Source-only frozen mock, NOT a runtime/caller-mintable witness."""
+    reservation = object()
+    values = dict(
+        attempt_nonce=nonce,
+        owner_attempt_nonce=nonce,
+        worker_attempt_nonce=nonce,
+        owner_reservation=reservation,
+        worker_reservation=reservation,
+        owner_status="exited",
+        owner_exit_code=0,
+        original_child_reaped=True,
+        original_child_unambiguous=True,
+        worker_status="exited",
+        worker_executed=True,
+        worker_timed_out=False,
+        worker_exit_code=0,
+        worker_cancelled=False,
+        ack_lost=False,
         stdout_eof=True,
         stderr_eof=True,
         stdout_truncated=False,
         stderr_truncated=False,
         output_within_bound=True,
         finite_observed_fs_ok=True,
-        original_child_unambiguous=True,
-        original_child_reaped=True,
-        process_may_be_running=True,
+        process_may_be_running=True,   # descendants intentionally not proven
+        cleanup_proven=False,
+        full_descendant_tree_clean="not_proven",
     )
+    values.update(changes)
+    return OwnedRowObservationT0(**values)
+
+
+def _success(env, index, nonce):
+    env.begin_row(index, nonce, nonce)
+    return env.finish_row(index, observation=_row_observation(nonce))
 
 
 def test_rows_are_globally_serial_across_workspaces():
@@ -394,17 +417,7 @@ def test_rows_are_globally_serial_across_workspaces():
     with pytest.raises(GateDenied, match="not ready|unexpected"):
         env.begin_row(4, nonces[4], nonces[4])
     assert env.finish_row(
-        0,
-        exit_code=0,
-        stdout_eof=True,
-        stderr_eof=True,
-        stdout_truncated=False,
-        stderr_truncated=False,
-        output_within_bound=True,
-        finite_observed_fs_ok=True,
-        original_child_unambiguous=True,
-        original_child_reaped=True,
-        process_may_be_running=True,
+        0, observation=_row_observation(nonces[0]),
     ) == RowState.POSITIVE_SUCCESS
     assert env.expected_row == 1 and env.state == JobState.READY
 
@@ -412,35 +425,63 @@ def test_rows_are_globally_serial_across_workspaces():
 @pytest.mark.parametrize(
     "kwargs,expected",
     [
-        (dict(exit_code=1), RowState.OBSERVED_NONZERO),
-        (dict(exit_code=0, stdout_truncated=True), RowState.OBSERVED_ZERO_INVALID),
-        (dict(exit_code=0, stderr_eof=False), RowState.OBSERVED_ZERO_INVALID),
-        (dict(exit_code=0, finite_observed_fs_ok=False), RowState.OBSERVED_ZERO_INVALID),
-        (dict(exit_code=None, original_child_unambiguous=False,
-              original_child_reaped=False), RowState.AMBIGUOUS),
-        (dict(exit_code=0, original_child_reaped=False), RowState.AMBIGUOUS),
+        (dict(owner_exit_code=1, worker_exit_code=1), RowState.OBSERVED_NONZERO),
+        (dict(stdout_truncated=True), RowState.OBSERVED_ZERO_INVALID),
+        (dict(stderr_eof=False), RowState.OBSERVED_ZERO_INVALID),
+        (dict(finite_observed_fs_ok=False), RowState.OBSERVED_ZERO_INVALID),
+        (dict(owner_status="timed_out", owner_exit_code=None,
+              original_child_reaped=False, worker_status="timed_out",
+              worker_timed_out=True, worker_exit_code=None), RowState.AMBIGUOUS),
+        (dict(original_child_reaped=False), RowState.AMBIGUOUS),
     ],
 )
 def test_failure_classes_latch_job_and_void_remaining_rows(kwargs, expected):
     env = _envelope()
     nonce = grant().command_nonces[0]
     env.begin_row(0, nonce, nonce)
-    base = dict(
-        exit_code=0,
-        stdout_eof=True,
-        stderr_eof=True,
-        stdout_truncated=False,
-        stderr_truncated=False,
-        output_within_bound=True,
-        finite_observed_fs_ok=True,
-        original_child_unambiguous=True,
-        original_child_reaped=True,
-        process_may_be_running=True,
-    )
-    base.update(kwargs)
-    assert env.finish_row(0, **base) == expected
+    assert env.finish_row(
+        0, observation=_row_observation(nonce, **kwargs),
+    ) == expected
     assert env.state == JobState.FAILED
+    assert env.active_attempt_nonce is None
     assert all(x == RowState.VOID for x in env.row_states[1:])
+    with pytest.raises(GateDenied):
+        env.begin_row(1, grant().command_nonces[1], grant().command_nonces[1])
+
+
+@pytest.mark.parametrize("fault", [
+    dict(worker_status="timed_out"),
+    dict(worker_status="launch_failed"),
+    dict(worker_executed=False),
+    dict(worker_timed_out=True),
+    dict(worker_cancelled=True),
+    dict(ack_lost=True),
+    dict(worker_exit_code=9),
+    dict(owner_exit_code=9),
+    dict(owner_status="UNREAPABLE"),
+    dict(owner_attempt_nonce="other-attempt"),
+    dict(worker_attempt_nonce="other-attempt"),
+    dict(attempt_nonce="other-attempt"),
+    dict(owner_reservation=object()),
+    dict(worker_reservation=object()),
+    dict(owner_exit_code=None),
+    dict(worker_exit_code=None),
+    dict(original_child_reaped=False),
+    dict(original_child_unambiguous=False),
+    dict(cleanup_proven=True),
+    dict(full_descendant_tree_clean="proven"),
+])
+def test_r012_same_attempt_worker_owner_contradictions_void_remaining(fault):
+    env = _envelope()
+    nonce = grant().command_nonces[0]
+    env.begin_row(0, nonce, nonce)
+    result = env.finish_row(
+        0, observation=_row_observation(nonce, **fault),
+    )
+    assert result == RowState.AMBIGUOUS
+    assert env.state == JobState.FAILED
+    assert env.row_states[0] == RowState.AMBIGUOUS
+    assert all(state == RowState.VOID for state in env.row_states[1:])
     with pytest.raises(GateDenied):
         env.begin_row(1, grant().command_nonces[1], grant().command_nonces[1])
 
@@ -819,3 +860,54 @@ def test_r012_red_requires_single_owner_worker_observation_model():
 def test_r012_red_requires_reviewed_audience_url_assembly():
     from tools.r010_authority_chain_t0 import build_oidc_token_url_t0
     assert callable(build_oidc_token_url_t0)
+
+
+def test_r012_canonical_oidc_request_url_from_reviewed_runner_base():
+    base = (
+        "https://pipelinesghubeus15.actions.githubusercontent.com/"
+        "_apis/oidc/token?api-version=2.0"
+    )
+    audience = f"mfg-r010:{DESIGN_BLOB}:{HEAD}:{SECRET_HASH}"
+    expected = base + "&audience=" + audience.replace(":", "%3A")
+    actual = build_oidc_token_url_t0(base, audience)
+    assert actual == expected
+    assert actual.count("audience=") == 1
+    assert actual.count("api-version=") == 1
+    assert "/_apis/oidc/token?" in actual
+    with pytest.raises(GateDenied):
+        build_oidc_token_url_t0(base, "forged-client-audience")
+    with pytest.raises(GateDenied):
+        build_oidc_token_url_t0(base + "&audience=forged", audience)
+
+
+@pytest.mark.parametrize("bad", [
+    dict(oidc_redirect_count=1),
+    dict(oidc_redirect_count=True),
+    dict(oidc_redirect_count=-1),
+    dict(bootstrap={"ACTIONS_ID_TOKEN_REQUEST_URL":
+                    "https://pipelinesghubeus15.actions.githubusercontent.com/"
+                    "_apis/oidc/token?api-version=2.0&audience=unknown"}),
+    dict(bootstrap={"ACTIONS_ID_TOKEN_REQUEST_URL":
+                    "https://pipelinesghubeus15.actions.githubusercontent.com/"
+                    "_apis/oidc/token?api-version=02.0"}),
+    dict(bootstrap={"ACTIONS_ID_TOKEN_REQUEST_URL":
+                    "https://pipelinesghubeus15.actions.githubusercontent.com/"
+                    "_apis/oidc/token?api-version=%32.0"}),
+])
+def test_r012_oidc_redirect_and_encoding_fail_before_bearer_use(bad):
+    # No network APIs or fake bearer send callback are invoked by the T0.
+    sent = []
+    with pytest.raises(GateDenied):
+        _check_preexec_t0(_preexec_t0(**bad))
+        sent.append("fake-bearer-sent")
+    assert sent == []
+
+
+def test_r012_owner_worker_observation_is_immutable_and_non_runtime():
+    from dataclasses import FrozenInstanceError
+    obs = _row_observation(grant().command_nonces[0])
+    assert obs.process_may_be_running is True
+    assert obs.cleanup_proven is False
+    assert obs.full_descendant_tree_clean == "not_proven"
+    with pytest.raises(FrozenInstanceError):
+        obs.worker_status = "timed_out"

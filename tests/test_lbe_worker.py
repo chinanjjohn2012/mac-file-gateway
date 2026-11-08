@@ -6,6 +6,7 @@ these tests do NOT approve F1 exception, real Exec apply or integration PASS.
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import replace
 import os
 import selectors
 import subprocess
@@ -658,21 +659,69 @@ def _r010_fake_worker_envelope():
     )
 
 
-def _r010_finish_from_owned_fake_worker(env, result, *, owner_reaped, fs_ok):
-    """Test adapter only: caller/client response cannot assert owner proof."""
+def _r012_record_private_owner_observe(patch, owner):
+    """T0 spy on the actual DirectChildOwner.observe(reservation) call."""
+    original_observe = owner.observe
+    record = {}
+
+    def observe(item, *, wait_seconds):
+        result = original_observe(item, wait_seconds=wait_seconds)
+        record["reservation"] = item
+        record["direct_observation"] = result
+        return result
+
+    patch.setattr(owner, "observe", observe)
+    return record
+
+
+def _r010_finish_from_owned_fake_worker(
+    env, result, *, owner_record, fs_ok, worker_override=None,
+    observation_override=None,
+):
+    """One same-reservation T0 observation, never a REST/MCP caller claim."""
+    from tools.r010_authority_chain_t0 import OwnedRowObservationT0
+
     assert type(result) is dict
-    env.begin_row(0, "fake-row-1", "fake-row-1")
-    return env.finish_row(
-        0, exit_code=result["exit_code"],
-        stdout_eof=result["output_complete"],
-        stderr_eof=result["output_complete"],
-        stdout_truncated=result["stdout_truncated"],
-        stderr_truncated=result["stderr_truncated"],
-        output_within_bound=True, finite_observed_fs_ok=fs_ok,
-        original_child_unambiguous=owner_reaped,
-        original_child_reaped=owner_reaped,
-        process_may_be_running=result["process_may_be_running"],
+    direct = owner_record["direct_observation"]
+    reservation = owner_record["reservation"]
+    observed_worker = dict(result)
+    if worker_override is not None:
+        observed_worker.update(worker_override)
+    nonce = "fake-row-1"
+    env.begin_row(0, nonce, nonce)
+    obs = OwnedRowObservationT0(
+        attempt_nonce=nonce,
+        owner_attempt_nonce=nonce,
+        worker_attempt_nonce=nonce,
+        owner_reservation=reservation,
+        worker_reservation=reservation,
+        owner_status=direct.status,
+        owner_exit_code=direct.exit_code,
+        original_child_reaped=(
+            direct.status == "exited" and type(direct.exit_code) is int
+        ),
+        original_child_unambiguous=(
+            direct.status == "exited" and type(direct.exit_code) is int
+        ),
+        worker_status=observed_worker["status"],
+        worker_executed=observed_worker["executed"],
+        worker_timed_out=observed_worker["timed_out"],
+        worker_exit_code=observed_worker["exit_code"],
+        worker_cancelled=False,
+        ack_lost=False,
+        stdout_eof=observed_worker["output_complete"],
+        stderr_eof=observed_worker["output_complete"],
+        stdout_truncated=observed_worker["stdout_truncated"],
+        stderr_truncated=observed_worker["stderr_truncated"],
+        output_within_bound=True,
+        finite_observed_fs_ok=fs_ok,
+        process_may_be_running=observed_worker["process_may_be_running"],
+        cleanup_proven=observed_worker["cleanup_proven"],
+        full_descendant_tree_clean=observed_worker["full_descendant_tree_clean"],
     )
+    if observation_override is not None:
+        obs = replace(obs, **observation_override)
+    return env.finish_row(0, observation=obs)
 
 
 @pytest.mark.parametrize(
@@ -687,7 +736,7 @@ def _r010_finish_from_owned_fake_worker(env, result, *, owner_reaped, fs_ok):
 def test_r010_worker_fake_child_reap_is_not_descendant_cleanup(
     monkeypatch, exit_code, streams_eof, fs_ok, expected,
 ):
-    """T0 integrates EXISTING owner/worker code with an injected FakeChild."""
+    """Actual Worker/DirectChildOwner code; synthetic FakeChild only."""
     fake = FakeChild(exit_code=exit_code)
     selector = FakeSelector()
 
@@ -702,55 +751,70 @@ def test_r010_worker_fake_child_reap_is_not_descendant_cleanup(
     worker, owner, _selector = driver(selector=selector, launch=launch, grace=0.025)
 
     def deny_real_process(*_args, **_kwargs):
-        raise AssertionError("R010 SAFE T0 forbids native launch and signals")
+        raise AssertionError("R012 SAFE T0 forbids native launch and signals")
 
     try:
         with monkeypatch.context() as patch:
             patch.setattr(subprocess, "Popen", deny_real_process)
             patch.setattr(os, "kill", deny_real_process)
             patch.setattr(os, "killpg", deny_real_process, raising=False)
+            record = _r012_record_private_owner_observe(patch, owner)
             result = worker.run(plan())
+
         assert result["status"] == "exited"
         assert result["executed"] is True and result["timed_out"] is False
         assert result["exit_code"] == exit_code
+        assert record["direct_observation"].status == "exited"
+        assert record["direct_observation"].exit_code == exit_code
         assert fake.wait_calls == 1
         assert owner.snapshot()["running_direct_children"] == 0
         assert result["process_may_be_running"] is True
         assert result["cleanup_proven"] is False
         assert result["full_descendant_tree_clean"] == "not_proven"
 
+        env = _r010_fake_worker_envelope()
         verdict = _r010_finish_from_owned_fake_worker(
-            _r010_fake_worker_envelope(), result,
-            owner_reaped=(fake.wait_calls == 1), fs_ok=fs_ok,
+            env, result, owner_record=record, fs_ok=fs_ok,
         )
         assert verdict.value == expected
+        if expected != "ROW_POSITIVE_SUCCESS":
+            from tools.r010_authority_chain_t0 import JobState, RowState
+            assert env.state == JobState.FAILED
+            assert all(x == RowState.VOID for x in env.row_states[1:])
+            with pytest.raises(Exception, match="not ready"):
+                env.begin_row(1, "fake-next", "fake-next")
     finally:
         owner.close()
 
 
 def test_r010_unreaped_fake_timeout_fails_closed_without_signal(monkeypatch):
-    """Timeout has no trusted completed reap; later wait cannot replay row."""
+    """Request timeout has no completed trusted reap; late exit not replayed."""
     from tools.r010_authority_chain_t0 import JobState, RowState
     fake = FakeChild()
     worker, owner, selector = driver(launch=lambda _plan: fake, grace=0.025)
 
     def deny_real_process(*_args, **_kwargs):
-        raise AssertionError("R010 SAFE T0 forbids native launch and signals")
+        raise AssertionError("R012 SAFE T0 forbids native launch and signals")
 
     try:
         with monkeypatch.context() as patch:
             patch.setattr(subprocess, "Popen", deny_real_process)
             patch.setattr(os, "kill", deny_real_process)
             patch.setattr(os, "killpg", deny_real_process, raising=False)
+            record = _r012_record_private_owner_observe(patch, owner)
             result = worker.run(plan(timeout=1))
+
         assert result["status"] == "timed_out"
         assert result["exit_code"] is None
         assert result["process_may_be_running"] is True
+        assert record["direct_observation"].status == "timed_out"
+        assert record["direct_observation"].exit_code is None
         assert fake.wait_calls == 1
         assert owner.snapshot()["reserved_slots"] == 1
+
         env = _r010_fake_worker_envelope()
         assert _r010_finish_from_owned_fake_worker(
-            env, result, owner_reaped=False, fs_ok=True,
+            env, result, owner_record=record, fs_ok=True,
         ) == RowState.AMBIGUOUS
         assert env.state == JobState.FAILED
         assert all(x == RowState.VOID for x in env.row_states[1:])
@@ -761,4 +825,65 @@ def test_r010_unreaped_fake_timeout_fails_closed_without_signal(monkeypatch):
         selector.enqueue(92, b"")
         fake.exit.set()
         wait_until(lambda: owner.snapshot()["reserved_slots"] == 0)
+        owner.close()
+
+
+@pytest.mark.parametrize("worker_change,observation_change", [
+    ({"status": "timed_out"}, None),
+    ({"status": "launch_failed"}, None),
+    ({"executed": False}, None),
+    ({"timed_out": True}, None),
+    ({"exit_code": 9}, None),
+    ({"cleanup_proven": True}, None),
+    (None, {"worker_attempt_nonce": "another-execution-attempt"}),
+    (None, {"owner_attempt_nonce": "another-execution-attempt"}),
+    (None, {"owner_reservation": object()}),
+    (None, {"worker_reservation": object()}),
+    (None, {"worker_cancelled": True}),
+    (None, {"ack_lost": True}),
+])
+def test_r012_worker_owner_conflicting_same_fake_attempt_voids_remaining(
+    monkeypatch, worker_change, observation_change,
+):
+    """Independent B R011 counterexamples on actual Worker/Owner fake path."""
+    from tools.r010_authority_chain_t0 import JobState, RowState
+    fake = FakeChild(exit_code=0)
+    selector = FakeSelector()
+
+    def launch(_plan):
+        selector.enqueue(91, b"valid observed output")
+        selector.enqueue(91, b"")
+        selector.enqueue(92, b"")
+        fake.exit.set()
+        return fake
+
+    worker, owner, _sel = driver(selector=selector, launch=launch)
+    def deny_real_process(*_args, **_kwargs):
+        raise AssertionError("R012 SAFE T0 forbids Popen/signal")
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(subprocess, "Popen", deny_real_process)
+            patch.setattr(os, "kill", deny_real_process)
+            patch.setattr(os, "killpg", deny_real_process, raising=False)
+            record = _r012_record_private_owner_observe(patch, owner)
+            result = worker.run(plan())
+        assert result["status"] == "exited"
+        assert result["exit_code"] == 0
+        assert record["direct_observation"].status == "exited"
+        assert record["direct_observation"].exit_code == 0
+        assert fake.wait_calls == 1
+        env = _r010_fake_worker_envelope()
+        assert _r010_finish_from_owned_fake_worker(
+            env, result, owner_record=record, fs_ok=True,
+            worker_override=worker_change,
+            observation_override=observation_change,
+        ) == RowState.AMBIGUOUS
+        assert env.state == JobState.FAILED
+        assert all(x == RowState.VOID for x in env.row_states[1:])
+        with pytest.raises(Exception, match="not ready"):
+            env.begin_row(1, "fake-next", "fake-next")
+        assert result["process_may_be_running"] is True
+        assert result["cleanup_proven"] is False
+        assert result["full_descendant_tree_clean"] == "not_proven"
+    finally:
         owner.close()

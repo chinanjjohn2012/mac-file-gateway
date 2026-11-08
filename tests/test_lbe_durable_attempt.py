@@ -165,6 +165,12 @@ def test_real_service_owner_locked_source_only_journal_restart(tmp_path, monkeyp
     from gateway.core import GatewayError
     from gateway.exec_state import ExecStateStore
     from gateway.lbe_owner_grant import verify_d4_owner_github_comment_t0
+    from gateway.lbe_owner_grant_bootstrap import _argv_fingerprint
+    from gateway.lbe_r006_macos_allowlist import (
+        D4R006HostAllowlistObservation,
+        R006_HOST_SOURCE_FINGERPRINT, R006_RUNNER_PROFILE_FINGERPRINT,
+    )
+    from gateway.lbe_hosted_source_probe import D4HostedSelectedSourceObservation
     from gateway.workspaces import WorkspaceService, ActiveRuntimeInventory
     from gateway.workspaces_config import parse_workspace_config
 
@@ -185,11 +191,13 @@ def test_real_service_owner_locked_source_only_journal_restart(tmp_path, monkeyp
         "github_run_id": 42445537246, "github_run_attempt": 1,
         "image_os": "macos15", "image_version": "20261104.0514.1",
         "os_build": "24H232",
-        "source_fingerprint": __import__("gateway.lbe_r006_macos_allowlist", fromlist=["R006_HOST_SOURCE_FINGERPRINT"]).R006_HOST_SOURCE_FINGERPRINT,
-        "runner_fingerprint": __import__("gateway.lbe_r006_macos_allowlist", fromlist=["R006_RUNNER_PROFILE_FINGERPRINT"]).R006_RUNNER_PROFILE_FINGERPRINT,
+        "source_fingerprint": R006_HOST_SOURCE_FINGERPRINT,
+        "runner_fingerprint": R006_RUNNER_PROFILE_FINGERPRINT,
         "workspace": "a", "cwd": "src",
-        "runner": "direct", "requested_argv_sha256": S,
-        "effective_argv_sha256": S, "timeout_seconds": 120,
+        "runner": "direct",
+        "requested_argv_sha256": _argv_fingerprint(("python", "-m", "pytest", "-q")),
+        "effective_argv_sha256": _argv_fingerprint(("python", "-m", "pytest", "-q")),
+        "timeout_seconds": 120,
         "nonce": "d" * 64, "expires_at": expires,
     }
     cid = 7712345678
@@ -227,23 +235,40 @@ def test_real_service_owner_locked_source_only_journal_restart(tmp_path, monkeyp
         "server": {"port": 8765, "transport": "http"},
         "workspaces": {"a": {"root": str(root), "exec": {"paths": ["src"]}}},
     })
+    source_obs = D4HostedSelectedSourceObservation(
+        root_identity=(1, 2, 3, 4, 5, 0o40755, 0, 1),
+        selected=(("x", S, (1, 2, 1, 4, 5, 0o100444, 0, 1)),),
+        root_ancestor_identities=((1, 2, 0o40755, 0),),
+    )
+    host = D4R006HostAllowlistObservation(
+        system=source_obs, usr=source_obs,
+        source_fingerprint=R006_HOST_SOURCE_FINGERPRINT,
+        runner_profile_fingerprint=R006_RUNNER_PROFILE_FINGERPRINT,
+        image_version="20261104.0514.1", macos_version="15.8.2",
+        os_build="24H232",
+    )
     for round in range(2):
         with_service = WorkspaceService(
             settings, config_dir=private,
             inventory=ActiveRuntimeInventory(paths=(runtime,)))
         try:
             assert with_service._exec_state.durability_state == "healthy"
-            # A plain attempt dataclass is deliberately not enough anymore.
-            with pytest.raises(GatewayError):
-                with_service._consume_d4_r006_attempt_source_only(
-                    replace(example(), workspace="a"))
             if round == 0:
                 assert len(with_service._consume_d4_r006_attempt_source_only(
-                    verified)) == 64
+                    verified, host, "a", "src",
+                    ["python", "-m", "pytest", "-q"], 120,
+                    base_sha=H, head_sha=H, head_tree=H,
+                    manifest_sha256=S, run_id=42445537246,
+                    run_attempt=1)) == 64
             else:
-                # The exact verifier-produced grant remains burned after restart.
+                # The exact grant remains burned after service restart.
                 with pytest.raises(GatewayError):
-                    with_service._consume_d4_r006_attempt_source_only(verified)
+                    with_service._consume_d4_r006_attempt_source_only(
+                        verified, host, "a", "src",
+                        ["python", "-m", "pytest", "-q"], 120,
+                        base_sha=H, head_sha=H, head_tree=H,
+                        manifest_sha256=S, run_id=42445537246,
+                        run_attempt=1)
             assert with_service._lbe_positive_authorized is False
             with pytest.raises(GatewayError) as denied:
                 with_service.invoke_exec("a", "src", ["python", "-m", "pytest", "-q"],
@@ -283,7 +308,10 @@ def test_service_without_existing_private_journal_never_creates_one(tmp_path):
     try:
         with pytest.raises(GatewayError):
             service._consume_d4_r006_attempt_source_only(
-                replace(example(), workspace="a"))
+                object(), object(), "a", "src",
+                ["python", "-m", "pytest", "-q"], 120,
+                base_sha=H, head_sha=H, head_tree=H,
+                manifest_sha256=S, run_id=1, run_attempt=1)
         assert service._d4_attempt_journal is None
     finally:
         service.close()

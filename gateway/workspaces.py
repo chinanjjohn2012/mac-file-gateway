@@ -495,28 +495,47 @@ class WorkspaceService:
                 self._active_operations -= 1
                 self._lifecycle.notify_all()
 
-    def _consume_d4_r006_attempt_source_only(self, grant: object) -> str:
-        """Burn only a verifier-produced future R006 owner grant.
+    def _consume_d4_r006_attempt_source_only(
+        self, grant: object, host: object, name: str, cwd: str,
+        argv: list[str], timeout_seconds: int, *,
+        base_sha: str, head_sha: str, head_tree: str, manifest_sha256: str,
+        run_id: int, run_attempt: int,
+    ) -> str:
+        """Bind and burn an exact future R006 attempt before any reservation.
 
-        This remains NONOPERATIVE: the verifier parses trusted-bootstrap
-        evidence but this method neither fetches GitHub nor opens F1/Runner.
-        A plain D4AttemptIdentity/dataclass/client packet can no longer reach
-        the service-owned durable consumption boundary.
+        NONOPERATIVE source/T0 only. The service itself rebuilds the canonical
+        plan under its lifecycle lock, checks current concurrency eligibility,
+        binds the verified owner decision to current Head/run/host/source, and
+        durably consumes nonce BEFORE a future Worker slot or Popen. This
+        method does not reserve a slot or invoke Runner; positive wiring is a
+        separate reviewed change after code review and exact T1 authorization.
         """
         from .lbe_durable_attempt import D4DurableAttemptDenied
-        from .lbe_owner_grant import D4VerifiedOwnerGrant
+        from .lbe_owner_grant_bootstrap import (
+            D4OwnerBootstrapDenied, bind_verified_owner_grant_t0,
+        )
+        from .lbe_plan import prepare_lbe_work_plan
         with self._lifecycle:
+            ctx = self.require_exec(name)
             if self._closing or self.settings.schema_version != 2:
                 raise GatewayError("runner_unavailable", "R006 service unavailable.")
             if self._exec_state is None or self._d4_attempt_journal is None:
                 raise GatewayError("runner_unavailable", "Durable owner ledger unavailable.")
             self._exec_state.require_healthy()
-            if type(grant) is not D4VerifiedOwnerGrant:
-                raise GatewayError("runner_unavailable", "Unverified R006 owner grant.")
+            if name in self._exec_active or len(self._exec_active) >= 4:
+                raise GatewayError("busy", "R006 executable slot is not eligible.")
             try:
-                return self._d4_attempt_journal.consume(grant.attempt)
-            except D4DurableAttemptDenied:
-                raise GatewayError("runner_unavailable", "R006 nonce is invalid or consumed.") from None
+                plan = prepare_lbe_work_plan(
+                    ctx, cwd=cwd, argv=argv, timeout_seconds=timeout_seconds)
+                bound = bind_verified_owner_grant_t0(
+                    grant, host, plan, base_sha=base_sha, head_sha=head_sha,
+                    head_tree=head_tree, manifest_sha256=manifest_sha256,
+                    run_id=run_id, run_attempt=run_attempt)
+                return self._d4_attempt_journal.consume(bound.attempt)
+            except (D4OwnerBootstrapDenied, D4DurableAttemptDenied, ValueError):
+                raise GatewayError(
+                    "runner_unavailable",
+                    "R006 owner/run binding is invalid or already consumed.") from None
 
     def _prepare_d4_r003_fixture_candidate(
         self, name: str, cwd: str, argv: list[str],

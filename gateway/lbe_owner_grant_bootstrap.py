@@ -126,6 +126,8 @@ class D4ConsumedOwnerGrant:
             raise D4OwnerBootstrapDenied("consumed grant binding changed")
         if recipe.selected_source_fingerprint != self._attempt.product_recipe_fingerprint:
             raise D4OwnerBootstrapDenied("consumed product recipe changed")
+        if int(time.time()) > self._attempt.expires_at_unix:
+            raise D4OwnerBootstrapDenied("consumed owner grant expired before launch")
 
 
 class D4BoundOwnerGrant:

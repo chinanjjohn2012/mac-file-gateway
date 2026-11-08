@@ -82,3 +82,21 @@ def test_prepare_bootstrap_install_order(monkeypatch):
         service,bundle,owner_comment_id=7712345678,
         g05_receipt_path="/private/g05.json") is prepared
     assert events==["prepare","bootstrap","install"]
+
+
+def test_parsed_bundle_collections_are_immutable_by_shape():
+    raw=_raw("go-project")
+    item=parse_r006_source_bundle(raw,hashlib.sha256(raw).hexdigest())
+    assert type(item.staged_manifests) is tuple
+    assert type(item.expected_source_identities) is tuple
+    with pytest.raises((TypeError, AttributeError)):
+        item.staged_manifests["go"] = ()
+
+
+def test_nested_private_and_provisioner_roots_denied():
+    obj=json.loads(_raw("py-direct"))
+    obj["private_root"]="/private/source/runner"
+    obj["provisioner_root"]="/private/source"
+    raw=(json.dumps(obj,sort_keys=True,separators=(",",":"))+"\n").encode()
+    with pytest.raises(D4R006HarnessDenied):
+        parse_r006_source_bundle(raw,hashlib.sha256(raw).hexdigest())

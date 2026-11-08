@@ -30,13 +30,19 @@ class D4R006SourceBundle:
     timeout_seconds: int
     private_root: str
     provisioner_root: str
-    staged_manifests: dict[str, tuple[tuple[str, str | None], ...]]
+    staged_manifests: tuple[tuple[str, tuple[tuple[str, str | None], ...]], ...]
     venv_manifest: tuple[tuple[str, str | None], ...] | None
-    expected_source_identities: dict[str, str]
+    expected_source_identities: tuple[tuple[str, str], ...]
     expected_venv_identity_sha256: str | None
     require_go_p007_stage_source: bool
     expected_venv_record_distributions: tuple[tuple[str, str], ...] | None
     bundle_sha256: str
+
+    def staged_manifest_dict(self):
+        return dict(self.staged_manifests)
+
+    def source_identity_dict(self):
+        return dict(self.expected_source_identities)
 
 
 def _pairs(items):
@@ -115,7 +121,8 @@ def parse_r006_source_bundle(raw: bytes, expected_sha256: str):
                 or os.path.normpath(value) != value or value.endswith("/")):
             raise D4R006HarnessDenied("invalid " + name)
         roots.append(value)
-    if roots[0] == roots[1]:
+    if (roots[0] == roots[1] or roots[0].startswith(roots[1] + "/")
+            or roots[1].startswith(roots[0] + "/")):
         raise D4R006HarnessDenied("source roots overlap")
 
     manifests = data["staged_manifests"]
@@ -146,6 +153,9 @@ def parse_r006_source_bundle(raw: bytes, expected_sha256: str):
                        for x in dists)):
             raise D4R006HarnessDenied("invalid venv distributions")
         dists = tuple((x[0],x[1]) for x in dists)
+        if tuple(sorted(dists)) != dists or len(set(dists)) != len(dists):
+            raise D4R006HarnessDenied(
+                "venv distributions must be sorted/unique")
 
     if cwd == "go-project":
         good = set(checked)=={"go"} and checked_venv is None and venv_id is None and p007 and dists is None
@@ -158,7 +168,8 @@ def parse_r006_source_bundle(raw: bytes, expected_sha256: str):
 
     return D4R006SourceBundle(
         data["workspace"], cwd, tuple(argv), timeout, roots[0], roots[1],
-        checked, checked_venv, checked_ids, venv_id, p007, dists, expected)
+        tuple(sorted(checked.items())), checked_venv,
+        tuple(sorted(checked_ids.items())), venv_id, p007, dists, expected)
 
 
 def load_r006_source_bundle(path: str, expected_sha256: str):
@@ -173,7 +184,12 @@ def load_r006_source_bundle(path: str, expected_sha256: str):
                 or not 0 < st.st_size <= _MAX):
             raise D4R006HarnessDenied("unsafe source-bundle file")
         raw = os.read(fd, _MAX + 1)
-        if len(raw) != st.st_size:
+        after = os.fstat(fd)
+        if (len(raw) != st.st_size
+                or (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns,
+                    st.st_ctime_ns, st.st_mode)
+                != (after.st_dev, after.st_ino, after.st_size,
+                    after.st_mtime_ns, after.st_ctime_ns, after.st_mode)):
             raise D4R006HarnessDenied("source-bundle read mismatch")
         return parse_r006_source_bundle(raw, expected_sha256)
     except OSError:
@@ -196,9 +212,9 @@ def prepare_and_install_r006_one_shot(
             bundle.workspace, bundle.cwd, list(bundle.argv),
             private_root=bundle.private_root,
             provisioner_root=bundle.provisioner_root,
-            staged_manifests=bundle.staged_manifests,
+            staged_manifests=bundle.staged_manifest_dict(),
             venv_manifest=bundle.venv_manifest,
-            expected_source_identities=bundle.expected_source_identities,
+            expected_source_identities=bundle.source_identity_dict(),
             expected_venv_identity_sha256=bundle.expected_venv_identity_sha256,
             require_go_p007_stage_source=bundle.require_go_p007_stage_source,
             expected_venv_record_distributions=bundle.expected_venv_record_distributions,

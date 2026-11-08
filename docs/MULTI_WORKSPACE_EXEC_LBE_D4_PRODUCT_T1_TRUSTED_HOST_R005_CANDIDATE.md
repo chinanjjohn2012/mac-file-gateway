@@ -49,7 +49,7 @@ Fixed sources, to be read as separate immutable authorities:
   Phase1 b3f2383f292a59fd234269389e5338cd50e334a2,
   G05 76c1c2b8a7947e0b305d55c5f550ab59c638b6d1
   and limited 36 locked Wheels / installed RECORD-listed source R004
-  2ffe5341288e428be5ee64e315e9275d2 are unchanged.
+  2ffe5341288e428be5ee5d0fa8d52aea3e9efc93 are unchanged.
   (The last R004 is the dependency-evidence profile, NOT D4 R004.)
 - ICR-V2.0, GHRH-2.0 and ETP-V2.0 apply as conservative, named
   review criteria; global three-Project formal activation is

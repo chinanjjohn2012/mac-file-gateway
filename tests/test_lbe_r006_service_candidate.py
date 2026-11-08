@@ -6,6 +6,9 @@ import threading
 import time
 
 import pytest
+from starlette.testclient import TestClient
+
+from gateway.http_multi import create_multi_app
 
 from gateway.core import GatewayError
 from gateway.exec_state import ExecStateStore
@@ -98,7 +101,7 @@ def _recipe(plan):
     )
 
 
-def _grant(plan):
+def _grant(plan, *, nonce="c" * 64):
     created = datetime.fromtimestamp(
         NOW, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     expires = datetime.fromtimestamp(
@@ -125,7 +128,7 @@ def _grant(plan):
         "requested_argv_sha256": _argv_fingerprint(plan.requested_argv),
         "effective_argv_sha256": _argv_fingerprint(plan.effective_argv),
         "timeout_seconds": plan.timeout_seconds,
-        "nonce": "c" * 64, "expires_at": expires,
+        "nonce": nonce, "expires_at": expires,
     }
     cid = 7712345678
     obj = {
@@ -164,8 +167,8 @@ def _patch_assembly(service, monkeypatch, host):
     return candidate, recipe
 
 
-def _bootstrap(monkeypatch, plan, *, head_sha=H):
-    grant = _grant(plan)
+def _bootstrap(monkeypatch, plan, *, head_sha=H, nonce="c" * 64):
+    grant = _grant(plan, nonce=nonce)
     reviews = object.__new__(D4VerifiedReviewPair)
     monkeypatch.setattr(
         D4VerifiedReviewPair, "check_grant", lambda self, value: None)
@@ -345,5 +348,90 @@ def test_preaccepted_cancellation_keeps_pending_but_posttake_cancellation_burns(
         assert late.value.code == "waiter_disconnected"
         assert len(list((private / "d4-journal").iterdir())) == 1
         assert service.info()["exec_policy"]["r006_one_shot_ready"] is False
+    finally:
+        service.close()
+
+
+_MCP_HEADERS = {
+    "Accept": "application/json, text/event-stream",
+    "Content-Type": "application/json",
+}
+
+
+def _rpc(client, method, params=None, ident=1):
+    response = client.post(
+        "/mcp", headers=_MCP_HEADERS,
+        json={"jsonrpc": "2.0", "id": ident, "method": method,
+              "params": params or {}})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _install_fresh_one_shot(service, monkeypatch, host, nonce):
+    candidate, _recipe_value = _patch_assembly(
+        service, monkeypatch, host)
+    prepared = _prepare(service)
+    service._install_d4_r006_one_shot(
+        prepared, _bootstrap(monkeypatch, candidate.plan, nonce=nonce))
+
+
+def test_same_service_rest_then_official_mcp_share_r006_invoke_gate_t0(
+        tmp_path, monkeypatch):
+    pytest.importorskip("mcp", reason="official MCP SDK required")
+    monkeypatch.setattr(time, "time", lambda: NOW)
+    service, private = _service(tmp_path)
+    host = _host()
+    monkeypatch.setattr(
+        D4R006NativeLaunchBoundary, "launch",
+        lambda self, plan: (_ for _ in ()).throw(
+            LbeNoChildStarted("T0 no child")))
+    try:
+        # REST has no owner/review/run fields. It can only consume a capability
+        # already installed by trusted in-process bootstrap code.
+        _install_fresh_one_shot(service, monkeypatch, host, "d" * 64)
+        with TestClient(
+                create_multi_app(service, enable_mcp=False),
+                base_url="http://127.0.0.1:8765") as client:
+            rest = client.post("/run", json={
+                "workspace": "a", "cwd": "py-direct",
+                "argv": ["python", "-m", "pytest", "-q"],
+                "timeout_seconds": 120, "dry_run": False,
+            })
+            assert rest.status_code == 200, rest.text
+            assert rest.json()["status"] == "launch_failed"
+            assert rest.json()["executed"] is False
+
+        assert len(list((private / "d4-journal").iterdir())) == 1
+
+        # Fresh exact nonce, same live WorkspaceService, official MCP tool.
+        _install_fresh_one_shot(service, monkeypatch, host, "e" * 64)
+        with TestClient(
+                create_multi_app(service, enable_mcp=True),
+                base_url="http://127.0.0.1:8765") as client:
+            initialized = _rpc(client, "initialize", {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "r006-t0", "version": "1"},
+            }, 10)
+            assert "result" in initialized
+            client.post(
+                "/mcp", headers=_MCP_HEADERS,
+                json={"jsonrpc": "2.0",
+                      "method": "notifications/initialized"})
+            result = _rpc(client, "tools/call", {
+                "name": "run_command",
+                "arguments": {
+                    "workspace": "a", "cwd": "py-direct",
+                    "argv": ["python", "-m", "pytest", "-q"],
+                    "timeout_seconds": 120, "dry_run": False,
+                },
+            }, 11)["result"]
+            assert result.get("isError") is not True, result
+            assert result["structuredContent"]["status"] == "launch_failed"
+            assert result["structuredContent"]["executed"] is False
+
+        assert len(list((private / "d4-journal").iterdir())) == 2
+        assert service.info()["exec_policy"]["r006_one_shot_ready"] is False
+        assert service.info()["exec_policy"]["adapter_exposed"] is True
     finally:
         service.close()

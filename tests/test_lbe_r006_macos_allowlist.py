@@ -144,3 +144,18 @@ def test_os_release_build_and_selected_byte_drift_denied(
             environ=_env(), macos_release="15.8.2", uname=_uname(),
             mount_rows=_mounts(), system_version=("15.8.2","24H232"),
             system_root=system, usr_root=usr)
+
+
+def test_sanitized_diagnostic_reports_names_not_values(
+        tmp_path, monkeypatch):
+    env = _env()
+    env["HTTPS_PROXY"] = "secret-proxy-value"
+    env["MY_PRIVATE_KEY"] = "secret-key-value"
+    diagnostic = profile.collect_r006_host_safety_diagnostics_t0(
+        environ=env, uname=_uname(), mount_rows=_mounts())
+    assert diagnostic["credential_variable_names"] == ("MY_PRIVATE_KEY",)
+    assert diagnostic["proxy_variable_names"] == ("HTTPS_PROXY",)
+    serialized = str(diagnostic)
+    assert "secret-proxy-value" not in serialized
+    assert "secret-key-value" not in serialized
+    assert diagnostic["native_launch_allowed"] is False

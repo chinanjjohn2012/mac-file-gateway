@@ -10,7 +10,9 @@ from gateway.lbe_owner_grant_bootstrap import (
     D4ConsumedOwnerGrant, D4OwnerBootstrapDenied,
 )
 from gateway.lbe_product_fixture import D4FixtureDenied, D4OneUseAttemptMarker
-from gateway.lbe_r006_macos_allowlist import (\n    D4R006HostAllowlistObservation, R006_RUNNER_PROFILE_FINGERPRINT,\n)
+from gateway.lbe_r006_macos_allowlist import (
+    D4R006HostAllowlistObservation, R006_RUNNER_PROFILE_FINGERPRINT,
+)
 from gateway import lbe_r006_native_runner as mod
 from gateway.lbe_r006_native_runner import (
     D4R006NativeLaunchBoundary, D4R006NativeRunnerDenied,

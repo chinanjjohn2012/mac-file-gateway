@@ -241,6 +241,41 @@ def _actual_system_version(system_root: str) -> tuple[str, str]:
     return version, build
 
 
+def collect_r006_host_safety_diagnostics_t0(
+    *, environ=None, uname=None, mount_rows=None,
+) -> dict[str, object]:
+    """Sanitized host blockers for T0 diagnostics; NEVER launch authority."""
+    env = os.environ if environ is None else environ
+    actual = os.uname() if uname is None else uname
+    credential_names = tuple(sorted(
+        name for name, value in env.items()
+        if bool(value) and (
+            name.upper() in _SECRET_NAMES
+            or name.upper().endswith(_SECRET_ENDINGS)
+        )
+    ))
+    proxy_names = tuple(sorted(
+        name for name, value in env.items()
+        if bool(value) and name.upper() in _PROXY_NAMES
+    ))
+    rows = _checked_mount_rows(
+        _darwin_mount_rows() if mount_rows is None else mount_rows)
+    unsafe = tuple(sorted(
+        (row[0], row[1]) for row in rows
+        if not (row[3] & _MNT_RDONLY) and not (row[3] & _MNT_LOCAL)
+    ))
+    return {
+        "status": "R007_HOST_SAFETY_DIAGNOSTIC_ONLY_NOT_AUTHORITY",
+        "kernel_sysname": getattr(actual, "sysname", ""),
+        "machine": getattr(actual, "machine", ""),
+        "credential_variable_names": credential_names,
+        "proxy_variable_names": proxy_names,
+        "mount_count": len(rows),
+        "writable_nonlocal_mount_types_and_targets": unsafe,
+        "native_launch_allowed": False,
+    }
+
+
 def verify_r006_fixed_host_allowlist_t0(
     *, environ=None, macos_release=None, uname=None, mount_rows=None,
     system_version=None, system_root="/System", usr_root="/usr",

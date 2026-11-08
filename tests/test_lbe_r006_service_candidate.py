@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 import json
 import os
+import subprocess
 import threading
 import time
 
@@ -18,10 +19,11 @@ from gateway.lbe_owner_grant import verify_d4_owner_github_comment_t0
 from gateway.lbe_owner_grant_bootstrap import _argv_fingerprint
 from gateway.lbe_product_fixture import D4OneUseAttemptMarker
 from gateway.lbe_r006_macos_allowlist import (
-    D4R006HostAllowlistObservation, R006_HOST_SOURCE_FINGERPRINT,
-    R006_RUNNER_PROFILE_FINGERPRINT,
+    D4R006HostAllowlistDenied, D4R006HostAllowlistObservation,
+    R006_HOST_SOURCE_FINGERPRINT, R006_RUNNER_PROFILE_FINGERPRINT,
 )
 from gateway import lbe_r006_macos_allowlist as allowlist_mod
+from gateway import lbe_r006_native_runner as native_runner_mod
 from gateway.lbe_r006_native_runner import (
     D4R006NativeLaunchBoundary, D4R006PreparedAttempt,
 )
@@ -498,5 +500,42 @@ def test_global_info_does_not_advertise_wrong_workspace_for_pending_one_shot(
                 service._exec_active.remove("a")
         assert service.info()["exec_policy"]["available"] is True
         assert service.info()["exec_policy"]["r006_one_shot_ready"] is True
+    finally:
+        service.close()
+
+
+def test_final_host_safety_denial_burns_durable_nonce_and_has_zero_popen(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: NOW)
+    service, private = _service(tmp_path)
+    host = _host()
+    candidate, _recipe_value = _patch_assembly(service, monkeypatch, host)
+    prepared = _prepare(service)
+    bootstrap = _bootstrap(monkeypatch, candidate.plan, nonce="9" * 64)
+    service._install_d4_r006_one_shot(prepared, bootstrap)
+    popen_calls = []
+    monkeypatch.setattr(
+        subprocess, "Popen",
+        lambda *a, **kw: popen_calls.append((a, kw)))
+    monkeypatch.setattr(
+        native_runner_mod, "verify_r006_fixed_host_allowlist_t0",
+        lambda: (_ for _ in ()).throw(
+            D4R006HostAllowlistDenied("unsafe stable host")))
+    try:
+        result = service.invoke_exec(
+            "a", "py-direct", ["python", "-m", "pytest", "-q"],
+            timeout_seconds=120, dry_run=False)
+        assert result["status"] == "launch_failed"
+        assert result["executed"] is False
+        assert popen_calls == []
+        tombstones = list((private / "d4-journal").iterdir())
+        assert len(tombstones) == 1
+        assert service.info()["exec_policy"]["r006_one_shot_ready"] is False
+        with pytest.raises(GatewayError) as replay:
+            service.invoke_exec(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                timeout_seconds=120, dry_run=False)
+        assert replay.value.code == "exec_cleanup_proof_required"
+        assert len(list((private / "d4-journal").iterdir())) == 1
     finally:
         service.close()

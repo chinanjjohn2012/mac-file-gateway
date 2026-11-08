@@ -1,6 +1,9 @@
 """SAFE T0 for R006 fresh G05 receipt + GitHub run/job binding."""
 from datetime import datetime, timezone
+import hashlib
 import json
+from pathlib import Path
+import subprocess
 import time
 
 import pytest
@@ -12,7 +15,7 @@ from gateway.lbe_r006_macos_allowlist import (
 )
 from gateway.lbe_r006_runtime_identity import (
     D4R006RuntimeIdentityDenied, D4VerifiedRuntimeIdentity,
-    verify_r006_runtime_identity_t0,
+    _fresh_checkout_receipt, verify_r006_runtime_identity_t0,
 )
 
 H = "a" * 40
@@ -160,3 +163,76 @@ def test_verified_runtime_identity_cannot_be_directly_constructed():
             object(),base_sha=H,head_sha=H,head_tree=T,
             manifest_sha256=M,run_id=RUN,run_attempt=1,
             job_id=JOB_ID,checkout_root=ROOT)
+
+
+def _git(root: Path, *argv: str) -> str:
+    result = subprocess.run(
+        ["git", *argv], cwd=root, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    return result.stdout.strip()
+
+
+def _make_runtime_checkout(tmp_path: Path):
+    root = tmp_path / "runtime-checkout"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.name", "R007 T0")
+    _git(root, "config", "user.email", "r007@example.invalid")
+    (root / ".gitignore").write_text("ignored_runtime.py\n", encoding="ascii")
+    (root / "gateway").mkdir()
+    (root / "gateway" / "__init__.py").write_text("VALUE = 1\n", encoding="ascii")
+    records = []
+    for path in sorted(
+            p for p in root.rglob("*")
+            if p.is_file() and ".git" not in p.parts
+            and p.name != "MANIFEST.sha256"):
+        rel = path.relative_to(root).as_posix()
+        records.append(
+            hashlib.sha256(path.read_bytes()).hexdigest() + "  ./" + rel)
+    (root / "MANIFEST.sha256").write_text(
+        "\n".join(records) + "\n", encoding="ascii")
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "runtime fixture")
+    head = _git(root, "rev-parse", "HEAD")
+    tree = _git(root, "rev-parse", "HEAD^{tree}")
+    manifest = hashlib.sha256((root / "MANIFEST.sha256").read_bytes()).hexdigest()
+    st = root.lstat()
+    receipt = {
+        "marker": "MFG_G05_R006_RECEIPT_V1",
+        "repo": "chinanjjohn2012/mac-file-gateway", "pr": 114,
+        "head_sha": head, "head_tree": tree, "manifest_sha256": manifest,
+        "run_id": RUN, "run_attempt": 1, "job_name": "r007-t0",
+        "checkout_root": str(root.resolve()),
+        "checkout_identity": [
+            st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid,
+            st.st_ctime_ns],
+        "checkout_credentials_clean": True,
+    }
+    env = {
+        "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "pull_request",
+        "GITHUB_REPOSITORY": "chinanjjohn2012/mac-file-gateway",
+        "GITHUB_RUN_ID": str(RUN), "GITHUB_RUN_ATTEMPT": "1",
+        "GITHUB_JOB": "r007-t0", "G05_EXPECTED_HEAD": head,
+    }
+    return root, receipt, env
+
+
+def test_canonical_fresh_checkout_rejects_post_receipt_ignored_and_untracked(
+        tmp_path):
+    root, receipt, env = _make_runtime_checkout(tmp_path)
+    raw = (json.dumps(
+        receipt, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    assert _fresh_checkout_receipt(receipt, environ=env) == raw
+
+    ignored = root / "ignored_runtime.py"
+    ignored.write_text("UNREVIEWED = True\n", encoding="ascii")
+    with pytest.raises(
+            D4R006RuntimeIdentityDenied, match="untracked/ignored"):
+        _fresh_checkout_receipt(receipt, environ=env)
+    ignored.unlink()
+
+    untracked = root / "unreviewed.txt"
+    untracked.write_text("x\n", encoding="ascii")
+    with pytest.raises(
+            D4R006RuntimeIdentityDenied, match="tracked/untracked"):
+        _fresh_checkout_receipt(receipt, environ=env)

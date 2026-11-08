@@ -1,4 +1,5 @@
 """Safe T0 for owner GitHub transport shape and exact runtime binding."""
+from datetime import datetime, timezone
 import hashlib
 import json
 import time
@@ -67,9 +68,12 @@ def _verified(monkeypatch):
         "requested_argv_sha256":_argv_fingerprint(plan.requested_argv),
         "effective_argv_sha256":_argv_fingerprint(plan.effective_argv),
         "timeout_seconds":120,"nonce":"c"*64,
-        "expires_at":"2026-11-08T13:21:40Z",
+        "expires_at":datetime.fromtimestamp(
+            NOW + 900, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
-    created="2026-11-08T13:06:40Z"; cid=7712345678
+    created=datetime.fromtimestamp(
+        NOW, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cid=7712345678
     obj={"id":cid,"body":"R006_OWNER_T1_GRANT_V1\n"+json.dumps(p,sort_keys=True,separators=(",",":")),
          "html_url":f"https://github.com/chinanjjohn2012/mac-file-gateway/pull/114#issuecomment-{cid}",
          "issue_url":"https://api.github.com/repos/chinanjjohn2012/mac-file-gateway/issues/114",

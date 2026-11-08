@@ -391,6 +391,11 @@ def _row_observation(nonce, **changes):
         worker_exit_code=0,
         worker_cancelled=False,
         ack_lost=False,
+        worker_pipe_reader_failed=False,
+        owner_pipe_reader_failed=False,
+        pipe_reader_finished=True,
+        owner_unavailable=False,
+        owner_closing=False,
         stdout_eof=True,
         stderr_eof=True,
         stdout_truncated=False,
@@ -470,6 +475,11 @@ def test_failure_classes_latch_job_and_void_remaining_rows(kwargs, expected):
     dict(original_child_unambiguous=False),
     dict(cleanup_proven=True),
     dict(full_descendant_tree_clean="proven"),
+    dict(worker_pipe_reader_failed=True),
+    dict(owner_pipe_reader_failed=True),
+    dict(pipe_reader_finished=False),
+    dict(owner_unavailable=True),
+    dict(owner_closing=True),
 ])
 def test_r012_same_attempt_worker_owner_contradictions_void_remaining(fault):
     env = _envelope()
@@ -957,4 +967,79 @@ def test_r013_preexec_renamed_original_bearer_never_becomes_child_value():
             expected_home="/private/tmp/mfg-r010-private-home",
             expected_tmp="/private/tmp/mfg-r010-private-tmp",
             approved_child_keys=PRODUCT_HELPER_ENV_KEYS | frozenset({"UNRELATED_NAME"}),
+        )
+
+
+@pytest.mark.parametrize("name,value", [
+    ("PYTHONUNBUFFERED", "1"),
+    ("PYTHONDONTWRITEBYTECODE", "1"),
+    ("PIP_NO_INDEX", "1"),
+    ("PIP_DISABLE_PIP_VERSION_CHECK", "1"),
+])
+def test_r013_reviewed_child_recipe_safe_extra_only_with_exact_value(name, value):
+    from tools.r010_authority_chain_t0 import (
+        PRODUCT_HELPER_ENV_KEYS, validate_preexec_selector_boundary_t0,
+    )
+    keys = PRODUCT_HELPER_ENV_KEYS | frozenset({name})
+    good = _preexec_t0(child={name: value})
+    validate_preexec_selector_boundary_t0(
+        good, expected_run_id=str(RUN), expected_run_attempt="1",
+        expected_head=HEAD, expected_image="20261104.0514.1",
+        expected_job="preexec_hold",
+        expected_home="/private/tmp/mfg-r010-private-home",
+        expected_tmp="/private/tmp/mfg-r010-private-tmp",
+        approved_child_keys=keys,
+    )
+    bad = _preexec_t0(child={name: "0"})
+    with pytest.raises(GateDenied):
+        validate_preexec_selector_boundary_t0(
+            bad, expected_run_id=str(RUN), expected_run_attempt="1",
+            expected_head=HEAD, expected_image="20261104.0514.1",
+            expected_job="preexec_hold",
+            expected_home="/private/tmp/mfg-r010-private-home",
+            expected_tmp="/private/tmp/mfg-r010-private-tmp",
+            approved_child_keys=keys,
+        )
+
+
+def test_r013_read_fault_or_owner_latch_invalidates_witnessed_original_exit_zero():
+    from tools.r010_authority_chain_t0 import JobState, RowState
+    nonce = grant().command_nonces[0]
+    for poisoned in (
+        dict(worker_pipe_reader_failed=True),
+        dict(owner_pipe_reader_failed=True),
+        dict(pipe_reader_finished=False),
+        dict(owner_unavailable=True),
+        dict(owner_closing=True),
+    ):
+        env = _envelope()
+        env.begin_row(0, nonce, nonce)
+        obs = _row_observation(nonce, **poisoned)
+        assert env.finish_row(0, observation=obs) == RowState.AMBIGUOUS
+        assert env.row_states[0] == RowState.AMBIGUOUS
+        assert env.state == JobState.FAILED
+        assert env.active_attempt_nonce is None
+        assert all(x == RowState.VOID for x in env.row_states[1:])
+        with pytest.raises(GateDenied):
+            env.begin_row(1, grant().command_nonces[1], grant().command_nonces[1])
+
+
+def test_r013_bearer_value_renamed_or_embedded_must_fail_even_under_safe_extension():
+    from tools.r010_authority_chain_t0 import (
+        PRODUCT_HELPER_ENV_KEYS, validate_preexec_selector_boundary_t0,
+    )
+    # Even with an independently source-reviewed innocuous variable NAME,
+    # the literal GitHub Runner credential may not appear as a child VALUE.
+    keys = PRODUCT_HELPER_ENV_KEYS | frozenset({"PYTHONUNBUFFERED"})
+    fixture = _preexec_t0(child={
+        "PYTHONUNBUFFERED": "prefix-private-fake-runner-bearer-only-suffix"
+    })
+    with pytest.raises(GateDenied):
+        validate_preexec_selector_boundary_t0(
+            fixture, expected_run_id=str(RUN), expected_run_attempt="1",
+            expected_head=HEAD, expected_image="20261104.0514.1",
+            expected_job="preexec_hold",
+            expected_home="/private/tmp/mfg-r010-private-home",
+            expected_tmp="/private/tmp/mfg-r010-private-tmp",
+            approved_child_keys=keys,
         )

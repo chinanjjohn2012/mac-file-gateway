@@ -2,8 +2,13 @@
 
 TASK_ID: MULTI-EXEC-LBE-FIVE-DAY-CANDIDATE-20261105
 MILESTONE_ID: LBE-FIVE-DAY-CORE-PRODUCT-CANDIDATE
-DESIGN_ID: MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-011-CANDIDATE
-REVIEW_ROUND: D4-R012-AUTHORITY-CHAIN-DESIGN-011
+DESIGN_ID: MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-012-CANDIDATE
+REVIEW_ROUND: D4-R013-AUTHORITY-CHAIN-DESIGN-012
+PREVIOUS_R012_FROZEN_HEAD_SHA: a2c28bee8c92b59ecd280597205038bb152586fd
+PREVIOUS_R012_FROZEN_TREE_SHA: 3a3ad1b2d5e93594927322644dcadd466bbd65f6
+PREVIOUS_R012_DESIGN_BLOB: 1dddfdaa5f610c6c02ba9b81d4d11296d2b36eb3
+PREVIOUS_R012_B_REVIEW: PRR_kwDOU5v3IM8AAAABWsvTtA (BLOCKED, two P2)
+PREVIOUS_R012_C_REVIEW: PRR_kwDOU5v3IM8AAAABWsvbsQ (TARGETED_PASS only, no migration)
 PREVIOUS_R011_FIXED_HEAD_SHA: 7cd6be407737be8e0b4f943bf6ac2ffb022f3f08
 PREVIOUS_R011_DESIGN_BLOB: 6b0d9e6f1248f075d927b04c0585f44357e4652c
 PREVIOUS_R011_B_REVIEW: PRR_kwDOU5v3IM8AAAABWsnx5A (BLOCKED, two P2 + one P3)
@@ -880,6 +885,166 @@ R012_DESIGN_STATUS=PROPOSED_NOT_EFFECTIVE
 REVIEW_ROUND=D4-R012-AUTHORITY-CHAIN-DESIGN-011
 REAL_OIDC_REQUEST=NOT_RUN
 ORIGINAL_MACOS_PRODUCT_T1=NOT_RUN
+INTEGRATION_STATUS=NOT_TESTED
+FULL_CODE_REVIEW_PASS=NOT_ISSUED
+R10_STATUS=BLOCKED
+
+
+## 16. R013 targeted P2 repair: reader/Owner health and irrevocable child deny
+
+R013 applies only to the PREVIOUS frozen R012 Standards findings
+B114-R012-ST-D011-P2-01 and B114-R012-ST-D011-P2-02, plus the directly
+necessary R012 C-scope adjacency. R012 B published REVIEW_COMPLETE,
+EVIDENCE_STATUS=INSUFFICIENT, VERDICT=BLOCKED with two in-scope P2.
+R012 C independently published TARGETED_REVIEW_PASS for DESIGN-011,
+NOT a PASS for DESIGN-012 or any runnable product.
+
+This section takes precedence over earlier sections 10/14/15 wherever
+they leave reader fault or child env override validation incomplete.
+It creates NO executable authority and does NOT change F1/R006, native
+launcher, Worker/DirectChildOwner source, GitHub workflow permissions,
+OIDC token acquisition, or real PRODUCT_T1 safety eligibility.
+
+### 16.1 B P2-01: reader/owner state is part of the ONE private row receipt
+
+A genuinely reaped original child, Worker.status="exited",
+Worker.executed=true, Worker.timed_out=false, matching integer exit=0
+and both stdout/stderr EOF do NOT suffice if reader resource cleanup
+fails. A real selector.close() or pipe.close() error AFTER both EOFs
+may produce output_complete=true AND pipe_reader_failed=true; the
+actual BoundedPipeDrain._release_resources sets _fault=true, signals
+the owner, and the Worker may return status="exited" after calling
+DirectChildOwner.latch_unavailable(reservation). This is a reader/owner
+uncertainty, never a positive next-row admission.
+
+For DESIGN-012 SAFE T0, the ONE frozen OwnedRowObservationT0 already
+binds identical active nonce, owner/Worker attempt, private reservation
+identity and witnessed original-child exit. Extend it to require ALL:
+- Worker-produced pipe_reader_failed is exactly False, not silently
+  omitted when output_complete=True.
+- The *same private reservation's* BoundedPipeDrain.snapshot reports
+  pipe_reader_failed exactly False AND pipe_reader_finished exactly True.
+- The actual DirectChildOwner.snapshot for the same owner is healthy:
+  unavailable exactly False AND closing exactly False, sampled after
+  the reader completion and immediately before row classification.
+- The original Owner DirectObservation and Worker result remain
+  consistent, no canceled/timed-out/ACK-lost or other invalid attempt.
+- Both actual streams EOF, no truncation, bounded bytes/redacted chars,
+  valid finite FS and Go artifact predicates.
+
+If ANY reader fault, missing reader-finalization proof, Owner-unavailable
+latch, Owner-close drift or contradictory Worker/Owner health exists,
+classify ROW_AMBIGUOUS (even when original exit=0 and EOF=true).
+This specifically overrides the broader earlier wording "failed reader
+=> ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS" for *owner/reader health
+faults* where the trusted completion authority is unavailable.
+ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS continues to apply to a
+HEALTHY completed reader with missing EOF, output truncated/over-bound
+or finite filesystem/artifact mismatch. Known nonzero only qualifies
+as ROW_OBSERVED_NONZERO when the same private observation and reader
+health are valid. Missing/false proof NEVER means allow subsequent
+Popen. Every nonpositive row latches JOB_FAILED_LATCHED, burns the
+nonce, VOID remaining rows, forbids retry/replay/later Popen.
+
+SAFE T0 tests must use ACTUAL LbeWorker/DirectChildOwner/BoundedPipeDrain
+source with an INJECTED FakeChild, explicitly produce TWO real fake
+zero-byte EOF events and then a selector.close() failure, and inspect
+Worker.pipe_reader_failed=True and Owner.unavailable=True. The row
+oracle MUST remain AMBIGUOUS/FAILED/VOID. Also test that a healthy
+status-exited original and completed no-fault reader still produces
+ROW_POSITIVE_SUCCESS even when public process_may_be_running=True
+describes unproven descendants, cleanup_proven=False and
+full_descendant_tree_clean="not_proven". More synthetic negatives must
+poison worker/owner reader health and finished flags independently.
+
+The receipt is NON_RUNTIME and source-only: test code reads the
+private owner reservation and reader snapshot. No client may mint
+this as evidence; the production pinned same-attempt adapter and
+atomic durable Job status/nonce journal do NOT exist yet and need
+separate implementation qualification. Current runtime Worker itself
+is NOT changed in this repair.
+
+### 16.2 B P2-02: hard-block forbidden child environment variable names
+
+An optional approved_child_keys argument is NEVER authority to expand
+the security boundary of the separate PRODUCT child. Do not merely
+compare a set of keys to a caller-provided frozenset or compare child
+values to the original PREEXEC Bearer. Hard DENY protected NAMES in
+the requested recipe and the actual child, independently of any
+caller-selected extension:
+
+- All ACTIONS_ID_TOKEN_*, GITHUB_*, RUNNER_*, SSH_*, GIT_*,
+  OIDC_*, AWS_*, AZURE_*, GOOGLE_*, GH_*, KRB5_* and Image*/IMAGE_*
+  selector families, plus exact SSH_AUTH_SOCK, GIT_ASKPASS,
+  SSH_ASKPASS and KRB5CCNAME.
+- All HTTP(S)_PROXY, ALL_PROXY, NO_PROXY and any other proxy selector,
+  including case changes and embedded PROXY; PIP_INDEX_URL,
+  PIP_EXTRA_INDEX_URL, PIP_TRUSTED_HOST, PIP_CONFIG_FILE,
+  PIPENV_* and other unapproved package/mirror selectors.
+- Names with token/password/secret/key/credential/auth suffixes or
+  embedded TOKEN/SECRET/PASSWORD; names outside canonical uppercase
+  ASCII env identifier syntax are denied.
+- Literal original OIDC Bearer, runner URL or SSH socket path forwarded
+  as ANY child/helper VALUE, including a renamed key or a prefixed/
+  suffixed copy; this is a conservative static value check, not proof
+  against transformed/encoded secret exfiltration.
+
+The safe child BASE is the closed five-key product-helper environment
+PATH, HOME, TMPDIR, LANG and LC_ALL. Only a separately source-reviewed
+SAFE T0 addition may join its closed recipe. This proposed R013
+immutable source-reviewed extra key/value profile is exactly:
+
+  PYTHONUNBUFFERED=1
+  PYTHONDONTWRITEBYTECODE=1
+  PIP_NO_INDEX=1
+  PIP_DISABLE_PIP_VERSION_CHECK=1
+
+Any selected combination of those four safe names is permitted solely
+with its EXACT value, plus all five base keys inherited exactly from
+the sanitized helper. An unknown Go/Pipenv/runtime env variable, a
+different value or an arbitrary approved_child_keys extension is
+DENY; review and VERSION a future new safe recipe explicitly rather
+than mutating this list or inheriting bootstrap env. These T0 candidate
+recipe options do not activate Go/Pipenv product execution.
+
+The PREEXEC stage still may receive exactly its separate reviewed two
+runner OIDC selectors, but the product helper remains the exact five
+noncredential keys and the product child must never receive the
+forbidden selector NAMES or values. No network/token request, HTTP
+redirect or foreign process is performed to evaluate this model.
+
+### 16.3 Original safe T0 / RED->GREEN and freeze
+
+For B P2-01, original RED MUST show FakeChild success status exit0 with
+both fake EOFs but a selector close-after-EOF resource fault; Worker
+returns pipe_reader_failed=true and owner unavailable=true, yet the
+old row model falsely advances. GREEN must produce ROW_AMBIGUOUS,
+JOB_FAILED_LATCHED, remaining ROW_VOID and zero future Popen; original
+no-fault exit0/nonzero/zero-invalid and cancel/timeout must regress.
+
+For B P2-02, original RED MUST show that approved_child_keys
+frozenset({base five} | {"ACTIONS_ID_TOKEN_REQUEST_TOKEN"}) can
+whitelist a *different fake token value* under that forbidden name;
+also test SSH/GITHUB/Runner/proxy/package selectors. GREEN must
+hard-deny irrespective of the override, retain safe exact-value extra
+recipe positives, reject renamed/embedded bearer, and preserve the
+existing signed OIDC Job-identity and canonical URL/ASCII-attempt T0.
+
+Retest the exact Head original Linux SAFE T0 and appropriate HTTP/MCP,
+Git/File regressions, current G05, Blob modes, Manifest and expected
+macOS R006 host FAIL_CLOSED. No exact positive native Worker, live
+OIDC, signature/JWKS, actual durable cross-process lease or integration
+is authorized. If new source/contract/Head drift occurs, B/C must
+review the fresh immutable Head/Tree and cannot inherit R012 PASS.
+
+R013_DESIGN_ID=MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-012-CANDIDATE
+R013_DESIGN_STATUS=PROPOSED_NOT_EFFECTIVE
+REVIEW_ROUND=D4-R013-AUTHORITY-CHAIN-DESIGN-012
+R012_B_VERDICT=BLOCKED_HISTORICAL_ONLY
+R012_C_VERDICT=TARGETED_PASS_HISTORICAL_ONLY
+OWNER_A0_A1_B0_B1=UNDECIDED
+ACTUAL_OIDC_AND_JWT=NOT_RUN_NOT_AUTHORIZED
+NATIVE_PRODUCT_T1=NOT_RUN_NOT_AUTHORIZED
 INTEGRATION_STATUS=NOT_TESTED
 FULL_CODE_REVIEW_PASS=NOT_ISSUED
 R10_STATUS=BLOCKED

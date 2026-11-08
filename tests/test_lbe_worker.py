@@ -662,7 +662,7 @@ def _r010_fake_worker_envelope():
 def _r012_record_private_owner_observe(patch, owner):
     """T0 spy on the actual DirectChildOwner.observe(reservation) call."""
     original_observe = owner.observe
-    record = {}
+    record = {"owner": owner}
 
     def observe(item, *, wait_seconds):
         result = original_observe(item, wait_seconds=wait_seconds)
@@ -684,6 +684,12 @@ def _r010_finish_from_owned_fake_worker(
     assert type(result) is dict
     direct = owner_record["direct_observation"]
     reservation = owner_record["reservation"]
+    # Real code observations of this exact private reservation and Owner:
+    # the public Worker dictionary cannot independently override health.
+    assert reservation.owner is owner_record["owner"]
+    assert reservation.pipe_drain is not None
+    reader_private = reservation.pipe_drain.snapshot()
+    owner_private = owner_record["owner"].snapshot()
     observed_worker = dict(result)
     if worker_override is not None:
         observed_worker.update(worker_override)
@@ -709,6 +715,11 @@ def _r010_finish_from_owned_fake_worker(
         worker_exit_code=observed_worker["exit_code"],
         worker_cancelled=False,
         ack_lost=False,
+        worker_pipe_reader_failed=observed_worker["pipe_reader_failed"],
+        owner_pipe_reader_failed=reader_private["pipe_reader_failed"],
+        pipe_reader_finished=reader_private["pipe_reader_finished"],
+        owner_unavailable=owner_private["unavailable"],
+        owner_closing=owner_private["closing"],
         stdout_eof=observed_worker["output_complete"],
         stderr_eof=observed_worker["output_complete"],
         stdout_truncated=observed_worker["stdout_truncated"],
@@ -945,5 +956,57 @@ def test_r013_red_both_eof_then_selector_close_fault_cannot_advance_row(monkeypa
         assert result["process_may_be_running"] is True
         assert result["cleanup_proven"] is False
         assert result["full_descendant_tree_clean"] == "not_proven"
+    finally:
+        owner.close()
+
+
+@pytest.mark.parametrize("worker_override,private_override", [
+    ({"pipe_reader_failed": True}, None),
+    (None, {"worker_pipe_reader_failed": True}),
+    (None, {"owner_pipe_reader_failed": True}),
+    (None, {"pipe_reader_finished": False}),
+    (None, {"owner_unavailable": True}),
+    (None, {"owner_closing": True}),
+])
+def test_r013_source_fake_worker_reader_or_owner_fault_forbids_later_row(
+    monkeypatch, worker_override, private_override,
+):
+    """Healthy REAL Worker FakeChild plus injected health contradiction."""
+    from tools.r010_authority_chain_t0 import RowState, JobState
+    fake = FakeChild(exit_code=0)
+    selector = FakeSelector()
+
+    def launch(_plan):
+        selector.enqueue(91, b"original-good")
+        selector.enqueue(91, b"")
+        selector.enqueue(92, b"")
+        fake.exit.set()
+        return fake
+
+    worker, owner, _ = driver(selector=selector, launch=launch)
+    def no_popen(*_a, **_kw):
+        raise AssertionError("R013 SAFE T0 forbids native child/signals")
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", no_popen)
+            m.setattr(os, "kill", no_popen)
+            m.setattr(os, "killpg", no_popen, raising=False)
+            record = _r012_record_private_owner_observe(m, owner)
+            result = worker.run(plan())
+        assert result["status"] == "exited"
+        assert result["output_complete"] is True
+        assert result["pipe_reader_failed"] is False
+        assert record["reservation"].pipe_drain.snapshot()["pipe_reader_finished"] is True
+        assert owner.snapshot()["unavailable"] is False
+        env = _r010_fake_worker_envelope()
+        assert _r010_finish_from_owned_fake_worker(
+            env, result, owner_record=record, fs_ok=True,
+            worker_override=worker_override,
+            observation_override=private_override,
+        ) == RowState.AMBIGUOUS
+        assert env.state == JobState.FAILED
+        assert all(row == RowState.VOID for row in env.row_states[1:])
+        with pytest.raises(Exception, match="not ready"):
+            env.begin_row(1, "second", "second")
     finally:
         owner.close()

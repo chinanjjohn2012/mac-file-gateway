@@ -11,9 +11,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 import re
+from types import MappingProxyType
 from urllib.parse import quote, urlsplit
 
-R010_DESIGN_ID = "MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-011-CANDIDATE"
+R010_DESIGN_ID = "MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-012-CANDIDATE"
 R012_OIDC_ENDPOINT_PROFILE = "R012_GITHUB_RUNNER_PIPELINES_OIDC_BASE_V1"
 R012_OIDC_ENDPOINT_PATH = "/_apis/oidc/token"
 R012_OIDC_ENDPOINT_QUERY = "api-version=2.0"
@@ -30,6 +31,32 @@ OIDC_PREEXEC_ADDITIONAL_KEYS = frozenset({
     "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
 })
 PRODUCT_HELPER_ENV_KEYS = frozenset({"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"})
+# Immutable source-reviewed offline-only extra child keys for this SAFE T0
+# profile. No unreviewed Go/Pipenv variable or arbitrary recipe name can
+# expand this policy via approved_child_keys. Exact values are mandatory.
+R013_REVIEWED_CHILD_EXTRA_VALUES = MappingProxyType({
+    "PYTHONUNBUFFERED": "1",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PIP_NO_INDEX": "1",
+    "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+})
+R013_FORBIDDEN_CHILD_EXACT = frozenset({
+    "SSH_AUTH_SOCK", "SSH_ASKPASS", "GIT_ASKPASS", "KRB5CCNAME",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_TRUSTED_HOST",
+    "PIP_CONFIG_FILE", "PIPENV_DOTENV_LOCATION",
+})
+R013_FORBIDDEN_CHILD_PREFIXES = (
+    "ACTIONS_ID_TOKEN_", "GITHUB_", "RUNNER_", "SSH_", "GIT_",
+    "AWS_", "AZURE_", "GOOGLE_", "OIDC_", "GH_", "KRB5_",
+    "IMAGE_", "Image", "HTTP_", "HTTPS_", "ALL_PROXY",
+    "PIP_INDEX", "PIP_EXTRA_INDEX", "PIP_TRUSTED", "PIP_CONFIG",
+    "PIPENV_",
+)
+R013_FORBIDDEN_CHILD_SUFFIXES = (
+    "_TOKEN", "_PASSWORD", "_PASSWD", "_SECRET", "_KEY",
+    "_CREDENTIAL", "_CREDENTIALS", "_AUTH", "_PROXY",
+)
 R010_CHOICE_MARKER = "R010_OWNER_DESIGN_CHOICE_V1"
 R010_GRANT_MARKER = "R010_OWNER_PRODUCT_T1_GRANT_V1"
 R010_STATE_DOMAIN = "R010_EPHEMERAL_JOB_STATE_V1"
@@ -193,6 +220,21 @@ def build_oidc_token_url_t0(raw_url: str, audience: str) -> str:
     return base + "&audience=" + quote(audience, safe="")
 
 
+def _r013_forbidden_child_selector_name(key: object) -> bool:
+    """Immutable hard DENY: a caller-selected recipe cannot weaken it."""
+    if (type(key) is not str
+            or re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", key,
+                            flags=re.ASCII) is None):
+        return True
+    return (key in R013_FORBIDDEN_CHILD_EXACT
+            or key.startswith(R013_FORBIDDEN_CHILD_PREFIXES)
+            or key.endswith(R013_FORBIDDEN_CHILD_SUFFIXES)
+            or "PROXY" in key
+            or "TOKEN" in key
+            or "SECRET" in key
+            or "PASSWORD" in key)
+
+
 def validate_preexec_selector_boundary_t0(
     item: PreexecSelectorBoundary, *,
     expected_run_id: str, expected_run_attempt: str,
@@ -228,8 +270,22 @@ def validate_preexec_selector_boundary_t0(
         raise GateDenied("PREEXEC bootstrap keys not the exact versioned allowlist")
     if set(helper) != PRODUCT_HELPER_ENV_KEYS:
         raise GateDenied("product helper contains extra credential/selector keys")
-    if type(approved_child_keys) is not frozenset or set(child) != approved_child_keys:
-        raise GateDenied("child differs from reviewed closed recipe")
+    if type(approved_child_keys) is not frozenset:
+        raise GateDenied("child recipe keys must be a reviewed exact frozenset")
+    # Independently hard-reject protected names in both the requested recipe
+    # and actual child. No user-configurable allowlist override can opt in.
+    if any(_r013_forbidden_child_selector_name(k)
+           for k in approved_child_keys | frozenset(child)):
+        raise GateDenied("forbidden child credential selector name")
+    reviewed = PRODUCT_HELPER_ENV_KEYS | frozenset(R013_REVIEWED_CHILD_EXTRA_VALUES)
+    if (not PRODUCT_HELPER_ENV_KEYS.issubset(approved_child_keys)
+            or not approved_child_keys.issubset(reviewed)
+            or set(child) != approved_child_keys):
+        raise GateDenied("child differs from immutable reviewed exact recipe")
+    if any(child.get(k) != expected
+           for k, expected in R013_REVIEWED_CHILD_EXTRA_VALUES.items()
+           if k in approved_child_keys):
+        raise GateDenied("reviewed child safe-key value mismatch")
     expected = {
         "PATH": "/usr/bin:/bin", "HOME": expected_home,
         "TMPDIR": expected_tmp, "LANG": "C", "LC_ALL": "C",
@@ -262,7 +318,11 @@ def validate_preexec_selector_boundary_t0(
         raise GateDenied("post-PREEXEC helper environment changed")
     if any(child.get(k) != bootstrap[k] for k in PRODUCT_HELPER_ENV_KEYS & approved_child_keys):
         raise GateDenied("reviewed child base environment changed")
-    if any(value in (raw_token, raw_url, bootstrap["SSH_AUTH_SOCK"])
+    # Renaming a selector does not make its literal value permissible.
+    # This is still source-only: real secret transformations require a
+    # later reviewed runtime origin/credential flow check.
+    forbidden_values = (raw_token, raw_url, bootstrap["SSH_AUTH_SOCK"])
+    if any(type(value) is not str or any(secret in value for secret in forbidden_values)
            for value in (*helper.values(), *child.values())):
         raise GateDenied("bootstrap credential/SSH selector forwarded")
 
@@ -451,6 +511,12 @@ class OwnedRowObservationT0:
     worker_exit_code: int | None
     worker_cancelled: bool
     ack_lost: bool
+    # Source-only evidence from the SAME private reader and Owner state.
+    worker_pipe_reader_failed: bool
+    owner_pipe_reader_failed: bool
+    pipe_reader_finished: bool
+    owner_unavailable: bool
+    owner_closing: bool
     stdout_eof: bool
     stderr_eof: bool
     stdout_truncated: bool
@@ -549,6 +615,11 @@ class JobEnvelope:
             and observation.worker_timed_out is False
             and observation.worker_cancelled is False
             and observation.ack_lost is False
+            and observation.worker_pipe_reader_failed is False
+            and observation.owner_pipe_reader_failed is False
+            and observation.pipe_reader_finished is True
+            and observation.owner_unavailable is False
+            and observation.owner_closing is False
             and type(observation.owner_exit_code) is int
             and type(observation.worker_exit_code) is int
             and observation.owner_exit_code == observation.worker_exit_code
@@ -558,7 +629,9 @@ class JobEnvelope:
         )
         if not valid:
             # Any untrusted/mismatching attempt, cancelled/lost-ACK waiter,
-            # timed-out Worker, missing reap, or disagreement is ambiguous,
+            # timed-out Worker, reader fault (even AFTER EOF), unhealthy
+            # Owner, unfinished drain, missing reap or disagreement is
+            # ambiguous,
             # even with a forged exit code zero and both streams complete.
             result = RowState.AMBIGUOUS
         elif observation.owner_exit_code != 0:

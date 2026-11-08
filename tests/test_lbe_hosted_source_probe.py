@@ -161,3 +161,90 @@ def test_one_use_host_receipt_concurrent_callers_burn_exactly_once(tmp_path):
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(compete, range(2)))
     assert sorted(results) == ["first", "rejected"]
+
+
+def test_root_external_ancestor_becoming_writable_during_fd_read_denied(
+        tmp_path, monkeypatch):
+    """External ancestors above source_root belong to the same source proof."""
+    outside = tmp_path / "owner-container"
+    outside.mkdir(mode=0o700)
+    outside.chmod(0o700)
+    root, parent, file, entry = _staged(outside)
+    leaf_id = (file.stat().st_dev, file.stat().st_ino)
+    original_read = os.read
+    changed = []
+    try:
+        def change_external_parent_on_read(fd, length):
+            data = original_read(fd, length)
+            st = os.fstat(fd)
+            if (not changed and (st.st_dev, st.st_ino) == leaf_id):
+                outside.chmod(0o777)
+                changed.append(True)
+            return data
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "read", change_external_parent_on_read)
+            with pytest.raises(D4HostedSourceDenied):
+                inspect_d4_hosted_selected_source_files(
+                    source_root=str(root), expected=entry)
+    finally:
+        outside.chmod(0o700)
+    assert changed == [True]
+
+
+def test_root_external_ancestor_replaced_in_namespace_during_read_denied(
+        tmp_path, monkeypatch):
+    """An FD alone is not proof that its parent pathname still resolves."""
+    outside = tmp_path / "owner-container"
+    moved = tmp_path / "owner-container-moved"
+    outside.mkdir(mode=0o700)
+    outside.chmod(0o700)
+    root, parent, file, entry = _staged(outside)
+    leaf_id = (file.stat().st_dev, file.stat().st_ino)
+    original_read = os.read
+    replaced = []
+    try:
+        def rename_external_parent_on_read(fd, length):
+            data = original_read(fd, length)
+            st = os.fstat(fd)
+            if (not replaced and (st.st_dev, st.st_ino) == leaf_id):
+                outside.rename(moved)
+                replaced.append(True)
+            return data
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "read", rename_external_parent_on_read)
+            with pytest.raises(D4HostedSourceDenied):
+                inspect_d4_hosted_selected_source_files(
+                    source_root=str(root), expected=entry)
+    finally:
+        if moved.exists() and not outside.exists():
+            moved.rename(outside)
+    assert replaced == [True]
+
+
+def test_root_external_ancestor_unsafe_permissions_rejected_at_entry(tmp_path):
+    outside = tmp_path / "owner-container"
+    outside.mkdir(mode=0o700)
+    root, parent, file, entry = _staged(outside)
+    outside.chmod(0o777)
+    try:
+        with pytest.raises(D4HostedSourceDenied):
+            inspect_d4_hosted_selected_source_files(
+                source_root=str(root), expected=entry)
+    finally:
+        outside.chmod(0o700)
+
+
+def test_root_external_ancestor_owned_and_unchanged_remains_legal(tmp_path):
+    outside = tmp_path / "owner-container"
+    outside.mkdir(mode=0o700)
+    root, parent, file, entry = _staged(outside)
+    measured = inspect_d4_hosted_selected_source_files(
+        source_root=str(root), expected=entry)
+    assert measured.native_launch_allowed is False
+    # Include the real /-to-source_root ancestors, not just the final root.
+    assert len(measured.root_ancestor_identities) >= 4
+    checked = D4HostedSelectedSourceRecheck(
+        source_root=str(root), expected=entry)
+    assert checked.recheck_once() is None

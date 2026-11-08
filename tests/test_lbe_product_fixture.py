@@ -4608,3 +4608,43 @@ def test_d4_service_nonoperative_worker_error_releases_request_lease(
                 with service._lifecycle:
                     service._exec_active.remove("a")
     assert calls == []
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go", "go-project", ["go", "test", "./..."]),
+])
+def test_d4_service_owned_worker_requires_real_selected_arm64_loader_set(
+        product_service, monkeypatch, kind, cwd, argv):
+    """The service-owned source path must reject inert selected executables.
+
+    The low-level D4 host source probe alone is not sufficient. All selected
+    Go go/compile/link or the actual Python/Pipenv interpreter need the same
+    full ARM64 Mach-O loader-set preflight as the separate inspector, even
+    when the public product is still hard-denied and no native child runs.
+    """
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    trees = _d4_staged_trees(workspace, kind)
+    observed = []
+
+    def forbidden(*_args, **_kwargs):
+        observed.append("spawn_or_signal")
+        raise AssertionError("No native Go, Python or Pipenv is authorized")
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", forbidden)
+        m.setattr(os, "kill", forbidden)
+        m.setattr(os, "killpg", forbidden, raising=False)
+        with pytest.raises(GatewayError) as rejected:
+            service._exercise_d4_r003_source_only_worker(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees=trees)
+        assert rejected.value.code == "runner_unavailable"
+        assert service._exec_active == set()
+        assert service._lbe_owner.snapshot()["reserved_slots"] == 0
+        assert service._lbe_owner.snapshot()["unavailable"] is False
+    assert observed == []

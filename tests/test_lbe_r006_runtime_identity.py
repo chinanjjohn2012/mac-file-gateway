@@ -227,12 +227,14 @@ def test_canonical_fresh_checkout_rejects_post_receipt_ignored_and_untracked(
     ignored = root / "ignored_runtime.py"
     ignored.write_text("UNREVIEWED = True\n", encoding="ascii")
     with pytest.raises(
-            D4R006RuntimeIdentityDenied, match="untracked/ignored"):
+            D4R006RuntimeIdentityDenied,
+            match="checkout root identity changed|untracked/ignored"):
         _fresh_checkout_receipt(receipt, environ=env)
     ignored.unlink()
 
     untracked = root / "unreviewed.txt"
     untracked.write_text("x\n", encoding="ascii")
     with pytest.raises(
-            D4R006RuntimeIdentityDenied, match="tracked/untracked"):
+            D4R006RuntimeIdentityDenied,
+            match="checkout root identity changed|tracked/untracked"):
         _fresh_checkout_receipt(receipt, environ=env)

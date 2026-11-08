@@ -5048,7 +5048,10 @@ def test_r006_private_runner_all_six_use_exact_product_recipe_then_replay_denies
         product_service, monkeypatch, kind, cwd, argv):
     from gateway.lbe_hosted_source_probe import D4HostedSelectedSourceObservation
     from gateway.lbe_owner_grant_bootstrap import D4ConsumedOwnerGrant
-    from gateway.lbe_r006_macos_allowlist import D4R006HostAllowlistObservation
+    from gateway.lbe_r006_macos_allowlist import (
+        D4R006HostAllowlistObservation, R006_HOST_SOURCE_FINGERPRINT,
+        R006_RUNNER_PROFILE_FINGERPRINT,
+    )
     from gateway import lbe_r006_native_runner as r006_runner
     from gateway.lbe_r006_native_runner import D4R006NativeLaunchBoundary
     from gateway.lbe_worker import LbeNoChildStarted
@@ -5073,12 +5076,16 @@ def test_r006_private_runner_all_six_use_exact_product_recipe_then_replay_denies
         )
         host = D4R006HostAllowlistObservation(
             system=selected, usr=selected,
-            source_fingerprint=(
-                "7c2b07cc58c98add78ad5ec5aa1b47610eba4345bca0f770565e89503d5990ee"),
-            runner_profile_fingerprint=(
-                "2d5f60e99e1f982b66d2fbe33392b7b5659188d227038511f2024dac79dc08fe"),
+            source_fingerprint=R006_HOST_SOURCE_FINGERPRINT,
+            runner_profile_fingerprint=R006_RUNNER_PROFILE_FINGERPRINT,
             image_version="20261104.0514.1", macos_version="15.8.2",
-            os_build="24H232",
+            os_build="24H232", kernel_sysname="Darwin", machine="arm64",
+            run_id=42445537246, run_attempt=1, job_name="r007-t0",
+            mount_table_fingerprint="f" * 64,
+            actual_host_safety_verified=True,
+            no_ambient_credentials_observed=True,
+            no_ambient_proxy_observed=True,
+            no_writable_nonlocal_mounts_observed=True,
         )
         consumed = object.__new__(D4ConsumedOwnerGrant)
         m.setattr(

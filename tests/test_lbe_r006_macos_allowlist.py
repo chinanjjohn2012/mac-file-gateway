@@ -42,8 +42,8 @@ def _mounts():
 
 def _stage(tmp_path, monkeypatch):
     system = tmp_path / "System"; usr = tmp_path / "usr"
-    (system / "Library" / "CoreServices").mkdir(parents=True)
-    (usr / "bin").mkdir(parents=True); (usr / "lib").mkdir()
+    (system / "Library" / "CoreServices").mkdir(parents=True, exist_ok=True)
+    (usr / "bin").mkdir(parents=True, exist_ok=True); (usr / "lib").mkdir(exist_ok=True)
     rows = [
         (system / "Library" / "CoreServices" / "SystemVersion.plist", b"plist"),
         (usr / "bin" / "env", b"env"), (usr / "lib" / "dyld", b"dyld"),

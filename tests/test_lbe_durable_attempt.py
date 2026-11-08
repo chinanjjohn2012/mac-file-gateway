@@ -172,7 +172,7 @@ def test_real_service_owner_locked_source_only_journal_restart(tmp_path, monkeyp
     from gateway.lbe_launch_recipe import D4NativeLaunchRecipe
     from gateway.lbe_plan import prepare_lbe_work_plan
     from gateway.lbe_r006_review_gate import D4VerifiedReviewPair
-from gateway.lbe_r006_macos_allowlist import (
+    from gateway.lbe_r006_macos_allowlist import (
         D4R006HostAllowlistObservation,
         R006_HOST_SOURCE_FINGERPRINT, R006_RUNNER_PROFILE_FINGERPRINT,
     )

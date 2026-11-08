@@ -49,6 +49,7 @@ class D4AttemptIdentity:
     os_build: str
     source_fingerprint: str
     runner_fingerprint: str
+    product_recipe_fingerprint: str
     workspace: str
     cwd: str
     runner: str
@@ -61,7 +62,8 @@ class D4AttemptIdentity:
     def checked(self) -> "D4AttemptIdentity":
         # Type checks precede formatting/equality to avoid hostile subclasses.
         for name in ("nonce", "manifest_sha256", "source_fingerprint",
-                     "runner_fingerprint", "requested_argv_fingerprint",
+                     "runner_fingerprint", "product_recipe_fingerprint",
+                     "requested_argv_fingerprint",
                      "effective_argv_fingerprint"):
             value = getattr(self, name)
             if type(value) is not str or _SHA.fullmatch(value) is None:

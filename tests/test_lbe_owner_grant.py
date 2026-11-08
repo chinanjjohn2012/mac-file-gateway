@@ -37,6 +37,7 @@ def payload(now):
         "os_build": "24H232",
         "source_fingerprint": R006_HOST_SOURCE_FINGERPRINT,
         "runner_fingerprint": R006_RUNNER_PROFILE_FINGERPRINT,
+        "product_recipe_fingerprint": "d" * 64,
         "workspace": "a", "cwd": "py-direct",
         "runner": "direct", "requested_argv_sha256": S,
         "effective_argv_sha256": S, "timeout_seconds": 120,
@@ -109,6 +110,7 @@ def test_non_owner_or_ambiguous_comment_denied(monkeypatch, mutate):
     {"image_os": "macos26"}, {"image_version": "unknown"},
     {"os_build": ""}, {"workspace": "../escape"}, {"cwd": "../outside"},
     {"runner": "shell"}, {"timeout_seconds": 121}, {"nonce": "bad"},
+    {"product_recipe_fingerprint": "bad"},
 ])
 def test_grant_binding_fields_fail_closed(monkeypatch, changes):
     now = 1794100000

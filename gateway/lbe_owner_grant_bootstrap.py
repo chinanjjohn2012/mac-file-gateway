@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import ssl
 import time
 import urllib.error
@@ -23,6 +24,7 @@ from .lbe_owner_grant import (
     verify_d4_owner_github_comment_t0,
 )
 from .lbe_r006_macos_allowlist import D4R006HostAllowlistObservation
+from .lbe_launch_recipe import D4NativeLaunchRecipe
 from .lbe_worker import LbeWorkPlan, LbeWorker, LbeWorkerError
 
 _REPO = "chinanjjohn2012/mac-file-gateway"
@@ -95,6 +97,37 @@ def fetch_verified_owner_grant(comment_id: int) -> D4VerifiedOwnerGrant:
         raise D4OwnerBootstrapDenied("GitHub owner grant semantic verification failed") from None
 
 
+class D4ConsumedOwnerGrant:
+    """Service-produced witness: exact grant was durably burned in this process."""
+
+    __slots__ = ("_attempt", "_journal_digest", "_pid", "_plan", "_recipe")
+
+    def __init__(self, token, attempt, journal_digest, plan, recipe):
+        if token is not _BIND_TOKEN:
+            raise D4OwnerBootstrapDenied("consumed grant cannot be directly constructed")
+        if (type(journal_digest) is not str or len(journal_digest) != 64
+                or any(c not in "0123456789abcdef" for c in journal_digest)):
+            raise D4OwnerBootstrapDenied("invalid durable consumption digest")
+        self._attempt = attempt
+        self._journal_digest = journal_digest
+        self._pid = os.getpid()
+        self._plan = plan
+        self._recipe = recipe
+
+    @property
+    def attempt(self):
+        return self._attempt
+
+    def check_binding(self, plan: object, recipe: object) -> None:
+        if (os.getpid() != self._pid or plan is not self._plan
+                or recipe is not self._recipe
+                or type(plan) is not LbeWorkPlan
+                or type(recipe) is not D4NativeLaunchRecipe):
+            raise D4OwnerBootstrapDenied("consumed grant binding changed")
+        if recipe.selected_source_fingerprint != self._attempt.product_recipe_fingerprint:
+            raise D4OwnerBootstrapDenied("consumed product recipe changed")
+
+
 class D4BoundOwnerGrant:
     """Exact current-runtime binding, not directly constructible."""
 
@@ -110,9 +143,13 @@ class D4BoundOwnerGrant:
     def attempt(self):
         return self._attempt
 
+    @property
+    def grant_digest(self):
+        return self._grant_digest
+
 
 def bind_verified_owner_grant_t0(
-    grant: object, host: object, plan: object, *,
+    grant: object, host: object, plan: object, recipe: object, *,
     base_sha: str, head_sha: str, head_tree: str, manifest_sha256: str,
     run_id: int, run_attempt: int,
 ) -> D4BoundOwnerGrant:
@@ -123,10 +160,24 @@ def bind_verified_owner_grant_t0(
         raise D4OwnerBootstrapDenied("unverified current host/source observation")
     if type(plan) is not LbeWorkPlan:
         raise D4OwnerBootstrapDenied("untrusted current plan")
+    if type(recipe) is not D4NativeLaunchRecipe:
+        raise D4OwnerBootstrapDenied("untrusted product recipe")
     try:
         LbeWorker._check_plan(plan)
     except LbeWorkerError:
         raise D4OwnerBootstrapDenied("invalid current plan") from None
+    if (recipe.workspace != plan.workspace
+            or recipe.runner != plan.runner
+            or recipe.requested_argv != plan.requested_argv
+            or recipe.service_effective_argv != plan.effective_argv
+            or recipe.original_timeout_seconds != plan.timeout_seconds
+            or recipe.native_launch_allowed is not False
+            or recipe.owner_t1_grant_present is not False
+            or type(recipe.selected_source_fingerprint) is not str
+            or len(recipe.selected_source_fingerprint) != 64
+            or any(c not in "0123456789abcdef"
+                   for c in recipe.selected_source_fingerprint)):
+        raise D4OwnerBootstrapDenied("product recipe does not match current plan")
     for value, length, label in (
         (base_sha, 40, "base"), (head_sha, 40, "head"),
         (head_tree, 40, "tree"), (manifest_sha256, 64, "manifest"),
@@ -146,6 +197,7 @@ def bind_verified_owner_grant_t0(
     current = (
         base_sha, head_sha, head_tree, manifest_sha256, run_id, run_attempt,
         host.source_fingerprint, host.runner_profile_fingerprint,
+        recipe.selected_source_fingerprint,
         plan.workspace, plan.cwd, plan.runner,
         _argv_fingerprint(plan.requested_argv),
         _argv_fingerprint(plan.effective_argv), plan.timeout_seconds,
@@ -155,6 +207,7 @@ def bind_verified_owner_grant_t0(
         attempt.base_sha, attempt.head_sha, attempt.head_tree,
         attempt.manifest_sha256, attempt.run_id, attempt.run_attempt,
         attempt.source_fingerprint, attempt.runner_fingerprint,
+        attempt.product_recipe_fingerprint,
         attempt.workspace, attempt.cwd, attempt.runner,
         attempt.requested_argv_fingerprint, attempt.effective_argv_fingerprint,
         attempt.timeout_seconds, attempt.image_version, attempt.os_build,
@@ -162,3 +215,15 @@ def bind_verified_owner_grant_t0(
     if current != approved or int(time.time()) > attempt.expires_at_unix:
         raise D4OwnerBootstrapDenied("owner grant does not match current run/plan")
     return D4BoundOwnerGrant(_BIND_TOKEN, attempt, grant.grant_digest)
+
+
+def _new_consumed_owner_grant(bound: object, journal_digest: str,
+                              plan: object, recipe: object) -> D4ConsumedOwnerGrant:
+    """WorkspaceService-only constructor after D4DurableAttemptJournal.consume."""
+    if (type(bound) is not D4BoundOwnerGrant or type(plan) is not LbeWorkPlan
+            or type(recipe) is not D4NativeLaunchRecipe):
+        raise D4OwnerBootstrapDenied("invalid durable grant source")
+    if recipe.selected_source_fingerprint != bound.attempt.product_recipe_fingerprint:
+        raise D4OwnerBootstrapDenied("durable grant recipe mismatch")
+    return D4ConsumedOwnerGrant(
+        _BIND_TOKEN, bound.attempt, journal_digest, plan, recipe)

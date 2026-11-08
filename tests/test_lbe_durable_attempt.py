@@ -30,6 +30,7 @@ def example(nonce=S, run_attempt=1):
         c_code_review_id="PRR_currentSpecReview123",
         image_version="20261104.0514.1", os_build="24H232",
         source_fingerprint=S, runner_fingerprint=S,
+        product_recipe_fingerprint=S,
         workspace="first-party", cwd="src", runner="direct",
         requested_argv_fingerprint=S, effective_argv_fingerprint=S,
         timeout_seconds=120, owner_comment_id=7712345678,
@@ -165,7 +166,10 @@ def test_real_service_owner_locked_source_only_journal_restart(tmp_path, monkeyp
     from gateway.core import GatewayError
     from gateway.exec_state import ExecStateStore
     from gateway.lbe_owner_grant import verify_d4_owner_github_comment_t0
-    from gateway.lbe_owner_grant_bootstrap import _argv_fingerprint
+    from gateway.lbe_owner_grant_bootstrap import (
+        D4ConsumedOwnerGrant, _argv_fingerprint,
+    )
+    from gateway.lbe_launch_recipe import D4NativeLaunchRecipe
     from gateway.lbe_r006_macos_allowlist import (
         D4R006HostAllowlistObservation,
         R006_HOST_SOURCE_FINGERPRINT, R006_RUNNER_PROFILE_FINGERPRINT,
@@ -193,6 +197,7 @@ def test_real_service_owner_locked_source_only_journal_restart(tmp_path, monkeyp
         "os_build": "24H232",
         "source_fingerprint": R006_HOST_SOURCE_FINGERPRINT,
         "runner_fingerprint": R006_RUNNER_PROFILE_FINGERPRINT,
+        "product_recipe_fingerprint": S,
         "workspace": "a", "cwd": "src",
         "runner": "direct",
         "requested_argv_sha256": _argv_fingerprint(("python", "-m", "pytest", "-q")),
@@ -247,6 +252,20 @@ def test_real_service_owner_locked_source_only_journal_restart(tmp_path, monkeyp
         image_version="20261104.0514.1", macos_version="15.8.2",
         os_build="24H232",
     )
+    recipe = D4NativeLaunchRecipe(
+        workspace="a",
+        profile_git_blob="f8556b48ab5f4af7390fb015092862a8a87768fb",
+        runner="direct",
+        requested_argv=("python", "-m", "pytest", "-q"),
+        service_effective_argv=("python", "-m", "pytest", "-q"),
+        resolved_executable="/private/bin/python",
+        resolved_spawn_argv=("/private/bin/python", "-m", "pytest", "-q"),
+        working_directory="/private/src",
+        closed_child_environment=(("HOME", "/private/home"),),
+        selected_source_fingerprint=S,
+        canonical_output_path=None,
+        original_timeout_seconds=120,
+    )
     for round in range(2):
         with_service = WorkspaceService(
             settings, config_dir=private,
@@ -254,17 +273,19 @@ def test_real_service_owner_locked_source_only_journal_restart(tmp_path, monkeyp
         try:
             assert with_service._exec_state.durability_state == "healthy"
             if round == 0:
-                assert len(with_service._consume_d4_r006_attempt_source_only(
-                    verified, host, "a", "src",
+                consumed = with_service._consume_d4_r006_attempt_source_only(
+                    verified, host, recipe, "a", "src",
                     ["python", "-m", "pytest", "-q"], 120,
                     base_sha=H, head_sha=H, head_tree=H,
                     manifest_sha256=S, run_id=42445537246,
-                    run_attempt=1)) == 64
+                    run_attempt=1)
+                assert type(consumed) is D4ConsumedOwnerGrant
+                assert consumed.attempt.nonce == "d" * 64
             else:
                 # The exact grant remains burned after service restart.
                 with pytest.raises(GatewayError):
                     with_service._consume_d4_r006_attempt_source_only(
-                        verified, host, "a", "src",
+                        verified, host, recipe, "a", "src",
                         ["python", "-m", "pytest", "-q"], 120,
                         base_sha=H, head_sha=H, head_tree=H,
                         manifest_sha256=S, run_id=42445537246,
@@ -308,7 +329,7 @@ def test_service_without_existing_private_journal_never_creates_one(tmp_path):
     try:
         with pytest.raises(GatewayError):
             service._consume_d4_r006_attempt_source_only(
-                object(), object(), "a", "src",
+                object(), object(), object(), "a", "src",
                 ["python", "-m", "pytest", "-q"], 120,
                 base_sha=H, head_sha=H, head_tree=H,
                 manifest_sha256=S, run_id=1, run_attempt=1)

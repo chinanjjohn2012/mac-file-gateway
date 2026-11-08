@@ -49,7 +49,8 @@ _FIELDS = (
     "head_tree", "manifest_sha256", "r006_design_blob", "b_design_review_id",
     "c_design_review_id", "b_code_review_id", "c_code_review_id",
     "github_run_id", "github_run_attempt", "image_os", "image_version",
-    "os_build", "source_fingerprint", "runner_fingerprint", "workspace", "cwd",
+    "os_build", "source_fingerprint", "runner_fingerprint",
+    "product_recipe_fingerprint", "workspace", "cwd",
     "runner", "requested_argv_sha256", "effective_argv_sha256",
     "timeout_seconds", "nonce", "expires_at",
 )
@@ -186,7 +187,8 @@ def verify_d4_owner_github_comment_t0(api_response: bytes) -> D4VerifiedOwnerGra
     for field in ("base_sha", "head_sha", "head_tree"):
         _sha(p[field], 40, field)
     for field in ("manifest_sha256", "source_fingerprint",
-                  "runner_fingerprint", "requested_argv_sha256",
+                  "runner_fingerprint", "product_recipe_fingerprint",
+                  "requested_argv_sha256",
                   "effective_argv_sha256", "nonce"):
         _sha(p[field], 64, field)
     run_id = _positive_int(p["github_run_id"], "GitHub run id")
@@ -230,6 +232,7 @@ def verify_d4_owner_github_comment_t0(api_response: bytes) -> D4VerifiedOwnerGra
         image_version=p["image_version"], os_build=p["os_build"],
         source_fingerprint=p["source_fingerprint"],
         runner_fingerprint=p["runner_fingerprint"],
+        product_recipe_fingerprint=p["product_recipe_fingerprint"],
         workspace=p["workspace"], cwd=p["cwd"], runner=p["runner"],
         requested_argv_fingerprint=p["requested_argv_sha256"],
         effective_argv_fingerprint=p["effective_argv_sha256"],

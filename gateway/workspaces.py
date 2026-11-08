@@ -496,11 +496,12 @@ class WorkspaceService:
                 self._lifecycle.notify_all()
 
     def _consume_d4_r006_attempt_source_only(
-        self, grant: object, host: object, name: str, cwd: str,
+        self, grant: object, host: object, recipe: object,
+        name: str, cwd: str,
         argv: list[str], timeout_seconds: int, *,
         base_sha: str, head_sha: str, head_tree: str, manifest_sha256: str,
         run_id: int, run_attempt: int,
-    ) -> str:
+    ) -> object:
         """Bind and burn an exact future R006 attempt before any reservation.
 
         NONOPERATIVE source/T0 only. The service itself rebuilds the canonical
@@ -512,7 +513,8 @@ class WorkspaceService:
         """
         from .lbe_durable_attempt import D4DurableAttemptDenied
         from .lbe_owner_grant_bootstrap import (
-            D4OwnerBootstrapDenied, bind_verified_owner_grant_t0,
+            D4OwnerBootstrapDenied, _new_consumed_owner_grant,
+            bind_verified_owner_grant_t0,
         )
         from .lbe_plan import prepare_lbe_work_plan
         with self._lifecycle:
@@ -528,10 +530,13 @@ class WorkspaceService:
                 plan = prepare_lbe_work_plan(
                     ctx, cwd=cwd, argv=argv, timeout_seconds=timeout_seconds)
                 bound = bind_verified_owner_grant_t0(
-                    grant, host, plan, base_sha=base_sha, head_sha=head_sha,
+                    grant, host, plan, recipe,
+                    base_sha=base_sha, head_sha=head_sha,
                     head_tree=head_tree, manifest_sha256=manifest_sha256,
                     run_id=run_id, run_attempt=run_attempt)
-                return self._d4_attempt_journal.consume(bound.attempt)
+                journal_digest = self._d4_attempt_journal.consume(bound.attempt)
+                return _new_consumed_owner_grant(
+                    bound, journal_digest, plan, recipe)
             except (D4OwnerBootstrapDenied, D4DurableAttemptDenied, ValueError):
                 raise GatewayError(
                     "runner_unavailable",

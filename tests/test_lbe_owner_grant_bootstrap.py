@@ -18,11 +18,13 @@ from gateway.lbe_r006_macos_allowlist import (
     R006_RUNNER_PROFILE_FINGERPRINT,
 )
 from gateway.lbe_hosted_source_probe import D4HostedSelectedSourceObservation
+from gateway.lbe_launch_recipe import D4NativeLaunchRecipe
 from gateway.lbe_worker import LbeWorkPlan
 
 H = "a" * 40
 M = "b" * 64
 NOW = 1794100000
+PRODUCT = "d" * 64
 
 def _plan():
     argv = ("python", "-m", "pytest", "-q")
@@ -31,6 +33,20 @@ def _plan():
         runner_project="py-direct", requested_argv=argv, effective_argv=argv,
         timeout_seconds=120, planned_go_output=None,
         planned_script_sha256=None, planned_pipfile_sha256=None,
+    )
+
+def _recipe(plan):
+    return D4NativeLaunchRecipe(
+        workspace=plan.workspace,
+        profile_git_blob="f8556b48ab5f4af7390fb015092862a8a87768fb",
+        runner=plan.runner, requested_argv=plan.requested_argv,
+        service_effective_argv=plan.effective_argv,
+        resolved_executable="/private/bin/python",
+        resolved_spawn_argv=("/private/bin/python", "-m", "pytest", "-q"),
+        working_directory="/private/py-direct",
+        closed_child_environment=(("HOME", "/private/home"),),
+        selected_source_fingerprint=PRODUCT,
+        canonical_output_path=None, original_timeout_seconds=120,
     )
 
 def _host():
@@ -64,6 +80,7 @@ def _verified(monkeypatch):
         "image_os":"macos15","image_version":"20261104.0514.1",
         "os_build":"24H232","source_fingerprint":R006_HOST_SOURCE_FINGERPRINT,
         "runner_fingerprint":R006_RUNNER_PROFILE_FINGERPRINT,
+        "product_recipe_fingerprint":PRODUCT,
         "workspace":"a","cwd":"py-direct","runner":"direct",
         "requested_argv_sha256":_argv_fingerprint(plan.requested_argv),
         "effective_argv_sha256":_argv_fingerprint(plan.effective_argv),
@@ -84,7 +101,8 @@ def _verified(monkeypatch):
 def test_exact_runtime_binding_remains_nonexecuting(monkeypatch):
     grant, plan = _verified(monkeypatch)
     bound = bind_verified_owner_grant_t0(
-        grant, _host(), plan, base_sha=H, head_sha=H, head_tree=H,
+        grant, _host(), plan, _recipe(plan),
+        base_sha=H, head_sha=H, head_tree=H,
         manifest_sha256=M, run_id=42445537246, run_attempt=1)
     assert bound.attempt.nonce == "c"*64
 
@@ -98,7 +116,8 @@ def test_runtime_identity_drift_denied(monkeypatch, field, value):
             run_id=42445537246,run_attempt=1)
     kw[field]=value
     with pytest.raises(D4OwnerBootstrapDenied):
-        bind_verified_owner_grant_t0(grant,_host(),plan,**kw)
+        bind_verified_owner_grant_t0(
+            grant, _host(), plan, _recipe(plan), **kw)
 
 def test_plan_drift_denied(monkeypatch):
     grant, plan = _verified(monkeypatch)
@@ -110,7 +129,8 @@ def test_plan_drift_denied(monkeypatch):
         planned_script_sha256=None,planned_pipfile_sha256=None)
     with pytest.raises(D4OwnerBootstrapDenied):
         bind_verified_owner_grant_t0(
-            grant,_host(),changed,base_sha=H,head_sha=H,head_tree=H,
+            grant,_host(),changed,_recipe(changed),
+            base_sha=H,head_sha=H,head_tree=H,
             manifest_sha256=M,run_id=42445537246,run_attempt=1)
 
 class _Response:

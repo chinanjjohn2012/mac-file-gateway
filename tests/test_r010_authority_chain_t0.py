@@ -1043,3 +1043,162 @@ def test_r013_bearer_value_renamed_or_embedded_must_fail_even_under_safe_extensi
             expected_tmp="/private/tmp/mfg-r010-private-tmp",
             approved_child_keys=keys,
         )
+
+
+# R014 RED -> GREEN: the *actual frozen contract Git blob*, not a fake "a"*40.
+# These tests are non-runtime model comparisons, NOT actual signed GitHub
+# Owner/Review objects, original JWT signatures, or a PRODUCT_T1 authorization.
+R014_DESIGN_ID = "MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-013-CANDIDATE"
+R013_DESIGN_ID = "MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-012-CANDIDATE"
+R012_DESIGN_ID = "MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-011-CANDIDATE"
+R013_DESIGN_BLOB = "fa3f756f5876e67ff9434747c855a68fd01e7654"
+R012_DESIGN_BLOB = "1dddfdaa5f610c6c02ba9b81d4d11296d2b36eb3"
+R013_B_REVIEW = "PRR_kwDOU5v3IM8AAAABWs2i6Q"
+R013_C_REVIEW = "PRR_kwDOU5v3IM8AAAABWs3Ieg"
+R014_B_SYNTHETIC = "synthetic-r014-new-b-review-NEVER-ISSUED"
+R014_C_SYNTHETIC = "synthetic-r014-new-c-review-NEVER-ISSUED"
+
+
+def _r014_exact_source_blob():
+    raw = (
+        Path(__file__).resolve().parents[1]
+        / "docs/MULTI_WORKSPACE_EXEC_LBE_R010_AUTHORITY_CHAIN_CONTRACT.md"
+    ).read_bytes()
+    git_object = b"blob " + str(len(raw)).encode("ascii") + b"\x00" + raw
+    return hashlib.sha1(git_object).hexdigest(), raw.decode("ascii")
+
+
+def _r014_synthetic_authority():
+    """No real Owner Choice or current B/C Review exists in this fixture."""
+    current_blob, _text = _r014_exact_source_blob()
+    ch = replace(
+        choice(), design_id=R014_DESIGN_ID, design_blob=current_blob,
+        b_design_review_id=R014_B_SYNTHETIC,
+        c_design_review_id=R014_C_SYNTHETIC,
+    )
+    qual = replace(
+        qualification(), design_id=R014_DESIGN_ID, design_blob=current_blob,
+    )
+    witness_now = replace(
+        witness(), audience=f"mfg-r010:{current_blob}:{HEAD}:{SECRET_HASH}",
+    )
+    g = replace(
+        grant(), design_id=R014_DESIGN_ID, design_blob=current_blob,
+        design_choice_digest=design_choice_digest(ch),
+        b_design_review_id=R014_B_SYNTHETIC,
+        c_design_review_id=R014_C_SYNTHETIC,
+    )
+    return current_blob, ch, qual, witness_now, g
+
+
+def _r014_validate(g, ch, qual, witness_now, *, expected_blob=None):
+    blob, _ = _r014_exact_source_blob()
+    validate_execution_grant(
+        g, choice=ch, qualification=qual, witness=witness_now,
+        verification=verification_receipt(),
+        expected_design_blob=blob if expected_blob is None else expected_blob,
+        expected_b_design_review_id=R014_B_SYNTHETIC,
+        expected_c_design_review_id=R014_C_SYNTHETIC,
+        expected_provider_subject=EXPECTED_PROVIDER_SUBJECT,
+        expected_job_envelope_key=ENVELOPE_KEY,
+    )
+
+
+def test_r014_red_one_current_source_blob_and_normative_version_only():
+    from tools import r010_authority_chain_t0 as policy
+    blob, spec = _r014_exact_source_blob()
+    assert R010_DESIGN_ID == R014_DESIGN_ID
+    assert policy.R010_CURRENT_DESIGN_BLOB == blob
+    assert blob not in (R012_DESIGN_BLOB, R013_DESIGN_BLOB)
+    assert f"DESIGN_ID: {R014_DESIGN_ID}" in spec.split("## 1.", 1)[0]
+    assert "REVIEW_ROUND: D4-R014-AUTHORITY-CHAIN-DESIGN-013" in spec
+    assert "CURRENT_DESIGN_ID" in spec and "CURRENT_DESIGN_BLOB" in spec
+    assert "CURRENT_DESIGN_BLOB" in spec.split("### 14.1", 1)[1].split("### 14.2", 1)[0]
+    auth14 = spec.split("### 14.3", 1)[1].split("### 14.4", 1)[0]
+    assert "CURRENT_DESIGN_BLOB" in auth14
+    assert "CURRENT_DESIGN_ID" in auth14
+    assert "EXACTLY DESIGN-011" not in auth14
+    assert "exact DESIGN-011" not in auth14
+    assert "DESIGN-011 Blob" not in spec.split("### 14.1", 1)[1].split("### 14.2", 1)[0]
+    assert "HISTORICAL" in spec.split("### 15.4", 1)[1].split("## 16.", 1)[0]
+    assert "## 17. R014" in spec
+
+
+def test_r014_red_real_frozen_blob_valid_synthetic_chain_only():
+    blob, ch, qual, witness_now, g = _r014_synthetic_authority()
+    assert len(blob) == 40
+    _r014_validate(g, ch, qual, witness_now)
+
+
+@pytest.mark.parametrize("old_id,old_blob,old_b,old_c", [
+    (R012_DESIGN_ID, R012_DESIGN_BLOB, "PRR_OLD_R012_B", "PRR_OLD_R012_C"),
+    (R013_DESIGN_ID, R013_DESIGN_BLOB, R013_B_REVIEW, R013_C_REVIEW),
+])
+def test_r014_red_old_version_choice_review_and_recomputed_grant_denied(
+    old_id, old_blob, old_b, old_c,
+):
+    _, ch, qual, witness_now, g = _r014_synthetic_authority()
+    old_ch = replace(
+        ch, design_id=old_id, design_blob=old_blob,
+        b_design_review_id=old_b, c_design_review_id=old_c,
+    )
+    disguised = replace(
+        g, design_id=old_id, design_blob=old_blob,
+        b_design_review_id=old_b, c_design_review_id=old_c,
+        design_choice_digest=design_choice_digest(old_ch),
+    )
+    with pytest.raises(GateDenied):
+        _r014_validate(disguised, old_ch, qual, witness_now)
+
+
+@pytest.mark.parametrize("role", ["b", "c"])
+def test_r014_red_current_blob_with_old_design_review_ids_denied(role):
+    _, ch, qual, witness_now, g = _r014_synthetic_authority()
+    if role == "b":
+        bad_ch = replace(ch, b_design_review_id=R013_B_REVIEW)
+        bad_g = replace(g, b_design_review_id=R013_B_REVIEW)
+    else:
+        bad_ch = replace(ch, c_design_review_id=R013_C_REVIEW)
+        bad_g = replace(g, c_design_review_id=R013_C_REVIEW)
+    bad_g = replace(bad_g, design_choice_digest=design_choice_digest(bad_ch))
+    with pytest.raises(GateDenied):
+        _r014_validate(bad_g, bad_ch, qual, witness_now)
+
+
+def test_r014_red_new_choice_with_old_oidc_audience_denied():
+    _, ch, qual, _, g = _r014_synthetic_authority()
+    for old_blob in (R012_DESIGN_BLOB, R013_DESIGN_BLOB):
+        stale = replace(
+            witness(), audience=f"mfg-r010:{old_blob}:{HEAD}:{SECRET_HASH}",
+        )
+        with pytest.raises(GateDenied):
+            _r014_validate(g, ch, qual, stale)
+
+
+def test_r014_red_legacy_blob_disguised_as_current_id_even_if_expected_is_old_denied():
+    _, ch, qual, witness_now, g = _r014_synthetic_authority()
+    old_ch = replace(ch, design_blob=R013_DESIGN_BLOB)
+    old_qual = replace(qual, design_blob=R013_DESIGN_BLOB)
+    old_g = replace(
+        g, design_blob=R013_DESIGN_BLOB,
+        design_choice_digest=design_choice_digest(old_ch),
+    )
+    old_witness = replace(
+        witness_now, audience=f"mfg-r010:{R013_DESIGN_BLOB}:{HEAD}:{SECRET_HASH}",
+    )
+    with pytest.raises(GateDenied):
+        _r014_validate(
+            old_g, old_ch, old_qual, old_witness,
+            expected_blob=R013_DESIGN_BLOB,
+        )
+
+
+@pytest.mark.parametrize("bad", [
+    {"run_attempt": 2},
+    {"check_run_id": CHECK_RUN + 1},
+    {"head_sha": "0" * 40},
+])
+def test_r014_red_current_authority_does_not_borrow_different_job_or_head(bad):
+    _, ch, qual, witness_now, g = _r014_synthetic_authority()
+    with pytest.raises(GateDenied):
+        _r014_validate(replace(g, **bad), ch, qual, witness_now)

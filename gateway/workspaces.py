@@ -177,6 +177,9 @@ class WorkspaceService:
         # Optional, existing-only R006 durable consumed-nonce witness.
         # No owner-signed grant, native T1 or public positive exception.
         self._d4_attempt_journal = None
+        # One exact future R006 capability may be installed only by trusted
+        # in-process bootstrap code. No REST/MCP/config/env field can mint it.
+        self._r006_pending = None
         # V2-owned ledger, also used by approved hosted Python-only T1.
         # Its construction alone NEVER grants public Exec apply or spawns.
         self._lbe_owner = (DirectChildOwner()
@@ -291,6 +294,8 @@ class WorkspaceService:
         """
         with self._lifecycle:
             self._closing = True
+            # Never carry a one-shot capability across close/restart.
+            self._r006_pending = None
             if self._lbe_owner is not None:
                 # No signal/join: a separately authorized direct child may
                 # outlive a dropped waiter or Gateway shutdown.
@@ -432,21 +437,81 @@ class WorkspaceService:
                 details={"process_may_be_running": exc.process_may_be_running},
             ) from None
 
+    def _install_d4_r006_one_shot(
+        self, prepared: object, bootstrap: object,
+    ) -> None:
+        """Install one exact internal capability for the shared invoke_exec gate.
+
+        This method is deliberately private and has no REST/MCP/config adapter.
+        The supplied objects are verifier-produced, process-bound types. Their
+        authority is rechecked again after the public request atomically takes
+        the pending slot and before durable nonce consumption/Popen.
+        """
+        from .lbe_owner_grant_bootstrap import _argv_fingerprint
+        from .lbe_r006_native_runner import D4R006PreparedAttempt
+        from .lbe_r006_trusted_bootstrap import (
+            D4TrustedBootstrapBundle, D4TrustedBootstrapDenied,
+        )
+        from .lbe_worker import LbeWorkPlan
+
+        with self._lifecycle:
+            if self._closing or self.settings.schema_version != 2:
+                raise GatewayError("runner_unavailable", "R006 service unavailable.")
+            if self._r006_pending is not None:
+                raise GatewayError(
+                    "busy", "An R006 one-shot capability is already pending.")
+            if self._exec_state is None or self._d4_attempt_journal is None:
+                raise GatewayError(
+                    "runner_unavailable", "R006 durable state unavailable.")
+            self._exec_state.require_healthy()
+            if (type(prepared) is not D4R006PreparedAttempt
+                    or type(bootstrap) is not D4TrustedBootstrapBundle):
+                raise GatewayError(
+                    "runner_unavailable", "Untrusted R006 one-shot inputs.")
+            plan = prepared.plan
+            if type(plan) is not LbeWorkPlan:
+                raise GatewayError("runner_unavailable", "Invalid R006 plan.")
+            try:
+                grant, _reviews, runtime = bootstrap.components()
+                attempt = grant.attempt
+                if (attempt.workspace != plan.workspace
+                        or attempt.cwd != plan.cwd
+                        or attempt.runner != plan.runner
+                        or attempt.timeout_seconds != plan.timeout_seconds
+                        or attempt.requested_argv_fingerprint
+                        != _argv_fingerprint(plan.requested_argv)
+                        or attempt.effective_argv_fingerprint
+                        != _argv_fingerprint(plan.effective_argv)
+                        or attempt.product_recipe_fingerprint
+                        != prepared.recipe_fingerprint
+                        or attempt.source_fingerprint
+                        != prepared.host_source_fingerprint
+                        or attempt.runner_fingerprint
+                        != prepared.runner_profile_fingerprint):
+                    raise D4TrustedBootstrapDenied(
+                        "owner grant does not match prepared command")
+                runtime.check_grant(grant)
+            except (AttributeError, D4TrustedBootstrapDenied):
+                raise GatewayError(
+                    "runner_unavailable",
+                    "R006 bootstrap/prepared binding is invalid.") from None
+            # Atomic publication under the same service lifecycle lock used by
+            # invoke_exec. Installation does not consume the durable nonce.
+            self._r006_pending = (prepared, bootstrap)
+
     def invoke_exec(self, name: str, cwd: str, argv: list[str],
                     timeout_seconds: int = 60, dry_run: bool = True, *,
                     cancelled: threading.Event | None = None) -> dict[str, Any]:
-        """One synchronous v1 and draft v2 admission boundary.
+        """Single synchronous v1/v2 admission boundary for every adapter.
 
-        Ordinary schema-v2 paths authorize preview only until the exact
-        D0 weaker-mode operative exception is approved. A separate hosted
-        Python-only, disposable CI fixture uses an explicit constructor
-        capability and fixed runner identity; no client/config may mint it.
-        Old private state/owner-lock/UNKNOWN and File/Git remain independent.
-        No cleanup proof, PID signals or rollback are claimed.
+        Ordinary schema-v2 apply remains F1-denied. A future exact R006 T1
+        can succeed only when trusted bootstrap code has installed one private,
+        process-bound capability whose plan exactly matches this request.
+        Clients never submit owner/review/runtime evidence or capability IDs.
         """
+        r006 = None
         with self._lifecycle:
             ctx = self.require_exec(name)
-            # B0 durable/ownership/UNKNOWN denial comes before proof status.
             if self._exec_state is None:
                 raise GatewayError(
                     "exec_state_unavailable", "Exec durable state is unavailable.")
@@ -454,40 +519,68 @@ class WorkspaceService:
             if type(dry_run) is not bool:
                 raise GatewayError("invalid_argument", "dry_run must be boolean.")
             if cancelled is not None and type(cancelled) is not threading.Event:
-                raise GatewayError("invalid_argument", "Invalid internal cancellation token.")
-            # F1 has NO positive cleanup-proof path. Proof denial wins over
-            # an occupied Worker slot and happens before Runner/PREPARED.
-            # Never use an instance-global subprocess ban: Git may spawn
-            # only via its own separately authorized durable protocol.
+                raise GatewayError(
+                    "invalid_argument", "Invalid internal cancellation token.")
             if not dry_run and self.settings.schema_version == 1:
                 raise GatewayError(
                     "exec_cleanup_proof_required",
-                    "Exec apply is unavailable without independently reviewed full-descendant cleanup proof.")
+                    "Exec apply is unavailable without independently reviewed "
+                    "full-descendant cleanup proof.")
             if (not dry_run and self.settings.schema_version == 2
                     and not self._lbe_positive_authorized):
-                # No exact operative D0 exception was approved. A public v2
-                # paths-only grant cannot activate _lbe_apply/Popen, regardless
-                # of REST/MCP/direct caller input, capacity or runner choice.
-                raise GatewayError(
-                    "exec_cleanup_proof_required",
-                    "Schema-v2 Exec apply needs separately approved operative "
-                    "authority; configured paths permit preview only.")
-            if name in self._exec_active or len(self._exec_active) >= 4:
-                raise GatewayError("busy", "A controlled command already occupies this execution slot.")
-            self._exec_active.add(name)
-            self._active_operations += 1
+                pending = self._r006_pending
+                matched = False
+                if pending is not None:
+                    prepared, bootstrap = pending
+                    plan = prepared.plan
+                    # Exact raw request matching is deliberately stricter than
+                    # canonical path equivalence: the owner approved this exact
+                    # vector, not a caller-selected alternate spelling.
+                    matched = bool(
+                        type(cwd) is str and type(argv) is list
+                        and all(type(item) is str for item in argv)
+                        and type(timeout_seconds) is int
+                        and name == plan.workspace and cwd == plan.cwd
+                        and tuple(argv) == plan.requested_argv
+                        and timeout_seconds == plan.timeout_seconds)
+                if not matched:
+                    raise GatewayError(
+                        "exec_cleanup_proof_required",
+                        "Schema-v2 Exec apply needs separately approved operative "
+                        "authority; configured paths permit preview only.")
+                # Known cancellation before accepting the request does not take
+                # the capability. After this atomic take, any cancellation race
+                # is handled only after durable nonce consumption.
+                if cancelled is not None and cancelled.is_set():
+                    raise GatewayError(
+                        "waiter_disconnected",
+                        "Request cancelled before R006 one-shot admission.")
+                self._r006_pending = None
+                r006 = pending
+            if r006 is None:
+                if name in self._exec_active or len(self._exec_active) >= 4:
+                    raise GatewayError(
+                        "busy",
+                        "A controlled command already occupies this execution slot.")
+                self._exec_active.add(name)
+                self._active_operations += 1
+        if r006 is not None:
+            prepared, bootstrap = r006
+            return self._execute_d4_r006_private_attempt(
+                prepared, bootstrap, cancelled=cancelled)
         try:
             if self.settings.schema_version == 2:
                 if dry_run:
-                    result = self._lbe_preview(ctx, cwd, argv, timeout_seconds)
+                    result = self._lbe_preview(
+                        ctx, cwd, argv, timeout_seconds)
                 else:
                     assert self._lbe_owner is not None
                     result = self._lbe_apply(
                         ctx, self._lbe_owner, cwd, argv, timeout_seconds,
                         cancelled=cancelled)
             else:
-                # Preserve the entire historic v1 preview and F1 deny-only path.
-                result = ctx.gateway.run_command(cwd, argv, timeout_seconds, dry_run)
+                result = ctx.gateway.run_command(
+                    cwd, argv, timeout_seconds, dry_run)
             return {**result, "workspace": name}
         finally:
             with self._lifecycle:
@@ -638,8 +731,6 @@ class WorkspaceService:
             self._exec_state.require_healthy()
             if cancelled is not None and type(cancelled) is not threading.Event:
                 raise GatewayError("invalid_argument", "Invalid internal cancellation token.")
-            if cancelled is not None and cancelled.is_set():
-                raise GatewayError("waiter_disconnected", "R006 request cancelled before grant.")
             if plan.workspace in self._exec_active or len(self._exec_active) >= 4:
                 raise GatewayError("busy", "R006 executable slot is not eligible.")
             owner = self._lbe_owner
@@ -1761,6 +1852,9 @@ class WorkspaceService:
             preview_capacity = bool(
                 old_state_healthy and not self._closing
                 and len(self._exec_active) < 4)
+            pending_plan = (
+                self._r006_pending[0].plan
+                if self._r006_pending is not None else None)
             result = []
             for ctx in self._workspaces.values():
                 granted = bool(self.settings.exec_enabled
@@ -1769,7 +1863,10 @@ class WorkspaceService:
                     granted and preview_capacity
                     and ctx.name not in self._exec_active)
                 apply = bool(
-                    preview and self._lbe_positive_authorized
+                    preview
+                    and (self._lbe_positive_authorized
+                         or (pending_plan is not None
+                             and pending_plan.workspace == ctx.name))
                     and self._lbe_owner is not None
                     and self._lbe_owner.can_admit_any((ctx.name,)))
                 result.append({
@@ -1816,9 +1913,11 @@ class WorkspaceService:
                 and not self._closing
                 and not lbe_state["unavailable"]
                 and not lbe_state["closing"])
+            r006_one_shot_ready = bool(self._r006_pending is not None)
             v2_available = bool(
-                v2_state_healthy and self._lbe_positive_authorized and
-                self._lbe_owner.can_admit_any(eligible_names))
+                v2_state_healthy
+                and (self._lbe_positive_authorized or r006_one_shot_ready)
+                and self._lbe_owner.can_admit_any(eligible_names))
             # A healthy schema-v2 service may support an entirely
             # nonspawning plan even though positive Exec remains F1-denied.
             # Preview requests share the synchronous request slot gate, not
@@ -1841,7 +1940,9 @@ class WorkspaceService:
                     # This is STATUS reporting only, never an Exec grant.
                     "read_only": not (
                         self.any_write or self.any_git or
-                        (is_v2 and self._lbe_positive_authorized)),
+                        (is_v2 and (
+                            self._lbe_positive_authorized
+                            or r006_one_shot_ready))),
                     "file_read_only": not self.any_write, "path_base": ".",
                     "workspaces": self.list_workspaces()["workspaces"],
                     "exec_policy": {
@@ -1857,9 +1958,13 @@ class WorkspaceService:
                         **({"preview_available": v2_preview_available}
                            if is_v2 else {}),
                         "completion_capability": (
-                            "best_effort" if (v2_state_healthy
-                                              and self._lbe_positive_authorized)
+                            "best_effort" if (
+                                v2_state_healthy and (
+                                    self._lbe_positive_authorized
+                                    or r006_one_shot_ready))
                             else "none"),
+                        **({"r006_one_shot_ready": r006_one_shot_ready}
+                           if is_v2 else {}),
                         "adapter_exposed": self._exec_adapter_exposed,
                         "durability_state": durability,
                         "quarantined": durability == "quarantined",

@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 import json
 import os
+import threading
 import time
 
 import pytest
@@ -252,5 +253,97 @@ def test_wrong_runtime_binding_burns_prepared_candidate_without_durable_record(
         with pytest.raises(GatewayError):
             service._execute_d4_r006_private_attempt(
                 prepared, _bootstrap(monkeypatch, candidate.plan))
+    finally:
+        service.close()
+
+
+def test_shared_invoke_exec_consumes_only_exact_installed_r006_one_shot(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: NOW)
+    service, private = _service(tmp_path)
+    host = _host()
+    candidate, _recipe_value = _patch_assembly(service, monkeypatch, host)
+    prepared = _prepare(service)
+    bootstrap = _bootstrap(monkeypatch, candidate.plan)
+    monkeypatch.setattr(
+        D4R006NativeLaunchBoundary, "launch",
+        lambda self, plan: (_ for _ in ()).throw(
+            LbeNoChildStarted("T0 no child")))
+    try:
+        before = service.info()["exec_policy"]
+        assert before["available"] is False
+        assert before["r006_one_shot_ready"] is False
+
+        service._install_d4_r006_one_shot(prepared, bootstrap)
+        ready = service.info()["exec_policy"]
+        assert ready["available"] is True
+        assert ready["r006_one_shot_ready"] is True
+        assert ready["completion_capability"] == "best_effort"
+
+        # A different public vector cannot steal or burn the capability.
+        with pytest.raises(GatewayError) as mismatch:
+            service.invoke_exec(
+                "a", "py-direct",
+                ["python", "-m", "compileall", "-q", "./src"],
+                timeout_seconds=120, dry_run=False)
+        assert mismatch.value.code == "exec_cleanup_proof_required"
+        assert service.info()["exec_policy"]["r006_one_shot_ready"] is True
+        assert list((private / "d4-journal").iterdir()) == []
+
+        result = service.invoke_exec(
+            "a", "py-direct", ["python", "-m", "pytest", "-q"],
+            timeout_seconds=120, dry_run=False)
+        assert result["status"] == "launch_failed"
+        assert result["executed"] is False
+        assert len(list((private / "d4-journal").iterdir())) == 1
+        assert service.info()["exec_policy"]["r006_one_shot_ready"] is False
+
+        with pytest.raises(GatewayError) as replay:
+            service.invoke_exec(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                timeout_seconds=120, dry_run=False)
+        assert replay.value.code == "exec_cleanup_proof_required"
+    finally:
+        service.close()
+
+
+def test_preaccepted_cancellation_keeps_pending_but_posttake_cancellation_burns(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: NOW)
+    service, private = _service(tmp_path)
+    host = _host()
+    candidate, _recipe_value = _patch_assembly(service, monkeypatch, host)
+    prepared = _prepare(service)
+    bootstrap = _bootstrap(monkeypatch, candidate.plan)
+    cancelled = threading.Event()
+    cancelled.set()
+    try:
+        service._install_d4_r006_one_shot(prepared, bootstrap)
+        with pytest.raises(GatewayError) as early:
+            service.invoke_exec(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                timeout_seconds=120, dry_run=False, cancelled=cancelled)
+        assert early.value.code == "waiter_disconnected"
+        assert service.info()["exec_policy"]["r006_one_shot_ready"] is True
+        assert list((private / "d4-journal").iterdir()) == []
+
+        # Simulate cancellation racing immediately AFTER atomic take by
+        # clearing before admission and setting it during prepared.claim.
+        cancelled.clear()
+        original_claim = D4R006PreparedAttempt.claim
+
+        def claim_then_cancel(self, ctx):
+            value = original_claim(self, ctx)
+            cancelled.set()
+            return value
+
+        monkeypatch.setattr(D4R006PreparedAttempt, "claim", claim_then_cancel)
+        with pytest.raises(GatewayError) as late:
+            service.invoke_exec(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                timeout_seconds=120, dry_run=False, cancelled=cancelled)
+        assert late.value.code == "waiter_disconnected"
+        assert len(list((private / "d4-journal").iterdir())) == 1
+        assert service.info()["exec_policy"]["r006_one_shot_ready"] is False
     finally:
         service.close()

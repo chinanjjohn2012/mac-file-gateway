@@ -495,27 +495,26 @@ class WorkspaceService:
                 self._active_operations -= 1
                 self._lifecycle.notify_all()
 
-    def _consume_d4_r006_attempt_source_only(self, identity: object) -> str:
-        """Burn a future R006 run identity through the real owner-locked service.
+    def _consume_d4_r006_attempt_source_only(self, grant: object) -> str:
+        """Burn only a verifier-produced future R006 owner grant.
 
-        This private preparation method cannot approve, sign or execute T1.
-        Actual future admission MUST separately authenticate owner consent,
-        verify exact run/attempt/image/source/expiry, and use this same ledger
-        before Worker reservation. Caller-originated packets never grant F1.
+        This remains NONOPERATIVE: the verifier parses trusted-bootstrap
+        evidence but this method neither fetches GitHub nor opens F1/Runner.
+        A plain D4AttemptIdentity/dataclass/client packet can no longer reach
+        the service-owned durable consumption boundary.
         """
-        from .lbe_durable_attempt import (
-            D4AttemptIdentity, D4DurableAttemptDenied,
-        )
+        from .lbe_durable_attempt import D4DurableAttemptDenied
+        from .lbe_owner_grant import D4VerifiedOwnerGrant
         with self._lifecycle:
             if self._closing or self.settings.schema_version != 2:
                 raise GatewayError("runner_unavailable", "R006 service unavailable.")
             if self._exec_state is None or self._d4_attempt_journal is None:
                 raise GatewayError("runner_unavailable", "Durable owner ledger unavailable.")
             self._exec_state.require_healthy()
-            if type(identity) is not D4AttemptIdentity:
-                raise GatewayError("runner_unavailable", "Untrusted R006 attempt identity.")
+            if type(grant) is not D4VerifiedOwnerGrant:
+                raise GatewayError("runner_unavailable", "Unverified R006 owner grant.")
             try:
-                return self._d4_attempt_journal.consume(identity)
+                return self._d4_attempt_journal.consume(grant.attempt)
             except D4DurableAttemptDenied:
                 raise GatewayError("runner_unavailable", "R006 nonce is invalid or consumed.") from None
 

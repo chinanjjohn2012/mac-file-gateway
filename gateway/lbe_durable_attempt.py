@@ -20,7 +20,7 @@ _SHA = re.compile(r"[0-9a-f]{64}\Z")
 _SHA40 = re.compile(r"[0-9a-f]{40}\Z")
 _WORKSPACE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _CREATED = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
-_MAX_RECORD = 2048
+_MAX_RECORD = 4096
 
 
 class D4DurableAttemptDenied(ValueError):
@@ -41,15 +41,28 @@ class D4AttemptIdentity:
     head_tree: str
     manifest_sha256: str
     r006_design_blob: str
+    b_design_review_id: str
+    c_design_review_id: str
+    b_code_review_id: str
+    c_code_review_id: str
+    image_version: str
+    os_build: str
     source_fingerprint: str
     runner_fingerprint: str
     workspace: str
-    command_fingerprint: str
+    cwd: str
+    runner: str
+    requested_argv_fingerprint: str
+    effective_argv_fingerprint: str
+    timeout_seconds: int
+    owner_comment_id: int
+    expires_at_unix: int
 
     def checked(self) -> "D4AttemptIdentity":
         # Type checks precede formatting/equality to avoid hostile subclasses.
         for name in ("nonce", "manifest_sha256", "source_fingerprint",
-                     "runner_fingerprint", "command_fingerprint"):
+                     "runner_fingerprint", "requested_argv_fingerprint",
+                     "effective_argv_fingerprint"):
             value = getattr(self, name)
             if type(value) is not str or _SHA.fullmatch(value) is None:
                 raise D4DurableAttemptDenied("malformed attempt " + name)
@@ -60,7 +73,8 @@ class D4AttemptIdentity:
         if (self.r006_design_blob
                 != "b8d8a1cb32fb7130dfa6d00b37831dfddfaad11c"):
             raise D4DurableAttemptDenied("wrong fixed R006 design identity")
-        for name in ("run_id", "run_attempt", "pr"):
+        for name in ("run_id", "run_attempt", "pr", "timeout_seconds",
+                     "owner_comment_id", "expires_at_unix"):
             value = getattr(self, name)
             if type(value) is not int or not 1 <= value <= 2**63 - 1:
                 raise D4DurableAttemptDenied("malformed attempt " + name)
@@ -69,6 +83,19 @@ class D4AttemptIdentity:
                 or type(self.workspace) is not str
                 or _WORKSPACE.fullmatch(self.workspace) is None):
             raise D4DurableAttemptDenied("unqualified repository/workspace")
+        if self.timeout_seconds > 120:
+            raise D4DurableAttemptDenied("attempt timeout exceeds R006 original-child ceiling")
+        for name in ("b_design_review_id", "c_design_review_id",
+                     "b_code_review_id", "c_code_review_id", "image_version",
+                     "os_build", "cwd", "runner"):
+            value = getattr(self, name)
+            if type(value) is not str or not value or len(value) > 240:
+                raise D4DurableAttemptDenied("malformed attempt " + name)
+        if (self.b_design_review_id != "PRR_kwDOU5v3IM8AAAABWq0I_w"
+                or self.c_design_review_id != "PRR_kwDOU5v3IM8AAAABWq0iKA"):
+            raise D4DurableAttemptDenied("wrong fixed R006 design reviews")
+        if self.image_version != "20261104.0514.1":
+            raise D4DurableAttemptDenied("unreviewed macOS image version")
         return self
 
 

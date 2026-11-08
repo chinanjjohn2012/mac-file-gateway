@@ -21,8 +21,16 @@ def example(nonce=S, run_attempt=1):
         repo="chinanjjohn2012/mac-file-gateway", pr=114,
         base_sha=H, head_sha=H, head_tree=H,
         manifest_sha256=S, r006_design_blob=R006,
+        b_design_review_id="PRR_kwDOU5v3IM8AAAABWq0I_w",
+        c_design_review_id="PRR_kwDOU5v3IM8AAAABWq0iKA",
+        b_code_review_id="PRR_currentStandards123",
+        c_code_review_id="PRR_currentSpecReview123",
+        image_version="20261104.0514.1", os_build="24G90",
         source_fingerprint=S, runner_fingerprint=S,
-        workspace="first-party", command_fingerprint=S,
+        workspace="first-party", cwd="src", runner="direct",
+        requested_argv_fingerprint=S, effective_argv_fingerprint=S,
+        timeout_seconds=120, owner_comment_id=7712345678,
+        expires_at_unix=4102444800,
     )
 
 
@@ -179,13 +187,10 @@ def test_real_service_owner_locked_source_only_journal_restart(tmp_path):
             inventory=ActiveRuntimeInventory(paths=(runtime,)))
         try:
             assert with_service._exec_state.durability_state == "healthy"
-            if round == 0:
-                assert len(with_service._consume_d4_r006_attempt_source_only(
-                    replace(example(), workspace="a"))) == 64
-            else:
-                with pytest.raises(GatewayError):
-                    with_service._consume_d4_r006_attempt_source_only(
-                        replace(example(), workspace="a"))
+            # A plain attempt dataclass is deliberately not enough anymore.
+            with pytest.raises(GatewayError):
+                with_service._consume_d4_r006_attempt_source_only(
+                    replace(example(), workspace="a"))
             assert with_service._lbe_positive_authorized is False
             with pytest.raises(GatewayError) as denied:
                 with_service.invoke_exec("a", "src", ["python", "-m", "pytest", "-q"],

@@ -179,8 +179,13 @@ def _parent_selector_guard() -> None:
             continue
         # Parent secret variables would still be in the same-UID host's
         # memory even if not forwarded. Never log their values.
+        upper = key.upper()
         if (key in _BAD_PARENT_EXACT
                 or key.startswith(_BAD_PARENT_PREFIXES)
+                or upper in {
+                    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                    "NO_PROXY", "FTP_PROXY",
+                }
                 or key.endswith(("_TOKEN", "_SECRET", "_PRIVATE_KEY",
                                  "_ACCESS_KEY"))):
             raise D4RuntimeSourceDenied(

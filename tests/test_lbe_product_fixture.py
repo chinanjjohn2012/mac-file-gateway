@@ -4678,3 +4678,170 @@ def test_d4_service_owned_worker_requires_real_selected_arm64_loader_set(
         assert service._lbe_owner.snapshot()["reserved_slots"] == 0
         assert service._lbe_owner.snapshot()["unavailable"] is False
     assert observed == []
+
+
+def _d4_service_operator_bundle(service, workspace, *, kind):
+    """Fresh disposable operator inputs for the COMPLETE service path.
+
+    All native image data is a static ARM64 header, deliberately not an
+    executable program. Manifest and identity receipts remain T0 only.
+    """
+    private = workspace.parent.parent
+    provisioner = private.parent / (private.name + "-service-provisioner")
+    if kind == "go":
+        sources = {"go": {
+            "bin/go": _d4_inert_arm64_tool("go-service"),
+            "pkg/tool/darwin_arm64/compile": _d4_inert_arm64_tool("compile-service"),
+            "pkg/tool/darwin_arm64/link": _d4_inert_arm64_tool("link-service"),
+            "src/runtime/runtime.go": b"package runtime\\n",
+        }}
+    elif kind == "python_direct":
+        sources = {
+            "bin": {"python": _d4_inert_arm64_tool("python-service")},
+            "lib": {"python/stdlib.py": b"constant = 1\\n"},
+        }
+    elif kind == "pipenv":
+        selected = workspace / "py-pipenv/.venv/bin/python"
+        selected.write_bytes(_d4_inert_arm64_tool("pipenv-service"))
+        selected.chmod(0o700)
+        sources = {
+            "bin": {"pipenv": ("#!" + str(selected) +
+                             "\\n# inert service Pipenv\\n").encode("ascii")},
+            "lib": {"python/stdlib.py": b"constant = 1\\n"},
+        }
+    else:
+        raise AssertionError("unknown disposable service fixture")
+
+    for source_kind, entries in sources.items():
+        for leaf, data in entries.items():
+            path = provisioner / source_kind / leaf
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            path.chmod(0o600 if leaf.endswith((".py", ".go", ".dylib"))
+                       else 0o700)
+    manifests = {
+        source_kind: _d4_tree_expected(provisioner / source_kind)
+        for source_kind in sources
+    }
+    return private, provisioner, manifests
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+])
+def test_d4_actual_service_assembles_operator_source_and_burns_real_worker(
+        product_service, monkeypatch, kind, cwd, argv):
+    service, workspace = product_service
+    private, provisioner, manifests = _d4_service_operator_bundle(
+        service, workspace, kind=kind)
+    forbidden_calls = []
+
+    def forbidden(*_args, **_kwargs):
+        forbidden_calls.append(True)
+        raise AssertionError("operator source T0 must not spawn or signal")
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", forbidden)
+        m.setattr(os, "kill", forbidden)
+        m.setattr(os, "killpg", forbidden, raising=False)
+        offered = service._observe_d4_r003_operator_provisioner(
+            "a", cwd, argv, provisioner_root=str(provisioner))
+        identities = {
+            label: view.observed_source_identity_sha256
+            for label, view in offered.items() if label in manifests
+        }
+        venv = (offered["venv"].proposed_manifest
+                if kind == "pipenv" else None)
+        venv_identity = (offered["venv"].observed_source_identity_sha256
+                         if kind == "pipenv" else None)
+        result = service._exercise_d4_r003_assembled_source_only_worker(
+            "a", cwd, argv,
+            private_root=str(private), provisioner_root=str(provisioner),
+            staged_manifests=manifests, venv_manifest=venv,
+            expected_source_identities=identities,
+            expected_venv_identity_sha256=venv_identity)
+        assert result["workspace"] == "a"
+        assert result["status"] == "launch_failed"
+        assert result["executed"] is False
+        assert result["exit_code"] is None
+        assert result["process_may_be_running"] is False
+        assert result["cleanup_proven"] is False
+        assert service._exec_active == set()
+        assert service._lbe_owner.snapshot()["reserved_slots"] == 0
+        assert service._lbe_owner.snapshot()["unavailable"] is False
+        with pytest.raises(GatewayError) as denied:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert denied.value.code == "exec_cleanup_proof_required"
+    assert forbidden_calls == []
+    assert not (workspace / "go-project/bin/app").exists()
+
+
+@pytest.mark.parametrize("failure,expected", [
+    ("missing_identity", "runner_unavailable"),
+    ("wrong_identity", "runner_unavailable"),
+    ("bad_manifest", "runner_unavailable"),
+    ("cancelled", "waiter_disconnected"),
+    ("occupied", "busy"),
+])
+def test_d4_assembled_service_fail_closed_without_reserved_child(
+        product_service, monkeypatch, failure, expected):
+    service, workspace = product_service
+    private, provisioner, manifests = _d4_service_operator_bundle(
+        service, workspace, kind="go")
+    calls = []
+
+    def forbidden(*_a, **_kw):
+        calls.append(True)
+        raise AssertionError("failed staged request cannot spawn or signal")
+
+    kwargs = {}
+    if failure == "missing_identity":
+        identity = None
+    else:
+        identity = {"go": "a" * 64}
+    if failure not in {"missing_identity", "wrong_identity"}:
+        with monkeypatch.context() as m:
+            m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+            offered = service._observe_d4_r003_operator_provisioner(
+                "a", "go-project", ["go", "test", "./..."],
+                provisioner_root=str(provisioner))
+        identity = {"go": offered["go"].observed_source_identity_sha256}
+    if failure == "bad_manifest":
+        manifests = {"bin": (("", None),)}
+    if failure == "cancelled":
+        token = threading.Event()
+        token.set()
+        kwargs["cancelled"] = token
+    if failure == "occupied":
+        with service._lifecycle:
+            service._exec_active.add("a")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", forbidden)
+        m.setattr(os, "kill", forbidden)
+        m.setattr(os, "killpg", forbidden, raising=False)
+        try:
+            with pytest.raises(GatewayError) as denied:
+                service._exercise_d4_r003_assembled_source_only_worker(
+                    "a", "go-project", ["go", "test", "./..."],
+                    private_root=str(private),
+                    provisioner_root=str(provisioner),
+                    staged_manifests=manifests,
+                    expected_source_identities=identity, **kwargs)
+            assert denied.value.code == expected
+            assert service._exec_active == (
+                {"a"} if failure == "occupied" else set())
+            assert service._lbe_owner.snapshot()["reserved_slots"] == 0
+            assert service._lbe_owner.snapshot()["unavailable"] is False
+        finally:
+            if failure == "occupied":
+                with service._lifecycle:
+                    service._exec_active.remove("a")
+    assert calls == []

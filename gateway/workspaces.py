@@ -718,6 +718,56 @@ class WorkspaceService:
             ) from None
         return candidate, marker, observed, recipe, runner
 
+    @staticmethod
+    def _run_d4_r003_bound_source_only_worker(
+        ctx: WorkspaceContext, owner: DirectChildOwner, name: str,
+        candidate: Any, marker: Any, *,
+        cancelled: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        """Run a service-owned one-use Runner under an already-held lease.
+
+        This is shared by pre-staged and operator-assembled private sources.
+        No client/request token may choose its launcher. The existing
+        macOS Runner *always* denies native PRODUCT_T1 without a separately
+        qualified physical resource domain and operative authority.
+        """
+        from .lbe_product_fixture import D4OneUseAttemptMarker
+        from .lbe_macos_runner import (
+            D4MacOSRunnerDenied, D4MacOSRunnerLaunchBoundary,
+        )
+        from .lbe_worker import LbeWorker, LbeWorkerError
+
+        # Product code, not a caller, chooses the exact service-bound
+        # launch callback. No alternate launcher or temporary owner can
+        # borrow this source and native-denial witness.
+        if (type(marker) is not D4OneUseAttemptMarker
+                or marker._ctx is not ctx
+                or marker._candidate is not candidate):
+            raise GatewayError(
+                "runner_unavailable", "Service Runner marker missing.")
+        boundary = marker._macos_boundary
+        if type(boundary) is not D4MacOSRunnerLaunchBoundary:
+            raise GatewayError(
+                "runner_unavailable", "Service Runner binding missing.")
+        try:
+            boundary.check_binding(ctx, candidate.plan)
+        except D4MacOSRunnerDenied:
+            raise GatewayError(
+                "runner_unavailable", "Service Runner identity drift.") from None
+        try:
+            result = LbeWorker(
+                owner, launcher=boundary.launch,
+            ).run(candidate.plan, cancelled=cancelled,
+                  product_attempt=marker)
+        except LbeWorkerError as exc:
+            raise GatewayError(
+                exc.code, "D4 source-only Worker did not complete safely.",
+                details={
+                    "process_may_be_running": exc.process_may_be_running,
+                },
+            ) from None
+        return {**result, "workspace": name}
+
     def _exercise_d4_r003_source_only_worker(
         self, name: str, cwd: str, argv: list[str], *,
         private_root: str, expected_hashes: dict[str, str],
@@ -769,42 +819,92 @@ class WorkspaceService:
                     expected_hashes=expected_hashes,
                     expected_trees=expected_trees,
                     timeout_seconds=timeout_seconds))
-            from .lbe_product_fixture import D4OneUseAttemptMarker
-            from .lbe_macos_runner import (
-                D4MacOSRunnerDenied, D4MacOSRunnerLaunchBoundary,
-            )
-            from .lbe_worker import LbeWorker, LbeWorkerError
+            return self._run_d4_r003_bound_source_only_worker(
+                ctx, owner, name, candidate, marker, cancelled=cancelled)
+        finally:
+            with self._lifecycle:
+                self._exec_active.remove(name)
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
 
-            # Product code, not a caller, chooses the exact service-bound
-            # launch callback. No alternate launcher or temporary owner can
-            # borrow this source and native-denial witness.
-            if (type(marker) is not D4OneUseAttemptMarker
-                    or marker._ctx is not ctx
-                    or marker._candidate is not candidate):
+    def _exercise_d4_r003_assembled_source_only_worker(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, provisioner_root: str,
+        staged_manifests: dict[str, tuple[tuple[str, str | None], ...]],
+        venv_manifest: tuple[tuple[str, str | None], ...] | None = None,
+        expected_source_identities: dict[str, str] | None = None,
+        expected_venv_identity_sha256: str | None = None,
+        require_go_p007_stage_source: bool = False,
+        expected_venv_record_distributions: tuple[tuple[str, str], ...] | None = None,
+        timeout_seconds: int = 60,
+        cancelled: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        """Run the complete operator-provisioner -> private Runner -> Worker path.
+
+        This actual private WorkspaceService orchestration closes the gap
+        between source assembly and a service-owned original-child attempt.
+        It acquires the same old-state/Workspace/one-per-workspace request
+        lease as the pre-staged Worker, stages and rechecks selected source,
+        binds the full ARM64 loader set plus private dylib graph, then
+        invokes ONLY the Runner's hard-denying callback. No positive F1/D0
+        grant, child launch, T1, or client-visible execution interface.
+        Failed staging remains a nonreusable private source candidate.
+        """
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if self.settings.schema_version != 2:
                 raise GatewayError(
-                    "runner_unavailable", "Service Runner marker missing.")
-            boundary = marker._macos_boundary
-            if type(boundary) is not D4MacOSRunnerLaunchBoundary:
+                    "exec_disabled", "D4 assembly requires schema v2.")
+            if self._exec_state is None:
                 raise GatewayError(
-                    "runner_unavailable", "Service Runner binding missing.")
-            try:
-                boundary.check_binding(ctx, candidate.plan)
-            except D4MacOSRunnerDenied:
+                    "exec_state_unavailable", "Exec durable state unavailable.")
+            self._exec_state.require_healthy()
+            if cancelled is not None and type(cancelled) is not threading.Event:
                 raise GatewayError(
-                    "runner_unavailable", "Service Runner identity drift.") from None
-            try:
-                result = LbeWorker(
-                    owner, launcher=boundary.launch,
-                ).run(candidate.plan, cancelled=cancelled,
-                      product_attempt=marker)
-            except LbeWorkerError as exc:
+                    "invalid_argument", "Invalid internal cancellation token.")
+            if cancelled is not None and cancelled.is_set():
                 raise GatewayError(
-                    exc.code, "D4 source-only Worker did not complete safely.",
-                    details={
-                        "process_may_be_running": exc.process_may_be_running,
-                    },
-                ) from None
-            return {**result, "workspace": name}
+                    "waiter_disconnected", "Request cancelled before source staging.")
+            if name in self._exec_active or len(self._exec_active) >= 4:
+                raise GatewayError(
+                    "busy", "A controlled command already occupies this slot.")
+            owner = self._lbe_owner
+            if owner is None:
+                raise GatewayError(
+                    "exec_state_unavailable", "D4 original-child owner missing.")
+            self._exec_active.add(name)
+            self._active_operations += 1
+        try:
+            # An independently inspected operator source identity is
+            # required even for this NONOPERATIVE path. Matching bytes
+            # are not themselves an owner grant or loader trust evidence.
+            if expected_source_identities is None:
+                raise GatewayError(
+                    "runner_unavailable", "D4 operator source identity missing.")
+            if (venv_manifest is not None
+                    and expected_venv_identity_sha256 is None):
+                raise GatewayError(
+                    "runner_unavailable", "D4 virtualenv source identity missing.")
+            prepared = self._assemble_d4_r003_source_only_runner(
+                name, cwd, argv, private_root=private_root,
+                provisioner_root=provisioner_root,
+                staged_manifests=staged_manifests,
+                venv_manifest=venv_manifest,
+                expected_source_identities=expected_source_identities,
+                expected_venv_identity_sha256=expected_venv_identity_sha256,
+                require_go_p007_stage_source=require_go_p007_stage_source,
+                expected_venv_record_distributions=(
+                    expected_venv_record_distributions),
+                timeout_seconds=timeout_seconds,
+            )
+            candidate, marker = prepared[0], prepared[1]
+            # These TWO independent static source rechecks must belong to
+            # this exact Worker marker, never a bare host preflight.
+            if marker._macho_set is None or marker._dylib is None:
+                raise GatewayError(
+                    "runner_unavailable", "D4 assembled loader graph missing.")
+            return self._run_d4_r003_bound_source_only_worker(
+                ctx, owner, name, candidate, marker, cancelled=cancelled)
         finally:
             with self._lifecycle:
                 self._exec_active.remove(name)

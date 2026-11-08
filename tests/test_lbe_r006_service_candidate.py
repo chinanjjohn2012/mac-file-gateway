@@ -21,6 +21,7 @@ from gateway.lbe_r006_native_runner import (
     D4R006NativeLaunchBoundary, D4R006PreparedAttempt,
 )
 from gateway.lbe_r006_review_gate import D4VerifiedReviewPair
+from gateway.lbe_r006_trusted_bootstrap import D4TrustedBootstrapBundle
 from gateway.lbe_worker import LbeNoChildStarted
 from gateway.workspaces import ActiveRuntimeInventory, WorkspaceService
 from gateway.workspaces_config import parse_workspace_config
@@ -160,11 +161,16 @@ def _patch_assembly(service, monkeypatch, host):
     return candidate, recipe
 
 
-def _reviews(monkeypatch):
+def _bootstrap(monkeypatch, plan):
+    grant = _grant(plan)
     reviews = object.__new__(D4VerifiedReviewPair)
     monkeypatch.setattr(
-        D4VerifiedReviewPair, "check_grant", lambda self, grant: None)
-    return reviews
+        D4VerifiedReviewPair, "check_grant", lambda self, value: None)
+    bundle = object.__new__(D4TrustedBootstrapBundle)
+    monkeypatch.setattr(
+        D4TrustedBootstrapBundle, "components",
+        lambda self: (grant, reviews))
+    return bundle
 
 
 def _prepare(service):
@@ -195,8 +201,17 @@ def test_private_candidate_consumes_grant_before_worker_but_public_exec_stays_de
             LbeNoChildStarted("T0 no child")))
 
     try:
+        # Parser-built pieces or arbitrary objects are no longer a product
+        # entrypoint. Reject before burning the prepared candidate.
+        with pytest.raises(GatewayError):
+            service._execute_d4_r006_private_attempt(
+                prepared, object(),
+                base_sha=H, head_sha=H, head_tree=H, manifest_sha256=M,
+                run_id=42445537246, run_attempt=1)
+        assert list((private / "d4-journal").iterdir()) == []
+
         result = service._execute_d4_r006_private_attempt(
-            prepared, _grant(candidate.plan), _reviews(monkeypatch),
+            prepared, _bootstrap(monkeypatch, candidate.plan),
             base_sha=H, head_sha=H, head_tree=H, manifest_sha256=M,
             run_id=42445537246, run_attempt=1)
         assert result["status"] == "launch_failed"
@@ -205,7 +220,7 @@ def test_private_candidate_consumes_grant_before_worker_but_public_exec_stays_de
 
         with pytest.raises(GatewayError):
             service._execute_d4_r006_private_attempt(
-                prepared, _grant(candidate.plan), _reviews(monkeypatch),
+                prepared, _bootstrap(monkeypatch, candidate.plan),
                 base_sha=H, head_sha=H, head_tree=H, manifest_sha256=M,
                 run_id=42445537246, run_attempt=1)
 

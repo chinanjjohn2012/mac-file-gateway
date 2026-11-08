@@ -609,7 +609,7 @@ class WorkspaceService:
                 self._lifecycle.notify_all()
 
     def _execute_d4_r006_private_attempt(
-        self, prepared: object, grant: object, reviews: object, *,
+        self, prepared: object, bootstrap: object, *,
         base_sha: str, head_sha: str, head_tree: str, manifest_sha256: str,
         run_id: int, run_attempt: int,
         cancelled: threading.Event | None = None,
@@ -623,6 +623,9 @@ class WorkspaceService:
         from .lbe_r006_native_runner import (
             D4R006NativeLaunchBoundary, D4R006NativeRunnerDenied,
             D4R006PreparedAttempt,
+        )
+        from .lbe_r006_trusted_bootstrap import (
+            D4TrustedBootstrapBundle, D4TrustedBootstrapDenied,
         )
         from .lbe_worker import LbeWorker, LbeWorkerError
         with self._lifecycle:
@@ -645,15 +648,20 @@ class WorkspaceService:
             if owner is None:
                 raise GatewayError("exec_state_unavailable", "R006 child owner unavailable.")
             try:
+                if type(bootstrap) is not D4TrustedBootstrapBundle:
+                    raise D4TrustedBootstrapDenied(
+                        "R006 execution requires canonical trusted bootstrap")
+                grant, reviews = bootstrap.components()
                 candidate, marker, recipe, host = prepared.claim(ctx)
                 consumed = self._consume_d4_r006_attempt_source_only(
                     grant, reviews, host, plan, recipe,
                     base_sha=base_sha, head_sha=head_sha,
                     head_tree=head_tree, manifest_sha256=manifest_sha256,
                     run_id=run_id, run_attempt=run_attempt)
-            except D4R006NativeRunnerDenied:
+            except (D4R006NativeRunnerDenied, D4TrustedBootstrapDenied):
                 raise GatewayError(
-                    "runner_unavailable", "R006 prepared attempt is invalid or replayed."
+                    "runner_unavailable",
+                    "R006 prepared/bootstrap attempt is invalid or replayed."
                 ) from None
             self._exec_active.add(plan.workspace)
             self._active_operations += 1

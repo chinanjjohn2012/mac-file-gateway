@@ -60,6 +60,81 @@ def git(root: Path, *argv: str) -> bytes:
     return result.stdout
 
 
+def git_optional(root: Path, *argv: str) -> tuple[int, bytes]:
+    result = subprocess.run(
+        ["git", *argv], cwd=root, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, check=False, timeout=30,
+    )
+    if result.returncode not in (0, 1):
+        raise AdmissionError(
+            f"git {' '.join(argv)} failed with exit {result.returncode}: "
+            + result.stderr.decode("utf-8", "replace")[:250]
+        )
+    return result.returncode, result.stdout
+
+
+def verify_r006_checkout_credentials(root: Path) -> None:
+    """Reject persisted checkout credentials without reading any secret value."""
+    _code, rows = git_optional(
+        root, "config", "--local", "--get-regexp",
+        r"^(credential\..*|http\..*\.extraheader)$",
+    )
+    if rows:
+        raise AdmissionError(
+            "R006 checkout contains persisted credential/helper configuration")
+    _code, remotes = git_optional(
+        root, "config", "--local", "--get-regexp", r"^remote\..*\.url$",
+    )
+    for row in remotes.decode("utf-8", "replace").splitlines():
+        _key, _sep, value = row.partition(" ")
+        lower = value.lower()
+        if ((lower.startswith("https://") or lower.startswith("http://"))
+                and "@" in value.split("/", 3)[2]):
+            raise AdmissionError("R006 checkout remote URL embeds credentials")
+
+
+def _r006_checkout_identity(root: Path) -> list[int]:
+    st = root.lstat()
+    if not stat.S_ISDIR(st.st_mode) or root.is_symlink():
+        raise AdmissionError("R006 checkout root is not an actual directory")
+    return [st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid, st.st_ctime_ns]
+
+
+def _required_positive_env_int(env: dict[str, str], name: str) -> int:
+    value = env.get(name, "")
+    if type(value) is not str or RUN_ID.fullmatch(value) is None:
+        raise AdmissionError("missing/malformed R006 " + name)
+    return int(value)
+
+
+def build_r006_receipt(
+    root: Path, evidence: dict[str, object], *, environ=None,
+) -> dict[str, object]:
+    """Bind G05 PASS to this exact Actions run/job and checkout inode."""
+    env = os.environ if environ is None else environ
+    expected = {
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_EVENT_NAME": "pull_request",
+        "GITHUB_REPOSITORY": "chinanjjohn2012/mac-file-gateway",
+        "G05_EXPECTED_HEAD": evidence.get("head_sha"),
+    }
+    if any(env.get(key) != value for key, value in expected.items()):
+        raise AdmissionError("R006 GitHub run context does not match G05 evidence")
+    job_name = env.get("GITHUB_JOB", "")
+    if type(job_name) is not str or JOB_NAME.fullmatch(job_name) is None:
+        raise AdmissionError("missing/malformed R006 GITHUB_JOB")
+    verify_r006_checkout_credentials(root)
+    return {
+        **evidence,
+        "run_id": _required_positive_env_int(env, "GITHUB_RUN_ID"),
+        "run_attempt": _required_positive_env_int(env, "GITHUB_RUN_ATTEMPT"),
+        "job_name": job_name,
+        "checkout_root": str(root.resolve()),
+        "checkout_identity": _r006_checkout_identity(root),
+        "checkout_credentials_clean": True,
+    }
+
+
 def paths_from_nul(data: bytes, label: str) -> set[str]:
     if data and not data.endswith(b"\0"):
         raise AdmissionError(f"{label}: missing NUL terminator")
@@ -278,7 +353,8 @@ def write_receipt(root: Path, target: str, evidence: dict[str, object]) -> None:
             raise AdmissionError("receipt must stay outside the tracked checkout")
     except RuntimeError:
         raise AdmissionError("receipt parent cannot be resolved") from None
-    raw = (json.dumps(evidence, sort_keys=True, separators=(",", ":"),
+    receipt = build_r006_receipt(root, evidence)
+    raw = (json.dumps(receipt, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=True) + "\n").encode("ascii")
     fd = parent_fd = -1
     try:

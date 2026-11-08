@@ -34,7 +34,18 @@ from tools.r010_authority_chain_t0 import (
     validate_provider_freshness_t0,
 )
 
-DESIGN_BLOB = "a" * 40
+def _git_object_design_blob_from_actual_source():
+    """Immutable design-file bytes, not a fabricated 40-character test Blob."""
+    raw = (
+        Path(__file__).resolve().parents[1]
+        / "docs/MULTI_WORKSPACE_EXEC_LBE_R010_AUTHORITY_CHAIN_CONTRACT.md"
+    ).read_bytes()
+    return hashlib.sha1(
+        b"blob " + str(len(raw)).encode("ascii") + b"\x00" + raw
+    ).hexdigest()
+
+
+DESIGN_BLOB = _git_object_design_blob_from_actual_source()
 HEAD = "b" * 40
 TREE = "c" * 40
 MANIFEST = "d" * 64
@@ -1202,3 +1213,44 @@ def test_r014_red_current_authority_does_not_borrow_different_job_or_head(bad):
     _, ch, qual, witness_now, g = _r014_synthetic_authority()
     with pytest.raises(GateDenied):
         _r014_validate(replace(g, **bad), ch, qual, witness_now)
+
+
+
+def test_r014_revoked_oidc_audience_rejected_by_endpoint_builder():
+    valid_base = (
+        "https://pipelinesghubeus15.actions.githubusercontent.com/"
+        "_apis/oidc/token?api-version=2.0"
+    )
+    for old in (R012_DESIGN_BLOB, R013_DESIGN_BLOB):
+        stale = f"mfg-r010:{old}:{HEAD}:{SECRET_HASH}"
+        with pytest.raises(GateDenied):
+            build_oidc_token_url_t0(valid_base, stale)
+
+
+def test_r014_same_role_review_id_cannot_fake_two_independent_reviews():
+    blob, ch, qual, witness_now, g = _r014_synthetic_authority()
+    bad = replace(ch, c_design_review_id=R014_B_SYNTHETIC)
+    disguised = replace(
+        g, c_design_review_id=R014_B_SYNTHETIC,
+        design_choice_digest=design_choice_digest(bad),
+    )
+    with pytest.raises(GateDenied):
+        validate_execution_grant(
+            disguised, choice=bad, qualification=qual, witness=witness_now,
+            verification=verification_receipt(),
+            expected_design_blob=blob,
+            expected_b_design_review_id=R014_B_SYNTHETIC,
+            expected_c_design_review_id=R014_B_SYNTHETIC,
+            expected_provider_subject=EXPECTED_PROVIDER_SUBJECT,
+            expected_job_envelope_key=ENVELOPE_KEY,
+        )
+
+
+def test_r014_normal_scope_cannot_promote_role_pass_or_real_t1_from_mock():
+    # This mock ensures only version consistency: no native authenticated
+    # GitHub Review, real JWT, O_EXCL/fsync, or Go/Pipenv child is performed.
+    _blob, ch, qual, witness_now, g = _r014_synthetic_authority()
+    _r014_validate(g, ch, qual, witness_now)
+    assert R010_DESIGN_ID == R014_DESIGN_ID
+    assert "NEVER-ISSUED" in ch.b_design_review_id.upper()
+    assert "NEVER-ISSUED" in ch.c_design_review_id.upper()

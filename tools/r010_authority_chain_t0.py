@@ -14,7 +14,17 @@ import re
 from types import MappingProxyType
 from urllib.parse import quote, urlsplit
 
-R010_DESIGN_ID = "MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-012-CANDIDATE"
+R010_DESIGN_ID = "MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-013-CANDIDATE"
+# Exact immutable Git blob of the revised R014 contract file, finalized
+# separately BEFORE pinning this constant. Source-only: not a live authority
+# lookup or an Owner/Review/JWT signature verifier. Never self-hash the doc.
+R010_CURRENT_DESIGN_BLOB = "435bdf92a09d8daa2c4a661f5a4568994eef7998"
+R010_REVOKED_DESIGN_BLOBS = frozenset({
+    "1dddfdaa5f610c6c02ba9b81d4d11296d2b36eb3",  # DESIGN-011 R012
+    "fa3f756f5876e67ff9434747c855a68fd01e7654",  # DESIGN-012 R013
+    "6b0d9e6f1248f075d927b04c0585f44357e4652c",  # DESIGN-010 R011
+    "f0cdeac6887c570e759f549587dcb9980e410253",  # DESIGN-009 R010
+})
 R012_OIDC_ENDPOINT_PROFILE = "R012_GITHUB_RUNNER_PIPELINES_OIDC_BASE_V1"
 R012_OIDC_ENDPOINT_PATH = "/_apis/oidc/token"
 R012_OIDC_ENDPOINT_QUERY = "api-version=2.0"
@@ -216,6 +226,10 @@ def build_oidc_token_url_t0(raw_url: str, audience: str) -> str:
         audience, flags=re.ASCII
     ) is None):
         raise GateDenied("unqualified R010 audience")
+    # Reject old/foreign design audiences even if caller picks a format-valid
+    # digest; exact current-version contract is pinned separately.
+    if audience.split(":")[1] != R010_CURRENT_DESIGN_BLOB:
+        raise GateDenied("OIDC audience does not bind current frozen design")
     # Exactly one canonical appended audience; URL base already disallows it.
     return base + "&audience=" + quote(audience, safe="")
 
@@ -697,6 +711,14 @@ def validate_design_choice(
     expected_b_review_id: str,
     expected_c_review_id: str,
 ) -> None:
+    if (type(expected_design_blob) is not str
+            or expected_design_blob != R010_CURRENT_DESIGN_BLOB
+            or expected_design_blob in R010_REVOKED_DESIGN_BLOBS):
+        raise GateDenied("expected design Blob is not the frozen R014 design")
+    if (type(expected_b_review_id) is not str or not expected_b_review_id
+            or type(expected_c_review_id) is not str or not expected_c_review_id
+            or expected_b_review_id == expected_c_review_id):
+        raise GateDenied("current B/C design review IDs must be distinct")
     if choice.marker in LEGACY_CHOICE_MARKERS or choice.marker != R010_CHOICE_MARKER:
         raise GateDenied("legacy/wrong design choice marker")
     if choice.design_id != R010_DESIGN_ID or choice.design_blob != expected_design_blob:
@@ -733,6 +755,8 @@ def validate_provider_witness(
     workflow_sha: str,
     job_local_secret_sha256: str,
 ) -> None:
+    if design_blob != R010_CURRENT_DESIGN_BLOB:
+        raise GateDenied("provider witness design is not current frozen Blob")
     audience = "mfg-r010:%s:%s:%s" % (
         design_blob,
         head_sha,

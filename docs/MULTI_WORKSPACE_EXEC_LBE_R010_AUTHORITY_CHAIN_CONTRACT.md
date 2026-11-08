@@ -2,8 +2,15 @@
 
 TASK_ID: MULTI-EXEC-LBE-FIVE-DAY-CANDIDATE-20261105
 MILESTONE_ID: LBE-FIVE-DAY-CORE-PRODUCT-CANDIDATE
-DESIGN_ID: MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-012-CANDIDATE
-REVIEW_ROUND: D4-R013-AUTHORITY-CHAIN-DESIGN-012
+DESIGN_ID: MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-013-CANDIDATE
+REVIEW_ROUND: D4-R014-AUTHORITY-CHAIN-DESIGN-013
+CURRENT_DESIGN_ID: MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-013-CANDIDATE
+CURRENT_DESIGN_BLOB: RESOLVE_FROM_THIS_FROZEN_FILE_GIT_OBJECT_AFTER_COMMIT
+PREVIOUS_R013_FROZEN_HEAD_SHA: 7fe777768b35c2182f028e786dba5b568296176d
+PREVIOUS_R013_FROZEN_TREE_SHA: 61f137415f2be84a660d764dc006b914c556e406
+PREVIOUS_R013_DESIGN_BLOB: fa3f756f5876e67ff9434747c855a68fd01e7654
+PREVIOUS_R013_B_REVIEW: PRR_kwDOU5v3IM8AAAABWs2i6Q (TARGETED PASS, historical)
+PREVIOUS_R013_C_REVIEW: PRR_kwDOU5v3IM8AAAABWs3Ieg (FAIL P2 C114-R013-DESIGN-012-SPEC-01, historical)
 PREVIOUS_R012_FROZEN_HEAD_SHA: a2c28bee8c92b59ecd280597205038bb152586fd
 PREVIOUS_R012_FROZEN_TREE_SHA: 3a3ad1b2d5e93594927322644dcadd466bbd65f6
 PREVIOUS_R012_DESIGN_BLOB: 1dddfdaa5f610c6c02ba9b81d4d11296d2b36eb3
@@ -30,9 +37,13 @@ REVIEW_SEQUENCE_OPTION: UNDECIDED
 R010 is the single normative authority root for any future R010 positive path.
 It preserves the substantive safety properties explicitly listed below, but no
 version-bound Review, Owner Choice or execution Grant from R006/R007/R008/R009
-is automatically upgraded into R010 authority. DESIGN-011 is a fresh Blob
-requiring new independent B/C design Reviews: old R010 DESIGN-009 Review
-IDs/Blobs and R008/R009 predecessor results never authorize it.
+is automatically upgraded into R010 authority. The sole new current design
+candidate is DESIGN-013 (CURRENT_DESIGN_ID above), whose actual Git Blob is
+resolved ONLY after this entire document is frozen. Historical DESIGN-009,
+DESIGN-010, DESIGN-011 and DESIGN-012 Blobs, corresponding B/C Review IDs,
+Choices, Qualifications, OIDC audiences and Grants have NO current authority.
+A new B/C pair must independently review this exact new frozen Blob/Head/Tree;
+old successes or failures remain historical, not authorization.
 
 This file is design-only. It does NOT authorize A1/B1 implementation, OIDC
 requests, SSH-agent access, autofs activation, native Python/Pipenv/Go execution,
@@ -86,18 +97,33 @@ It is never executable R010 authority.
 
 ## 3. R010 authorization chain - exact order
 
+CURRENT_VERSION_AUTHORITY_RULE (normative for R014): CURRENT_DESIGN_ID is
+MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-013-CANDIDATE. CURRENT_DESIGN_BLOB
+means the complete frozen Git blob SHA of THIS document, independently
+obtained from the fixed reviewed Git Head/Tree AFTER source editing, NOT a
+self-referential hash written in this file. It must be identical at every
+authorization layer. CURRENT_DESIGN_REVIEW_B_ID and
+CURRENT_DESIGN_REVIEW_C_ID mean DISTINCT, freshly issued B/C native
+GitHub Review nodes independently bound to the exact CURRENT_DESIGN_ID,
+CURRENT_DESIGN_BLOB, current design Base/Head/Tree and R014 review target.
+They are NOT the historical R012 or R013 review IDs. All are currently
+NOT_ISSUED; this design alone confers no real authority.
+
 No layer can be skipped or backfilled from an older version.
 
 1. FIXED R010 DESIGN
-   - exact R010 design Blob;
-   - exact Base/Head/Tree/Manifest;
+   - exact CURRENT_DESIGN_ID and CURRENT_DESIGN_BLOB;
+   - exact design Base/Head/Tree/Manifest (from frozen Git source);
+   - reject every old DESIGN-009 through DESIGN-012 Blob for this round;
    - current V2 rule identifiers and security gates.
 2. INDEPENDENT R010 DESIGN REVIEWS
-   - B and C each review the same R010 design Blob;
-   - both must be TARGETED design PASS with no in-scope P0/P1/P2.
+   - B and C each independently review CURRENT_DESIGN_BLOB on the
+     same frozen Base/Head/Tree and declare CURRENT_DESIGN_ID;
+   - bind their two distinct current Review IDs; each must be TARGETED
+     design PASS with no in-scope P0/P1/P2, old rounds not inherited.
 3. R010 OWNER DESIGN CHOICE
-   - exact R010 Blob;
-   - exact B/C R010 design Review node IDs;
+   - exact CURRENT_DESIGN_ID and CURRENT_DESIGN_BLOB;
+   - exact CURRENT_DESIGN_REVIEW_B_ID and CURRENT_DESIGN_REVIEW_C_ID;
    - A0/A1, B0/B1 and exact risk re-affirmation;
    - state_domain=R010_EPHEMERAL_JOB_STATE_V1.
 4. R010 IMPLEMENTATION SNAPSHOT
@@ -112,8 +138,10 @@ No layer can be skipped or backfilled from an older version.
    - safe qualification only; zero PRODUCT Popen before execution grant;
    - creates global Job envelope, state provenance and provider OIDC witness.
 7. R010 OWNER PRODUCT_T1 GRANT
-   - binds exact current R010 design, owner choice, implementation Reviews,
-     provider Job witness, global envelope and six row nonces.
+   - binds exact CURRENT_DESIGN_ID/CURRENT_DESIGN_BLOB, current owner Choice
+     and its canonical digest, separate current implementation Reviews,
+     provider Job witness, global envelope and six distinct one-use row nonces;
+   - old or mixed design/review/Choice/audience/Grant is DENY.
 8. SIX SERIAL PRODUCT_T1 ROWS
    - each row independently one-use and globally serialized;
    - any failure/ambiguity latches the Job and voids remaining rows.
@@ -133,9 +161,10 @@ R010_OWNER_DESIGN_CHOICE_V1
 
 Required canonical fields:
 - repo, pr;
-- r010_design_blob;
-- b_r010_design_review_id;
-- c_r010_design_review_id;
+- r010_design_id exactly CURRENT_DESIGN_ID;
+- r010_design_blob exactly CURRENT_DESIGN_BLOB;
+- b_r010_design_review_id exactly CURRENT_DESIGN_REVIEW_B_ID;
+- c_r010_design_review_id exactly CURRENT_DESIGN_REVIEW_C_ID;
 - host_option exactly A0 or A1;
 - review_sequence_option exactly B0 or B1;
 - state_domain exactly R010_EPHEMERAL_JOB_STATE_V1;
@@ -149,8 +178,11 @@ The new comment is a fresh R010 re-affirmation. Prior R006 risk acceptance may
 be cited as history but does not substitute for this R010 risk_marker.
 
 R006/R007/R008/R009 design-choice/grant markers are SUPERSEDED_DENY for R010.
-An edited comment, wrong Blob, old Review IDs, mismatched A/B option or missing
-risk marker => DENY.
+The existing R010_OWNER_DESIGN_CHOICE_V1 marker remains structurally valid,
+but a DESIGN-009/010/011/012 payload under this same marker is ALWAYS DENY;
+no rehash, editing, copying fields or newer Review can promote that payload.
+An edited comment, wrong current ID/Blob, historical Review IDs, mismatched
+A/B option or missing risk marker => DENY.
 
 ## 5. Host options under R010
 
@@ -237,7 +269,7 @@ Before Owner PRODUCT_T1 grant:
 1. PREEXEC_HOLD creates JOB_LOCAL_SECRET (256 random bits) in the create-once
    Job lease, never logs it, and computes JOB_LOCAL_SECRET_SHA256.
 2. It requests a GitHub OIDC token with custom audience:
-   mfg-r010:<R010_DESIGN_BLOB>:<HEAD_SHA>:<JOB_LOCAL_SECRET_SHA256>
+   mfg-r010:<CURRENT_DESIGN_BLOB>:<IMPLEMENTATION_HEAD_SHA>:<JOB_LOCAL_SECRET_SHA256>
 3. A future verifier must validate the provider signature and require exact:
    iss=https://token.actions.githubusercontent.com
    repository=chinanjjohn2012/mac-file-gateway
@@ -577,8 +609,9 @@ PRECEDENCE AND EXACT ALLOWLIST:
 - The two OIDC values MUST originate from the current GitHub runner job
   context; a copied env value or caller assertion is not a provider
   identity proof, so the independently signed JWT verification below is
-  mandatory. The reviewed custom audience binds exact DESIGN-011 Blob,
-  exact implementation Head and job-local-secret digest; URL, bearer and
+  mandatory. The reviewed custom audience binds exact CURRENT_DESIGN_BLOB
+  (the R014 DESIGN-013 Git object resolved after freeze),
+  exact current implementation Head and job-local-secret digest; URL, bearer and
   audience must NOT be influenced by REST/MCP/client, Workspace config,
   untrusted source files or public API input.
 - Require HTTPS + authenticated hostname and certificate, a reviewed
@@ -673,24 +706,28 @@ The current model tests no real OIDC network calls or cryptographic JWT.
 
 ### 14.3 B114-R010-ST-D009-P2-03: atomic authority composition
 
-1. An independently fetched immutable exact DESIGN-011 Git Blob and both
-   independent B/C new-round design Review IDs define EXPECTED authority
+1. An independently fetched immutable exact CURRENT_DESIGN_BLOB together
+   with exact CURRENT_DESIGN_ID and both DISTINCT current R014 B/C design
+   Review IDs on the SAME frozen Base/Head/Tree define EXPECTED authority
    values. Caller supplied Choice/Grant fields CANNOT define expectations.
 2. Validate real direct OWNER authorship, immutable comment and current
-   R010_OWNER_DESIGN_CHOICE_V1 marker, exact DESIGN-011 id/blob, B/C
-   design Reviews, A0/A1+B0/B1, fresh R010 risk marker and ephemeral
+   R010_OWNER_DESIGN_CHOICE_V1 marker, exact CURRENT_DESIGN_ID and
+   CURRENT_DESIGN_BLOB, CURRENT_DESIGN_REVIEW_B_ID/C_ID, A0/A1+B0/B1,
+   fresh R010 risk marker and ephemeral
    Job state BEFORE inspecting any execution grant digest. A legacy
    R008/R009 or superseded R010 DESIGN-009 Choice is DENY even with
    a recomputed matching digest.
 3. Independently verify implementation code review objects and require
-   qualification.design_id/blob EXACTLY DESIGN-011, same current Head/Tree/
-   Manifest and independently verified B+C code Review IDs, matching
+   qualification.design_id/blob EXACTLY CURRENT_DESIGN_ID /
+   CURRENT_DESIGN_BLOB, separate current implementation Head/Tree/Manifest
+   and independently verified B+C current code Review IDs, matching
    role/scope/verdict/evidence. For option B0, BOTH current reviews must
    be ROLE_FULL_SCOPE_PASS BEFORE T1; B1 must have BOTH current
    TARGETED_REVIEW_PASS for the complete pre-T1 critical path and later
    new FULL. Current B0/B1 choices remain UNDECIDED.
 4. ONLY THEN validate fresh owner-authored immutable
-   R010_OWNER_PRODUCT_T1_GRANT_V1, exact selected options/risk,
+   R010_OWNER_PRODUCT_T1_GRANT_V1 with CURRENT_DESIGN_ID/BLOB,
+   exact selected options/risk,
    B/C design and implementation identity, canonical Choice digest,
    signed and fresh JWT original-byte transcript, current Job/lease/
    state/source/nonce. Invalid legacy choice+new grant, wrong qual
@@ -711,9 +748,9 @@ independent B/C review. The job-level id-token permission is not
 PREEXEC-only OS isolation. Product host/sandbox guarantees, loaded graph,
 positive native T1, integration, FULL and R10 remain not established.
 
-DESIGN_STATUS=PROPOSED_NOT_EFFECTIVE
-REVIEW_ROUND=D4-R012-AUTHORITY-CHAIN-DESIGN-011
-B_C_NEW_ROUND_REVIEWS=NOT_ISSUED
+HISTORICAL_R011_REVISION_STATUS=PROPOSED_NOT_EFFECTIVE
+HISTORICAL_R011_REVISION_ROUND=D4-R012-AUTHORITY-CHAIN-DESIGN-011
+HISTORICAL_R011_B_C_REVIEWS_AT_THAT_TIME=NOT_ISSUED
 A0_B0_DEFAULT_DENY_RETAINED=true
 REAL_PROVIDER_OIDC=NOT_RUN
 PRODUCT_T1=NOT_RUN_NOT_AUTHORIZED
@@ -877,13 +914,14 @@ SECURITY_BOUNDARIES_UNCHANGED:
 - Owner A0/A1 and B0/B1 choice UNDECIDED; no approved direct R012 owner
   choice/execution grant, no native T1 qualification, no FULL role review,
   integration or R10 release authority.
-- New review must independently fix HEAD/BASE/TREE/new DESIGN-011 Git Blob,
-  B/C verdicts separately, and original current-Head CI evidence. Old
-  R011 PASS/BLOCKED never automatically applies.
+- HISTORICAL R012-only requirement: reviewers at the time had to fix
+  HEAD/BASE/TREE/new DESIGN-011 Git Blob and independently verify old
+  R012 evidence. DESIGN-011 never becomes the CURRENT_DESIGN_BLOB for
+  R014, and its old role verdicts never transfer.
 
-R012_DESIGN_STATUS=PROPOSED_NOT_EFFECTIVE
-REVIEW_ROUND=D4-R012-AUTHORITY-CHAIN-DESIGN-011
-REAL_OIDC_REQUEST=NOT_RUN
+HISTORICAL_R012_DESIGN_STATUS=PROPOSED_NOT_EFFECTIVE
+HISTORICAL_R012_REVIEW_ROUND=D4-R012-AUTHORITY-CHAIN-DESIGN-011
+HISTORICAL_R012_REAL_OIDC_REQUEST=NOT_RUN
 ORIGINAL_MACOS_PRODUCT_T1=NOT_RUN
 INTEGRATION_STATUS=NOT_TESTED
 FULL_CODE_REVIEW_PASS=NOT_ISSUED
@@ -901,6 +939,9 @@ NOT a PASS for DESIGN-012 or any runnable product.
 
 This section takes precedence over earlier sections 10/14/15 wherever
 they leave reader fault or child env override validation incomplete.
+Its historical R013 version predicates have NO R014 authority; section
+17 now takes precedence over ALL earlier current-design identity predicates
+(including this section) without weakening reader/child-env safety.
 It creates NO executable authority and does NOT change F1/R006, native
 launcher, Worker/DirectChildOwner source, GitHub workflow permissions,
 OIDC token acquisition, or real PRODUCT_T1 safety eligibility.
@@ -1037,14 +1078,133 @@ OIDC, signature/JWKS, actual durable cross-process lease or integration
 is authorized. If new source/contract/Head drift occurs, B/C must
 review the fresh immutable Head/Tree and cannot inherit R012 PASS.
 
-R013_DESIGN_ID=MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-012-CANDIDATE
-R013_DESIGN_STATUS=PROPOSED_NOT_EFFECTIVE
-REVIEW_ROUND=D4-R013-AUTHORITY-CHAIN-DESIGN-012
+HISTORICAL_R013_DESIGN_ID=MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-012-CANDIDATE
+HISTORICAL_R013_DESIGN_STATUS=PROPOSED_NOT_EFFECTIVE
+HISTORICAL_R013_REVIEW_ROUND=D4-R013-AUTHORITY-CHAIN-DESIGN-012
 R012_B_VERDICT=BLOCKED_HISTORICAL_ONLY
 R012_C_VERDICT=TARGETED_PASS_HISTORICAL_ONLY
 OWNER_A0_A1_B0_B1=UNDECIDED
 ACTUAL_OIDC_AND_JWT=NOT_RUN_NOT_AUTHORIZED
 NATIVE_PRODUCT_T1=NOT_RUN_NOT_AUTHORIZED
+INTEGRATION_STATUS=NOT_TESTED
+FULL_CODE_REVIEW_PASS=NOT_ISSUED
+R10_STATUS=BLOCKED
+
+
+## 17. R014 unique CURRENT DESIGN authority and irreversible revocation
+
+This section is normative for R014, DESIGN-013 and all later steps that
+claim to derive authority from THIS fixed source contract. It resolves
+C114-R013-DESIGN-012-SPEC-01 by superseding ALL inconsistent earlier
+current-version predicates, specifically the original section 1
+"DESIGN-011 fresh", section 14.1 audience, section 14.3 expected ID/Blob
+and qualification, section 15.4 old "new review" direction, and the
+section 16 former DESIGN-012 current-instance scope. Earlier technical
+safety requirements (F1/R006 refusal, closed PREEXEC, original reaper,
+healthy pipe drain, owner/reader latch, serial six nonces, state/host/
+source guards, no descendant cleanup claim) are RETAINED unchanged.
+
+### 17.1 One current source object; no self-hash
+
+CURRENT_DESIGN_ID = MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-013-CANDIDATE.
+CURRENT_DESIGN_BLOB = the exact SHA1 Git blob object holding the entire
+frozen bytes of THIS file, independently resolved by GitHub content API
+and crosschecked against the identical path at the frozen design
+HEAD_TREE. It is NOT the R013 DESIGN-012 Blob fa3f756f5876e67ff9434747c855a68fd01e7654,
+the R012 DESIGN-011 Blob 1dddfdaa5f610c6c02ba9b81d4d11296d2b36eb3,
+or a synthetic constant like "a"*40. The final current Blob must be
+calculated AFTER editing this file; the hash is NOT embedded into this
+same file. A separately versioned tools/r010_authority_chain_t0.py
+source-only model may pin the exact resulting final Blob and tests MUST
+recalculate git_hash(b"blob "+size+b"\0"+bytes) of this exact document.
+The frozen Head/Base/Tree and final Git Blob must match the current
+GitHub API contents before any B/C review or Owner Choice exists.
+
+The only current external expected authority includes ALL of:
+- this exact CURRENT_DESIGN_ID and final CURRENT_DESIGN_BLOB;
+- the same immutable R014 design BASE_SHA, HEAD_SHA and HEAD_TREE;
+- separately independently issued, nonempty, DISTINCT, current B/C
+  R014 design Review node IDs both on that exact target and snapshot;
+- a new direct, unedited human OWNER choice on those precise IDs,
+  options A0/A1 + B0/B1, reviewed risk acceptance and state domain;
+- a separate, later current implementation HEAD_SHA/HEAD_TREE/Manifest,
+  appropriate B/C independent pre-T1 implementation code Reviews;
+- provider-signed original-byte OIDC evidence for the current run/job/
+  attempt/Head, audience exactly mfg-r010:<CURRENT_DESIGN_BLOB>:
+  <IMPLEMENTATION_HEAD_SHA>:<JOB_LOCAL_SECRET_SHA256>;
+- a fresh owner-authored R010_OWNER_PRODUCT_T1_GRANT_V1 binding all the
+  above together with one Job-global lease and exactly six one-use
+  command nonces. No state row runs until actual owner qualification.
+
+The old message TYPES R010_OWNER_DESIGN_CHOICE_V1 and
+R010_OWNER_PRODUCT_T1_GRANT_V1 remain structurally valid. But types
+alone confer NO authority. A payload using an earlier design ID,
+earlier Blob, stale B/C IDs, old signed audience, old implementation
+Head/Job/nonce, stale risk choice or old grant is forever INVALID
+for this R014 contract even if someone recomputes its canonical digest
+under a new type marker or forges a consistent expected field set.
+
+### 17.2 Precedence and history versus required present
+
+All occurrences of DESIGN-009, DESIGN-010, DESIGN-011 and DESIGN-012
+in sections 1/14/15/16, parent tables, historic audit trails, old review
+references, previous snapshots or superseded footers are HISTORICAL
+identifiers only. They DO NOT provide alternative current-required IDs,
+valid expected Blob, Review IDs, Choice, Qualification, audience or Grant.
+The operative identity of the CURRENT contract is section 3 plus THIS
+section 17; in any conflict these supersede ALL earlier version
+predicates. In particular, no OLD id/blob survives as an alias of the
+current DESIGN-013 and no C/B Review can be inherited after a new Blob.
+
+Valid R014 B/C design Reviews, if independently issued later, cannot
+be assumed to exist at source freeze. A (Developer) never fabricates
+their IDs or an Owner choice. The current status remains PROPOSED and
+the only executable decision remains DENY.
+
+### 17.3 Required current-snapshot T0 cross-version adversarial matrix
+
+A synthetically correct current DESIGN-013 + its EXACT, independently
+pinned final contract Git Blob + distinct synthetic current-role IDs,
+mock fresh direct Choice, qualification, matching mock signed audience
+and matching synthetic Grant MUST pass PURE FIELD-CONSISTENCY checks.
+This is a legitimate model-success path, not an actual JWT signature,
+two actual human approvals, or permission to launch a child.
+
+All of the following MUST be denied in pure T0 before any possible
+Popen: old DESIGN-011 and old DESIGN-012 Choices, either historical
+Blob disguised by a current DESIGN_ID and recomputed digest, current
+Blob with R013 old B/C Review node IDs, an old OIDC audience in a
+new Choice, a stale owner Grant rehashed to resemble current fields,
+foreign/stale Job or run_attempt, changed implementation HEAD,
+missing/disparate review IDs, missing state/nonce or unrelated
+target. Matching self-declared fields do not prove GitHub provenance.
+The external trusted expected design Blob and expected Review IDs
+cannot be copied from caller-supplied Choice/Grant.
+
+### 17.4 Freeze / evidence / safety status
+
+A-only SHA-bound original RED->GREEN on full current Git Head, G05,
+source Blob and tracked MANIFEST.sha256, and adjacent SAFE T0 are
+required for R014 targeted design handoff. New B and C reviews MUST
+both bind the identical BASE/HEAD/TREE/CURRENT_DESIGN_BLOB. Historical
+R013 B TARGETED_PASS and C FAIL are not R014 B/C conclusions.
+
+No live OIDC token request or JWT verification, mutable field and
+actual Owner-authorship proof, real crossprocess O_EXCL/fsync/owner.lock
+recovery, native Python/Go/Pipenv PRODUCT_T1, same-instance positive
+integration, FULL/R10, shared or production, merge/tag/deploy is
+authorized by this design revision. F1/R006 and PR102 source/host Gate
+B OFFLINE_ONLY remain fail-closed.
+
+R014_DESIGN_ID=MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-013-CANDIDATE
+R014_DESIGN_STATUS=PROPOSED_NOT_EFFECTIVE
+REVIEW_ROUND=D4-R014-AUTHORITY-CHAIN-DESIGN-013
+CURRENT_DESIGN_BLOB_VALUE=POST_FREEZE_GIT_OBJECT_NOT_EMBEDDED
+R014_B_REVIEW=NOT_ISSUED
+R014_C_REVIEW=NOT_ISSUED
+OWNER_A0_A1_B0_B1=UNDECIDED
+REAL_PROVIDER_OIDC=NOT_RUN_NOT_AUTHORIZED
+PRODUCT_T1=NOT_RUN_NOT_AUTHORIZED
 INTEGRATION_STATUS=NOT_TESTED
 FULL_CODE_REVIEW_PASS=NOT_ISSUED
 R10_STATUS=BLOCKED

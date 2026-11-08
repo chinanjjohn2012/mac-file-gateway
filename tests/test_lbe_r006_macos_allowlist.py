@@ -159,3 +159,20 @@ def test_sanitized_diagnostic_reports_names_not_values(
     assert "secret-proxy-value" not in serialized
     assert "secret-key-value" not in serialized
     assert diagnostic["native_launch_allowed"] is False
+
+
+def test_sanitized_mount_diagnostic_binds_source_hash_and_flags_without_source(
+        tmp_path, monkeypatch):
+    mounts = _mounts() + (
+        ("autofs", "/System/Volumes/Data/home", "map auto_home", 0x200000),
+    )
+    diagnostic = profile.collect_r006_host_safety_diagnostics_t0(
+        environ=_env(), uname=_uname(), mount_rows=mounts)
+    source_hash = hashlib.sha256(b"map auto_home").hexdigest()
+    assert diagnostic["writable_nonlocal_mount_identities"] == (
+        ("autofs", "/System/Volumes/Data/home", source_hash, 0x200000),
+    )
+    serialized = str(diagnostic)
+    assert "map auto_home" not in serialized
+    assert source_hash in serialized
+    assert diagnostic["native_launch_allowed"] is False

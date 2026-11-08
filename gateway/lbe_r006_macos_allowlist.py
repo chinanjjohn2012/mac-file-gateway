@@ -260,9 +260,18 @@ def collect_r006_host_safety_diagnostics_t0(
     ))
     rows = _checked_mount_rows(
         _darwin_mount_rows() if mount_rows is None else mount_rows)
-    unsafe = tuple(sorted(
-        (row[0], row[1]) for row in rows
+    unsafe_rows = tuple(
+        row for row in rows
         if not (row[3] & _MNT_RDONLY) and not (row[3] & _MNT_LOCAL)
+    )
+    unsafe = tuple(sorted((row[0], row[1]) for row in unsafe_rows))
+    unsafe_identities = tuple(sorted(
+        (
+            row[0], row[1],
+            hashlib.sha256(row[2].encode("utf-8", "strict")).hexdigest(),
+            row[3],
+        )
+        for row in unsafe_rows
     ))
     return {
         "status": "R007_HOST_SAFETY_DIAGNOSTIC_ONLY_NOT_AUTHORITY",
@@ -272,6 +281,7 @@ def collect_r006_host_safety_diagnostics_t0(
         "proxy_variable_names": proxy_names,
         "mount_count": len(rows),
         "writable_nonlocal_mount_types_and_targets": unsafe,
+        "writable_nonlocal_mount_identities": unsafe_identities,
         "native_launch_allowed": False,
     }
 

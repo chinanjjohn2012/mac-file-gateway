@@ -5290,3 +5290,125 @@ def test_r010_six_service_rejects_cross_instance_source_plan(
         recheck_r010_service_six_source(
             service=service, ctx=service.get("a"),
             snapshot=replace(good, rows=(good.rows[0], wrong_row) + good.rows[2:]))
+
+
+
+def _r010_t0_job_for_shared_service(tmp_path):
+    """Disposable PRIVATE test-only Job envelope; never GitHub/OIDC authority."""
+    import hashlib
+    from gateway.lbe_r010_job_envelope import (
+        R010JobKey, _create_once_in_pinned_anchor)
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+
+    anchor = tmp_path / "r010-job-anchor"
+    anchor.mkdir(mode=0o700)
+    anchor_fd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    key = R010JobKey(
+        repo="chinanjjohn2012/mac-file-gateway", pr=114,
+        workflow_id=145, workflow_path=".github/workflows/r010.yml",
+        workflow_ref=("chinanjjohn2012/mac-file-gateway/"
+                      ".github/workflows/r010.yml@refs/heads/main"),
+        run_id=42640408843, run_attempt=1, check_run_id=129239691259,
+        job_name="r010_preexec_hold", head_sha="a" * 40,
+        design_id="MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-013-CANDIDATE",
+        design_blob="f57e39543a6fe3d64fe99b8669fc7da854b93a64",
+        owner_choice_comment_id=6740275850, host_option="A1",
+        review_sequence_option="B1",
+        state_domain="R010_EPHEMERAL_JOB_STATE_V1",
+    )
+    raw = tuple(f"{i:064x}" for i in range(1, 7))
+    digests = tuple(hashlib.sha256(bytes.fromhex(n)).hexdigest() for n in raw)
+    return anchor_fd, anchor, key, raw, digests
+
+
+def test_r010_shared_service_canonically_binds_one_row1_nonce_without_launch(
+        product_service, tmp_path, monkeypatch):
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    def deny(*_a, **_kw):
+        raise AssertionError("R010 source binding may not launch or signal")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", deny)
+        m.setattr(os, "kill", deny)
+        m.setattr(os, "killpg", deny, raising=False)
+        try:
+            with _create_once_in_pinned_anchor(fd, key) as env:
+                journal = R010SerialNonceJournal(
+                    env, six_nonce_sha256=digests)
+                six = service._prepare_r010_six_command_source_only("a")
+                capture = service._bind_r010_first_row_source_only(
+                    "a", source_plan=six, journal=journal, nonce=raw[0])
+                assert capture.status()["reservation_bound"] is False
+                assert capture.status()["native_launch_allowed"] is False
+                assert journal.row_state_snapshot()["job_state_model"] == (
+                    "JOB_ROW_RUNNING_1")
+                assert journal.row_state_snapshot()["rows_model"] == (
+                    ("ROW_RUNNING",) + ("ROW_NOT_RUN",) * 5)
+                with pytest.raises(GatewayError):
+                    service._bind_r010_first_row_source_only(
+                        "a", source_plan=six,
+                        journal=journal, nonce=raw[0])
+                with pytest.raises(GatewayError) as denied:
+                    service.invoke_exec(
+                        "a", "py-direct",
+                        ["python", "-m", "pytest", "-q"], dry_run=False)
+                assert denied.value.code == "exec_cleanup_proof_required"
+        finally:
+            os.close(fd)
+    assert service._active_operations == 0
+    assert service._exec_active == set()
+
+
+@pytest.mark.parametrize("change", ["wrong_nonce", "source_drift",
+                                    "cross_workspace", "cancelled"])
+def test_r010_shared_first_row_invalid_source_latches_all_six_without_spawn(
+        product_service, tmp_path, monkeypatch, change):
+    import json
+    import threading
+    from dataclasses import replace
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+
+    service, root = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                  (_ for _ in ()).throw(AssertionError("never launch")))
+        try:
+            with _create_once_in_pinned_anchor(fd, key) as env:
+                journal = R010SerialNonceJournal(
+                    env, six_nonce_sha256=digests)
+                six = service._prepare_r010_six_command_source_only("a")
+                token = raw[0]
+                cancelled = None
+                if change == "wrong_nonce":
+                    token = raw[1]
+                if change == "source_drift":
+                    (root / "py-direct" / "src" / "main.py").write_bytes(
+                        b"changed before row1\n")
+                if change == "cross_workspace":
+                    six = replace(six, workspace="b")
+                if change == "cancelled":
+                    cancelled = threading.Event()
+                    cancelled.set()
+                with pytest.raises(GatewayError, match="failed closed"):
+                    service._bind_r010_first_row_source_only(
+                        "a", source_plan=six, journal=journal,
+                        nonce=token, cancelled=cancelled)
+                job = env.snapshot()
+                rootpath = anchor / job["envelope_root_name"]
+                failure = json.loads(
+                    (rootpath / "command-journal" /
+                     "r010-row-failure.json").read_text())
+                assert failure["status"] == "JOB_FAILED_LATCHED"
+                assert failure["rows"] == ["ROW_VOID"] * 6
+                with pytest.raises(GatewayError):
+                    service._bind_r010_first_row_source_only(
+                        "a", source_plan=six,
+                        journal=journal, nonce=raw[0])
+        finally:
+            os.close(fd)
+    assert service._active_operations == 0
+    assert service._exec_active == set()

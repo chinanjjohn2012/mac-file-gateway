@@ -778,6 +778,72 @@ class WorkspaceService:
                 self._lifecycle.notify_all()
 
 
+
+    def _bind_r010_first_row_source_only(
+        self, name: str, *, source_plan: object, journal: object,
+        nonce: str, cancelled: threading.Event | None = None,
+    ):
+        """Bind SAME service's full six-row source to one durable row-1 capture.
+
+        This is the nonoperative half of R010 serial admission:
+        - all six original service-selected source snapshots rechecked;
+        - one Job nonce irrevocably burned in the global journal;
+        - Worker reservation captured only through the original Owner object.
+        The returned source-only capture is NOT an Exec Grant or launcher.
+        """
+        from .lbe_r010_six_service import (
+            R010SixSourcePlan, R010SixSourceDenied,
+            recheck_r010_service_six_source,
+        )
+        from .lbe_r010_serial_journal import R010SerialNonceJournal
+
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if (self.settings.schema_version != 2
+                    or self._closing or self._closed
+                    or self._exec_state is None or self._lbe_owner is None
+                    or self._r006_pending is not None):
+                raise GatewayError(
+                    "runner_unavailable", "R010 shared source slot unavailable.")
+            self._exec_state.require_healthy()
+            if self._exec_active:
+                raise GatewayError("busy", "Another Exec slot is active.")
+            if cancelled is not None and type(cancelled) is not threading.Event:
+                raise GatewayError(
+                    "invalid_argument", "R010 cancellation token invalid.")
+            self._active_operations += 1
+        try:
+            try:
+                if (type(source_plan) is not R010SixSourcePlan
+                        or type(journal) is not R010SerialNonceJournal
+                        or source_plan.workspace != ctx.name
+                        or (cancelled is not None and cancelled.is_set())):
+                    raise R010SixSourceDenied(
+                        "wrong source plan, Job or cancelled waiter")
+                recheck_r010_service_six_source(
+                    service=self, ctx=ctx, snapshot=source_plan)
+                journal.burn_first_nonce(nonce)
+                return journal.make_first_row_private_capture(
+                    owner=self._lbe_owner,
+                    plan=source_plan.rows[0].candidate.plan)
+            except Exception:
+                # One invalid pre-Popen attempt permanently VOID-s the Job,
+                # even if the nonce wasn't burned yet. Reusing the same Job
+                # root after a failure or a crash never becomes allowed.
+                if type(journal) is R010SerialNonceJournal:
+                    try:
+                        journal.latch_failure("source_preexec_denied")
+                    except Exception:
+                        pass
+                raise GatewayError(
+                    "runner_unavailable",
+                    "R010 shared-service first-row source gate failed closed."
+                ) from None
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
     def _prepare_r010_six_command_source_only(
         self, name: str, *, timeout_seconds: int = 120,
     ):

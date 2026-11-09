@@ -23,6 +23,7 @@ from .lbe_r010_row_fs import (
 )
 from .lbe_r010_finite_integrity import R010SelectedSourceSnapshot
 from .lbe_direct_owner import DirectChildOwner
+from .lbe_r010_six_state import R010SixRowPolicy, R010SixRowPolicyDenied
 from .lbe_worker import LbeWorkPlan
 from typing import Any
 
@@ -73,6 +74,11 @@ class R010SerialNonceJournal:
             envelope._r010_nonce_journal_claimed = True
         self._envelope = envelope
         self._digests = six_nonce_sha256
+        # One canonical six-row model under the same envelope lock.
+        # Its synthetic positive transitions NEVER authenticate an exit or
+        # authorize NativeLauncher; the current product journal only uses
+        # actual source-only first-row and permanent failure transitions.
+        self._state_model = R010SixRowPolicy.hold(six_nonce_sha256)
         self._burned = False
         self._failed = False
         self._source_recorded = False
@@ -96,6 +102,12 @@ class R010SerialNonceJournal:
                     or hashlib.sha256(bytes.fromhex(nonce)).hexdigest()
                     != self._digests[0]):
                 raise R010SerialAdmissionDenied("wrong row-1 nonce")
+            try:
+                changed_model = self._state_model.ready_model_first().burn_model(
+                    1, nonce)
+            except R010SixRowPolicyDenied:
+                raise R010SerialAdmissionDenied(
+                    "invalid global first-row state") from None
             record = (json.dumps({
                 "version": "R010_ROW_BURN_V1",
                 "row": 1,
@@ -112,6 +124,7 @@ class R010SerialNonceJournal:
                 self._failed = True
                 raise R010SerialAdmissionDenied("row burn uncertain, deny forever") from None
             self._burned = True
+            self._state_model = changed_model
             return {
                 "row": 1, "nonce_burned": True,
                 "native_launch_allowed": False,
@@ -131,8 +144,17 @@ class R010SerialNonceJournal:
                 "invalid_output_or_fs": "ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS",
                 "owner_reader_ambiguous": "ROW_AMBIGUOUS",
             }.get(code, "ROW_AMBIGUOUS")
-            rows = ([failure_row] + ["ROW_VOID"] * 5
-                    if self._burned else ["ROW_VOID"] * 6)
+            try:
+                if self._burned:
+                    failed_model = self._state_model.finish_model(
+                        1, failure_row)
+                else:
+                    failed_model = self._state_model.fail_unstarted_model()
+            except R010SixRowPolicyDenied:
+                self._failed = True
+                raise R010SerialAdmissionDenied(
+                    "global state model corrupt, permanent deny") from None
+            rows = list(failed_model.rows)
             record = (json.dumps({
                 "status": "JOB_FAILED_LATCHED",
                 "reason": code,
@@ -148,6 +170,7 @@ class R010SerialNonceJournal:
             except R010JobEnvelopeDenied:
                 self._failed = True
                 raise R010SerialAdmissionDenied("failure latch uncertain, deny forever") from None
+            self._state_model = failed_model
             self._failed = True
 
     def latch_from_owned_row(self, observation: R010OwnedRowSourceObservation) -> None:
@@ -349,6 +372,12 @@ class R010SerialNonceJournal:
                     self._failed = True
             raise R010SerialAdmissionDenied(
                 "original owner row-1 finalization uncertain, denied") from None
+
+    def row_state_snapshot(self) -> dict[str, object]:
+        """Status-only six-row observability; never a source of authority."""
+        with self._envelope._lock:
+            self._require_live()
+            return self._state_model.snapshot()
 
     def begin_later_row(self, *_args: object, **_kwargs: object) -> None:
         raise R010SerialAdmissionDenied("trusted row-success adapter not implemented")

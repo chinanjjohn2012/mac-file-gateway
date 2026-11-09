@@ -364,3 +364,24 @@ def test_cross_nonce_and_wrong_finite_receipt_cannot_mint_source_success(
                 owned=owned, finite=finite)
     root = anchor / instance.snapshot()["envelope_root_name"]
     assert not (root / "command-journal" / "row-01-source-only.json").exists()
+
+
+
+def test_real_journal_reports_six_row_state_but_never_models_fake_completion(
+        envelope):
+    _, instance = envelope
+    raw, commits = nonces()
+    journal = R010SerialNonceJournal(instance, six_nonce_sha256=commits)
+    before = journal.row_state_snapshot()
+    assert before["job_state_model"] == "JOB_PREEXEC_HOLD"
+    assert before["rows_model"] == ("ROW_NOT_RUN",) * 6
+    journal.burn_first_nonce(raw[0])
+    during = journal.row_state_snapshot()
+    assert during["job_state_model"] == "JOB_ROW_RUNNING_1"
+    assert during["rows_model"] == ("ROW_RUNNING",) + ("ROW_NOT_RUN",) * 5
+    assert during["six_command_product_t1_pass"] is False
+    with pytest.raises(R010SerialAdmissionDenied, match="not implemented"):
+        journal.begin_later_row(2, raw[1])
+    journal.latch_failure("owner_reader_ambiguous")
+    with pytest.raises(R010SerialAdmissionDenied):
+        journal.row_state_snapshot()

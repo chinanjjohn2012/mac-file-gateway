@@ -23,6 +23,8 @@ from .lbe_r010_row_fs import (
 )
 from .lbe_r010_finite_integrity import R010SelectedSourceSnapshot
 from .lbe_direct_owner import DirectChildOwner
+from .lbe_r010_private_capture import (
+    R010PrivateWorkerCapture, R010PrivateCaptureDenied)
 from .lbe_r010_six_state import R010SixRowPolicy, R010SixRowPolicyDenied
 from .lbe_worker import LbeWorkPlan
 from typing import Any
@@ -83,6 +85,7 @@ class R010SerialNonceJournal:
         self._failed = False
         self._source_recorded = False
         self._row1_finalization_claimed = False
+        self._row1_capture_claimed = False
 
     def _require_live(self) -> None:
         if self._failed:
@@ -372,6 +375,64 @@ class R010SerialNonceJournal:
                     self._failed = True
             raise R010SerialAdmissionDenied(
                 "original owner row-1 finalization uncertain, denied") from None
+
+    def make_first_row_private_capture(
+        self, *, owner: DirectChildOwner, plan: LbeWorkPlan,
+    ) -> R010PrivateWorkerCapture:
+        """Bind the next private Worker reservation to the burned Job row.
+
+        No Popen and no product grant. The capture cannot be replayed or
+        transferred to another owner or plan.
+        """
+        with self._envelope._lock:
+            self._require_live()
+            if (not self._burned or self._row1_capture_claimed
+                    or self._source_recorded or self._row1_finalization_claimed
+                    or type(owner) is not DirectChildOwner
+                    or type(plan) is not LbeWorkPlan):
+                raise R010SerialAdmissionDenied(
+                    "first-row private capture unavailable or already claimed")
+            try:
+                validate_r010_fixed_row_plan(1, plan)
+            except Exception:
+                raise R010SerialAdmissionDenied(
+                    "private capture plan does not match fixed row") from None
+            self._row1_capture_claimed = True
+            return R010PrivateWorkerCapture._issue_source_only(
+                journal=self, owner=owner, plan=plan,
+                nonce_sha256=self._digests[0])
+
+    def finalize_first_row_from_worker_capture_source_only(
+        self, *, capture: R010PrivateWorkerCapture,
+        selected_root_fd: int,
+        selected_before: R010SelectedSourceSnapshot,
+        private_root_fd: int,
+        private_before: R010PrivateTreeSnapshot,
+    ) -> dict[str, object]:
+        """Take a Worker-created reservation result, not user Worker metadata."""
+        if type(capture) is not R010PrivateWorkerCapture:
+            raise R010SerialAdmissionDenied("invalid Worker capture")
+        try:
+            owner, reservation, plan, result, nonce_hash = (
+                capture._take_for_journal(self))
+            if (not self._row1_capture_claimed
+                    or nonce_hash != self._digests[0]):
+                raise R010PrivateCaptureDenied("capture does not match row")
+        except R010PrivateCaptureDenied:
+            if not self._failed and not self._source_recorded:
+                try:
+                    self.latch_failure("owner_reader_ambiguous")
+                except Exception:
+                    self._failed = True
+            raise R010SerialAdmissionDenied(
+                "first-row original Worker capture unavailable") from None
+        return self.finalize_first_row_from_actual_owner_source_only(
+            owner=owner, reservation=reservation, plan=plan,
+            worker_result=result,
+            selected_root_fd=selected_root_fd,
+            selected_before=selected_before,
+            private_root_fd=private_root_fd,
+            private_before=private_before)
 
     def row_state_snapshot(self) -> dict[str, object]:
         """Status-only six-row observability; never a source of authority."""

@@ -109,7 +109,7 @@ def no_foreign_effects(monkeypatch):
 
 
 def run_fake(*, exit_code=0, both_eof=True, close_fails=False,
-             proposed_plan=None):
+             proposed_plan=None, journal=None, capture_box=None):
     owner = DirectChildOwner()
     sel = FakeSelector(close_fails=close_fails)
     child = FakeChild(exit_code)
@@ -140,7 +140,12 @@ def run_fake(*, exit_code=0, both_eof=True, close_fails=False,
 
     worker = LbeWorker(owner, launcher=launch, drain_factory=make_reader)
     proposed = plan() if proposed_plan is None else proposed_plan
-    result = worker.run(proposed)
+    private_capture = (
+        journal.make_first_row_private_capture(owner=owner, plan=proposed)
+        if journal is not None else None)
+    if capture_box is not None:
+        capture_box["capture"] = private_capture
+    result = worker.run(proposed, r010_source_capture=private_capture)
     assert len(reservations) == 1
     assert child.reaped == 1
     observed = observe_r010_private_owner_row(
@@ -437,3 +442,106 @@ def test_wrong_plan_fails_closed_before_owner_acceptance(
         _finalize_first_row(
             journal, r010_first_row_private_files, proposed_plan=plan())
     assert _durable_failure(anchor, env)["rows"][0] == "ROW_AMBIGUOUS"
+
+
+def test_actual_worker_capture_is_bound_before_fake_launcher_and_replay_denied(
+        r010_journal, r010_first_row_private_files):
+    from gateway.lbe_r010_serial_journal import R010SerialAdmissionDenied
+
+    _, _, journal, raw = r010_journal
+    captured = {}
+    # The actual Worker binds the private reservation without monkeypatching
+    # a response or trusting caller-supplied Owner fields.
+    _, owner, reservation, plan_obj, result = run_fake(
+        proposed_plan=_r010_pytest_plan(), journal=journal,
+        capture_box=captured)
+    receipt = captured["capture"]
+    assert receipt.status()["reservation_bound"] is True
+    assert receipt.status()["worker_result_recorded"] is True
+    # Even a poisoned later public result dictionary cannot rewrite Worker.
+    result["status"] = "forged-status"
+    result["exit_code"] = 998
+    assert journal.finalize_first_row_from_worker_capture_source_only(
+        capture=receipt,
+        selected_root_fd=r010_first_row_private_files["selected_root_fd"],
+        selected_before=r010_first_row_private_files["selected_before"],
+        private_root_fd=r010_first_row_private_files["private_root_fd"],
+        private_before=r010_first_row_private_files["private_before"],
+    )["status"] == "ROW_FINITE_ZERO_SOURCE_ONLY_NOT_PRODUCT_T1"
+    assert receipt.status()["consumed"] is True
+    with pytest.raises(R010SerialAdmissionDenied):
+        journal.finalize_first_row_from_worker_capture_source_only(
+            capture=receipt,
+            selected_root_fd=r010_first_row_private_files["selected_root_fd"],
+            selected_before=r010_first_row_private_files["selected_before"],
+            private_root_fd=r010_first_row_private_files["private_root_fd"],
+            private_before=r010_first_row_private_files["private_before"],
+        )
+    with pytest.raises(R010SerialAdmissionDenied, match="not implemented"):
+        journal.begin_later_row(2, raw[1])
+    owner.close()
+
+
+@pytest.mark.parametrize("code,eof,close_fails,expected", [
+    (9, True, False, "ROW_OBSERVED_NONZERO"),
+    (0, False, False, "ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS"),
+    (0, True, True, "ROW_AMBIGUOUS"),
+])
+def test_worker_bound_capture_negative_path_voids_all_remaining(
+        r010_journal, r010_first_row_private_files,
+        code, eof, close_fails, expected):
+    anchor, env, journal, raw = r010_journal
+    box = {}
+    _, owner, _, _, _ = run_fake(
+        exit_code=code, both_eof=eof, close_fails=close_fails,
+        proposed_plan=_r010_pytest_plan(), journal=journal, capture_box=box)
+    result = journal.finalize_first_row_from_worker_capture_source_only(
+        capture=box["capture"],
+        selected_root_fd=r010_first_row_private_files["selected_root_fd"],
+        selected_before=r010_first_row_private_files["selected_before"],
+        private_root_fd=r010_first_row_private_files["private_root_fd"],
+        private_before=r010_first_row_private_files["private_before"],
+    )
+    assert result["status"] == expected
+    assert result["durably_latched"] is True
+    assert _durable_failure(anchor, env)["rows"] == (
+        [expected] + ["ROW_VOID"] * 5)
+    owner.close()
+
+
+def test_r010_worker_capture_cannot_be_attached_to_other_owner(
+        r010_journal, monkeypatch):
+    from gateway.lbe_r010_private_capture import R010PrivateCaptureDenied
+    from gateway.lbe_worker import LbeWorkerError
+    _, _, journal, _ = r010_journal
+    owner = DirectChildOwner()
+    other = DirectChildOwner()
+    plan_obj = _r010_pytest_plan()
+    cap = journal.make_first_row_private_capture(
+        owner=owner, plan=plan_obj)
+    try:
+        with pytest.raises(LbeWorkerError, match="invalid_worker_dependency"):
+            LbeWorker(other, launcher=lambda *_: (
+                _ for _ in ()).throw(AssertionError("should not launch"))
+            ).run(plan_obj, r010_source_capture=cap)
+        assert cap.status()["reservation_bound"] is False
+    finally:
+        owner.close()
+        other.close()
+
+
+def test_r010_worker_capture_wrong_plan_binds_no_reservation(
+        r010_journal):
+    from gateway.lbe_worker import LbeWorkerError
+    _, _, journal, _ = r010_journal
+    owner = DirectChildOwner()
+    cap = journal.make_first_row_private_capture(
+        owner=owner, plan=_r010_pytest_plan())
+    try:
+        with pytest.raises(LbeWorkerError, match="invalid_worker_dependency"):
+            LbeWorker(owner, launcher=lambda *_: (
+                _ for _ in ()).throw(AssertionError("should not launch"))
+            ).run(plan(), r010_source_capture=cap)
+        assert cap.status()["reservation_bound"] is False
+    finally:
+        owner.close()

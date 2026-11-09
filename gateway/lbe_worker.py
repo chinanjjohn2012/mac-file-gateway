@@ -229,7 +229,8 @@ class LbeWorker:
 
     def run(self, plan: LbeWorkPlan, *,
             cancelled: threading.Event | None = None,
-            product_attempt: object = None) -> dict[str, Any]:
+            product_attempt: object = None,
+            r010_source_capture: object = None) -> dict[str, Any]:
         """Run via a trusted injected launcher, never public Exec authority.
 
         Fake T0 tests create no real child. The separately owner-approved
@@ -239,6 +240,15 @@ class LbeWorker:
         an attachment failure retains wait() ownership and latches admission.
         """
         self._check_plan(plan)
+        if r010_source_capture is not None:
+            from .lbe_r010_private_capture import (
+                R010PrivateCaptureDenied, R010PrivateWorkerCapture)
+            if type(r010_source_capture) is not R010PrivateWorkerCapture:
+                raise LbeWorkerError("invalid_worker_dependency")
+            try:
+                r010_source_capture._check_for_worker(self._owner, plan)
+            except R010PrivateCaptureDenied:
+                raise LbeWorkerError("invalid_worker_dependency") from None
         # Retain the exact launcher selected before rechecks or drain setup:
         # no injected callback may switch it between validation and invocation.
         launcher = self._launcher
@@ -271,6 +281,15 @@ class LbeWorker:
             reservation = self._owner.reserve(plan.workspace)
         except LbeOwnerError as exc:
             raise LbeWorkerError(exc.code) from None
+        if r010_source_capture is not None:
+            try:
+                r010_source_capture._bind_reserved(self._owner, reservation, plan)
+            except BaseException:
+                try:
+                    self._owner.spawn_failed(reservation)
+                except BaseException:
+                    self._owner.latch_unavailable(reservation)
+                raise LbeWorkerError("invalid_worker_dependency") from None
         drain = None
         try:
             drain = self._drain_factory(reservation.capture)
@@ -310,11 +329,15 @@ class LbeWorker:
                 self._owner.spawn_failed(reservation)
             except BaseException:
                 raise LbeWorkerError("exec_state_unavailable") from None
-            return self._base(
+            response = self._base(
                 plan, status="launch_failed", executed=False, exit_code=None,
                 timed_out=False, may_run=False,
                 output={"output_complete": False},
             )
+            if r010_source_capture is not None:
+                r010_source_capture._record_worker_result(
+                    self._owner, reservation, plan, response)
+            return response
         except BaseException:
             # No negative witness exists; even a native OSError might have
             # occurred AFTER a child was launched and before it was returned.
@@ -356,19 +379,27 @@ class LbeWorker:
                     output = drain.snapshot()
                     if output["pipe_reader_failed"]:
                         self._owner.latch_unavailable(reservation)
-                    return self._base(
+                    response = self._base(
                         plan, status="exited", executed=True,
                         exit_code=obs.exit_code, timed_out=False, may_run=True,
                         output=output,
                     )
+                    if r010_source_capture is not None:
+                        r010_source_capture._record_worker_result(
+                            self._owner, reservation, plan, response)
+                    return response
                 if remaining <= 0:
                     # Timeout annotates the waiter only: child/reaper/reader
                     # remain active; output_complete is never invented.
-                    return self._base(
+                    response = self._base(
                         plan, status="timed_out", executed=True,
                         exit_code=None, timed_out=True, may_run=True,
                         output=drain.snapshot(),
                     )
+                    if r010_source_capture is not None:
+                        r010_source_capture._record_worker_result(
+                            self._owner, reservation, plan, response)
+                    return response
         except LbeWorkerError:
             raise
         except BaseException:

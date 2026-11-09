@@ -218,7 +218,7 @@ def test_go_cache_delta_allowed_for_go_test_only(fixture_root):
 def test_build_requires_preabsent_and_exact_new_artifact(fixture_root, tmp_path):
     selected, private, *_ = fixture_root
     binparent = selected / "bin"
-    binparent.mkdir(mode=0o700)
+    # Preexisting pinned workspace output parent (created by fixture_root).
     fd = os.open(binparent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         prior = observe_go_output_absent(parent_fd=fd)

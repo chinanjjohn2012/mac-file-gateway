@@ -132,15 +132,22 @@ class R010SerialNonceJournal:
                     "row_positive_success": False,
                     "six_command_product_t1_pass": False,
                 }, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+            except (R010SixSourceDenied, R010JobEnvelopeDenied,
+                    ValueError, TypeError, OSError):
+                # Deterministic source/shape rejection is NOT an uncertain
+                # disk write. The caller must persist JOB_FAILED/ROW_VOID.
+                raise R010SerialAdmissionDenied(
+                    "six-row source identity denied") from None
+            try:
                 _write_once(
                     self._envelope._journal_fd,
                     "six-row-source-binding.json", payload)
-            except (R010SixSourceDenied, R010JobEnvelopeDenied,
-                    ValueError, TypeError, OSError):
-                # An uncertain create-once write can never become retryable.
+            except R010JobEnvelopeDenied:
+                # O_EXCL/fsync may have partially persisted: never retry,
+                # re-adopt this Job or fabricate a successful VOID write.
                 self._failed = True
                 raise R010SerialAdmissionDenied(
-                    "durable six-row source binding unavailable") from None
+                    "durable six-row source write uncertain") from None
             self._six_source_bound = True
             self._six_source_sha256 = digest
             self._six_source_plan = source_plan
@@ -324,6 +331,8 @@ class R010SerialNonceJournal:
                 "row": 1, "nonce_sha256": self._digests[0],
                 "original_exit_code": 0,
                 "source_only": True,
+                "job_key_sha256": self._envelope._key.key_sha256(),
+                "six_source_binding_sha256": self._six_source_sha256,
                 "private_before_sha256": finite.private_tree_before_sha256,
                 "private_after_sha256": finite.private_tree_after_sha256,
                 "status": "ROW_FINITE_ZERO_SOURCE_ONLY_NOT_PRODUCT_T1",
@@ -434,6 +443,7 @@ class R010SerialNonceJournal:
 
     def make_first_row_private_capture(
         self, *, owner: DirectChildOwner, plan: LbeWorkPlan,
+        source_plan: object = None,
     ) -> R010PrivateWorkerCapture:
         """Bind the next private Worker reservation to the burned Job row.
 
@@ -445,7 +455,11 @@ class R010SerialNonceJournal:
             if (not self._burned or self._row1_capture_claimed
                     or self._source_recorded or self._row1_finalization_claimed
                     or type(owner) is not DirectChildOwner
-                    or type(plan) is not LbeWorkPlan):
+                    or type(plan) is not LbeWorkPlan
+                    or (self._six_source_bound
+                        and (source_plan is not self._six_source_plan
+                             or plan is not
+                             self._six_source_plan.rows[0].candidate.plan))):
                 raise R010SerialAdmissionDenied(
                     "first-row private capture unavailable or already claimed")
             try:
@@ -489,6 +503,24 @@ class R010SerialNonceJournal:
             selected_before=selected_before,
             private_root_fd=private_root_fd,
             private_before=private_before)
+
+    def _require_active_private_capture(
+        self, capture: R010PrivateWorkerCapture,
+        source_plan: object,
+    ) -> None:
+        """Guard the exact unlatched Job immediately before Worker launcher."""
+        with self._envelope._lock:
+            self._require_live()
+            if (type(capture) is not R010PrivateWorkerCapture
+                    or capture._journal is not self
+                    or not self._burned or not self._row1_capture_claimed
+                    or self._source_recorded or self._row1_finalization_claimed
+                    or self._state_model.job_state != "JOB_ROW_RUNNING_1"
+                    or self._state_model.active_row != 1
+                    or (self._six_source_bound
+                        and source_plan is not self._six_source_plan)):
+                raise R010SerialAdmissionDenied(
+                    "private Worker receipt lost live Job identity")
 
     def row_state_snapshot(self) -> dict[str, object]:
         """Status-only six-row observability; never a source of authority."""

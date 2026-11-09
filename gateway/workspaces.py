@@ -830,7 +830,8 @@ class WorkspaceService:
                 journal.burn_first_nonce(nonce)
                 capture = journal.make_first_row_private_capture(
                     owner=self._lbe_owner,
-                    plan=source_plan.rows[0].candidate.plan)
+                    plan=source_plan.rows[0].candidate.plan,
+                    source_plan=source_plan)
                 capture._bind_six_source(
                     service=self, ctx=ctx, source_plan=source_plan)
                 return capture

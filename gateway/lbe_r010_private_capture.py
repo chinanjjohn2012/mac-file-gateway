@@ -66,7 +66,9 @@ class R010PrivateWorkerCapture:
                 or type(ctx) is not WorkspaceContext
                 or type(source_plan) is not R010SixSourcePlan
                 or service._lbe_owner is not self._owner
-                or source_plan.rows[0].candidate.plan is not self._plan):
+                or source_plan.rows[0].candidate.plan is not self._plan
+                or getattr(self._journal, "_six_source_plan", None)
+                   is not source_plan):
             raise R010PrivateCaptureDenied("source binding not from same service")
         try:
             recheck_r010_service_six_source(
@@ -85,17 +87,26 @@ class R010PrivateWorkerCapture:
         with self._lock:
             binding = self._source_binding
         if binding is None:
-            # No service-bound source can be claimed by a test-only capture.
-            # This never makes an unbound capture a native authorization.
+            # Old disposable FakeChild T0 may create an unbound SOURCE_ONLY
+            # receipt; it never grants PRODUCT_T1 or allows row advancement.
+            try:
+                self._journal._require_active_private_capture(self, None)
+            except Exception:
+                raise R010PrivateCaptureDenied(
+                    "private capture no longer bound to a live Job") from None
             return
         from .lbe_r010_six_service import recheck_r010_service_six_source
         try:
+            self._journal._require_active_private_capture(
+                self, binding[2])
             recheck_r010_service_six_source(
                 service=binding[0], ctx=binding[1],
                 snapshot=binding[2])
+            self._journal._require_active_private_capture(
+                self, binding[2])
         except Exception:
             raise R010PrivateCaptureDenied(
-                "service-selected first-party source drift before launcher"
+                "service source or Job identity drift before launcher"
             ) from None
 
     def _check_for_worker(self, owner: DirectChildOwner,

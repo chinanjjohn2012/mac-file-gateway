@@ -5568,3 +5568,69 @@ def test_r010_cannot_bind_six_source_after_first_burn(
                     service=service, ctx=service.get("a"), source_plan=six)
     finally:
         os.close(fd)
+
+
+
+def test_r010_source_rejection_is_latched_with_six_void_rows(
+        product_service, tmp_path, monkeypatch):
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    service, root = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(
+        tmp_path)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(
+                env, six_nonce_sha256=digests)
+            six = service._prepare_r010_six_command_source_only("a")
+            real = journal.bind_six_source_before_first_burn
+            def mutate_before_bind(*, service, ctx, source_plan):
+                (root / "go-project" / "cmd" / "app" / "main.go"
+                 ).write_bytes(b"package main\n// changed\n")
+                return real(service=service, ctx=ctx,
+                            source_plan=source_plan)
+            monkeypatch.setattr(
+                journal, "bind_six_source_before_first_burn",
+                mutate_before_bind)
+            with pytest.raises(GatewayError, match="failed closed"):
+                service._bind_r010_first_row_source_only(
+                    "a", source_plan=six, journal=journal, nonce=raw[0])
+            home = anchor / env.snapshot()["envelope_root_name"]
+            result = json.loads(
+                (home / "command-journal" /
+                 "r010-row-failure.json").read_text())
+            assert result["rows"] == ["ROW_VOID"] * 6
+            assert result["status"] == "JOB_FAILED_LATCHED"
+            assert not (home / "command-journal" /
+                        "six-row-source-binding.json").exists()
+    finally:
+        os.close(fd)
+
+
+def test_r010_worker_capture_denied_after_job_latch_before_launch(
+        product_service, tmp_path, monkeypatch):
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    fd, _, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    launched = []
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(
+                env, six_nonce_sha256=digests)
+            six = service._prepare_r010_six_command_source_only("a")
+            cap = service._bind_r010_first_row_source_only(
+                "a", source_plan=six, journal=journal, nonce=raw[0])
+            journal.latch_failure("owner_reader_ambiguous")
+            def forbidden(*_args, **_kw):
+                launched.append(True)
+                raise AssertionError("no Worker launcher after Job latch")
+            with pytest.raises(LbeWorkerError, match="invalid_worker_dependency"):
+                LbeWorker(service._lbe_owner, launcher=forbidden).run(
+                    six.rows[0].candidate.plan, r010_source_capture=cap)
+            assert launched == []
+    finally:
+        os.close(fd)

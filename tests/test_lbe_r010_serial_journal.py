@@ -320,9 +320,11 @@ def test_finite_plus_source_owned_zero_persists_but_never_advances(
     raw, hashes = nonces()
     journal = R010SerialNonceJournal(instance, six_nonce_sha256=hashes)
     journal.burn_first_nonce(raw[0])
+    # Replay reuses the exact immutable source receipt, not a new fixture.
+    finite_receipt = _source_only_first_row_finite(tmp_path)
     result = journal.record_source_only_first_row_zero(
         owned=_fake_source_only_owned(hashes[0]),
-        finite=_source_only_first_row_finite(tmp_path))
+        finite=finite_receipt)
     assert result["next_row_allowed"] is False
     assert result["native_launch_allowed"] is False
     assert result["six_command_product_t1_pass"] is False
@@ -335,7 +337,7 @@ def test_finite_plus_source_owned_zero_persists_but_never_advances(
     with pytest.raises(R010SerialAdmissionDenied, match="duplicate"):
         journal.record_source_only_first_row_zero(
             owned=_fake_source_only_owned(hashes[0]),
-            finite=_source_only_first_row_finite(tmp_path))
+            finite=finite_receipt)
     with pytest.raises(R010SerialAdmissionDenied, match="not implemented"):
         journal.begin_later_row(2, raw[1])
 

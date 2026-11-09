@@ -20,6 +20,7 @@ from .lbe_r010_finite_integrity import (
     R010FiniteIntegrityDenied, R010GoOutputAbsent,
     R010SelectedSourceSnapshot, _directory_identity, _file_identity,
     _read_regular, inspect_go_build_artifact, recheck_selected_source_files,
+    observe_selected_source_files,
 )
 
 _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC

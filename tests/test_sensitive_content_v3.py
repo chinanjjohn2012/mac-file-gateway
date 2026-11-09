@@ -48,6 +48,107 @@ def test_v3_runtime_references_are_visible_writable_and_searchable(tmp_path, lin
         gateway.close()
 
 
+@pytest.mark.parametrize("line", [
+    "headers['Authorization'] = 'Bearer ' + access_value",
+    "headers['Authorization'] = f'Bearer {access_value}'",
+    "headers = {'Authorization': 'Bearer ' + access_value}",
+    "headers = {'Authorization': f'Bearer {access_value}'}",
+    "send(Authorization='Bearer ' + access_value)",
+    "authorization = 'Bearer ' + access_value",
+    "self.authorization = f'Bearer {access_value}'",
+    "authorization, other = 'Bearer ' + access_value, 'ordinary'",
+    "headers['Authorization'] = 'Bearer ' + os.environ['ACCESS_TOKEN']",
+])
+@pytest.mark.parametrize("ext", ["py", "pyi"])
+def test_dynamic_bearer_authorization_is_writable_visible_and_searchable(tmp_path, line, ext):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    path = 'source.' + ext
+    source = line + "\n# marker = 1\n"
+    gateway = Gateway(root, allow_write=True)
+    try:
+        assert not gateway.create_file(path, source)["applied"]
+        assert gateway.create_file(path, source, dry_run=False)["applied"]
+        read = gateway.read_file(path)
+        assert read["redacted_lines"] == 0
+        assert line in read["content"]
+        assert gateway.search_files("Bearer ", file_glob=path)["matches"]
+        gateway.replace_text(path, "# marker = 1", "# marker = 2", read["file_sha256"], dry_run=False)
+        updated = source.replace("# marker = 1", "# marker = 2")
+        assert (root / path).read_bytes() == updated.encode()
+        sha = gateway.read_file(path)["file_sha256"]
+        gateway.write_file(path, updated + "# done\n", sha, dry_run=False)
+        assert (root / path).read_bytes() == (updated + "# done\n").encode()
+    finally:
+        gateway.close()
+
+
+@pytest.mark.parametrize("source", [
+    "headers['Authorization'] = 'Bearer actual-literal-secret'\n",
+    "headers['Authorization'] = 'Bearer ' + 'literal-secret'\n",
+    "headers['Authorization'] = f\"Bearer {'literal-secret'}\"\n",
+    "headers['Authorization'] = f'Bearer {access_value}literal-secret'\n",
+    "headers['Authorization'] = 'Bearer ' + (access_value + 'literal-secret')\n",
+    "headers = {'Authorization': 'Bearer ' + 'literal-secret'}\n",
+    "send(Authorization='Bearer ' + 'literal-secret')\n",
+    "token = 'Bearer ' + access_value\n",
+    "headers['Authorization'] = 'Basic ' + access_value\n",
+    "headers['Authorization'] = b'Bearer ' + access_value\n",
+    "headers['Authorization'] = 'Bearer ' + os.getenv('ACCESS_TOKEN', 'literal-secret')\n",
+    "headers['Authorization'] = 'Bearer ' + access_value; password = 'literal-secret'\n",
+    "headers['Authorization'] = 'Bearer ' + str(123456789)\n",
+    "headers['Authorization'] = f'Bearer {str(123456789)}'\n",
+    "access_value = 'literal-secret'\nheaders['Authorization'] = 'Bearer ' + access_value\n",
+    "first = 'literal-secret'\naccess_value = first\nheaders['Authorization'] = f'Bearer {access_value}'\n",
+    "access_value = 'literal' + '-secret'\nheaders['Authorization'] = 'Bearer ' + access_value\n",
+    "access_value = 'literal-secret' * 2\nheaders['Authorization'] = 'Bearer ' + access_value\n",
+    "access_value = str(123456789)\nheaders['Authorization'] = 'Bearer ' + access_value\n",
+    "access_value, other = 'literal-secret', None\nheaders['Authorization'] = 'Bearer ' + access_value\n",
+    "def f(access_value='literal-secret'):\n    return {'Authorization': 'Bearer ' + access_value}\n",
+    "os.environ['AUTH_VALUE'] = 'literal-secret'\nheaders['Authorization'] = 'Bearer ' + os.environ['AUTH_VALUE']\n",
+    "os.environ['AUTH_VALUE'] = 'literal-secret'\naccess_value = os.getenv('AUTH_VALUE')\nheaders['Authorization'] = 'Bearer ' + access_value\n",
+    "headers['Authorization'] = 'Bearer ' + get_token()\n",
+    "for access_value in ['literal-secret']:\n    headers['Authorization'] = 'Bearer ' + access_value\n",
+    "access_value = 'literal-secret'\ndef f():\n    global access_value\n    headers['Authorization'] = 'Bearer ' + access_value\n",
+    "def outer():\n    access_value = get_value()\n    def inner():\n        nonlocal access_value\n        access_value = 'literal-secret'\n    inner()\n    headers['Authorization'] = 'Bearer ' + access_value\n",
+    "values = {'AUTH_VALUE': 'literal-secret'}\nos.environ.update(values)\nheaders['Authorization'] = 'Bearer ' + os.environ['AUTH_VALUE']\n",
+    "env = os.environ\nenv['AUTH_VALUE'] = 'literal-secret'\nheaders['Authorization'] = 'Bearer ' + os.environ['AUTH_VALUE']\n",
+    "os.environ.setdefault('AUTH_VALUE', 'literal-secret')\nheaders['Authorization'] = 'Bearer ' + os.environ['AUTH_VALUE']\n",
+    "class Vault:\n    def get(self):\n        return 'literal-secret'\naccess_value = Vault().get()\nheaders['Authorization'] = 'Bearer ' + access_value\n",
+    "def build(access_value):\n    return {'Authorization': 'Bearer ' + access_value}\nbuild('literal-secret')\n",
+    "def build(access_value):\n    return {'Authorization': 'Bearer ' + access_value}\nbuild(access_value='literal-secret')\n",
+    "class Settings:\n    value = 'literal-secret'\naccess_value = Settings.value\nheaders['Authorization'] = 'Bearer ' + access_value\n",
+    "env = os.environ\nenv.update({'AUTH_VALUE': 'literal-secret'})\nheaders['Authorization'] = 'Bearer ' + os.environ['AUTH_VALUE']\n",
+    "env = os.environ\ne = env\ne['AUTH_VALUE'] = 'literal-secret'\nheaders['Authorization'] = 'Bearer ' + os.environ['AUTH_VALUE']\n",
+    "def build(access_value):\n    return {'Authorization': 'Bearer ' + access_value}\nbuild(**{'access_value': 'literal-secret'})\n",
+    "def build(*args):\n    access_value = args[0]\n    return {'Authorization': 'Bearer ' + access_value}\nbuild('literal-secret')\n",
+    "key = 'AUTH_VALUE'\nos.environ[key] = 'literal-secret'\nheaders['Authorization'] = 'Bearer ' + os.environ['AUTH_VALUE']\n",
+    "values = {}\nvalues['x'] = 'literal-secret'\naccess_value = values['x']\nheaders['Authorization'] = 'Bearer ' + access_value\n",
+    "env: object = os.environ\nenv['AUTH_VALUE'] = 'literal-secret'\nheaders['Authorization'] = 'Bearer ' + os.environ['AUTH_VALUE']\n",
+])
+def test_bearer_exception_keeps_literal_and_other_credential_fields_hard(tmp_path, source):
+    from datetime import datetime, timedelta, timezone
+    root = tmp_path / "workspace"
+    root.mkdir()
+    expiry = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    gateway = Gateway(root, allow_write=True, sensitive_content_audit_paths=(".",),
+                      sensitive_content_audit_until=expiry)
+    try:
+        assert gateway.info()["write_policy"]["sensitive_content"]["write_mode"] == "audit"
+        preview = gateway.create_file("candidate.py", source)
+        assert preview["applied"] is False
+        assert not (root / "candidate.py").exists()
+        applied = gateway.create_file("candidate.py", source, dry_run=False)
+        assert applied["applied"] is True
+        read = gateway.read_file("candidate.py")
+        assert read["redacted_lines"] == 0
+        assert all(line in read["content"] for line in source.splitlines() if line.strip())
+        _flags, findings = gateway._visibility.classify("candidate.py", source.encode())
+        assert any(kind == "hard" for _number, kind in findings)
+    finally:
+        gateway.close()
+
+
 @pytest.mark.parametrize("source", [
     'def connect(api_key="abc"): pass\n',
     'async def send(*, password="secret"): pass\n',

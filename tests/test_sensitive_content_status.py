@@ -171,9 +171,11 @@ def test_root_audit_expires_at_requested_deadline(tmp_path, monkeypatch, hours):
     try:
         assert gateway.info()["write_policy"]["sensitive_content"]["write_mode"] == "audit"
         assert gateway.create_file("DEV_CHECKPOINT.md", "token = runtime_value\n", dry_run=False)["applied"]
-        assert gateway.read_file("DEV_CHECKPOINT.md")["redacted_lines"] == 1
-        with pytest.raises(GatewayError):
-            gateway.create_file("hard.md", "password = 'hardcoded'\n", dry_run=False)
+        shown = gateway.read_file("DEV_CHECKPOINT.md")
+        assert shown["redacted_lines"] == 0
+        assert "token = runtime_value" in shown["content"]
+        assert gateway.create_file("hard.md", "password = 'hardcoded'\n", dry_run=False)["applied"]
+        assert "password = 'hardcoded'" in gateway.read_file("hard.md")["content"]
         duration = timedelta(hours=hours).total_seconds()
         monkeypatch.setattr(module.time, "monotonic", lambda: 100.0 + duration - 1)
         assert gateway.info()["write_policy"]["sensitive_content"]["write_mode"] == "audit"

@@ -229,9 +229,8 @@ def test_audit_heuristic_only_scoped_and_hard_secrets_rejected(tmp_path):
         with pytest.raises(GatewayError) as exc:
             gateway.create_file("other/b.py", candidate, dry_run=False)
         assert exc.value.code == "sensitive_content"
-        with pytest.raises(GatewayError) as exc:
-            gateway.create_file("src/ordinary.py", "password = 'hardcoded-secret'\n", dry_run=False)
-        assert exc.value.code == "sensitive_content"
+        gateway.create_file("src/ordinary.py", "password = 'hardcoded-secret'\n", dry_run=False)
+        assert "hardcoded-secret" in gateway.read_file("src/ordinary.py")["content"]
         assert gateway.info()["write_policy"]["sensitive_content"]["write_mode"] == "audit"
     finally:
         gateway.close()
@@ -347,7 +346,9 @@ def test_http_contextvar_cycle_and_temporary_audit(tmp_path):
             hard = client.post("/create", json={"path": "src/hard.py",
                                                 "content": "password = 'hardcoded'\n",
                                                 "dry_run": False})
-            assert hard.status_code == 403 and hard.json()["error"] == "sensitive_content"
+            assert hard.status_code == 200
+            read_hard = client.get("/read", params={"path": "src/hard.py"})
+            assert "password = 'hardcoded'" in read_hard.json()["content"]
     finally:
         gateway.close()
 
@@ -366,10 +367,9 @@ def test_audit_does_not_allow_structured_kubernetes_credentials(tmp_path, payloa
                       sensitive_content_audit_paths=("src",),
                       sensitive_content_audit_until=until)
     try:
-        with pytest.raises(GatewayError) as exc:
-            gateway.create_file("src/cluster.yaml", payload, dry_run=False)
-        assert exc.value.code == "sensitive_content"
-        assert not (root / "src" / "cluster.yaml").exists()
+        applied = gateway.create_file("src/cluster.yaml", payload, dry_run=False)
+        assert applied["applied"] is True
+        assert payload.strip() in gateway.read_file("src/cluster.yaml")["content"]
     finally:
         gateway.close()
 
@@ -423,5 +423,168 @@ def test_dynamic_module_rebinding_does_not_imply_hardcoded_value(tmp_path, mutat
         read = gateway.read_file("dynamic_binding.py")
         assert read["redacted_lines"] == 0
         assert "token = active.set(value)" in read["content"]
+    finally:
+        gateway.close()
+
+
+@pytest.mark.parametrize("source", [
+    "token, attempt = attempts[0]['claim_token'], attempts[0]['id']\n",
+    "token = attempts[0]['claim_token']\n",
+    "password = records['password']\n",
+    "token = records['claim_token'][0]\n",
+    "[token, attempt] = [attempts[0]['claim_token'], attempts[0]['id']]\n",
+])
+def test_dynamic_lookup_keys_remain_visible_and_writable(tmp_path, source):
+    gateway = Gateway(tmp_path, allow_write=True)
+    try:
+        preview = gateway.create_file('sample.py', source)
+        assert preview['applied'] is False
+        assert not (tmp_path / 'sample.py').exists()
+        gateway.create_file('sample.py', source, dry_run=False)
+        read = gateway.read_file('sample.py')
+        assert read['redacted_lines'] == 0
+        assert source.strip() in read['content']
+        assert gateway.search_files('claim_token' if 'claim_token' in source else 'password',
+                                    file_glob='sample.py')['matches']
+    finally:
+        gateway.close()
+
+
+@pytest.mark.parametrize("source", [
+    "token = ['synthetic-secret'][0]\n",
+    "token = {'value': 'synthetic-secret'}['value']\n",
+    "token = 'synthetic-secret'[:]\n",
+    "token = records['claim_token'] or 'synthetic-secret'\n",
+    "token = os.getenv('TOKEN', 'synthetic-secret')\n",
+    "token = records['sk-1234567890abcdefghijklmnopqrstuvwxyz']\n",
+])
+def test_lookup_change_preserves_hard_literal_protection(tmp_path, source):
+    gateway = Gateway(tmp_path, allow_write=True)
+    try:
+        with pytest.raises(GatewayError) as error:
+            gateway.create_file('sample.py', source)
+        assert error.value.details['rule_id'] == 'CREDENTIAL_HARD'
+        (tmp_path / 'sample.py').write_text(source)
+        assert gateway.read_file('sample.py')['redacted_lines'] > 0
+    finally:
+        gateway.close()
+
+
+def test_active_audit_shows_hard_and_heuristic_lines_until_expiry(tmp_path):
+    root = tmp_path / "project"
+    (root / "src").mkdir(parents=True)
+    (root / "other").mkdir()
+    until = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    gateway = Gateway(
+        root, allow_write=True, write_paths=("src", "other"),
+        sensitive_content_audit_paths=("src",),
+        sensitive_content_audit_until=until,
+    )
+    hard = "password = 'hardcoded-secret'\n"
+    heuristic = 'token = f"{runtime}" +\n'
+    (root / "src" / "hard.py").write_text(hard)
+    (root / "src" / "soft.py").write_text(heuristic)
+    (root / "other" / "hard.py").write_text(hard)
+    try:
+        assert gateway.info()["write_policy"]["sensitive_content"]["read_redaction_enabled"] is True
+        shown = gateway.read_file("src/hard.py")
+        assert shown["redacted_lines"] == 0
+        assert "hardcoded-secret" in shown["content"]
+        _flags, findings = gateway._visibility.classify("src/hard.py", hard.encode())
+        assert any(kind == "hard" for _number, kind in findings)
+        assert "runtime" in gateway.read_file("src/soft.py")["content"]
+        assert gateway.search_files("hardcoded-secret", file_glob="hard.py")["matches"]
+        hidden = gateway.read_file("other/hard.py")
+        assert "hardcoded-secret" not in hidden["content"]
+        assert hidden["redacted_lines"] == 1
+        gateway.sensitive_audit.deadline = 0.0
+        expired = gateway.read_file("src/hard.py")
+        assert "hardcoded-secret" not in expired["content"]
+        assert expired["redacted_lines"] == 1
+    finally:
+        gateway.close()
+
+
+def test_active_audit_writes_hard_lines_without_a_pending_grant(tmp_path, capsys):
+    root = tmp_path / "project"
+    (root / "src").mkdir(parents=True)
+    (root / "other").mkdir()
+    until = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    gateway = Gateway(
+        root, allow_write=True, write_paths=("src", "other"),
+        sensitive_content_audit_paths=("src",),
+        sensitive_content_audit_until=until,
+    )
+    hard = "password = 'hardcoded-secret'\n"
+    try:
+        preview = gateway.create_file("src/hard.py", hard)
+        assert preview["applied"] is False
+        assert "hardcoded-secret" in preview["diff"]
+        assert preview["warnings"] == ["Temporary heuristic write audit active; inspect content locally."]
+        applied = gateway.create_file("src/hard.py", hard, dry_run=False)
+        assert applied["applied"] is True
+        assert "sensitive approval" not in capsys.readouterr().err
+        read = gateway.read_file("src/hard.py")
+        replaced = gateway.replace_text(
+            "src/hard.py", "hardcoded-secret", "other-secret",
+            read["file_sha256"], dry_run=False,
+        )
+        assert replaced["applied"] is True
+        assert "other-secret" in gateway.read_file("src/hard.py")["content"]
+        current = gateway.read_file("src/hard.py")
+        overwritten = gateway.write_file(
+            "src/hard.py", "password = 'third-secret'\n", current["file_sha256"], dry_run=False,
+        )
+        assert overwritten["applied"] is True
+        with pytest.raises(GatewayError) as outside:
+            gateway.create_file("other/hard.py", hard, dry_run=False)
+        assert outside.value.details["rule_id"] == "CREDENTIAL_HARD"
+        assert not (root / "other" / "hard.py").exists()
+        gateway.sensitive_audit.deadline = 0.0
+        with pytest.raises(GatewayError) as expired:
+            gateway.create_file("src/next.py", hard, dry_run=False)
+        assert expired.value.details["rule_id"] == "CREDENTIAL_HARD"
+        assert not (root / "src" / "next.py").exists()
+    finally:
+        gateway.close()
+
+
+def test_hard_literal_without_audit_stays_rejected_and_redacted(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    gateway = Gateway(root, allow_write=True)
+    hard = "password = 'hardcoded-secret'\n"
+    try:
+        with pytest.raises(GatewayError) as blocked:
+            gateway.create_file("sample.py", hard, dry_run=False)
+        assert blocked.value.details["rule_id"] == "CREDENTIAL_HARD"
+        assert not (root / "sample.py").exists()
+        (root / "sample.py").write_text(hard)
+        assert "hardcoded-secret" not in gateway.read_file("sample.py")["content"]
+    finally:
+        gateway.close()
+
+
+def test_hard_write_is_rejected_when_audit_expires_before_install(tmp_path, monkeypatch):
+    from gateway import write_storage
+    root = tmp_path / "project"
+    (root / "src").mkdir(parents=True)
+    until = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    gateway = Gateway(root, allow_write=True, write_paths=("src",),
+                      sensitive_content_audit_paths=("src",),
+                      sensitive_content_audit_until=until)
+    original_install = write_storage.install_file
+
+    def expire_before_install(parent, name, raw, mode, verify, *, create):
+        gateway.sensitive_audit.deadline = 0.0
+        return original_install(parent, name, raw, mode, verify, create=create)
+
+    try:
+        monkeypatch.setattr(write_storage, "install_file", expire_before_install)
+        with pytest.raises(GatewayError) as exc:
+            gateway.create_file("src/hard.py", "password = 'hardcoded-secret'\n", dry_run=False)
+        assert exc.value.code == "sensitive_content"
+        assert "before install" in str(exc.value)
+        assert not (root / "src" / "hard.py").exists()
     finally:
         gateway.close()

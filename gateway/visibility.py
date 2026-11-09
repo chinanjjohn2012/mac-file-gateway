@@ -78,11 +78,15 @@ def source_lines(text: str, canonical_path: str = '', *, keepends: bool = False)
 
 
 class SensitiveContentPolicy:
-    def __init__(self, protected_paths: tuple[str, ...] = ()):
+    def __init__(self, protected_paths: tuple[str, ...] = (), *,
+                 line_visible: Callable[[str, str], bool] | None = None,
+                 path_visible: Callable[[str], bool] | None = None):
         # Kept for backwards-compatible callers only. A filesystem path in
         # source text is not a credential, even when its target is private.
         # Filesystem access restrictions are enforced by Gateway separately.
         del protected_paths
+        self._line_visible = line_visible or (lambda _path, _line: False)
+        self._path_visible = path_visible or (lambda _path: False)
 
 
     def classify(self, canonical_path: str, raw: bytes) -> tuple[list[bool], tuple[tuple[int, str], ...]]:
@@ -145,12 +149,38 @@ class SensitiveContentPolicy:
     def full_flags(self, canonical_path: str, text: str) -> list[bool]:
         return self.classify(canonical_path, text.encode("utf-8"))[0]
 
+    def display_flags(self, canonical_path: str, text: str) -> list[bool]:
+        """Classification flags with Audit-scoped or granted lines left visible.
+
+        Findings stay Hard or heuristic. scan_unavailable is never revealed.
+        A grant reveals only its exact Hard line. An active Audit path reveals
+        every Hard and heuristic line in that file.
+        """
+        if not canonical_path:
+            return self.sensitive_flags(text)
+        flags, findings = self.classify(canonical_path, text.encode("utf-8"))
+        lines = source_lines(text, canonical_path)
+        if any(kind == "scan_unavailable" for _, kind in findings) or len(flags) != len(lines):
+            return [True] * max(1, len(lines))
+        audit = self._path_visible(canonical_path)
+        revealed: set[int] = set()
+        for number, kind in findings:
+            if not 1 <= number <= len(lines):
+                continue
+            if audit and kind in {"hard", "heuristic"}:
+                revealed.add(number)
+            elif kind == "hard" and self._line_visible(canonical_path, lines[number - 1]):
+                revealed.add(number)
+        if not revealed:
+            return flags
+        return [False if index + 1 in revealed else flag for index, flag in enumerate(flags)]
+
     def sensitive_flags(self, text: str) -> list[bool]:
         from .core import _sensitive_line_flags
         return _sensitive_line_flags(text)
 
     def redact_lines(self, text: str, canonical_path: str = '') -> tuple[list[str], int]:
-        flags = self.full_flags(canonical_path, text) if canonical_path else self.sensitive_flags(text)
+        flags = self.display_flags(canonical_path, text) if canonical_path else self.sensitive_flags(text)
         lines = source_lines(text, canonical_path)
         if len(flags) != len(lines):
             flags = [True] * len(lines)
@@ -158,7 +188,7 @@ class SensitiveContentPolicy:
                  for line, flag in zip(lines, flags)], sum(flags))
 
     def redacted_diff_lines(self, text: str, canonical_path: str = '') -> list[str]:
-        flags = self.full_flags(canonical_path, text) if canonical_path else self.sensitive_flags(text)
+        flags = self.display_flags(canonical_path, text) if canonical_path else self.sensitive_flags(text)
         lines = source_lines(text, canonical_path, keepends=True)
         if len(flags) != len(lines):
             flags = [True] * len(lines)
@@ -178,7 +208,7 @@ class SensitiveContentPolicy:
         straddling hidden lines cannot match. Lines ending in CRLF/BOM are
         left as-is; writer uses raw source when applying eligible matches.
         """
-        flags = self.full_flags(canonical_path, text) if canonical_path else self.sensitive_flags(text)
+        flags = self.display_flags(canonical_path, text) if canonical_path else self.sensitive_flags(text)
         lines = source_lines(text, canonical_path, keepends=True)
         if len(flags) != len(lines):
             flags = [True] * len(lines)
@@ -234,9 +264,9 @@ class SensitiveContentPolicy:
         updated_lines: dict[int, tuple[int, str, bool]] = {}
         offset = 0
         candidate_lines = source_lines(updated, canonical_path, keepends=True)
-        candidate_flags = self.full_flags(canonical_path, updated) if canonical_path else self.sensitive_flags(updated)
+        candidate_flags = self.display_flags(canonical_path, updated) if canonical_path else self.sensitive_flags(updated)
         source_split = source_lines(source, canonical_path, keepends=True)
-        source_flags = self.full_flags(canonical_path, source) if canonical_path else self.sensitive_flags(source)
+        source_flags = self.display_flags(canonical_path, source) if canonical_path else self.sensitive_flags(source)
         if len(candidate_lines) != len(candidate_flags) or len(source_split) != len(source_flags):
             return False
         for line, hidden in zip(candidate_lines, candidate_flags):

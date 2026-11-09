@@ -58,6 +58,63 @@ def test_http_exact_replace(client, root):
     assert (root / "app.py").read_bytes() == b"count = 8\n"
 
 
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+def test_dynamic_bearer_through_real_http_and_mcp(tmp_path, transport):
+    if transport == "mcp":
+        pytest.importorskip("mcp")
+    source = "headers['Authorization'] = 'Bearer ' + access_value\n"
+    gateway = Gateway(tmp_path, allow_write=True)
+    try:
+        with TestClient(create_app(gateway, enable_mcp=transport == "mcp"),
+                        base_url="http://127.0.0.1:8765") as client:
+            if transport == "mcp":
+                headers = {"Accept": "application/json, text/event-stream"}
+                response = client.post("/mcp", headers=headers, json={
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                        "protocolVersion": "2025-11-25", "capabilities": {},
+                        "clientInfo": {"name": "bearer-regression", "version": "1"},
+                    },
+                })
+                assert response.status_code == 200
+                client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+                def call(name, arguments):
+                    response = client.post("/mcp", headers=headers, json={
+                        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                        "params": {"name": name, "arguments": arguments},
+                    })
+                    assert response.status_code == 200
+                    return response.json()["result"]
+
+                preview = call("create_file", {"path": "auth.py", "content": source})
+                assert not preview.get("isError") and not preview["structuredContent"]["applied"]
+                created = call("create_file", {"path": "auth.py", "content": source, "dry_run": False})
+                assert not created.get("isError") and created["structuredContent"]["applied"]
+                read = call("read_file", {"path": "auth.py"})["structuredContent"]
+                assert read["redacted_lines"] == 0 and source.strip() in read["content"]
+                rejected = call("replace_text", {"path": "auth.py", "old_text": "access_value",
+                                "new_text": "'literal-secret'", "expected_sha256": read["file_sha256"],
+                                "dry_run": False})
+                assert rejected.get("isError") is True and "CREDENTIAL_HARD" in str(rejected)
+                assert "literal-secret" not in str(rejected)
+            else:
+                preview = client.post("/create", json={"path": "auth.py", "content": source})
+                assert preview.status_code == 200 and not preview.json()["applied"]
+                created = client.post("/create", json={"path": "auth.py", "content": source, "dry_run": False})
+                assert created.status_code == 200 and created.json()["applied"]
+                read = client.get("/read", params={"path": "auth.py"}).json()
+                assert read["redacted_lines"] == 0 and source.strip() in read["content"]
+                rejected = client.post("/replace", json={"path": "auth.py", "old_text": "access_value",
+                                       "new_text": "'literal-secret'", "expected_sha256": read["file_sha256"],
+                                       "dry_run": False})
+                assert rejected.status_code == 403
+                assert rejected.json()["error"] == "sensitive_content"
+                assert "literal-secret" not in rejected.text
+            assert (tmp_path / "auth.py").read_text() == source
+    finally:
+        gateway.close()
+
+
 def test_http_markdown_python_and_evidence_reference(client, root):
     content = "# Checkpoint\n```python\ntoken = get_token()\n```\n"
     created = client.post("/create", json={"path": "DEV_CHECKPOINT.md", "content": content, "dry_run": False})

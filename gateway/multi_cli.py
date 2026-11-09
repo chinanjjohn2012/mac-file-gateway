@@ -42,9 +42,23 @@ def run_multi(args) -> int:
             else:
                 git_state = 'disabled by policy or unavailable'
             print('General Exec and Local Skills disabled; Git CLI ' + git_state + '.', file=sys.stderr)
-            uvicorn.run(app, host='127.0.0.1', port=settings.port,
-                        access_log=False, proxy_headers=False, limit_concurrency=16,
-                        timeout_keep_alive=5, timeout_graceful_shutdown=10, log_level='warning')
+            from .sensitive_grants import ApprovalListener, ApprovalService
+            approvals = ApprovalService()
+            for gateway in service.gateways():
+                approvals.register(gateway)
+            listener = ApprovalListener(approvals)
+            try:
+                listener.start()
+            except GatewayError as exc:
+                print(f'Gateway: {exc}', file=sys.stderr)
+                listener = None
+            try:
+                uvicorn.run(app, host='127.0.0.1', port=settings.port,
+                            access_log=False, proxy_headers=False, limit_concurrency=16,
+                            timeout_keep_alive=5, timeout_graceful_shutdown=10, log_level='warning')
+            finally:
+                if listener is not None:
+                    listener.close()
             return 0
         finally:
             service.close()

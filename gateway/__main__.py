@@ -12,6 +12,10 @@ from .core import Gateway, GatewayError
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0] == "approve-sensitive":
+        from .sensitive_grants import approve_cli
+        return approve_cli(raw[1:])
     parser = argparse.ArgumentParser(description="Read one explicitly selected project, with optional guarded writes and controlled command execution.")
     parser.add_argument("--root", default=argparse.SUPPRESS, help="Existing project directory; never / or the entire home directory")
     parser.add_argument("--config", help="Private Multi-Workspace gateway.json; mutually exclusive with legacy --root")
@@ -21,9 +25,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-write", action="store_true", default=argparse.SUPPRESS, help="Enable guarded file writes and directory creation (default: read-only)")
     parser.add_argument("--write-path", action="append", default=argparse.SUPPRESS, help="Writable relative subtree or file; repeatable; requires --allow-write")
     parser.add_argument("--sensitive-content-audit-path", action="append", default=argparse.SUPPRESS,
-                        help="Temporary heuristic write audit path ('.' for this workspace); repeatable; requires --allow-write and --sensitive-content-audit-until")
+                        help="Temporary audit path that admits heuristic and Hard lines ('.' for this workspace); repeatable; requires --allow-write and --sensitive-content-audit-until")
     parser.add_argument("--sensitive-content-audit-until", default=argparse.SUPPRESS,
-                        help="Temporary heuristic write audit absolute UTC expiry; must be in the future")
+                        help="Temporary audit absolute UTC expiry for heuristic and Hard lines; must be in the future")
     parser.add_argument("--backup-retention-days", type=int, default=argparse.SUPPRESS, help="Backup retention in UTC days (1-3650; default 15)")
     parser.add_argument("--allow-exec", action="store_true", default=argparse.SUPPRESS, help="Enable controlled project command execution (default: disabled)")
     parser.add_argument("--exec-path", action="append", default=argparse.SUPPRESS, help="Executable relative subtree; repeatable; required with --allow-exec")
@@ -46,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
         'allow_git': False, 'git_command': [],
         'local_skill_root': None, 'local_skill_policy_dir': None,
     }
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw)
     if args.config is not None:
         if not args.config.strip():
             parser.error("--config requires a nonempty path")
@@ -84,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.allow_git and not args.git_command:
         parser.error("--allow-git requires at least one --git-command")
     gateway = None
+    listener = None
     try:
         gateway = Gateway(args.root, excludes=tuple(args.exclude), allow_hidden_paths=tuple(args.allow_hidden_path), allow_write=args.allow_write, write_paths=tuple(args.write_path), backup_retention_days=args.backup_retention_days, sensitive_content_audit_paths=tuple(args.sensitive_content_audit_path), sensitive_content_audit_until=args.sensitive_content_audit_until, allow_exec=args.allow_exec, exec_paths=tuple(args.exec_path), exec_runners=tuple(args.exec_runner), allow_git=args.allow_git, git_allowed_commands=tuple(args.git_command))
         local_skill_bridge = None
@@ -103,6 +108,16 @@ def main(argv: list[str] | None = None) -> int:
         if not args.http_only and importlib.util.find_spec("mcp") is None:
             print("Official MCP SDK is missing. Run: bash setup.sh", file=sys.stderr)
             return 2
+        from .sensitive_grants import ApprovalListener, ApprovalService
+        approvals = ApprovalService()
+        approvals.register(gateway)
+        candidate = ApprovalListener(approvals)
+        try:
+            candidate.start()
+        except GatewayError as exc:
+            print(f"Gateway: {exc}", file=sys.stderr)
+        else:
+            listener = candidate
         if args.transport == "stdio":
             from .mcp_adapter import build_mcp
             build_mcp(gateway, port=args.port, local_skill_bridge=local_skill_bridge).run(transport="stdio")
@@ -141,6 +156,8 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 0
     finally:
+        if listener is not None:
+            listener.close()
         if gateway is not None:
             gateway.close()
 

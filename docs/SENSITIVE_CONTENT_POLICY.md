@@ -24,9 +24,27 @@ credential material. Ordinary code including
 `api_key = os.environ["API_KEY"]` is not sensitive solely by those names.
 No ContextVar provenance/typing/source Worker is executed or required.
 
+Subscript selectors such as `attempts[0]['claim_token']` are lookup keys or
+indices, not credential-value literals. Thus
+`token, attempt = attempts[0]['claim_token'], attempts[0]['id']` remains
+visible. The value source is still inspected: `token = ['literal'][0]`,
+literal-bearing containers, and static fallback values remain Hard.
+Independent key/token signatures and private-key detection still cover the
+complete source, including selectors.
+
+For an `Authorization` field, the exact protocol prefix `"Bearer "`
+followed by a simple name or a recognized environment lookup is not itself
+credential material. This applies to direct string concatenation and a
+simple f-string with one value, including assignments, dictionary fields, and
+call arguments. Direct credential literals and detected literal origins in
+the same source remain Hard. Source analysis is best-effort: it cannot prove
+the runtime origin of every value or inspect other modules. Other expression
+shapes and invalid Python retain conservative handling.
+
 **Hard** findings include:
 
-- Nonempty `str`/`bytes` literals contributing to a named credential
+- Except for the exact runtime Bearer scheme prefix described above,
+  nonempty `str`/`bytes` literals contributing to a named credential
   assignment (including annotated/walrus), dictionary value, call keyword,
   or `def`/`async def`/`lambda` parameter default.
 - Composite static literals, string concatenation, literal-bearing
@@ -135,9 +153,51 @@ another Workspace. This operator-authorized 2026-10-26 amendment supersedes
 the original design's 60-minute/subtree-only cap and the interim 24-hour cap.
 Expired deadlines are rejected at startup, and reaching the deadline restores
 `enforce` without restart. Wall-clock rollback cannot extend the duration
-calculated at startup. Audit only allows writes whose new findings are
-**heuristic**, not Hard or `scan_unavailable`. Redaction, file/path denial,
-and all other write permissions remain active.
+calculated at startup. Audit admits new heuristic and Hard findings inside its path until expiry,
+and read, search, and diff show those lines. It cannot admit
+`scan_unavailable`. Redaction outside the path, after expiry, and for
+`scan_unavailable` stays active. File and path denial and all other write
+permissions remain active.
+
+## 4.1 Exact-line grants
+
+Hard classification does not change. A local operator can allow one exact
+source line to be written again by granting its SHA-256, a Workspace name,
+a relative path prefix, and a future UTC expiry. The same line text may
+then be written under that prefix until expiry. A different literal, a
+different Workspace, or a path outside the prefix is still
+`CREDENTIAL_HARD`. `scan_unavailable` cannot be granted. An active Audit admits Hard lines inside its path without a line-hash
+grant. Outside that path, and after Audit expiry, an exact line-hash
+grant is still required. A grant cannot admit `scan_unavailable`.
+
+Grants are stored outside every Workspace, in
+`~/.config/mac-file-gateway/sensitive-grants.json`. The Gateway reloads
+that file when its modification time changes. Expiry uses both the UTC
+timestamp and a monotonic deadline taken when that file version was
+loaded, so turning the clock backward does not extend a grant.
+
+A rejected preview or apply stores the candidate only in process memory
+for 10 minutes and returns `pending_id` plus each ungranted Hard line's
+number and `line_sha256`. The error does not include the line text or an
+approval token. The Gateway process prints one stderr line,
+`sensitive approval pending_id=... token=...`, and that line does not
+contain source text. The operator reviews the text with
+`python -m gateway approve-sensitive --token <token>`. The local socket
+rejects `show` and `approve` when the token is missing or wrong, so a
+client that only received `pending_id` cannot read the line or write a
+grant. A confirmed approve consumes that pending id; repeating it cannot
+extend the expiry. Grant updates take an exclusive lock on
+`sensitive-grants.json.lock` and re-read the file first, so two
+Workspaces cannot overwrite each other's grants. The socket lives in
+the config directory. When that path is too long for a local socket,
+the socket is `/tmp/mfg-<uid>.sock` instead. That socket is not an HTTP
+route and not an MCP tool. The grant is written only after the operator confirms.
+
+Until a grant expires, read, search, and diff show those exact granted
+lines so the file can keep being edited. Neighbouring ungranted Hard
+lines stay redacted. After expiry, redaction and rejection both return.
+The file already on disk is left in place. `/info` reports only
+`grant_count` and `earliest_expires_at`.
 
 Multi-workspace `gateway.json`, inside one Workspace's `write` object:
 

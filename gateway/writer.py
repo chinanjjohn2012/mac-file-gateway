@@ -62,6 +62,7 @@ class FileWriter:
                 "paths": ["/".join(p) or "." for p in self.paths] or ["."],
                 "dry_run_default": True, "source_hash_required_for_updates": True,
                 "sensitive_content": self.gateway.sensitive_audit.status(),
+                "sensitive_grants": self.gateway.sensitive_grants.status(),
                 "max_file_bytes": self.gateway.limits.max_file_bytes,
                 "backup_directory": storage.BACKUP_DIR,
                 "max_backup_files": storage.BACKUP_COUNT_LIMIT,
@@ -104,9 +105,29 @@ class FileWriter:
             raise GatewayError("sensitive_content", "Credential-like content is not accepted by this gateway's write policy.")
         return raw
 
+    def _introduced(self, canonical: str, raw: bytes, previous: bytes | None,
+                    source: tuple[tuple[int, str], ...],
+                    candidate: tuple[tuple[int, str], ...]) -> list[tuple[int, str, str]]:
+        """New (line, exact text, severity) rows. Identical text may move."""
+        from collections import Counter
+        candidate_text = source_lines(raw.decode("utf-8-sig"), canonical)
+        if previous is None:
+            return [(number, candidate_text[number - 1], kind) for number, kind in candidate]
+        source_text = source_lines(previous.decode("utf-8-sig"), canonical)
+        remaining = Counter((source_text[number - 1], kind) for number, kind in source)
+        introduced: list[tuple[int, str, str]] = []
+        for number, kind in candidate:
+            text = candidate_text[number - 1]
+            key = (text, kind)
+            if remaining[key]:
+                remaining[key] -= 1
+                continue
+            introduced.append((number, text, kind))
+        return introduced
+
     def _reject_candidate(self, canonical: str, raw: bytes, previous: bytes | None = None) -> bool:
         """Return whether temporary audit was required for an allowed candidate."""
-        from collections import Counter
+        from .sensitive_grants import announce_pending, line_sha256
         source = () if previous is None else self.gateway._visibility.classify(canonical, previous)[1]
         candidate = self.gateway._visibility.classify(canonical, raw)[1]
         if any(kind == "scan_unavailable" for _, kind in (*source, *candidate)):
@@ -117,30 +138,34 @@ class FileWriter:
             )
         # For replacement, preserve existing unchanged hidden lines separately.
         # New heuristic findings can be accepted only within an active scoped audit.
-        if previous is None:
-            introduced = [kind for _, kind in candidate]
-        else:
-            # Lines may move after an edit; compare exact hidden line text with
-            # classification severity, never compare only a count of findings.
-            source_text = source_lines(previous.decode('utf-8-sig'), canonical)
-            candidate_text = source_lines(raw.decode('utf-8-sig'), canonical)
-            old = Counter((source_text[n - 1], kind) for n, kind in source)
-            new = Counter((candidate_text[n - 1], kind) for n, kind in candidate)
-            introduced = list((new - old).elements())
-            introduced = [kind for _, kind in introduced]
-        if not introduced:
-            return False
-        if "hard" in introduced:
-            first = next((n for n, kind in candidate if kind == "hard"), 0)
+        # An exact Hard line the operator already granted is not a new secret.
+        introduced = self._introduced(canonical, raw, previous, source, candidate)
+        audit_covers = self.gateway.sensitive_audit.allows(canonical)
+        ungranted = [
+            (number, text) for number, text, kind in introduced
+            if kind == "hard" and not audit_covers
+            and not self.gateway.sensitive_grants.line_visible(canonical, text)
+        ]
+        if ungranted:
+            pending_id, token = self.gateway.pending.remember(
+                workspace=self.gateway.workspace_name, path=canonical, lines=ungranted,
+            )
+            announce_pending(pending_id, token)
             raise GatewayError("sensitive_content",
                 "Credential-like content is not accepted by this gateway's write policy.",
-                details={"rule_id": "CREDENTIAL_HARD", "line": first, "severity": "hard"})
-        if not self.gateway.sensitive_audit.allows(canonical):
-            first = next((n for n, kind in candidate if kind == "heuristic"), 0)
+                details={
+                    "rule_id": "CREDENTIAL_HARD",
+                    "line": ungranted[0][0],
+                    "severity": "hard",
+                    "pending_id": pending_id,
+                    "lines": [{"line": number, "line_sha256": line_sha256(text)} for number, text in ungranted],
+                })
+        heuristic = [number for number, _text, kind in introduced if kind == "heuristic"]
+        if heuristic and not audit_covers:
             raise GatewayError("sensitive_content",
                 "Credential-like content is not accepted by this gateway's write policy.",
-                details={"rule_id": "CREDENTIAL_ASSIGNMENT", "line": first, "severity": "heuristic"})
-        return True
+                details={"rule_id": "CREDENTIAL_ASSIGNMENT", "line": heuristic[0], "severity": "heuristic"})
+        return audit_covers and any(kind in {"hard", "heuristic"} for _number, _text, kind in introduced)
 
     @staticmethod
     def _visible_match_spans(source_text: str, old_text: str) -> list[tuple[int, int]]:
@@ -226,7 +251,8 @@ class FileWriter:
                             "Source cannot be completely scanned; no change was permitted.",
                             details={"rule_id": "SCAN_UNAVAILABLE", "severity": "scan_unavailable"},
                         )
-                    source_has_sensitive = any(source_classification[0])
+                    source_text = snapshot.raw.decode("utf-8-sig")
+                    source_has_sensitive = any(self.gateway._visibility.display_flags(canonical, source_text))
                     if operation == "write" and source_has_sensitive:
                         raise GatewayError("sensitive_content", "This source contains redacted data and cannot be whole-file overwritten through the gateway.")
                     if not snapshot.metadata.st_mode & 0o222:

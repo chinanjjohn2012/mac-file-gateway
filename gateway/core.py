@@ -205,7 +205,9 @@ class Gateway:
                  allow_git: bool = False, git_allowed_commands: tuple[str, ...] = (),
                  git_state_dir: str | Path | None = None,
                  sensitive_content_audit_paths: tuple[str, ...] = (),
-                 sensitive_content_audit_until: str | None = None):
+                 sensitive_content_audit_until: str | None = None,
+                 workspace_name: str | None = None,
+                 sensitive_grants_path: str | Path | None = None):
         if type(allow_write) is not bool:
             raise GatewayError("invalid_argument", "allow_write must be a boolean.")
         if type(backup_retention_days) is not int or not 1 <= backup_retention_days <= 3650:
@@ -240,11 +242,10 @@ class Gateway:
         )
         self.allow_exec = allow_exec
         self.limits = limits or Limits()
-        from .visibility import SensitiveContentPolicy
         # Retain protected_content_paths in the public constructor for
         # compatibility; pathname *text* no longer triggers redaction.
         # The root/hidden-file permission checks below remain authoritative.
-        self._visibility = SensitiveContentPolicy(protected_content_paths)
+        self._protected_content_paths = protected_content_paths
         self.excludes = tuple(x.casefold() for x in excludes)
         if isinstance(allow_hidden_paths, (str, bytes)):
             raise GatewayError("invalid_argument", "allow_hidden_paths must be a sequence of directory paths.")
@@ -277,9 +278,22 @@ class Gateway:
             raise GatewayError("invalid_root", "The selected project must be an existing readable directory.") from None
         self.project_name = resolved.name
         self._root_path = resolved
+        self.workspace_name = self.project_name if workspace_name is None else workspace_name
+        from .sensitive_grants import PendingApprovals, SensitiveGrantTable, default_grants_path
+        from .visibility import SensitiveContentPolicy
         from .writer import FileWriter
         from .executor import CommandRunner
         try:
+            self.sensitive_grants = SensitiveGrantTable(
+                default_grants_path() if sensitive_grants_path is None else sensitive_grants_path,
+                self.workspace_name,
+            )
+            self.pending = PendingApprovals()
+            self._visibility = SensitiveContentPolicy(
+                self._protected_content_paths,
+                line_visible=self.sensitive_grants.line_visible,
+                path_visible=self.sensitive_audit.allows,
+            )
             self._writer = FileWriter(self, write_paths)
             self._executor = CommandRunner(self, enabled=allow_exec, exec_paths=exec_paths, exec_runners=exec_runners)
             if self.allow_git:
@@ -468,11 +482,11 @@ class Gateway:
     def _text(self, parts: tuple[str, ...]) -> tuple[list[str], int, int, list[bool]]:
         snapshot = self._snapshot(parts)
         canonical = '/'.join(parts)
-        flags, findings = self._visibility.classify(canonical, snapshot.raw)
+        _flags, findings = self._visibility.classify(canonical, snapshot.raw)
         if any(kind == "scan_unavailable" for _, kind in findings):
             raise GatewayError("scan_unavailable", "Source could not be completely scanned.")
         lines, redacted = self._visibility.redact_lines(snapshot.text, canonical)
-        return lines, redacted, len(snapshot.raw), flags
+        return lines, redacted, len(snapshot.raw), self._visibility.display_flags(canonical, snapshot.text)
 
     def create_directory(self, path: str, parents: bool = False, exist_ok: bool = True,
                          dry_run: bool = True) -> dict[str, Any]:

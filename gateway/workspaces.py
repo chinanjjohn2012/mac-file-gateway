@@ -150,6 +150,7 @@ class WorkspaceService:
                     sensitive_content_audit_paths=item.sensitive_content_audit_paths,
                     sensitive_content_audit_until=item.sensitive_content_audit_until,
                     allow_exec=False, exec_paths=(), exec_runners=(),
+                    workspace_name=item.name,
                 )
                 if (os.fstat(gateway._root_fd).st_dev, os.fstat(gateway._root_fd).st_ino) != pin.ancestor_ids[-1]:
                     gateway.close()
@@ -296,12 +297,17 @@ class WorkspaceService:
         with self._lifecycle:
             return any(ctx.settings.allow_write for ctx in self._workspaces.values())
 
+    def gateways(self) -> list[Any]:
+        with self._lifecycle:
+            return [ctx.gateway for ctx in self._workspaces.values()]
+
     def list_workspaces(self) -> dict[str, Any]:
         with self._lifecycle:
             return {"workspaces": [
                 {"id": ctx.name, "read": True, "write": ctx.settings.allow_write,
                  "exec": False, "local_skills": False,
                  "sensitive_content": ctx.gateway.sensitive_audit.status(),
+                 "sensitive_grants": ctx.gateway.sensitive_grants.status(),
                  "git": {"enabled": bool(self.settings.git_enabled
                                          and ctx.settings.git_allowed_commands),
                          "allowed_commands": list(ctx.settings.git_allowed_commands)}}

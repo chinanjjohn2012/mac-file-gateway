@@ -128,3 +128,83 @@ def test_close_invalidates_first_nonce_burn(envelope):
     instance.close()
     with pytest.raises(R010SerialAdmissionDenied, match="unavailable"):
         journal.burn_first_nonce(raw[0])
+
+
+@pytest.mark.parametrize("outcome,expected_reason", [
+    ("ROW_OBSERVED_NONZERO", "original_nonzero"),
+    ("ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS", "invalid_output_or_fs"),
+    ("ROW_AMBIGUOUS", "owner_reader_ambiguous"),
+])
+def test_actual_source_nonpositive_row_latches_durable_global_deny(
+        envelope, outcome, expected_reason):
+    """No synthetic response can authorize a later Popen or row."""
+    from gateway.lbe_r010_owned_row import R010OwnedRowSourceObservation
+
+    anchor, instance = envelope
+    raw, hashes = nonces()
+    journal = R010SerialNonceJournal(instance, six_nonce_sha256=hashes)
+    journal.burn_first_nonce(raw[0])
+    observation = R010OwnedRowSourceObservation(
+        row=1, nonce_sha256=hashes[0], outcome=outcome,
+        observed_original_exit_code=3 if outcome == "ROW_OBSERVED_NONZERO" else None,
+        original_child_reaped=outcome != "ROW_AMBIGUOUS",
+        owner_reader_healthy=outcome != "ROW_AMBIGUOUS",
+        output_complete=outcome != "ROW_AMBIGUOUS",
+    )
+    journal.latch_from_owned_row(observation)
+    root = anchor / instance.snapshot()["envelope_root_name"]
+    data = json.loads(
+        (root / "command-journal" / "r010-row-failure.json").read_text())
+    assert data["status"] == "JOB_FAILED_LATCHED"
+    assert data["reason"] == expected_reason
+    assert data["rows_remaining"] == "ROW_VOID"
+    with pytest.raises(R010SerialAdmissionDenied, match="latched"):
+        journal.burn_first_nonce(raw[0])
+    with pytest.raises(R010SerialAdmissionDenied, match="not implemented"):
+        journal.begin_later_row(2, raw[1])
+
+
+def test_valid_fake_exit_zero_never_advances_six_row_journal(envelope):
+    """A healthy Owner/Worker source-only result is not full T1 acceptance."""
+    from gateway.lbe_r010_owned_row import R010OwnedRowSourceObservation
+
+    _, instance = envelope
+    raw, hashes = nonces()
+    journal = R010SerialNonceJournal(instance, six_nonce_sha256=hashes)
+    journal.burn_first_nonce(raw[0])
+    observation = R010OwnedRowSourceObservation(
+        row=1, nonce_sha256=hashes[0],
+        outcome="ORIGINAL_ZERO_READER_HEALTHY_FINITE_FS_NOT_CHECKED",
+        observed_original_exit_code=0,
+        original_child_reaped=True, owner_reader_healthy=True,
+        output_complete=True,
+    )
+    with pytest.raises(R010SerialAdmissionDenied, match="lacks full product"):
+        journal.latch_from_owned_row(observation)
+    with pytest.raises(R010SerialAdmissionDenied, match="not implemented"):
+        journal.begin_later_row(2, raw[1])
+
+
+def test_cross_nonce_or_wrong_row_receipt_is_rejected_before_any_latch(envelope):
+    from dataclasses import replace
+    from gateway.lbe_r010_owned_row import R010OwnedRowSourceObservation
+
+    _, instance = envelope
+    raw, hashes = nonces()
+    journal = R010SerialNonceJournal(instance, six_nonce_sha256=hashes)
+    journal.burn_first_nonce(raw[0])
+    base = R010OwnedRowSourceObservation(
+        row=1, nonce_sha256=hashes[0], outcome="ROW_AMBIGUOUS",
+        observed_original_exit_code=None,
+        original_child_reaped=False, owner_reader_healthy=False,
+        output_complete=False,
+    )
+    for altered in (
+        replace(base, row=2),
+        replace(base, nonce_sha256=hashes[1]),
+        replace(base, native_launch_allowed=True),
+        replace(base, row_positive_success=True),
+    ):
+        with pytest.raises(R010SerialAdmissionDenied, match="not bound"):
+            journal.latch_from_owned_row(altered)
+    journal.latch_from_owned_row(base)

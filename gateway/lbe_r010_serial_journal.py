@@ -14,6 +14,7 @@ import re
 from .lbe_r010_job_envelope import (
     R010CreatedJobEnvelope, R010JobEnvelopeDenied, _write_once,
 )
+from .lbe_r010_owned_row import R010OwnedRowSourceObservation
 
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 _REASON = re.compile(r"[a-z][a-z0-9_]{0,79}\Z", re.ASCII)
@@ -105,6 +106,32 @@ class R010SerialNonceJournal:
                 self._failed = True
                 raise R010SerialAdmissionDenied("failure latch uncertain, deny forever") from None
             self._failed = True
+
+    def latch_from_owned_row(self, observation: R010OwnedRowSourceObservation) -> None:
+        """Durably void the Job for an actual source-observed NONPOSITIVE row.
+
+        Neither a healthy FakeChild exit0 nor a forged public observation can
+        advance this journal. Trusted positive row acceptance and row 2..6
+        remain disabled pending complete private FS/Provider/Grant qualification.
+        This is a deny-only bridge; it cannot mint execution authority.
+        """
+        if (type(observation) is not R010OwnedRowSourceObservation
+                or observation.row != 1 or
+                observation.nonce_sha256 != self._digests[0] or
+                observation.native_launch_allowed is not False or
+                observation.row_positive_success is not False or
+                observation.six_command_product_t1_pass is not False or
+                not self._burned):
+            raise R010SerialAdmissionDenied("observation not bound to burned row")
+        reason = {
+            "ROW_OBSERVED_NONZERO": "original_nonzero",
+            "ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS": "invalid_output_or_fs",
+            "ROW_AMBIGUOUS": "owner_reader_ambiguous",
+        }.get(observation.outcome)
+        if reason is None:
+            raise R010SerialAdmissionDenied(
+                "healthy zero still lacks full product integrity and owner Grant")
+        self.latch_failure(reason)
 
     def begin_later_row(self, *_args: object, **_kwargs: object) -> None:
         raise R010SerialAdmissionDenied("trusted row-success adapter not implemented")

@@ -14,8 +14,17 @@ import re
 from .lbe_r010_job_envelope import (
     R010CreatedJobEnvelope, R010JobEnvelopeDenied, _write_once,
 )
-from .lbe_r010_owned_row import R010OwnedRowSourceObservation
-from .lbe_r010_row_fs import R010FiniteRowObservation
+from .lbe_r010_owned_row import (
+    R010OwnedRowSourceObservation, observe_r010_private_owner_row,
+)
+from .lbe_r010_row_fs import (
+    R010FiniteRowObservation, R010PrivateTreeSnapshot,
+    validate_r010_fixed_row_plan, verify_r010_finite_row_after,
+)
+from .lbe_r010_finite_integrity import R010SelectedSourceSnapshot
+from .lbe_direct_owner import DirectChildOwner
+from .lbe_worker import LbeWorkPlan
+from typing import Any
 
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 _REASON = re.compile(r"[a-z][a-z0-9_]{0,79}\Z", re.ASCII)
@@ -67,6 +76,7 @@ class R010SerialNonceJournal:
         self._burned = False
         self._failed = False
         self._source_recorded = False
+        self._row1_finalization_claimed = False
 
     def _require_live(self) -> None:
         if self._failed:
@@ -255,6 +265,90 @@ class R010SerialNonceJournal:
                 "native_launch_allowed": False,
                 "six_command_product_t1_pass": False,
             }
+
+    def finalize_first_row_from_actual_owner_source_only(
+        self, *, owner: DirectChildOwner, reservation: object,
+        plan: LbeWorkPlan, worker_result: dict[str, Any],
+        selected_root_fd: int,
+        selected_before: R010SelectedSourceSnapshot,
+        private_root_fd: int,
+        private_before: R010PrivateTreeSnapshot,
+    ) -> dict[str, object]:
+        """One-use Owner/Worker/finite-FS adapter for row 1; NO native grant.
+
+        Worker and Owner must have completed the same private reservation.
+        This entrypoint observes the actual Owner/reader (not a supplied
+        success dataclass), then post-checks pinned source/private FDs.
+        Failure permanently latches this Job; healthy zero writes only a
+        SOURCE_ONLY record. No path can advance to row 2 or invoke Popen.
+
+        This is still NOT an authenticated runtime adapter: same-UID callers
+        can supply mutable Python objects, and no provider/Owner product
+        Grant, host provenance or actual loaded-source closure is proven.
+        Only the pre-authorized nonoperative SAFE T0 path may call it.
+        """
+        with self._envelope._lock:
+            self._require_live()
+            if (not self._burned or self._source_recorded
+                    or self._row1_finalization_claimed):
+                raise R010SerialAdmissionDenied(
+                    "first row not active or finalization already consumed")
+            # Claim exactly one finalization BEFORE inspecting mutable Worker
+            # or files. A concurrent/later ACK cannot reclassify this row.
+            self._row1_finalization_claimed = True
+        try:
+            validate_r010_fixed_row_plan(1, plan)
+            owned = observe_r010_private_owner_row(
+                owner=owner, reservation=reservation, plan=plan,
+                worker_result=worker_result, row=1,
+                nonce_sha256=self._digests[0])
+            if owned.outcome in (
+                "ROW_OBSERVED_NONZERO",
+                "ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS",
+                "ROW_AMBIGUOUS",
+            ):
+                self.latch_from_owned_row(owned)
+                return {
+                    "row": 1, "status": owned.outcome,
+                    "durably_latched": True,
+                    "next_row_allowed": False,
+                    "native_launch_allowed": False,
+                    "six_command_product_t1_pass": False,
+                }
+            if (owned.outcome !=
+                    "ORIGINAL_ZERO_READER_HEALTHY_FINITE_FS_NOT_CHECKED"):
+                raise R010SerialAdmissionDenied("unknown private owner status")
+            try:
+                finite = verify_r010_finite_row_after(
+                    row=1, plan=plan,
+                    selected_root_fd=selected_root_fd,
+                    selected_before=selected_before,
+                    private_root_fd=private_root_fd,
+                    private_before=private_before)
+            except Exception:
+                # Trusted original zero + healthy reader, but finite
+                # source/cache postcheck missing/failed/ambiguous.
+                self.latch_failure("invalid_output_or_fs")
+                return {
+                    "row": 1, "status": "ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS",
+                    "durably_latched": True,
+                    "next_row_allowed": False,
+                    "native_launch_allowed": False,
+                    "six_command_product_t1_pass": False,
+                }
+            return self.record_source_only_first_row_zero(
+                owned=owned, finite=finite)
+        except Exception:
+            # Any unexpected source/Owner/record failure leaves a burned
+            # non-retryable nonce. Try to persist the ambiguity; a failed
+            # fsync also remains a permanent denial on this Job.
+            if not self._failed:
+                try:
+                    self.latch_failure("owner_reader_ambiguous")
+                except Exception:
+                    self._failed = True
+            raise R010SerialAdmissionDenied(
+                "original owner row-1 finalization uncertain, denied") from None
 
     def begin_later_row(self, *_args: object, **_kwargs: object) -> None:
         raise R010SerialAdmissionDenied("trusted row-success adapter not implemented")

@@ -108,7 +108,8 @@ def no_foreign_effects(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", forbidden)
 
 
-def run_fake(*, exit_code=0, both_eof=True, close_fails=False):
+def run_fake(*, exit_code=0, both_eof=True, close_fails=False,
+             proposed_plan=None):
     owner = DirectChildOwner()
     sel = FakeSelector(close_fails=close_fails)
     child = FakeChild(exit_code)
@@ -138,7 +139,7 @@ def run_fake(*, exit_code=0, both_eof=True, close_fails=False):
         )
 
     worker = LbeWorker(owner, launcher=launch, drain_factory=make_reader)
-    proposed = plan()
+    proposed = plan() if proposed_plan is None else proposed_plan
     result = worker.run(proposed)
     assert len(reservations) == 1
     assert child.reaped == 1
@@ -251,3 +252,188 @@ def test_wrong_reservation_or_workspace_identity_is_deny():
             plan=replace(proposed, workspace="other"),
             worker_result=result, row=1, nonce_sha256="a" * 64)
     owner.close()
+
+
+def _r010_pytest_plan():
+    return LbeWorkPlan(
+        workspace="py-direct", cwd="py-direct", runner="direct",
+        runner_project="py-direct", timeout_seconds=2,
+        requested_argv=("python", "-m", "pytest", "-q"),
+        effective_argv=("python", "-m", "pytest", "-q"),
+    )
+
+
+@pytest.fixture
+def r010_journal(tmp_path):
+    import hashlib
+    from gateway.lbe_r010_job_envelope import (
+        R010JobKey, _create_once_in_pinned_anchor)
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+
+    anchor = tmp_path / "job-anchor"
+    anchor.mkdir(mode=0o700)
+    fd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    key = R010JobKey(
+        repo="chinanjjohn2012/mac-file-gateway", pr=114,
+        workflow_id=145, workflow_path=".github/workflows/r010.yml",
+        workflow_ref=("chinanjjohn2012/mac-file-gateway/"
+                      ".github/workflows/r010.yml@refs/heads/main"),
+        run_id=42640408843, run_attempt=1, check_run_id=129239691259,
+        job_name="r010_preexec_hold", head_sha="a" * 40,
+        design_id="MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-013-CANDIDATE",
+        design_blob="f57e39543a6fe3d64fe99b8669fc7da854b93a64",
+        owner_choice_comment_id=6740275850, host_option="A1",
+        review_sequence_option="B1",
+        state_domain="R010_EPHEMERAL_JOB_STATE_V1",
+    )
+    raw = tuple(f"{i:064x}" for i in range(1, 7))
+    digests = tuple(
+        hashlib.sha256(bytes.fromhex(n)).hexdigest() for n in raw)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as envelope:
+            journal = R010SerialNonceJournal(
+                envelope, six_nonce_sha256=digests)
+            journal.burn_first_nonce(raw[0])
+            yield anchor, envelope, journal, raw
+    finally:
+        os.close(fd)
+
+
+@pytest.fixture
+def r010_first_row_private_files(tmp_path):
+    from gateway.lbe_r010_finite_integrity import observe_selected_source_files
+    from gateway.lbe_r010_row_fs import observe_r010_private_tree
+
+    selected = tmp_path / "selected"
+    private = tmp_path / "private"
+    selected.mkdir(mode=0o700)
+    private.mkdir(mode=0o700)
+    (selected / "main.py").write_text("x=1\n")
+    sfd = os.open(selected, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    pfd = os.open(private, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        yield {
+            "selected_root_fd": sfd,
+            "selected_before": observe_selected_source_files(
+                root_fd=sfd, relative_paths=("main.py",)),
+            "private_root_fd": pfd,
+            "private_before": observe_r010_private_tree(root_fd=pfd),
+            "selected_path": selected, "private_path": private,
+        }
+    finally:
+        os.close(sfd)
+        os.close(pfd)
+
+
+def _finalize_first_row(journal, files, *, exit_code=0, both_eof=True,
+                        close_fails=False, tamper_result=None,
+                        proposed_plan=None):
+    proposed = _r010_pytest_plan() if proposed_plan is None else proposed_plan
+    _, owner, reservation, plan_obj, result = run_fake(
+        exit_code=exit_code, both_eof=both_eof,
+        close_fails=close_fails, proposed_plan=proposed)
+    if tamper_result:
+        result = {**result, **tamper_result}
+    try:
+        return journal.finalize_first_row_from_actual_owner_source_only(
+            owner=owner, reservation=reservation, plan=plan_obj,
+            worker_result=result,
+            selected_root_fd=files["selected_root_fd"],
+            selected_before=files["selected_before"],
+            private_root_fd=files["private_root_fd"],
+            private_before=files["private_before"])
+    finally:
+        owner.close()
+
+
+def _durable_failure(anchor, envelope):
+    import json
+    root = anchor / envelope.snapshot()["envelope_root_name"]
+    return json.loads(
+        (root / "command-journal" / "r010-row-failure.json").read_text())
+
+
+def test_first_row_owner_plus_finite_source_persists_no_t1(
+        r010_journal, r010_first_row_private_files):
+    import json
+    from gateway.lbe_r010_serial_journal import R010SerialAdmissionDenied
+
+    anchor, env, journal, raw = r010_journal
+    outcome = _finalize_first_row(journal, r010_first_row_private_files)
+    assert outcome["status"] == "ROW_FINITE_ZERO_SOURCE_ONLY_NOT_PRODUCT_T1"
+    assert outcome["next_row_allowed"] is False
+    assert outcome["native_launch_allowed"] is False
+    root = anchor / env.snapshot()["envelope_root_name"]
+    record = json.loads(
+        (root / "command-journal" / "row-01-source-only.json").read_text())
+    assert record["row_positive_success"] is False
+    assert record["original_exit_code"] == 0
+    with pytest.raises(R010SerialAdmissionDenied, match="not implemented"):
+        journal.begin_later_row(2, raw[1])
+    with pytest.raises(R010SerialAdmissionDenied, match="consumed"):
+        journal.finalize_first_row_from_actual_owner_source_only(
+            owner=None, reservation=None, plan=_r010_pytest_plan(),
+            worker_result={},
+            selected_root_fd=r010_first_row_private_files["selected_root_fd"],
+            selected_before=r010_first_row_private_files["selected_before"],
+            private_root_fd=r010_first_row_private_files["private_root_fd"],
+            private_before=r010_first_row_private_files["private_before"])
+
+
+@pytest.mark.parametrize("exit_code,both_eof,close_fails,expected", [
+    (3, True, False, "ROW_OBSERVED_NONZERO"),
+    (0, False, False, "ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS"),
+    (0, True, True, "ROW_AMBIGUOUS"),
+])
+def test_actual_worker_negative_latches_six_rows(
+        r010_journal, r010_first_row_private_files,
+        exit_code, both_eof, close_fails, expected):
+    import json
+    from gateway.lbe_r010_serial_journal import R010SerialAdmissionDenied
+
+    anchor, env, journal, raw = r010_journal
+    result = _finalize_first_row(
+        journal, r010_first_row_private_files,
+        exit_code=exit_code, both_eof=both_eof,
+        close_fails=close_fails)
+    assert result["status"] == expected
+    assert result["durably_latched"] is True
+    assert result["next_row_allowed"] is False
+    record = _durable_failure(anchor, env)
+    assert record["rows"] == [expected] + ["ROW_VOID"] * 5
+    with pytest.raises(R010SerialAdmissionDenied):
+        journal.begin_later_row(2, raw[1])
+
+
+def test_private_source_drift_after_fake_child_latches_invalid(
+        r010_journal, r010_first_row_private_files):
+    anchor, env, journal, _ = r010_journal
+    path = r010_first_row_private_files["selected_path"] / "main.py"
+    path.write_text("x=2\n")
+    result = _finalize_first_row(journal, r010_first_row_private_files)
+    assert result["status"] == "ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS"
+    assert _durable_failure(anchor, env)["reason"] == "invalid_output_or_fs"
+
+
+@pytest.mark.parametrize("poison", [
+    {"status": "timed_out", "timed_out": True},
+    {"exit_code": 14}, {"pipe_reader_failed": True},
+])
+def test_forged_worker_result_is_ambiguous_not_a_positive_record(
+        r010_journal, r010_first_row_private_files, poison):
+    anchor, env, journal, _ = r010_journal
+    result = _finalize_first_row(
+        journal, r010_first_row_private_files, tamper_result=poison)
+    assert result["status"] == "ROW_AMBIGUOUS"
+    assert _durable_failure(anchor, env)["rows"][0] == "ROW_AMBIGUOUS"
+
+
+def test_wrong_plan_fails_closed_before_owner_acceptance(
+        r010_journal, r010_first_row_private_files):
+    from gateway.lbe_r010_serial_journal import R010SerialAdmissionDenied
+
+    anchor, env, journal, _ = r010_journal
+    with pytest.raises(R010SerialAdmissionDenied, match="uncertain"):
+        _finalize_first_row(
+            journal, r010_first_row_private_files, proposed_plan=plan())
+    assert _durable_failure(anchor, env)["rows"][0] == "ROW_AMBIGUOUS"

@@ -15,6 +15,7 @@ from .lbe_r010_job_envelope import (
     R010CreatedJobEnvelope, R010JobEnvelopeDenied, _write_once,
 )
 from .lbe_r010_owned_row import R010OwnedRowSourceObservation
+from .lbe_r010_row_fs import R010FiniteRowObservation
 
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 _REASON = re.compile(r"[a-z][a-z0-9_]{0,79}\Z", re.ASCII)
@@ -65,6 +66,7 @@ class R010SerialNonceJournal:
         self._digests = six_nonce_sha256
         self._burned = False
         self._failed = False
+        self._source_recorded = False
 
     def _require_live(self) -> None:
         if self._failed:
@@ -163,6 +165,96 @@ class R010SerialNonceJournal:
             raise R010SerialAdmissionDenied(
                 "healthy zero still lacks full product integrity and owner Grant")
         self.latch_failure(reason)
+
+    def record_source_only_first_row_zero(
+        self, *, owned: R010OwnedRowSourceObservation,
+        finite: R010FiniteRowObservation,
+    ) -> dict[str, object]:
+        """Persist finite source evidence, WITHOUT advancing to row 2.
+
+        Both inputs are constructible data, not current provider/Owner Grant
+        or native execution proof. A forged FakeChild exit0 can at most create
+        an explicitly unqualified SOURCE_ONLY record. The Job's expected row
+        remains 1 and no method releases a Popen capability.
+        """
+        with self._envelope._lock:
+            self._require_live()
+            if not self._burned or self._source_recorded:
+                raise R010SerialAdmissionDenied(
+                    "no active first row or duplicate source observation")
+            valid_owner = (
+                type(owned) is R010OwnedRowSourceObservation
+                and type(owned.row) is int and owned.row == 1
+                and owned.nonce_sha256 == self._digests[0]
+                and owned.outcome ==
+                "ORIGINAL_ZERO_READER_HEALTHY_FINITE_FS_NOT_CHECKED"
+                and type(owned.observed_original_exit_code) is int
+                and owned.observed_original_exit_code == 0
+                and owned.original_child_reaped is True
+                and owned.owner_reader_healthy is True
+                and owned.output_complete is True
+                and owned.native_launch_allowed is False
+                and owned.row_positive_success is False
+                and owned.six_command_product_t1_pass is False
+                and owned.descendant_cleanup_proven is False
+            )
+            valid_finite = (
+                type(finite) is R010FiniteRowObservation
+                and type(finite.row) is int and finite.row == 1
+                and finite.requested_argv ==
+                    ("python", "-m", "pytest", "-q")
+                and finite.effective_argv ==
+                    ("python", "-m", "pytest", "-q")
+                and finite.status ==
+                    "FINITE_SOURCE_AND_PRIVATE_DELTAS_VALID_NOT_T1"
+                and finite.selected_source_stable is True
+                and finite.finite_private_delta_valid is True
+                and finite.transient_mutation_absence_proven is False
+                and finite.unobserved_host_side_effects_proven_absent is False
+                and finite.go_build_artifact_sha256 is None
+                and finite.native_launch_allowed is False
+                and finite.row_positive_success is False
+                and finite.six_command_product_t1_pass is False
+                and type(finite.private_tree_before_sha256) is str
+                and _HEX64.fullmatch(finite.private_tree_before_sha256)
+                is not None
+                and type(finite.private_tree_after_sha256) is str
+                and _HEX64.fullmatch(finite.private_tree_after_sha256)
+                is not None
+            )
+            if not valid_owner or not valid_finite:
+                # Caller must explicitly latch the detected failure via the
+                # existing durable failure path. Never issue a positive row.
+                raise R010SerialAdmissionDenied(
+                    "first row finite/owner source evidence unqualified")
+            record = (json.dumps({
+                "version": "R010_FIRST_ROW_SOURCE_ONLY_V1",
+                "row": 1, "nonce_sha256": self._digests[0],
+                "original_exit_code": 0,
+                "source_only": True,
+                "private_before_sha256": finite.private_tree_before_sha256,
+                "private_after_sha256": finite.private_tree_after_sha256,
+                "status": "ROW_FINITE_ZERO_SOURCE_ONLY_NOT_PRODUCT_T1",
+                "next_row_allowed": False,
+                "native_launch_allowed": False,
+                "row_positive_success": False,
+                "six_command_product_t1_pass": False,
+            }, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+            try:
+                _write_once(
+                    self._envelope._journal_fd,
+                    "row-01-source-only.json", record)
+            except R010JobEnvelopeDenied:
+                self._failed = True
+                raise R010SerialAdmissionDenied(
+                    "source observation write uncertain, permanent deny") from None
+            self._source_recorded = True
+            return {
+                "status": "ROW_FINITE_ZERO_SOURCE_ONLY_NOT_PRODUCT_T1",
+                "row": 1, "next_row_allowed": False,
+                "native_launch_allowed": False,
+                "six_command_product_t1_pass": False,
+            }
 
     def begin_later_row(self, *_args: object, **_kwargs: object) -> None:
         raise R010SerialAdmissionDenied("trusted row-success adapter not implemented")

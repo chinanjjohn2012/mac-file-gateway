@@ -269,3 +269,96 @@ def test_failure_before_any_burn_voids_all_six_rows(envelope):
     assert result["active_row"] is None
     assert result["rows"] == ["ROW_VOID"] * 6
     assert result["native_launch_allowed"] is False
+
+
+def _source_only_first_row_finite(tmp_path):
+    """Real local nofollow FS observations; no Worker or subprocess launch."""
+    from gateway.lbe_r010_finite_integrity import observe_selected_source_files
+    from gateway.lbe_r010_row_fs import (
+        observe_r010_private_tree, verify_r010_finite_row_after)
+    from gateway.lbe_worker import LbeWorkPlan
+
+    selected = tmp_path / "first-party"
+    selected.mkdir(mode=0o700)
+    (selected / "main.py").write_text("x = 1\n")
+    private = tmp_path / "private-cache"
+    private.mkdir(mode=0o700)
+    src_fd = os.open(selected, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    cache_fd = os.open(private, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        source_before = observe_selected_source_files(
+            root_fd=src_fd, relative_paths=("main.py",))
+        cache_before = observe_r010_private_tree(root_fd=cache_fd)
+        fixed = LbeWorkPlan(
+            workspace="py-direct", cwd="py-direct",
+            runner="direct", runner_project="py-direct",
+            timeout_seconds=120,
+            requested_argv=("python", "-m", "pytest", "-q"),
+            effective_argv=("python", "-m", "pytest", "-q"))
+        return verify_r010_finite_row_after(
+            row=1, plan=fixed,
+            selected_root_fd=src_fd, selected_before=source_before,
+            private_root_fd=cache_fd, private_before=cache_before)
+    finally:
+        os.close(src_fd)
+        os.close(cache_fd)
+
+
+def _fake_source_only_owned(digest):
+    from gateway.lbe_r010_owned_row import R010OwnedRowSourceObservation
+    return R010OwnedRowSourceObservation(
+        row=1, nonce_sha256=digest,
+        outcome="ORIGINAL_ZERO_READER_HEALTHY_FINITE_FS_NOT_CHECKED",
+        observed_original_exit_code=0,
+        original_child_reaped=True, owner_reader_healthy=True,
+        output_complete=True)
+
+
+def test_finite_plus_source_owned_zero_persists_but_never_advances(
+        envelope, tmp_path):
+    anchor, instance = envelope
+    raw, hashes = nonces()
+    journal = R010SerialNonceJournal(instance, six_nonce_sha256=hashes)
+    journal.burn_first_nonce(raw[0])
+    result = journal.record_source_only_first_row_zero(
+        owned=_fake_source_only_owned(hashes[0]),
+        finite=_source_only_first_row_finite(tmp_path))
+    assert result["next_row_allowed"] is False
+    assert result["native_launch_allowed"] is False
+    assert result["six_command_product_t1_pass"] is False
+    root = anchor / instance.snapshot()["envelope_root_name"]
+    persisted = json.loads(
+        (root / "command-journal" / "row-01-source-only.json").read_text())
+    assert persisted["row_positive_success"] is False
+    assert persisted["next_row_allowed"] is False
+    assert persisted["original_exit_code"] == 0
+    with pytest.raises(R010SerialAdmissionDenied, match="duplicate"):
+        journal.record_source_only_first_row_zero(
+            owned=_fake_source_only_owned(hashes[0]),
+            finite=_source_only_first_row_finite(tmp_path))
+    with pytest.raises(R010SerialAdmissionDenied, match="not implemented"):
+        journal.begin_later_row(2, raw[1])
+
+
+def test_cross_nonce_and_wrong_finite_receipt_cannot_mint_source_success(
+        envelope, tmp_path):
+    from dataclasses import replace
+    anchor, instance = envelope
+    raw, hashes = nonces()
+    journal = R010SerialNonceJournal(instance, six_nonce_sha256=hashes)
+    journal.burn_first_nonce(raw[0])
+    valid = _source_only_first_row_finite(tmp_path)
+    for owned, finite in (
+        (_fake_source_only_owned(hashes[1]), valid),
+        (_fake_source_only_owned(hashes[0]),
+         replace(valid, row=2)),
+        (_fake_source_only_owned(hashes[0]),
+         replace(valid, native_launch_allowed=True)),
+        (_fake_source_only_owned(hashes[0]),
+         replace(valid, six_command_product_t1_pass=True)),
+    ):
+        with pytest.raises(R010SerialAdmissionDenied, match="unqualified"):
+            journal.record_source_only_first_row_zero(
+                owned=owned, finite=finite)
+    root = anchor / instance.snapshot()["envelope_root_name"]
+    assert not (root / "command-journal" / "row-01-source-only.json").exists()

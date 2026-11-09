@@ -147,8 +147,12 @@ def observe_r010_private_tree(*, root_fd: int) -> R010PrivateTreeSnapshot:
                             raise R010RowFiniteDenied("private directory replaced")
                         # Directory ctime/mtime may change for valid children;
                         # preserve stable inode/owner/mode identity only.
+                        # Creating a valid child directory increments
+                        # its parent's st_nlink, not its inode/ownership.
+                        # Compare parent inode, owner and mode, while checking
+                        # every newly observed child against this row's policy.
                         ident = (before.st_dev, before.st_ino, before.st_uid,
-                                 before.st_mode, before.st_nlink)
+                                 before.st_mode)
                         rows.append((path, "dir", ident, None))
                         walk(child, path + "/", depth + 1)
                     finally:

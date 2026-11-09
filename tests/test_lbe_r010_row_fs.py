@@ -278,3 +278,11 @@ def test_transient_created_then_deleted_not_claimed_absent(fixture_root):
     assert obs.changed_private_paths == ()
     assert obs.unobserved_host_side_effects_proven_absent is False
     assert obs.transient_mutation_absence_proven is False
+
+
+def test_preexisting_private_src_permission_drift_denied(fixture_root):
+    _, private, *_ = fixture_root
+    (private / "src").chmod(0o755)
+    # Mode remains owner-safe but violates pre/post directory identity.
+    with pytest.raises(R010RowFiniteDenied, match="unreviewed"):
+        verify(2, fixture_root)

@@ -783,6 +783,85 @@ class WorkspaceService:
 
 
 
+
+    def _finalize_r010_first_row_source_only(
+        self, name: str, *, journal: object, capture: object,
+        private_root_fd: int, private_before: object,
+    ) -> dict[str, Any]:
+        """Finalize actual Owner/Worker row 1 with SERVICE-pinned source FD.
+
+        Unlike the low-level Journal API, the source root and BEFORE data
+        come from this exact live WorkspaceService's six-source snapshot.
+        The private-cache BEFORE descriptor must still be supplied by
+        separately trusted private-runner setup; that binding is NOT yet
+        an authenticated runtime/Owner Grant. No native T1 or row2 allowed.
+        """
+        from .lbe_r010_serial_journal import R010SerialNonceJournal
+        from .lbe_r010_private_capture import R010PrivateWorkerCapture
+        from .lbe_r010_row_fs import R010PrivateTreeSnapshot
+        from .lbe_r010_six_service import (
+            R010SixSourcePlan, recheck_r010_service_six_source,
+        )
+
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if (self.settings.schema_version != 2
+                    or self._closing or self._closed
+                    or self._exec_state is None
+                    or self._lbe_owner is None):
+                raise GatewayError(
+                    "runner_unavailable", "R010 service not eligible.")
+            self._exec_state.require_healthy()
+            self._active_operations += 1
+        try:
+            try:
+                if (type(journal) is not R010SerialNonceJournal
+                        or type(capture) is not R010PrivateWorkerCapture
+                        or type(private_root_fd) is not int
+                        or type(private_before) is not R010PrivateTreeSnapshot
+                        or capture._journal is not journal
+                        or capture._owner is not self._lbe_owner):
+                    raise ValueError("wrong Job capture or private source")
+                binding = capture._source_binding
+                if (type(binding) is not tuple or len(binding) != 3
+                        or binding[0] is not self
+                        or binding[1] is not ctx
+                        or type(binding[2]) is not R010SixSourcePlan
+                        or journal._six_source_plan is not binding[2]):
+                    raise ValueError("no same-service six-source witness")
+                six = binding[2]
+                recheck_r010_service_six_source(
+                    service=self, ctx=ctx, snapshot=six)
+                before = six.rows[0].selected.selected_source
+                project_cwd = six.rows[0].candidate.plan.cwd
+                source_fd = os.open(
+                    project_cwd,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW |
+                    os.O_CLOEXEC,
+                    dir_fd=ctx.gateway._root_fd)
+                try:
+                    return journal.finalize_first_row_from_worker_capture_source_only(
+                        capture=capture, selected_root_fd=source_fd,
+                        selected_before=before,
+                        private_root_fd=private_root_fd,
+                        private_before=private_before)
+                finally:
+                    os.close(source_fd)
+            except Exception:
+                try:
+                    if type(journal) is R010SerialNonceJournal:
+                        journal.latch_failure("owner_reader_ambiguous")
+                except Exception:
+                    pass
+                raise GatewayError(
+                    "runner_unavailable",
+                    "R010 row1 source/Owner/finite verification failed closed."
+                ) from None
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
     def _prepare_and_bind_r010_first_row_source_only(
         self, name: str, *, journal: object, nonce: str,
         timeout_seconds: int = 120,

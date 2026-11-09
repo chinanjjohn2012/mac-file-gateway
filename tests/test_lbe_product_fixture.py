@@ -5699,3 +5699,76 @@ def test_r010_single_service_failed_preflight_is_six_void(
     finally:
         os.close(fd)
     assert service._active_operations == 0
+
+
+
+@pytest.mark.parametrize("exit_code,expected", [
+    (0, "ROW_FINITE_ZERO_SOURCE_ONLY_NOT_PRODUCT_T1"),
+    (7, "ROW_OBSERVED_NONZERO"),
+])
+def test_r010_actual_shared_service_finalizes_first_owner_row_source_only(
+        product_service, tmp_path, monkeypatch, exit_code, expected):
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_row_fs import observe_r010_private_tree
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_worker import LbeWorker
+    service, root = product_service
+    fd, anchor, key, raw, hashes = _r010_t0_job_for_shared_service(
+        tmp_path)
+    private = tmp_path / "r010-private-row-output"
+    private.mkdir(mode=0o700)
+    pfd = os.open(private, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    before = observe_r010_private_tree(root_fd=pfd)
+    def deny(*_args, **_kw):
+        raise AssertionError("no real native PRODUCT_T1")
+    monkeypatch.setattr(subprocess, "Popen", deny)
+    class FakeChild:
+        def __init__(self):
+            stdout_read, stdout_write = os.pipe()
+            stderr_read, stderr_write = os.pipe()
+            os.close(stdout_write)
+            os.close(stderr_write)
+            self.stdout = os.fdopen(stdout_read, "rb", buffering=0)
+            self.stderr = os.fdopen(stderr_read, "rb", buffering=0)
+        def wait(self):
+            return exit_code
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(
+                env, six_nonce_sha256=hashes)
+            capture = service._prepare_and_bind_r010_first_row_source_only(
+                "a", journal=journal, nonce=raw[0])
+            result = LbeWorker(
+                service._lbe_owner, launcher=lambda _plan: FakeChild()
+            ).run(capture._plan, r010_source_capture=capture)
+            assert result["status"] == "exited"
+            assert result["process_may_be_running"] is True
+            assert result["cleanup_proven"] is False
+            assert result["full_descendant_tree_clean"] == "not_proven"
+            assert result["exit_code"] == exit_code
+            decided = service._finalize_r010_first_row_source_only(
+                "a", journal=journal, capture=capture,
+                private_root_fd=pfd, private_before=before)
+            assert decided["status"] == expected
+            assert decided["next_row_allowed"] is False
+            assert decided["native_launch_allowed"] is False
+            home = anchor / env.snapshot()["envelope_root_name"]
+            if exit_code == 0:
+                record = json.loads(
+                    (home / "command-journal" /
+                     "row-01-source-only.json").read_text())
+                assert record["six_source_binding_sha256"]
+                assert record["job_key_sha256"] == key.key_sha256()
+                assert record["six_command_product_t1_pass"] is False
+            else:
+                failure = json.loads(
+                    (home / "command-journal" /
+                     "r010-row-failure.json").read_text())
+                assert failure["rows"] == (
+                    ["ROW_OBSERVED_NONZERO"] + ["ROW_VOID"] * 5)
+    finally:
+        os.close(pfd)
+        os.close(fd)
+    assert service._active_operations == 0
+    assert service._exec_active == set()

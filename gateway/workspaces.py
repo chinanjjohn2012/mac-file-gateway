@@ -782,6 +782,58 @@ class WorkspaceService:
 
 
 
+
+    def _prepare_and_bind_r010_first_row_source_only(
+        self, name: str, *, journal: object, nonce: str,
+        timeout_seconds: int = 120,
+        cancelled: threading.Event | None = None,
+    ):
+        """Single private service operation for the full R010 first-row gate.
+
+        Keep the SAME WorkspaceService alive over source selection and the
+        create-once six-row source/nonce journal transaction. On any failed
+        selection permanently latch all six as VOID when persistence permits.
+        This never returns a launcher, executable approval or T1 authority.
+        """
+        from .lbe_r010_serial_journal import R010SerialNonceJournal
+        if type(journal) is not R010SerialNonceJournal:
+            raise GatewayError(
+                "runner_unavailable", "R010 Job journal identity absent.")
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if (self._closing or self._closed or
+                    self.settings.schema_version != 2):
+                raise GatewayError(
+                    "runner_unavailable", "R010 source service unavailable.")
+            self._active_operations += 1
+        try:
+            if (cancelled is not None and
+                    (type(cancelled) is not threading.Event
+                     or cancelled.is_set())):
+                raise GatewayError(
+                    "waiter_disconnected", "R010 waiter not active.")
+            six = self._prepare_r010_six_command_source_only(
+                name, timeout_seconds=timeout_seconds)
+            return self._bind_r010_first_row_source_only(
+                name, source_plan=six, journal=journal, nonce=nonce,
+                cancelled=cancelled)
+        except Exception:
+            # No alternative path may turn a failed source selection into
+            # a positive Job. If the journal is already failed, the second
+            # latch is rejected and its original durable result is retained.
+            try:
+                journal.latch_failure("source_preexec_denied")
+            except Exception:
+                pass
+            raise GatewayError(
+                "runner_unavailable",
+                "R010 all-six source and first-row admission failed closed."
+            ) from None
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
     def _bind_r010_first_row_source_only(
         self, name: str, *, source_plan: object, journal: object,
         nonce: str, cancelled: threading.Event | None = None,

@@ -5634,3 +5634,68 @@ def test_r010_worker_capture_denied_after_job_latch_before_launch(
             assert launched == []
     finally:
         os.close(fd)
+
+
+
+def test_r010_shared_service_single_source_to_first_row_transaction(
+        product_service, tmp_path, monkeypatch):
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    service, _ = product_service
+    fd, anchor, key, raw, hashes = _r010_t0_job_for_shared_service(tmp_path)
+    def no_spawn(*_a, **_kw):
+        raise AssertionError("R010 private preflight must not spawn")
+    monkeypatch.setattr(subprocess, "Popen", no_spawn)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(
+                env, six_nonce_sha256=hashes)
+            receipt = service._prepare_and_bind_r010_first_row_source_only(
+                "a", journal=journal, nonce=raw[0])
+            assert receipt.status()["same_service_source_bound"] is True
+            assert receipt.status()["native_launch_allowed"] is False
+            assert journal.row_state_snapshot()["job_state_model"] == (
+                "JOB_ROW_RUNNING_1")
+            home = anchor / env.snapshot()["envelope_root_name"]
+            bound = json.loads(
+                (home / "command-journal" /
+                 "six-row-source-binding.json").read_text())
+            assert bound["job_key_sha256"] == key.key_sha256()
+            assert len(bound["source_row_sha256"]) == 6
+            assert bound["six_command_product_t1_pass"] is False
+            for cwd, argv in _ROWS:
+                with pytest.raises(GatewayError) as denied:
+                    service.invoke_exec("a", cwd, argv, dry_run=False)
+                assert denied.value.code == "exec_cleanup_proof_required"
+    finally:
+        os.close(fd)
+    assert service._active_operations == 0
+    assert service._exec_active == set()
+
+
+def test_r010_single_service_failed_preflight_is_six_void(
+        product_service, tmp_path):
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    service, root = product_service
+    fd, anchor, key, raw, hashes = _r010_t0_job_for_shared_service(tmp_path)
+    (root / "go-project" / "cmd" / "app" / "main.go").unlink()
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(
+                env, six_nonce_sha256=hashes)
+            with pytest.raises(GatewayError, match="failed closed"):
+                service._prepare_and_bind_r010_first_row_source_only(
+                    "a", journal=journal, nonce=raw[0])
+            home = anchor / env.snapshot()["envelope_root_name"]
+            failed = json.loads(
+                (home / "command-journal" /
+                 "r010-row-failure.json").read_text())
+            assert failed["rows"] == ["ROW_VOID"] * 6
+            assert not (home / "command-journal" /
+                        "row-01-burn.json").exists()
+    finally:
+        os.close(fd)
+    assert service._active_operations == 0

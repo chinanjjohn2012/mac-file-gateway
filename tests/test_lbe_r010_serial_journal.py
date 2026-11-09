@@ -10,6 +10,7 @@ import pytest
 from gateway.lbe_r010_job_envelope import (
     R010JobKey, _create_once_in_pinned_anchor,
 )
+from gateway.lbe_r010_six_state import R010SixRowPolicy
 from gateway.lbe_r010_serial_journal import (
     R010SerialAdmissionDenied, R010SerialNonceJournal,
 )
@@ -385,3 +386,64 @@ def test_real_journal_reports_six_row_state_but_never_models_fake_completion(
     journal.latch_failure("owner_reader_ambiguous")
     with pytest.raises(R010SerialAdmissionDenied):
         journal.row_state_snapshot()
+
+
+
+@pytest.mark.parametrize("active", [1, 2, 3, 4, 5, 6])
+@pytest.mark.parametrize("reason,classification", [
+    ("original_nonzero", "ROW_OBSERVED_NONZERO"),
+    ("invalid_output_or_fs", "ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS"),
+    ("owner_reader_ambiguous", "ROW_AMBIGUOUS"),
+])
+def test_durable_failure_serializer_respects_any_future_active_row_model(
+        envelope, active, reason, classification):
+    """Future complete-row model shape; NOT execution/native authority.
+
+    No other row can actually be burned through this runtime Journal. We
+    inject ONLY an immutable source model into the internal failure writer
+    to exercise the complete durable six-row failure serializer.
+    """
+    import json
+    anchor, instance = envelope
+    raw, hashes = nonces()
+    journal = R010SerialNonceJournal(instance, six_nonce_sha256=hashes)
+    model = R010SixRowPolicy.hold(hashes).ready_model_first()
+    for row in range(1, active + 1):
+        model = model.burn_model(row, raw[row - 1])
+        if row != active:
+            model = model.finish_model(row, "ROW_POSITIVE_SUCCESS")
+    journal._state_model = model
+    # Source-only synthetic model success must NOT imply actual native grant.
+    journal.latch_failure(reason)
+    home = anchor / instance.snapshot()["envelope_root_name"]
+    got = json.loads((
+        home / "command-journal" /
+        "r010-row-failure.json").read_text())
+    assert got["status"] == "JOB_FAILED_LATCHED"
+    assert got["active_row"] == active
+    assert got["previous_expected_row"] == active
+    assert got["rows"] == (
+        ["ROW_POSITIVE_SUCCESS"] * (active - 1)
+        + [classification] + ["ROW_VOID"] * (6 - active))
+    assert got["native_launch_allowed"] is False
+    with pytest.raises(R010SerialAdmissionDenied):
+        journal.begin_later_row(active + 1, raw[min(active, 5)])
+
+
+def test_source_only_journal_durable_first_row_receipt_binds_job_key(envelope,
+                                                                     tmp_path):
+    import json
+    anchor, instance = envelope
+    raw, hashes = nonces()
+    journal = R010SerialNonceJournal(instance, six_nonce_sha256=hashes)
+    journal.burn_first_nonce(raw[0])
+    journal.record_source_only_first_row_zero(
+        owned=_fake_source_only_owned(hashes[0]),
+        finite=_source_only_first_row_finite(tmp_path))
+    root = anchor / instance.snapshot()["envelope_root_name"]
+    result = json.loads((
+        root / "command-journal" /
+        "row-01-source-only.json").read_text())
+    assert result["job_key_sha256"] == instance._key.key_sha256()
+    assert result["six_source_binding_sha256"] is None
+    assert result["six_command_product_t1_pass"] is False

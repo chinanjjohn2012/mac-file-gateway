@@ -210,12 +210,16 @@ class R010SerialNonceJournal:
                 "invalid_output_or_fs": "ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS",
                 "owner_reader_ambiguous": "ROW_AMBIGUOUS",
             }.get(code, "ROW_AMBIGUOUS")
+            # One failure writer for ANY globally active row. The actual
+            # SOURCE_ONLY admission still only burns row 1; later positive
+            # admission remains blocked pending independent B1/Owner Grant.
+            current = self._state_model
             try:
-                if self._burned:
-                    failed_model = self._state_model.finish_model(
-                        1, failure_row)
+                if current.active_row is not None:
+                    failed_model = current.finish_model(
+                        current.active_row, failure_row)
                 else:
-                    failed_model = self._state_model.fail_unstarted_model()
+                    failed_model = current.fail_unstarted_model()
             except R010SixRowPolicyDenied:
                 self._failed = True
                 raise R010SerialAdmissionDenied(
@@ -224,8 +228,10 @@ class R010SerialNonceJournal:
             record = (json.dumps({
                 "status": "JOB_FAILED_LATCHED",
                 "reason": code,
-                "active_row": 1 if self._burned else None,
+                "active_row": current.active_row,
+                "previous_expected_row": current.expected_row,
                 "next_expected_row": None,
+                "sequence_transition": failed_model.transition_number,
                 "rows": rows,
                 "rows_remaining": "ROW_VOID",
                 "native_launch_allowed": False,

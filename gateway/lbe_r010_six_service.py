@@ -10,6 +10,8 @@ provider Job, original Owner grant, runtime resources and native evidence.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import json
 from typing import TYPE_CHECKING
 
 from .lbe_product_fixture import D4FixtureCandidate
@@ -129,6 +131,52 @@ def recheck_r010_service_six_source(
         if fresh != record.selected:
             raise R010SixSourceDenied("six-row selected source drift")
     return snapshot
+
+
+def fingerprint_r010_six_source(
+    *, service: "WorkspaceService", ctx: "WorkspaceContext",
+    snapshot: R010SixSourcePlan,
+) -> tuple[str, tuple[str, ...]]:
+    """Deterministically commit ALL six rechecked source/plan identities.
+
+    The private Job journal stores these immutable digests, not an executable
+    capability. This does not attest the full native loader or host inputs.
+    """
+    recheck_r010_service_six_source(
+        service=service, ctx=ctx, snapshot=snapshot)
+    digests = []
+    for item in snapshot.rows:
+        candidate = item.candidate
+        plan = candidate.plan
+        selected = item.selected.selected_source
+        evidence = {
+            "row": item.index, "command_id": item.command_id,
+            "workspace": plan.workspace, "cwd": plan.cwd,
+            "runner": plan.runner, "runner_project": plan.runner_project,
+            "requested_argv": plan.requested_argv,
+            "effective_argv": plan.effective_argv,
+            "timeout_seconds": plan.timeout_seconds,
+            "planned_go_output": plan.planned_go_output,
+            "planned_pipfile_sha256": plan.planned_pipfile_sha256,
+            "selected_files": selected.files,
+            "selected_root_identity": selected.root_identity,
+            "selected_directory_identity": candidate.directory_identity,
+            "candidate_profile_id": candidate.profile_id,
+            "candidate_profile_git_blob": candidate.profile_git_blob,
+        }
+        encoded = json.dumps(
+            evidence, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True).encode("ascii")
+        digests.append(hashlib.sha256(encoded).hexdigest())
+    aggregate = {
+        "version": "R010_SIX_ROW_SOURCE_BINDING_V1",
+        "workspace": snapshot.workspace,
+        "source_row_sha256": digests,
+    }
+    packed = json.dumps(
+        aggregate, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True).encode("ascii")
+    return hashlib.sha256(packed).hexdigest(), tuple(digests)
 
 
 def prepare_r010_service_six_source(

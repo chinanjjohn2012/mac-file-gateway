@@ -86,6 +86,9 @@ class R010SerialNonceJournal:
         self._source_recorded = False
         self._row1_finalization_claimed = False
         self._row1_capture_claimed = False
+        self._six_source_bound = False
+        self._six_source_plan = None
+        self._six_source_sha256 = None
 
     def _require_live(self) -> None:
         if self._failed:
@@ -94,6 +97,59 @@ class R010SerialNonceJournal:
             self._envelope._require_live()
         except R010JobEnvelopeDenied:
             raise R010SerialAdmissionDenied("Job envelope unavailable") from None
+
+    def bind_six_source_before_first_burn(
+        self, *, service: object, ctx: object, source_plan: object,
+    ) -> dict[str, object]:
+        """Durably seal six SAME-service plan/source digests before burn.
+
+        This is a source-only journal operation, not provider attestation,
+        native execution or a valid Owner PRODUCT_T1 Grant. It neither
+        consumes row 2 nor permits an original Popen.
+        """
+        from .lbe_r010_six_service import (
+            R010SixSourcePlan, R010SixSourceDenied,
+            fingerprint_r010_six_source,
+        )
+        with self._envelope._lock:
+            self._require_live()
+            if (self._burned or self._six_source_bound
+                    or self._source_recorded or self._row1_capture_claimed
+                    or type(source_plan) is not R010SixSourcePlan):
+                raise R010SerialAdmissionDenied(
+                    "six-source binding unavailable after row admission")
+            try:
+                digest, row_digests = fingerprint_r010_six_source(
+                    service=service, ctx=ctx, snapshot=source_plan)
+                payload = (json.dumps({
+                    "version": "R010_SIX_ROW_SOURCE_BINDING_V1",
+                    "job_key_sha256": self._envelope._key.key_sha256(),
+                    "workspace": source_plan.workspace,
+                    "source_sha256": digest,
+                    "source_row_sha256": row_digests,
+                    "nonce_sha256": self._digests,
+                    "native_launch_allowed": False,
+                    "row_positive_success": False,
+                    "six_command_product_t1_pass": False,
+                }, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+                _write_once(
+                    self._envelope._journal_fd,
+                    "six-row-source-binding.json", payload)
+            except (R010SixSourceDenied, R010JobEnvelopeDenied,
+                    ValueError, TypeError, OSError):
+                # An uncertain create-once write can never become retryable.
+                self._failed = True
+                raise R010SerialAdmissionDenied(
+                    "durable six-row source binding unavailable") from None
+            self._six_source_bound = True
+            self._six_source_sha256 = digest
+            self._six_source_plan = source_plan
+            return {
+                "source_sha256": digest, "row_count": 6,
+                "status": "SIX_ROW_SOURCE_BOUND_NO_T1",
+                "native_launch_allowed": False,
+                "six_command_product_t1_pass": False,
+            }
 
     def burn_first_nonce(self, nonce: str) -> dict[str, object]:
         """Atomically burn once before any future, separately approved Popen."""
@@ -438,7 +494,11 @@ class R010SerialNonceJournal:
         """Status-only six-row observability; never a source of authority."""
         with self._envelope._lock:
             self._require_live()
-            return self._state_model.snapshot()
+            return {
+                **self._state_model.snapshot(),
+                "six_source_durable_binding_present": self._six_source_bound,
+                "six_source_sha256": self._six_source_sha256,
+            }
 
     def begin_later_row(self, *_args: object, **_kwargs: object) -> None:
         raise R010SerialAdmissionDenied("trusted row-success adapter not implemented")

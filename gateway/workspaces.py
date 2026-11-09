@@ -825,6 +825,8 @@ class WorkspaceService:
                         "wrong source plan, Job or cancelled waiter")
                 recheck_r010_service_six_source(
                     service=self, ctx=ctx, snapshot=source_plan)
+                journal.bind_six_source_before_first_burn(
+                    service=self, ctx=ctx, source_plan=source_plan)
                 journal.burn_first_nonce(nonce)
                 capture = journal.make_first_row_private_capture(
                     owner=self._lbe_owner,

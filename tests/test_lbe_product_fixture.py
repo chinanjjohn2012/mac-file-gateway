@@ -5479,3 +5479,92 @@ def test_r010_same_service_worker_prelaunch_source_drift_is_zero_popen(
         os.close(fd)
     assert service._active_operations == 0
     assert service._exec_active == set()
+
+
+
+def test_r010_six_sources_durably_sealed_with_nonce_and_job_key(
+        product_service, tmp_path, monkeypatch):
+    import hashlib
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_six_service import fingerprint_r010_six_source
+
+    service, _ = product_service
+    fd, anchor, key, nonces, digests = _r010_t0_job_for_shared_service(
+        tmp_path)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(
+                env, six_nonce_sha256=digests)
+            six = service._prepare_r010_six_command_source_only("a")
+            expected, expected_rows = fingerprint_r010_six_source(
+                service=service, ctx=service.get("a"), snapshot=six)
+            cap = service._bind_r010_first_row_source_only(
+                "a", source_plan=six, journal=journal, nonce=nonces[0])
+            assert cap.status()["same_service_source_bound"] is True
+            state = journal.row_state_snapshot()
+            assert state["six_source_durable_binding_present"] is True
+            assert state["six_source_sha256"] == expected
+            root = anchor / env.snapshot()["envelope_root_name"]
+            binding = json.loads((
+                root / "command-journal" /
+                "six-row-source-binding.json").read_text())
+            assert binding["source_sha256"] == expected
+            assert binding["source_row_sha256"] == list(expected_rows)
+            assert len(set(binding["source_row_sha256"])) == 6
+            assert binding["nonce_sha256"] == list(digests)
+            assert binding["job_key_sha256"] == key.key_sha256()
+            assert binding["native_launch_allowed"] is False
+            assert binding["six_command_product_t1_pass"] is False
+            assert binding["row_positive_success"] is False
+            assert (root / "command-journal" /
+                    "row-01-burn.json").exists()
+    finally:
+        os.close(fd)
+
+
+def test_r010_source_binding_cannot_be_reattached_or_replaced(
+        product_service, tmp_path):
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import (
+        R010SerialAdmissionDenied, R010SerialNonceJournal)
+    service, _ = product_service
+    fd, _, key, _, digests = _r010_t0_job_for_shared_service(tmp_path)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(
+                env, six_nonce_sha256=digests)
+            six = service._prepare_r010_six_command_source_only("a")
+            journal.bind_six_source_before_first_burn(
+                service=service, ctx=service.get("a"), source_plan=six)
+            with pytest.raises(R010SerialAdmissionDenied):
+                journal.bind_six_source_before_first_burn(
+                    service=service, ctx=service.get("a"), source_plan=six)
+            assert journal.row_state_snapshot()["job_state_model"] == (
+                "JOB_PREEXEC_HOLD")
+            assert journal.row_state_snapshot()["native_launch_allowed"] is False
+    finally:
+        os.close(fd)
+
+
+def test_r010_cannot_bind_six_source_after_first_burn(
+        product_service, tmp_path):
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import (
+        R010SerialAdmissionDenied, R010SerialNonceJournal)
+    service, _ = product_service
+    fd, _, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(
+                env, six_nonce_sha256=digests)
+            six = service._prepare_r010_six_command_source_only("a")
+            journal.burn_first_nonce(raw[0])
+            with pytest.raises(R010SerialAdmissionDenied):
+                journal.bind_six_source_before_first_burn(
+                    service=service, ctx=service.get("a"), source_plan=six)
+    finally:
+        os.close(fd)

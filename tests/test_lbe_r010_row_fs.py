@@ -55,6 +55,9 @@ def fixture_root(tmp_path):
     (selected / "main.py").write_text("value = 1\n")
     private = tmp_path / "private"
     private.mkdir(mode=0o700)
+    # R003: the private src parent exists BEFORE compileall starts.
+    # Only __pycache__/pyc may appear as the legal row-2 delta.
+    (private / "src").mkdir(mode=0o700)
     srcfd = os.open(selected, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     cachefd = os.open(private, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:

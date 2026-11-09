@@ -5115,3 +5115,87 @@ def test_r006_private_runner_all_six_use_exact_product_recipe_then_replay_denies
         with pytest.raises(LbeNoChildStarted):
             boundary.launch(candidate.plan)
         assert len(calls) == 1
+
+
+
+@pytest.mark.parametrize("row,cwd,argv", [
+    (index, cwd, argv) for index, (cwd, argv) in enumerate(_ROWS, 1)
+])
+def test_r010_d4_actual_workspace_service_selection_binds_six_sources(
+        product_service, monkeypatch, row, cwd, argv):
+    """The real service's Workspace name differs from its project cwd."""
+    from gateway.lbe_r010_row_fs import (
+        capture_r010_d4_selected_source_from_service,
+        validate_r010_fixed_row_plan,
+    )
+
+    service, workspace = product_service
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                  (_ for _ in ()).throw(AssertionError("no T1 Popen")))
+        candidate = service._prepare_d4_r003_fixture_candidate(
+            "a", cwd, argv, timeout_seconds=120)
+        assert candidate.plan.workspace == "a"
+        assert candidate.plan.cwd == cwd
+        validate_r010_fixed_row_plan(row, candidate.plan)
+        observed = capture_r010_d4_selected_source_from_service(
+            row=row, ctx=service.get("a"), candidate=candidate)
+    assert observed.workspace == "a"
+    assert observed.project_cwd == cwd
+    assert observed.selected_source.files
+    assert observed.source_count == len(candidate.source_sha256)
+    assert observed.native_launch_allowed is False
+    assert observed.runtime_loaded_sources_proven is False
+    assert observed.six_command_product_t1_pass is False
+    with pytest.raises(GatewayError) as denied:
+        service.invoke_exec("a", cwd, argv, dry_run=False)
+    assert denied.value.code == "exec_cleanup_proof_required"
+
+
+def test_r010_d4_rejects_actual_service_selected_source_drift(product_service):
+    from gateway.lbe_r010_row_fs import (
+        R010RowFiniteDenied,
+        capture_r010_d4_selected_source_from_service,
+    )
+    service, root = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    (root / "py-direct" / "src" / "main.py").write_bytes(b"x = CHANGED\n")
+    with pytest.raises(R010RowFiniteDenied):
+        capture_r010_d4_selected_source_from_service(
+            row=1, ctx=service.get("a"), candidate=candidate)
+
+
+def test_r010_d4_rejects_cross_workspace_service_candidate(product_service):
+    from dataclasses import replace
+    from gateway.lbe_r010_row_fs import (
+        R010RowFiniteDenied,
+        capture_r010_d4_selected_source_from_service,
+    )
+    service, _ = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    altered = replace(candidate, plan=replace(candidate.plan, workspace="b"))
+    with pytest.raises(R010RowFiniteDenied, match="Workspace"):
+        capture_r010_d4_selected_source_from_service(
+            row=4, ctx=service.get("a"), candidate=altered)
+
+
+def test_r010_d4_rejects_poisoned_file_identity(product_service):
+    from dataclasses import replace
+    from gateway.lbe_r010_row_fs import (
+        R010RowFiniteDenied,
+        capture_r010_d4_selected_source_from_service,
+    )
+    service, _ = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "vet", "./..."])
+    original = candidate.source_identity
+    poisoned = ((
+        original[0][0],
+        (original[0][1][0] + 1, *original[0][1][1:]),
+    ), *original[1:])
+    with pytest.raises(R010RowFiniteDenied):
+        capture_r010_d4_selected_source_from_service(
+            row=5, ctx=service.get("a"),
+            candidate=replace(candidate, source_identity=poisoned))

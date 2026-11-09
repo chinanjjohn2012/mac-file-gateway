@@ -94,7 +94,7 @@ def test_other_row_ids_denied(row):
 @pytest.mark.parametrize("field,value", [
     ("requested_argv", ("python", "-m", "pytest", "-x")),
     ("effective_argv", ("python", "-m", "pytest", "-x")),
-    ("workspace", "other"), ("cwd", "py-pipenv"),
+    ("workspace", ""), ("cwd", "py-pipenv"),
     ("runner_project", "other"),
     ("runner", "pipenv"), ("timeout_seconds", 121),
     ("planned_go_output", "py-direct/bin/app"),

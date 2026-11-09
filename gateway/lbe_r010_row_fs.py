@@ -9,7 +9,7 @@ This source NEVER runs a child, issues a grant, or returns T1 acceptance.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import os
 import re
@@ -87,7 +87,11 @@ def validate_r010_fixed_row_plan(row: int, plan: LbeWorkPlan) -> None:
     except LbeWorkerError:
         raise R010RowFiniteDenied("unqualified Worker plan") from None
     # Exact type checks above must precede equality on any user-supplied type.
-    if (plan.workspace != workspace or plan.cwd != workspace
+    # Workspace is the shared service namespace (e.g. "a"); py-direct,
+    # py-pipenv and go-project are workspace-RELATIVE project cwds, not
+    # workspace names. The service-bound candidate must separately prove
+    # candidate.plan.workspace == ctx.name.
+    if (plan.cwd != workspace
             or plan.runner_project != workspace or plan.runner != runner
             or plan.requested_argv != requested
             or plan.effective_argv != effective
@@ -99,6 +103,111 @@ def validate_r010_fixed_row_plan(row: int, plan: LbeWorkPlan) -> None:
             or (row != 3 and plan.planned_pipfile_sha256 is not None)
             or plan.timeout_seconds > 120):
         raise R010RowFiniteDenied("wrong R010 fixed command/runner/fixture")
+
+
+
+
+@dataclass(frozen=True, slots=True)
+class R010D4SelectedSourceObservation:
+    """One real service-selected first-party source snapshot, never a grant."""
+
+    selected_source: R010SelectedSourceSnapshot
+    workspace: str
+    project_cwd: str
+    source_count: int
+    status: str = "R010_D4_SELECTED_SOURCE_BOUND_SOURCE_ONLY"
+    native_launch_allowed: bool = False
+    runtime_loaded_sources_proven: bool = False
+    row_positive_success: bool = False
+    six_command_product_t1_pass: bool = False
+
+
+def capture_r010_d4_selected_source_from_service(
+    *, row: int, ctx: object, candidate: object,
+) -> R010D4SelectedSourceObservation:
+    """Bind R010 finite snapshot to actual WorkspaceService D4 selection.
+
+    Recompute the full first-party D4 inventory from the pinned Workspace
+    context, including Python import paths, then compare exact source SHA
+    and the reordered inode/owner/mode/time identity for EVERY selected file.
+    This is not a full interpreter/Go loader/OS/Owner grant proof.
+    """
+    from .lbe_product_fixture import (
+        D4FixtureCandidate, D4FixtureDenied, check_d4_r003_fixture)
+    from .workspaces import WorkspaceContext
+
+    if (type(ctx) is not WorkspaceContext or
+            type(candidate) is not D4FixtureCandidate or
+            type(candidate.plan) is not LbeWorkPlan):
+        raise R010RowFiniteDenied("no actual service-selected D4 source")
+    plan = candidate.plan
+    validate_r010_fixed_row_plan(row, plan)
+    if (plan.workspace != ctx.name
+            or candidate.native_launch_allowed is not False
+            or candidate.actual_loaded_sources_proven is not False
+            or candidate.owner_approval_attested is not False
+            or candidate.runner_qualified is not False
+            or candidate.resource_enforcement_proven is not False):
+        raise R010RowFiniteDenied("service Workspace or no-authority drift")
+    # Exact type/size checks before using any candidate-provided comparisons.
+    items = candidate.source_sha256
+    identities = candidate.source_identity
+    if (type(items) is not tuple or type(identities) is not tuple
+            or not 1 <= len(items) <= 2048 or len(items) != len(identities)
+            or any(type(pair) is not tuple or len(pair) != 2
+                   or type(pair[0]) is not str or type(pair[1]) is not str
+                   for pair in items)
+            or any(type(pair) is not tuple or len(pair) != 2
+                   or type(pair[0]) is not str or type(pair[1]) is not tuple
+                   or len(pair[1]) != 8
+                   or any(type(x) is not int for x in pair[1])
+                   for pair in identities)):
+        raise R010RowFiniteDenied("D4 selected source inventory malformed")
+    try:
+        refreshed = check_d4_r003_fixture(ctx, plan)
+        if plan.cwd in ("py-direct", "py-pipenv"):
+            from .lbe_python_import_sources import (
+                inspect_d4_python_first_party_import_sources,
+            )
+            refreshed = replace(
+                refreshed, python_import_sources=
+                inspect_d4_python_first_party_import_sources(ctx, refreshed))
+        if refreshed != candidate:
+            raise R010RowFiniteDenied("current service selected source drift")
+        prefix = plan.cwd + "/"
+        if (any(not name.startswith(prefix) for name, _ in items)
+                or any(name != identity_name for
+                       (name, _), (identity_name, _) in zip(items, identities))):
+            raise R010RowFiniteDenied("D4 selected root/prefix changed")
+        relative = tuple(name[len(prefix):] for name, _ in items)
+        if (not relative or relative != tuple(sorted(set(relative)))):
+            raise R010RowFiniteDenied("D4 source list not canonical")
+        fd = os.open(
+            plan.cwd, _DIRECTORY, dir_fd=ctx.gateway._root_fd)
+        try:
+            snapshot = observe_selected_source_files(
+                root_fd=fd, relative_paths=relative)
+            expected_rows = []
+            for (name, digest), (_, d4) in zip(items, identities):
+                # D4 format: dev,ino,size,mtime,ctime,mode,uid,nlink
+                # R010 format: dev,ino,uid,mode,nlink,size,mtime,ctime
+                stable = (d4[0], d4[1], d4[6], d4[5],
+                          d4[7], d4[2], d4[3], d4[4])
+                expected_rows.append((name[len(prefix):], stable, digest))
+            if snapshot.files != tuple(expected_rows):
+                raise R010RowFiniteDenied(
+                    "D4 source metadata/digest mismatch with R010")
+        finally:
+            os.close(fd)
+        return R010D4SelectedSourceObservation(
+            selected_source=snapshot, workspace=ctx.name,
+            project_cwd=plan.cwd, source_count=len(relative))
+    except R010RowFiniteDenied:
+        raise
+    except (D4FixtureDenied, R010FiniteIntegrityDenied,
+            OSError, TypeError, ValueError, AttributeError):
+        raise R010RowFiniteDenied(
+            "current service-selected D4 source unavailable") from None
 
 
 def _private_name(name: str) -> None:

@@ -14,6 +14,7 @@ import json
 import os
 import re
 import stat
+import sys
 import threading
 import time
 
@@ -158,6 +159,8 @@ def _new_private_directory(parent_fd: int, name: str) -> int:
 
 def _fixed_macos_anchor_fd() -> int:
     """Check the R009 fixed platform anchor, not a user-provided path."""
+    if sys.platform != "darwin":
+        raise R010JobEnvelopeDenied("R010 positive anchor is Darwin-only")
     opened = []
     try:
         for path in ("/", "/private", "/private/tmp"):
@@ -189,11 +192,14 @@ class R010CreatedJobEnvelope:
     """
 
     def __init__(self, marker: object, *, root_fd: int, journal_fd: int,
+                 anchor_fd: int, anchor_identity: tuple[int, ...],
                  root_name: str, key: R010JobKey, secret_sha256: str,
                  instance_sha256: str, root_identity: tuple[int, ...],
                  journal_identity: tuple[int, ...]):
         if marker is not _CREATOR_MARKER:
             raise R010JobEnvelopeDenied("cannot fabricate a Job envelope")
+        self._anchor_fd = anchor_fd
+        self._anchor_identity = anchor_identity
         self._root_fd = root_fd
         self._journal_fd = journal_fd
         self._root_name = root_name
@@ -213,6 +219,25 @@ class R010CreatedJobEnvelope:
                 or _checked_private_dir(self._journal_fd)
                 != self._journal_identity):
             raise R010JobEnvelopeDenied("Job root or journal changed")
+        try:
+            anchor = os.fstat(self._anchor_fd)
+            if ((anchor.st_dev, anchor.st_ino, anchor.st_uid, anchor.st_mode)
+                    != self._anchor_identity):
+                raise R010JobEnvelopeDenied("pinned Job anchor changed")
+            root_entry = os.stat(
+                self._root_name, dir_fd=self._anchor_fd,
+                follow_symlinks=False)
+            journal_entry = os.stat(
+                "command-journal", dir_fd=self._root_fd,
+                follow_symlinks=False)
+            if ((root_entry.st_dev, root_entry.st_ino, root_entry.st_uid,
+                 root_entry.st_mode) != self._root_identity
+                    or (journal_entry.st_dev, journal_entry.st_ino,
+                        journal_entry.st_uid, journal_entry.st_mode)
+                    != self._journal_identity):
+                raise R010JobEnvelopeDenied("Job path entry replaced")
+        except OSError:
+            raise R010JobEnvelopeDenied("Job path entry unavailable") from None
 
     def snapshot(self) -> dict[str, object]:
         """Public diagnostic hashes only; never expose local secrets."""
@@ -245,6 +270,7 @@ class R010CreatedJobEnvelope:
             self._closed = True
             os.close(self._journal_fd)
             os.close(self._root_fd)
+            os.close(self._anchor_fd)
 
     def close(self) -> None:
         with self._lock:
@@ -252,6 +278,7 @@ class R010CreatedJobEnvelope:
                 self._closed = True
                 os.close(self._journal_fd)
                 os.close(self._root_fd)
+                os.close(self._anchor_fd)
 
     def __enter__(self) -> "R010CreatedJobEnvelope":
         return self
@@ -261,9 +288,11 @@ class R010CreatedJobEnvelope:
 
 
 _CREATOR_MARKER = object()
+_FIXED_ANCHOR_MARKER = object()
 
 
-def _create_once_in_pinned_anchor(anchor_fd: int, key: R010JobKey
+def _create_once_in_pinned_anchor(anchor_fd: int, key: R010JobKey,
+                                  *, _fixed_marker: object = None
                                   ) -> R010CreatedJobEnvelope:
     """Low-level create-only fd mechanics, used by safe disposable T0.
 
@@ -280,22 +309,27 @@ def _create_once_in_pinned_anchor(anchor_fd: int, key: R010JobKey
         anchor = os.fstat(anchor_fd)
         if not stat.S_ISDIR(anchor.st_mode):
             raise R010JobEnvelopeDenied("unqualified anchor")
+        if _fixed_marker is _FIXED_ANCHOR_MARKER:
+            if (anchor.st_uid != 0
+                    or stat.S_IMODE(anchor.st_mode) != 0o1777):
+                raise R010JobEnvelopeDenied("wrong fixed platform anchor")
+        elif (anchor.st_uid != os.getuid()
+              or stat.S_IMODE(anchor.st_mode) != 0o700):
+            raise R010JobEnvelopeDenied("unqualified private T0 anchor")
     except OSError:
         raise R010JobEnvelopeDenied("unavailable anchor") from None
-    name = "mfg-r010-job-" + key.key_sha256()
+    name = "mfg-r009-job-" + key.key_sha256()
     root_fd = None
     journal_fd = None
+    retained_anchor_fd = None
+    successful = False
     # mkdir O_EXCL-like create-once is atomic even across processes. Never
     # unlink root on any failure, regardless of whether lease was written.
     try:
-        root_fd = _new_private_directory(anchor_fd, name)
-        _new_private_directory(root_fd, "service-config").__class__  # closed below
-        # Need to close each subdir FD; no reuse of existing directories.
-        config_fd = os.open("service-config", _DIRECTORY, dir_fd=root_fd)
-        try:
-            _checked_private_dir(config_fd)
-        finally:
-            os.close(config_fd)
+        retained_anchor_fd = os.dup(anchor_fd)
+        root_fd = _new_private_directory(retained_anchor_fd, name)
+        config_fd = _new_private_directory(root_fd, "service-config")
+        os.close(config_fd)
         state_fd = _new_private_directory(root_fd, "exec-state")
         os.close(state_fd)
         journal_fd = _new_private_directory(root_fd, "command-journal")
@@ -333,20 +367,28 @@ def _create_once_in_pinned_anchor(anchor_fd: int, key: R010JobKey
             }, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii"))
         os.fsync(journal_fd)
         os.fsync(root_fd)
-        return R010CreatedJobEnvelope(
+        envelope = R010CreatedJobEnvelope(
             _CREATOR_MARKER, root_fd=root_fd, journal_fd=journal_fd,
+            anchor_fd=retained_anchor_fd,
+            anchor_identity=(anchor.st_dev, anchor.st_ino,
+                             anchor.st_uid, anchor.st_mode),
             root_name=name, key=key,
             secret_sha256=hashlib.sha256(local_secret).hexdigest(),
             instance_sha256=hashlib.sha256(instance_nonce).hexdigest(),
             root_identity=root_identity, journal_identity=journal_identity)
+        successful = True
+        return envelope
     except (OSError, R010JobEnvelopeDenied):
         raise R010JobEnvelopeDenied(
             "Job envelope already exists or durable creation failed") from None
     finally:
-        if journal_fd is not None and "lease_bytes" not in locals():
-            os.close(journal_fd)
-        if root_fd is not None and "lease_bytes" not in locals():
-            os.close(root_fd)
+        if not successful:
+            if journal_fd is not None:
+                os.close(journal_fd)
+            if root_fd is not None:
+                os.close(root_fd)
+            if retained_anchor_fd is not None:
+                os.close(retained_anchor_fd)
 
 
 def create_only_under_fixed_macos_anchor(key: R010JobKey
@@ -358,6 +400,7 @@ def create_only_under_fixed_macos_anchor(key: R010JobKey
     """
     anchor = _fixed_macos_anchor_fd()
     try:
-        return _create_once_in_pinned_anchor(anchor, key)
+        return _create_once_in_pinned_anchor(
+            anchor, key, _fixed_marker=_FIXED_ANCHOR_MARKER)
     finally:
         os.close(anchor)

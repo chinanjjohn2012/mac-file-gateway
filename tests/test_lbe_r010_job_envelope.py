@@ -70,7 +70,7 @@ def test_create_once_pins_root_lease_secret_and_preexec_only(tmp_path, monkeypat
             assert len(pub["job_local_secret_sha256"]) == 64
             assert len(pub["service_instance_nonce_sha256"]) == 64
             assert not hasattr(envelope, "start_row")
-            root = anchor / ("mfg-r010-job-" + key.key_sha256())
+            root = anchor / ("mfg-r009-job-" + key.key_sha256())
             assert root.exists()
             assert stat.S_IMODE(root.stat().st_mode) == 0o700
             for child in ("service-config", "exec-state", "command-journal"):
@@ -179,7 +179,7 @@ def test_existing_symlink_root_never_adopted_or_removed(tmp_path):
     anchor, fd = _anchor(tmp_path)
     target = tmp_path / "outside"
     target.mkdir()
-    name = "mfg-r010-job-" + example_key().key_sha256()
+    name = "mfg-r009-job-" + example_key().key_sha256()
     (anchor / name).symlink_to(target, target_is_directory=True)
     try:
         with pytest.raises(R010JobEnvelopeDenied):
@@ -262,7 +262,7 @@ def test_durable_latched_failure_never_reopens(tmp_path):
         with pytest.raises(R010JobEnvelopeDenied):
             env.snapshot()
         latch = json.loads((root / "command-journal" / "latch-failure.json").read_text())
-        assert latch["state"] == "JOB_FAILED_LATCHED" or latch["status"] == "JOB_FAILED_LATCHED"
+        assert latch.get("state") == "JOB_FAILED_LATCHED" or latch.get("status") == "JOB_FAILED_LATCHED"
         with pytest.raises(R010JobEnvelopeDenied):
             _create_once_in_pinned_anchor(fd, example_key())
     finally:

@@ -9,7 +9,7 @@ provider Job, original Owner grant, runtime resources and native evidence.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from .lbe_product_fixture import D4FixtureCandidate
@@ -39,6 +39,7 @@ class R010ServiceSourceRow:
 class R010SixSourcePlan:
     workspace: str
     rows: tuple[R010ServiceSourceRow, ...]
+    service_identity: object = field(repr=False, compare=False)
     status: str = "SIX_SOURCE_ROWS_CHECKED_NO_RUNTIME_AUTHORITY"
     source_only: bool = True
     native_launch_allowed: bool = False
@@ -101,6 +102,7 @@ def recheck_r010_service_six_source(
     _checked_shared_owner(service, ctx)
     if (type(snapshot) is not R010SixSourcePlan
             or snapshot.workspace != ctx.name
+            or snapshot.service_identity is not service._r010_source_identity
             or len(snapshot.rows) != 6
             or snapshot.native_launch_allowed is not False
             or snapshot.six_command_product_t1_pass is not False):
@@ -155,6 +157,8 @@ def prepare_r010_service_six_source(
         rows.append(R010ServiceSourceRow(
             index=number, command_id=_IDS[number - 1],
             candidate=selected, selected=checked))
-    plan = R010SixSourcePlan(workspace=ctx.name, rows=tuple(rows))
+    plan = R010SixSourcePlan(
+        workspace=ctx.name, rows=tuple(rows),
+        service_identity=service._r010_source_identity)
     return recheck_r010_service_six_source(
         service=service, ctx=ctx, snapshot=plan)

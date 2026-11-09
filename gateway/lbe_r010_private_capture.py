@@ -28,7 +28,7 @@ class R010PrivateWorkerCapture:
 
     __slots__ = (
         "_owner", "_plan", "_journal", "_nonce_sha256", "_reservation",
-        "_result", "_consumed", "_lock",
+        "_result", "_consumed", "_lock", "_source_binding",
     )
 
     def __init__(self, marker: object, *, owner: DirectChildOwner,
@@ -45,6 +45,7 @@ class R010PrivateWorkerCapture:
         self._result = None
         self._consumed = False
         self._lock = threading.Lock()
+        self._source_binding = None
 
     @classmethod
     def _issue_source_only(cls, *, journal: object, owner: DirectChildOwner,
@@ -54,6 +55,49 @@ class R010PrivateWorkerCapture:
         return cls(_MARKER, owner=owner, plan=plan, journal=journal,
                    nonce_sha256=nonce_sha256)
 
+    def _bind_six_source(self, *, service: object, ctx: object,
+                         source_plan: object) -> None:
+        """Bind the original source service instance before any Worker step."""
+        from .lbe_r010_six_service import (
+            R010SixSourcePlan, recheck_r010_service_six_source,
+        )
+        from .workspaces import WorkspaceService, WorkspaceContext
+        if (type(service) is not WorkspaceService
+                or type(ctx) is not WorkspaceContext
+                or type(source_plan) is not R010SixSourcePlan
+                or service._lbe_owner is not self._owner
+                or source_plan.rows[0].candidate.plan is not self._plan):
+            raise R010PrivateCaptureDenied("source binding not from same service")
+        try:
+            recheck_r010_service_six_source(
+                service=service, ctx=ctx, snapshot=source_plan)
+        except Exception:
+            raise R010PrivateCaptureDenied(
+                "source drift before Worker binding") from None
+        with self._lock:
+            if self._source_binding is not None or self._consumed:
+                raise R010PrivateCaptureDenied(
+                    "source service binding already consumed")
+            self._source_binding = (service, ctx, source_plan)
+
+    def _recheck_six_source(self) -> None:
+        """Second first-party check at the actual Worker launch boundary."""
+        with self._lock:
+            binding = self._source_binding
+        if binding is None:
+            # No service-bound source can be claimed by a test-only capture.
+            # This never makes an unbound capture a native authorization.
+            return
+        from .lbe_r010_six_service import recheck_r010_service_six_source
+        try:
+            recheck_r010_service_six_source(
+                service=binding[0], ctx=binding[1],
+                snapshot=binding[2])
+        except Exception:
+            raise R010PrivateCaptureDenied(
+                "service-selected first-party source drift before launcher"
+            ) from None
+
     def _check_for_worker(self, owner: DirectChildOwner,
                           plan: LbeWorkPlan) -> None:
         with self._lock:
@@ -62,6 +106,7 @@ class R010PrivateWorkerCapture:
                     or self._consumed):
                 raise R010PrivateCaptureDenied(
                     "capture not bound to this exact Worker plan")
+        self._recheck_six_source()
 
     def _bind_reserved(self, owner: DirectChildOwner,
                        reservation: _Reservation,
@@ -108,6 +153,7 @@ class R010PrivateWorkerCapture:
                 "reservation_bound": self._reservation is not None,
                 "worker_result_recorded": self._result is not None,
                 "consumed": self._consumed,
+                "same_service_source_bound": self._source_binding is not None,
                 "native_launch_allowed": False,
                 "row_positive_success": False,
             }

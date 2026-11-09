@@ -5412,3 +5412,70 @@ def test_r010_shared_first_row_invalid_source_latches_all_six_without_spawn(
             os.close(fd)
     assert service._active_operations == 0
     assert service._exec_active == set()
+
+
+
+def test_r010_six_source_rejects_forged_other_instance_token(product_service):
+    from dataclasses import replace
+    from gateway.lbe_r010_six_service import (
+        R010SixSourceDenied, recheck_r010_service_six_source,
+    )
+    service, _ = product_service
+    source = service._prepare_r010_six_command_source_only("a")
+    poisoned = replace(source, service_identity=object())
+    with pytest.raises(R010SixSourceDenied):
+        recheck_r010_service_six_source(
+            service=service, ctx=service.get("a"), snapshot=poisoned)
+
+
+@pytest.mark.parametrize("when", ["before_worker", "after_reservation"])
+def test_r010_same_service_worker_prelaunch_source_drift_is_zero_popen(
+        product_service, tmp_path, monkeypatch, when):
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import (
+        R010SerialAdmissionDenied, R010SerialNonceJournal)
+    from gateway.lbe_worker import LbeWorkPlan, LbeWorker, LbeWorkerError
+    from gateway.lbe_pipe_drain import BoundedPipeDrain
+
+    service, root = product_service
+    fd, anchor, key, raw, hashes = _r010_t0_job_for_shared_service(tmp_path)
+    launched = []
+    def launcher(_plan):
+        launched.append(True)
+        raise AssertionError("source drift must block before Popen")
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(env, six_nonce_sha256=hashes)
+            source = service._prepare_r010_six_command_source_only("a")
+            capture = service._bind_r010_first_row_source_only(
+                "a", source_plan=source, journal=journal, nonce=raw[0])
+            selected_file = root / "py-direct" / "src" / "main.py"
+            if when == "before_worker":
+                selected_file.write_bytes(b"changed before Worker starts\n")
+                drain_factory = None
+            else:
+                def drain_factory(capture):
+                    selected_file.write_bytes(
+                        b"changed after reserve before launcher\n")
+                    return BoundedPipeDrain(capture)
+            worker = LbeWorker(
+                service._lbe_owner, launcher=launcher,
+                **({"drain_factory": drain_factory}
+                   if drain_factory is not None else {}))
+            with pytest.raises(LbeWorkerError, match="invalid_worker_dependency"):
+                worker.run(
+                    source.rows[0].candidate.plan,
+                    r010_source_capture=capture)
+            assert launched == []
+            # Incomplete capture cannot be promoted by a later public ACK.
+            with pytest.raises(R010SerialAdmissionDenied):
+                journal.finalize_first_row_from_worker_capture_source_only(
+                    capture=capture, selected_root_fd=-1,
+                    selected_before=None, private_root_fd=-1,
+                    private_before=None)
+            assert service._lbe_owner.snapshot()["unavailable"] is False
+            assert service._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        os.close(fd)
+    assert service._active_operations == 0
+    assert service._exec_active == set()

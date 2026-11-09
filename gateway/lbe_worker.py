@@ -320,6 +320,17 @@ class LbeWorker:
                 raise LbeWorkerError("exec_state_unavailable") from None
             raise LbeWorkerError("waiter_disconnected")
 
+        if r010_source_capture is not None:
+            # No Popen can occur before the SAME full six-row source packet
+            # has been rechecked after the reservation/reader setup.
+            try:
+                r010_source_capture._recheck_six_source()
+            except BaseException:
+                try:
+                    self._owner.spawn_failed(reservation)
+                except BaseException:
+                    self._owner.latch_unavailable(reservation)
+                raise LbeWorkerError("invalid_worker_dependency") from None
         try:
             child = launcher(plan)
         except LbeNoChildStarted:

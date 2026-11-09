@@ -180,6 +180,9 @@ class WorkspaceService:
         # One exact future R006 capability may be installed only by trusted
         # in-process bootstrap code. No REST/MCP/config/env field can mint it.
         self._r006_pending = None
+        # Not a grant: only prevents borrowing a source snapshot produced
+        # by another WorkspaceService instance with identical fixture bytes.
+        self._r010_source_identity = object()
         # V2-owned ledger, also used by approved hosted Python-only T1.
         # Its construction alone NEVER grants public Exec apply or spawns.
         self._lbe_owner = (DirectChildOwner()
@@ -823,9 +826,12 @@ class WorkspaceService:
                 recheck_r010_service_six_source(
                     service=self, ctx=ctx, snapshot=source_plan)
                 journal.burn_first_nonce(nonce)
-                return journal.make_first_row_private_capture(
+                capture = journal.make_first_row_private_capture(
                     owner=self._lbe_owner,
                     plan=source_plan.rows[0].candidate.plan)
+                capture._bind_six_source(
+                    service=self, ctx=ctx, source_plan=source_plan)
+                return capture
             except Exception:
                 # One invalid pre-Popen attempt permanently VOID-s the Job,
                 # even if the nonce wasn't burned yet. Reusing the same Job

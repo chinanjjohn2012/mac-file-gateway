@@ -799,9 +799,7 @@ class WorkspaceService:
         from .lbe_r010_serial_journal import R010SerialNonceJournal
         from .lbe_r010_private_capture import R010PrivateWorkerCapture
         from .lbe_r010_row_fs import R010PrivateTreeSnapshot
-        from .lbe_r010_six_service import (
-            R010SixSourcePlan, recheck_r010_service_six_source,
-        )
+        from .lbe_r010_six_service import R010SixSourcePlan
 
         with self._lifecycle:
             ctx = self.require_exec(name)
@@ -830,8 +828,13 @@ class WorkspaceService:
                         or journal._six_source_plan is not binding[2]):
                     raise ValueError("no same-service six-source witness")
                 six = binding[2]
-                recheck_r010_service_six_source(
-                    service=self, ctx=ctx, snapshot=six)
+                # The Worker already rechecked ALL SIX sources immediately
+                # before its launcher. At completion, let the actual
+                # owner/finite-FS classifier inspect row 1's selected source
+                # first, so a witnessed exit0 with a drifted row-1 source
+                # becomes ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS rather than
+                # a fabricated owner/reader ambiguity. Later rows remain
+                # disabled until new source verification and true T1 Grant.
                 before = six.rows[0].selected.selected_source
                 project_cwd = six.rows[0].candidate.plan.cwd
                 source_fd = os.open(

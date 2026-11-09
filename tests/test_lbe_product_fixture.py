@@ -5702,12 +5702,14 @@ def test_r010_single_service_failed_preflight_is_six_void(
 
 
 
-@pytest.mark.parametrize("exit_code,expected", [
-    (0, "ROW_FINITE_ZERO_SOURCE_ONLY_NOT_PRODUCT_T1"),
-    (7, "ROW_OBSERVED_NONZERO"),
+@pytest.mark.parametrize("exit_code,mutate_source,expected", [
+    (0, False, "ROW_FINITE_ZERO_SOURCE_ONLY_NOT_PRODUCT_T1"),
+    (7, False, "ROW_OBSERVED_NONZERO"),
+    (0, True, "ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS"),
 ])
 def test_r010_actual_shared_service_finalizes_first_owner_row_source_only(
-        product_service, tmp_path, monkeypatch, exit_code, expected):
+        product_service, tmp_path, monkeypatch, exit_code, mutate_source,
+        expected):
     import json
     from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
     from gateway.lbe_r010_row_fs import observe_r010_private_tree
@@ -5747,6 +5749,9 @@ def test_r010_actual_shared_service_finalizes_first_owner_row_source_only(
             assert result["cleanup_proven"] is False
             assert result["full_descendant_tree_clean"] == "not_proven"
             assert result["exit_code"] == exit_code
+            if mutate_source:
+                (root / "py-direct" / "src" / "main.py").write_bytes(
+                    b"x=changed after original exit\n")
             decided = service._finalize_r010_first_row_source_only(
                 "a", journal=journal, capture=capture,
                 private_root_fd=pfd, private_before=before)
@@ -5754,7 +5759,7 @@ def test_r010_actual_shared_service_finalizes_first_owner_row_source_only(
             assert decided["next_row_allowed"] is False
             assert decided["native_launch_allowed"] is False
             home = anchor / env.snapshot()["envelope_root_name"]
-            if exit_code == 0:
+            if exit_code == 0 and not mutate_source:
                 record = json.loads(
                     (home / "command-journal" /
                      "row-01-source-only.json").read_text())
@@ -5766,7 +5771,7 @@ def test_r010_actual_shared_service_finalizes_first_owner_row_source_only(
                     (home / "command-journal" /
                      "r010-row-failure.json").read_text())
                 assert failure["rows"] == (
-                    ["ROW_OBSERVED_NONZERO"] + ["ROW_VOID"] * 5)
+                    [expected] + ["ROW_VOID"] * 5)
     finally:
         os.close(pfd)
         os.close(fd)

@@ -155,6 +155,14 @@ def observe_r010_private_tree(*, root_fd: int) -> R010PrivateTreeSnapshot:
                                  before.st_mode)
                         rows.append((path, "dir", ident, None))
                         walk(child, path + "/", depth + 1)
+                        # Recheck the name -> pinned child identity after
+                        # traversal; a replaced ancestor must not be trusted.
+                        end_entry = os.stat(
+                            name, dir_fd=fd, follow_symlinks=False)
+                        if ((end_entry.st_dev, end_entry.st_ino,
+                             end_entry.st_uid, end_entry.st_mode) != ident):
+                            raise R010RowFiniteDenied(
+                                "private directory entry replaced during scan")
                     finally:
                         os.close(child)
                 elif stat.S_ISREG(before.st_mode):
@@ -216,6 +224,27 @@ def _tree_digest(snapshot: R010PrivateTreeSnapshot) -> str:
     return hashlib.sha256(("\n".join(rows) + "\n").encode("ascii")).hexdigest()
 
 
+def _require_same_pinned_go_bin(
+    *, workspace_fd: int, output_fd: int,
+) -> None:
+    """Prove Go row 6's bin FD is the exact workspace-relative ./bin.
+
+    The user-selected source root must be the reviewed go-project workspace
+    root. This check is *path binding*, not evidence of original Popen target.
+    """
+    try:
+        _directory_identity(workspace_fd)
+        pinned = _directory_identity(output_fd)
+        entry = os.stat("bin", dir_fd=workspace_fd, follow_symlinks=False)
+        observed = (entry.st_dev, entry.st_ino, entry.st_uid,
+                    entry.st_mode & 0o7777)
+        expected = (pinned[0], pinned[1], pinned[2], pinned[3] & 0o7777)
+        if not stat.S_ISDIR(entry.st_mode) or observed != expected:
+            raise R010RowFiniteDenied("Go output parent not the selected bin")
+    except (OSError, R010FiniteIntegrityDenied):
+        raise R010RowFiniteDenied("Go output bin path not pinned") from None
+
+
 def verify_r010_finite_row_after(
     *, row: int, plan: LbeWorkPlan,
     selected_root_fd: int, selected_before: R010SelectedSourceSnapshot,
@@ -254,9 +283,13 @@ def verify_r010_finite_row_after(
                 raise R010RowFiniteDenied("unreviewed private file delta")
         artifact = None
         if row == 6:
+            _require_same_pinned_go_bin(
+                workspace_fd=selected_root_fd, output_fd=go_output_parent_fd)
             artifact = inspect_go_build_artifact(
                 parent_fd=go_output_parent_fd,
                 output_was_absent=go_output_before)
+            _require_same_pinned_go_bin(
+                workspace_fd=selected_root_fd, output_fd=go_output_parent_fd)
     except (R010FiniteIntegrityDenied, OSError):
         raise R010RowFiniteDenied("finite source, tree, or artifact failed") from None
     # Even a finite PASS is not original-child exit0/Grant/native T1 evidence.

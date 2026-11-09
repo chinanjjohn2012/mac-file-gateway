@@ -53,6 +53,8 @@ def fixture_root(tmp_path):
     selected = tmp_path / "selected"
     selected.mkdir(mode=0o700)
     (selected / "main.py").write_text("value = 1\n")
+    # R003 requires a pinned existing go-project/bin before build.
+    (selected / "bin").mkdir(mode=0o700)
     private = tmp_path / "private"
     private.mkdir(mode=0o700)
     # R003: the private src parent exists BEFORE compileall starts.
@@ -214,8 +216,8 @@ def test_go_cache_delta_allowed_for_go_test_only(fixture_root):
 
 
 def test_build_requires_preabsent_and_exact_new_artifact(fixture_root, tmp_path):
-    _, private, *_ = fixture_root
-    binparent = tmp_path / "bin"
+    selected, private, *_ = fixture_root
+    binparent = selected / "bin"
     binparent.mkdir(mode=0o700)
     fd = os.open(binparent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -232,8 +234,8 @@ def test_build_requires_preabsent_and_exact_new_artifact(fixture_root, tmp_path)
 
 
 def test_build_missing_or_unsafe_artifact_denied(fixture_root, tmp_path):
-    root = tmp_path / "bin"
-    root.mkdir(mode=0o700)
+    selected, private, *_ = fixture_root
+    root = selected / "bin"
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         prior = observe_go_output_absent(parent_fd=fd)
@@ -286,3 +288,49 @@ def test_preexisting_private_src_permission_drift_denied(fixture_root):
     # Mode remains owner-safe but violates pre/post directory identity.
     with pytest.raises(R010RowFiniteDenied, match="unreviewed"):
         verify(2, fixture_root)
+
+
+def test_go_output_parent_is_not_an_alternate_external_directory(
+        fixture_root, tmp_path):
+    other = tmp_path / "other-bin"
+    other.mkdir(mode=0o700)
+    fd = os.open(other, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        before = observe_go_output_absent(parent_fd=fd)
+        (other / "app").write_bytes(b"untrusted alternate output")
+        (other / "app").chmod(0o700)
+        with pytest.raises(R010RowFiniteDenied, match="selected bin"):
+            verify(6, fixture_root, go_output_parent_fd=fd,
+                   go_output_before=before)
+    finally:
+        os.close(fd)
+
+
+def test_go_bin_parent_replacement_does_not_borrow_old_fd(
+        fixture_root, tmp_path):
+    selected, _, *_ = fixture_root
+    root = selected / "bin"
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        before = observe_go_output_absent(parent_fd=fd)
+        root.rename(selected / "old-bin")
+        root.mkdir(mode=0o700)
+        (selected / "old-bin" / "app").write_bytes(b"old inode")
+        (selected / "old-bin" / "app").chmod(0o700)
+        with pytest.raises(R010RowFiniteDenied, match="selected bin"):
+            verify(6, fixture_root, go_output_parent_fd=fd,
+                   go_output_before=before)
+    finally:
+        os.close(fd)
+
+
+def test_lbe_r003_fixed_command_matrix_has_not_drifted():
+    from gateway.lbe_product_fixture import _MATRIX
+    from gateway.lbe_r010_row_fs import _ROWS
+
+    assert len(_MATRIX) == len(_ROWS) == 6
+    for row, (workspace, runner, requested, effective) in enumerate(_MATRIX, 1):
+        assert _ROWS[row - 1][0] == workspace
+        assert _ROWS[row - 1][1] == runner
+        assert _ROWS[row - 1][2] == requested
+        assert effective == plan(row).effective_argv

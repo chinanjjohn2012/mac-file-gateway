@@ -45,6 +45,9 @@ def _object(raw: bytes, limit: int) -> dict[str, object]:
         raise R010OIDCDenied("unavailable or unbounded JSON bytes")
     try:
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique)
+    except R010OIDCDenied:
+        # Preserve the precise duplicate-key rejection from object_pairs_hook.
+        raise
     except (UnicodeError, ValueError, TypeError):
         raise R010OIDCDenied("malformed or ambiguous original JSON") from None
     if type(value) is not dict:

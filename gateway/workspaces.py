@@ -777,6 +777,42 @@ class WorkspaceService:
                 self._active_operations -= 1
                 self._lifecycle.notify_all()
 
+
+    def _prepare_r010_six_command_source_only(
+        self, name: str, *, timeout_seconds: int = 120,
+    ):
+        """Prepare and recheck all six R010 rows through ONE shared service.
+
+        SOURCE-ONLY; this is not a public Exec route, permission, T1 Grant,
+        runnable attempt, or authority to bypass current F1/NativeLauncher.
+        """
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if (self.settings.schema_version != 2
+                    or self._closing or self._closed
+                    or self._exec_state is None or self._lbe_owner is None):
+                raise GatewayError(
+                    "runner_unavailable", "R010 shared service not eligible.")
+            self._exec_state.require_healthy()
+            if name in self._exec_active:
+                raise GatewayError("busy", "R010 Workspace Exec slot is occupied.")
+            self._active_operations += 1
+        try:
+            from .lbe_r010_six_service import (
+                R010SixSourceDenied, prepare_r010_service_six_source,
+            )
+            try:
+                return prepare_r010_service_six_source(
+                    service=self, ctx=ctx, timeout_seconds=timeout_seconds)
+            except R010SixSourceDenied:
+                raise GatewayError(
+                    "command_not_allowed", "R010 six-row source admission denied."
+                ) from None
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
     def _prepare_d4_r003_fixture_candidate(
         self, name: str, cwd: str, argv: list[str],
         timeout_seconds: int = 60,

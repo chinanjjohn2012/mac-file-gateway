@@ -5199,3 +5199,94 @@ def test_r010_d4_rejects_poisoned_file_identity(product_service):
         capture_r010_d4_selected_source_from_service(
             row=5, ctx=service.get("a"),
             candidate=replace(candidate, source_identity=poisoned))
+
+
+def test_r010_full_six_source_selection_is_one_real_shared_service(
+        product_service, monkeypatch):
+    from gateway.lbe_r010_six_service import (
+        R010SixSourcePlan, recheck_r010_service_six_source,
+    )
+    service, root = product_service
+    def forbidden(*_a, **_kw):
+        raise AssertionError("source-only R010 must never run a child")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", forbidden)
+        m.setattr(os, "kill", forbidden)
+        m.setattr(os, "killpg", forbidden, raising=False)
+        plan = service._prepare_r010_six_command_source_only("a")
+        assert type(plan) is R010SixSourcePlan
+        assert plan.workspace == "a"
+        assert len(plan.rows) == 6
+        assert tuple(row.candidate.plan.requested_argv for row in plan.rows) == (
+            tuple(tuple(argv) for _, argv in _ROWS))
+        assert tuple(row.index for row in plan.rows) == (1, 2, 3, 4, 5, 6)
+        assert all(row.candidate.plan.workspace == "a" for row in plan.rows)
+        assert plan.native_launch_allowed is False
+        assert plan.six_command_product_t1_pass is False
+        assert plan.summary()["row_count"] == 6
+        assert recheck_r010_service_six_source(
+            service=service, ctx=service.get("a"), snapshot=plan) is plan
+        for cwd, argv in _ROWS:
+            with pytest.raises(GatewayError) as ex:
+                service.invoke_exec("a", cwd, argv, dry_run=False)
+            assert ex.value.code == "exec_cleanup_proof_required"
+    assert service._active_operations == 0
+    assert service._exec_active == set()
+    assert not (root / "go-project" / "bin" / "app").exists()
+
+
+def test_r010_six_source_stale_after_first_party_mutation(product_service):
+    from gateway.lbe_r010_six_service import (
+        R010SixSourceDenied, recheck_r010_service_six_source,
+    )
+    service, root = product_service
+    candidate = service._prepare_r010_six_command_source_only("a")
+    (root / "go-project" / "cmd" / "app" / "main.go").write_bytes(
+        b"package main\nfunc changed(){}\n")
+    with pytest.raises(R010SixSourceDenied, match="source"):
+        recheck_r010_service_six_source(
+            service=service, ctx=service.get("a"), snapshot=candidate)
+
+
+@pytest.mark.parametrize("wrong", [
+    ("b", 120), ("a", 0), ("a", 121), ("a", True),
+])
+def test_r010_six_service_denies_wrong_scope_or_timeout(product_service, wrong):
+    service, _ = product_service
+    name, timeout = wrong
+    with pytest.raises((GatewayError, ValueError)):
+        service._prepare_r010_six_command_source_only(
+            name, timeout_seconds=timeout)
+    assert service._active_operations == 0
+
+
+def test_r010_six_service_detects_missing_source_and_does_not_launch(
+        product_service, monkeypatch):
+    service, root = product_service
+    (root / "py-direct" / "src" / "main.py").unlink()
+    def forbidden(*_a, **_kw):
+        raise AssertionError("never spawn while source absent")
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    with pytest.raises(GatewayError, match="R010"):
+        service._prepare_r010_six_command_source_only("a")
+    assert service._active_operations == 0
+    assert service._exec_active == set()
+
+
+def test_r010_six_service_rejects_cross_instance_source_plan(
+        product_service):
+    from dataclasses import replace
+    from gateway.lbe_r010_six_service import (
+        R010SixSourceDenied, recheck_r010_service_six_source,
+    )
+    service, _ = product_service
+    good = service._prepare_r010_six_command_source_only("a")
+    wrong = replace(good, workspace="b")
+    with pytest.raises(R010SixSourceDenied):
+        recheck_r010_service_six_source(
+            service=service, ctx=service.get("a"), snapshot=wrong)
+    wrong_row = replace(good.rows[1], index=3)
+    with pytest.raises(R010SixSourceDenied):
+        recheck_r010_service_six_source(
+            service=service, ctx=service.get("a"),
+            snapshot=replace(good, rows=(good.rows[0], wrong_row) + good.rows[2:]))

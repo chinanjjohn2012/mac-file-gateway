@@ -208,3 +208,64 @@ def test_cross_nonce_or_wrong_row_receipt_is_rejected_before_any_latch(envelope)
         with pytest.raises(R010SerialAdmissionDenied, match="not bound"):
             journal.latch_from_owned_row(altered)
     journal.latch_from_owned_row(base)
+
+
+def test_all_six_nonce_commitments_are_durable_before_first_row(envelope):
+    anchor, instance = envelope
+    _, hashes = nonces()
+    R010SerialNonceJournal(instance, six_nonce_sha256=hashes)
+    root = anchor / instance.snapshot()["envelope_root_name"]
+    manifest = json.loads(
+        (root / "command-journal" / "six-nonce-manifest.json").read_text())
+    assert manifest["version"] == "R010_SIX_NONCE_MANIFEST_V1"
+    assert manifest["six_nonce_sha256"] == list(hashes)
+    assert manifest["native_launch_allowed"] is False
+
+
+def test_burn_record_tracks_exact_six_row_sequence_without_allow(envelope):
+    anchor, instance = envelope
+    raw, hashes = nonces()
+    journal = R010SerialNonceJournal(instance, six_nonce_sha256=hashes)
+    journal.burn_first_nonce(raw[0])
+    root = anchor / instance.snapshot()["envelope_root_name"]
+    record = json.loads(
+        (root / "command-journal" / "row-01-burn.json").read_text())
+    assert record["job_state"] == "JOB_ROW_RUNNING_1"
+    assert record["expected_row"] == 1
+    assert record["rows"] == ["ROW_RUNNING"] + ["ROW_NOT_RUN"] * 5
+    assert record["native_launch_allowed"] is False
+
+
+@pytest.mark.parametrize("code,expected_first", [
+    ("original_nonzero", "ROW_OBSERVED_NONZERO"),
+    ("invalid_output_or_fs", "ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS"),
+    ("owner_reader_ambiguous", "ROW_AMBIGUOUS"),
+])
+def test_failure_records_exact_one_row_and_five_voided(envelope, code,
+                                                        expected_first):
+    anchor, instance = envelope
+    raw, hashes = nonces()
+    journal = R010SerialNonceJournal(instance, six_nonce_sha256=hashes)
+    journal.burn_first_nonce(raw[0])
+    journal.latch_failure(code)
+    root = anchor / instance.snapshot()["envelope_root_name"]
+    result = json.loads(
+        (root / "command-journal" / "r010-row-failure.json").read_text())
+    assert result["rows"] == [expected_first] + ["ROW_VOID"] * 5
+    assert result["active_row"] == 1
+    assert result["next_expected_row"] is None
+    with pytest.raises(R010SerialAdmissionDenied):
+        journal.begin_later_row(2, raw[1])
+
+
+def test_failure_before_any_burn_voids_all_six_rows(envelope):
+    anchor, instance = envelope
+    _, hashes = nonces()
+    journal = R010SerialNonceJournal(instance, six_nonce_sha256=hashes)
+    journal.latch_failure("preexec_unavailable")
+    root = anchor / instance.snapshot()["envelope_root_name"]
+    result = json.loads(
+        (root / "command-journal" / "r010-row-failure.json").read_text())
+    assert result["active_row"] is None
+    assert result["rows"] == ["ROW_VOID"] * 6
+    assert result["native_launch_allowed"] is False

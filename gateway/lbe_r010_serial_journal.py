@@ -44,6 +44,22 @@ class R010SerialNonceJournal:
                 raise R010SerialAdmissionDenied("Job envelope unavailable") from None
             if getattr(envelope, "_r010_nonce_journal_claimed", False):
                 raise R010SerialAdmissionDenied("Job row adapter already claimed")
+            # Persist all six unique nonce commitments in the ONLY
+            # create-once Job journal, before any row may be burned.
+            # A partial write or crash leaves the root consumed forever.
+            manifest = (json.dumps({
+                "version": "R010_SIX_NONCE_MANIFEST_V1",
+                "six_nonce_sha256": list(six_nonce_sha256),
+                "state_domain": "R010_EPHEMERAL_JOB_STATE_V1",
+                "native_launch_allowed": False,
+            }, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+            try:
+                _write_once(
+                    envelope._journal_fd, "six-nonce-manifest.json", manifest)
+            except R010JobEnvelopeDenied:
+                envelope._r010_nonce_journal_claimed = True
+                raise R010SerialAdmissionDenied(
+                    "Job nonce manifest uncertain, permanent deny") from None
             envelope._r010_nonce_journal_claimed = True
         self._envelope = envelope
         self._digests = six_nonce_sha256
@@ -73,6 +89,9 @@ class R010SerialNonceJournal:
                 "row": 1,
                 "nonce_sha256": self._digests[0],
                 "status": "ROW_RUNNING",
+                "job_state": "JOB_ROW_RUNNING_1",
+                "expected_row": 1,
+                "rows": ["ROW_RUNNING"] + ["ROW_NOT_RUN"] * 5,
                 "native_launch_allowed": False,
             }, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
             try:
@@ -93,9 +112,21 @@ class R010SerialNonceJournal:
             raise R010SerialAdmissionDenied("invalid failure code")
         with self._envelope._lock:
             self._require_live()
+            # Append-only failure record has the complete six-row outcome.
+            # This does NOT edit the original PREEXEC_HOLD creation record.
+            failure_row = {
+                "original_nonzero": "ROW_OBSERVED_NONZERO",
+                "invalid_output_or_fs": "ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS",
+                "owner_reader_ambiguous": "ROW_AMBIGUOUS",
+            }.get(code, "ROW_AMBIGUOUS")
+            rows = ([failure_row] + ["ROW_VOID"] * 5
+                    if self._burned else ["ROW_VOID"] * 6)
             record = (json.dumps({
                 "status": "JOB_FAILED_LATCHED",
                 "reason": code,
+                "active_row": 1 if self._burned else None,
+                "next_expected_row": None,
+                "rows": rows,
                 "rows_remaining": "ROW_VOID",
                 "native_launch_allowed": False,
             }, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")

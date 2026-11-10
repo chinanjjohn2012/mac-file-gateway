@@ -87,6 +87,19 @@ def _owner_comment_url(value: int) -> str:
     return _API + "/issues/comments/" + str(value)
 
 
+def _current_job_api_url(url: str) -> bool:
+    """Only one exact public run or its single-attempt current jobs list."""
+    if type(url) is not str:
+        return False
+    path = url[len(_API):] if url.startswith(_API) else ""
+    return re.fullmatch(
+        r"/actions/runs/[1-9][0-9]{0,17}"
+        r"(?:/attempts/[1-9][0-9]{0,11}/jobs"
+        r"\?per_page=100&page=1)?",
+        path, re.ASCII,
+    ) is not None
+
+
 class _ConstrainedHttps:
     """No proxy, redirect, custom CA, caller headers or unreviewed hosts.
 
@@ -118,7 +131,8 @@ class _ConstrainedHttps:
             url == _REVIEWS or
             (url.startswith(_API + "/issues/comments/") and
              _DIGITS.fullmatch(url[len(_API) + len("/issues/comments/"):])
-             is not None)
+             is not None) or
+            _current_job_api_url(url)
         )
         is_issuer = url == _DISCOVERY or (
             parsed.hostname == "token.actions.githubusercontent.com"

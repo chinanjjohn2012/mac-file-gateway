@@ -1,7 +1,7 @@
 """One-use R010 source-only capture of a real Worker reservation and result.
 
 This is a private identity correlation object, NOT an Owner T1 Grant. It is
-created from the already-burned row-1 Job journal and attached by LbeWorker
+created from the already-burned, exact-row Job journal and attached by LbeWorker
 immediately after DirectChildOwner.reserve(), BEFORE the launcher callback.
 The actual Worker stores a detached result snapshot; a user-supplied REST/
 MCP result dict, later fake ACK, second reservation or changed dictionary
@@ -27,19 +27,22 @@ class R010PrivateWorkerCapture:
     """Source only, never returns a spawn, grant or execution capability."""
 
     __slots__ = (
-        "_owner", "_plan", "_journal", "_nonce_sha256", "_reservation",
+        "_owner", "_plan", "_journal", "_row", "_nonce_sha256", "_reservation",
         "_result", "_consumed", "_lock", "_source_binding",
     )
 
     def __init__(self, marker: object, *, owner: DirectChildOwner,
-                 plan: LbeWorkPlan, journal: object, nonce_sha256: str):
+                 plan: LbeWorkPlan, journal: object, nonce_sha256: str,
+                 row: int = 1):
         if (marker is not _MARKER or type(owner) is not DirectChildOwner
                 or type(plan) is not LbeWorkPlan
-                or type(nonce_sha256) is not str or len(nonce_sha256) != 64):
+                or type(nonce_sha256) is not str or len(nonce_sha256) != 64
+                or type(row) is not int or not 1 <= row <= 6):
             raise R010PrivateCaptureDenied("not a journal-minted source capture")
         self._owner = owner
         self._plan = plan
         self._journal = journal
+        self._row = row
         self._nonce_sha256 = nonce_sha256
         self._reservation = None
         self._result = None
@@ -50,10 +53,11 @@ class R010PrivateWorkerCapture:
     @classmethod
     def _issue_source_only(cls, *, journal: object, owner: DirectChildOwner,
                            plan: LbeWorkPlan,
-                           nonce_sha256: str) -> "R010PrivateWorkerCapture":
+                           nonce_sha256: str,
+                           row: int = 1) -> "R010PrivateWorkerCapture":
         """Called only by the first-row journal, never public request data."""
         return cls(_MARKER, owner=owner, plan=plan, journal=journal,
-                   nonce_sha256=nonce_sha256)
+                   nonce_sha256=nonce_sha256, row=row)
 
     def _bind_six_source(self, *, service: object, ctx: object,
                          source_plan: object) -> None:
@@ -66,7 +70,7 @@ class R010PrivateWorkerCapture:
                 or type(ctx) is not WorkspaceContext
                 or type(source_plan) is not R010SixSourcePlan
                 or service._lbe_owner is not self._owner
-                or source_plan.rows[0].candidate.plan is not self._plan
+                or source_plan.rows[self._row - 1].candidate.plan is not self._plan
                 or getattr(self._journal, "_six_source_plan", None)
                    is not source_plan):
             raise R010PrivateCaptureDenied("source binding not from same service")
@@ -161,6 +165,7 @@ class R010PrivateWorkerCapture:
         with self._lock:
             return {
                 "status": "PRIVATE_WORKER_SOURCE_CAPTURE_ONLY",
+                "row": self._row,
                 "reservation_bound": self._reservation is not None,
                 "worker_result_recorded": self._result is not None,
                 "consumed": self._consumed,

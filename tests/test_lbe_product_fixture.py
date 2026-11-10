@@ -5777,3 +5777,268 @@ def test_r010_actual_shared_service_finalizes_first_owner_row_source_only(
         os.close(fd)
     assert service._active_operations == 0
     assert service._exec_active == set()
+
+
+def _r010_fake_completed_child(exit_code=0):
+    """Actual DirectChildOwner.wait and two EOF drains; NO OS subprocess."""
+    class FakeChild:
+        def __init__(self):
+            out_r, out_w = os.pipe()
+            err_r, err_w = os.pipe()
+            os.close(out_w)
+            os.close(err_w)
+            self.stdout = os.fdopen(out_r, "rb", buffering=0)
+            self.stderr = os.fdopen(err_r, "rb", buffering=0)
+
+        def wait(self):
+            return exit_code
+
+    return FakeChild()
+
+
+def _r010_source_model_step(
+        *, service, root, journal, six, raw, row, private_fd,
+        exit_code=0, output_drift=False):
+    """One real Worker/Owner/Journal source transaction; FakeChild T0."""
+    from gateway.lbe_r010_row_fs import observe_r010_private_tree
+    from gateway.lbe_worker import LbeWorker
+    from gateway.lbe_r010_finite_integrity import observe_go_output_absent
+
+    before = observe_r010_private_tree(root_fd=private_fd)
+    if row == 1:
+        capture = service._bind_r010_first_row_source_only(
+            "a", source_plan=six, journal=journal, nonce=raw[0])
+    else:
+        capture = service._bind_r010_later_source_model_row(
+            "a", source_plan=six, journal=journal, row=row,
+            nonce=raw[row - 1])
+    assert capture.status()["row"] == row
+    plan = six.rows[row - 1].candidate.plan
+    assert capture._plan is plan
+    go_fd = None
+    go_before = None
+    if row == 6:
+        go_fd = os.open(
+            root / "go-project" / "bin",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        go_before = observe_go_output_absent(parent_fd=go_fd)
+
+    def fake_launcher(observed_plan):
+        assert observed_plan is plan
+        if row == 6 and exit_code == 0:
+            # A first-party synthetic output after Worker source recheck:
+            # real pinned bin/app checks will be applied in finite postflight.
+            output = root / "go-project" / "bin" / "app"
+            output.write_bytes(b"fixed-T0-go-build-result")
+            output.chmod(0o700)
+        return _r010_fake_completed_child(exit_code)
+
+    try:
+        result = LbeWorker(
+            service._lbe_owner, launcher=fake_launcher).run(
+                plan, r010_source_capture=capture)
+        assert result["status"] == "exited"
+        assert result["exit_code"] == exit_code
+        assert result["process_may_be_running"] is True
+        assert result["cleanup_proven"] is False
+        assert result["full_descendant_tree_clean"] == "not_proven"
+        assert result["output_complete"] is True
+        assert capture.status()["worker_result_recorded"] is True
+        if output_drift:
+            (root / "py-direct" / "src" / "main.py").write_bytes(
+                b"mutated after original reaper observed exit\\n")
+        decision = service._finalize_r010_source_model_row(
+            "a", row=row, journal=journal, capture=capture,
+            private_root_fd=private_fd, private_before=before,
+            go_output_parent_fd=go_fd, go_output_before=go_before)
+        assert decision["native_launch_allowed"] is False
+        assert decision["next_row_allowed"] is False
+        assert decision["six_command_product_t1_pass"] is False
+        assert capture.status()["consumed"] is True
+        return decision
+    finally:
+        if go_fd is not None:
+            os.close(go_fd)
+
+
+def test_r010_one_real_service_owner_worker_journal_six_rows_fake_t0(
+        product_service, tmp_path, monkeypatch):
+    """End-to-end six *source-model* rows, not six native PRODUCT_T1 calls."""
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import (
+        R010SerialAdmissionDenied, R010SerialNonceJournal)
+    from gateway.lbe_r010_row_fs import observe_r010_private_tree
+
+    service, root = product_service
+    fd, anchor, key, raw, hashes = _r010_t0_job_for_shared_service(tmp_path)
+    private = tmp_path / "t0-owned-row-output"
+    private.mkdir(mode=0o700)
+    pfd = os.open(private, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    def forbidden(*_a, **_kw):
+        raise AssertionError("source-only integration may not use real Popen")
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(os, "kill", forbidden)
+    monkeypatch.setattr(os, "killpg", forbidden, raising=False)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as instance:
+            journal = R010SerialNonceJournal(
+                instance, six_nonce_sha256=hashes)
+            six = service._prepare_r010_six_command_source_only("a")
+            for row in range(1, 7):
+                decision = _r010_source_model_step(
+                    service=service, root=root, journal=journal,
+                    six=six, raw=raw, row=row, private_fd=pfd)
+                assert decision["status"] == (
+                    "OWNER_WORKER_FINITE_SOURCE_MODEL_ZERO_NOT_T1")
+                next_model = row + 1 if row < 6 else None
+                assert decision["source_model_next_row"] == next_model
+                state = journal.row_state_snapshot()
+                assert state["source_only_model_rows_completed"] == row
+                assert state["product_t1_original_rows_attested"] is False
+                assert state["native_launch_allowed"] is False
+                assert state["six_command_product_t1_pass"] is False
+                assert state["rows_model"][:row] == (
+                    "ROW_POSITIVE_SUCCESS",) * row
+                home = anchor / instance.snapshot()["envelope_root_name"]
+                record = json.loads((
+                    home / "command-journal" /
+                    ("row-%02d-source-model-observed.json" % row)
+                ).read_text())
+                assert record["job_key_sha256"] == key.key_sha256()
+                assert record["source_only_model"] is True
+                assert record["actual_product_t1_attested"] is False
+                assert record["row_positive_success"] is False
+                assert record["native_launch_allowed"] is False
+            assert state["job_state_model"] == "JOB_SIX_COMMAND_COMPLETE"
+            assert state["source_only_worker_journal_connected"] is True
+            with pytest.raises(R010SerialAdmissionDenied, match="not implemented"):
+                journal.begin_later_row(2, raw[1])
+            with pytest.raises(R010SerialAdmissionDenied, match="not proven"):
+                journal.claim_six_command_pass()
+            # Source-model completion is never a public Exec bypass.
+            for cwd, argv in _ROWS:
+                with pytest.raises(GatewayError) as denied:
+                    service.invoke_exec("a", cwd, argv, dry_run=False)
+                assert denied.value.code == "exec_cleanup_proof_required"
+    finally:
+        os.close(fd)
+        os.close(pfd)
+    assert service._active_operations == 0
+    assert service._exec_active == set()
+
+
+@pytest.mark.parametrize("failed_row", (1, 2, 3, 4, 5, 6))
+def test_r010_six_row_original_owner_nonzero_latches_all_later_rows(
+        product_service, tmp_path, monkeypatch, failed_row):
+    """Same reservation reaper exit1 -> durable failed row + void later rows."""
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import (
+        R010SerialAdmissionDenied, R010SerialNonceJournal)
+
+    service, root = product_service
+    fd, anchor, key, raw, hashes = _r010_t0_job_for_shared_service(tmp_path)
+    private = tmp_path / "r010-private-nonzero"
+    private.mkdir(mode=0o700)
+    pfd = os.open(private, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_k:
+                        (_ for _ in ()).throw(AssertionError("no Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as instance:
+            journal = R010SerialNonceJournal(
+                instance, six_nonce_sha256=hashes)
+            six = service._prepare_r010_six_command_source_only("a")
+            for row in range(1, failed_row + 1):
+                decision = _r010_source_model_step(
+                    service=service, root=root, journal=journal, six=six,
+                    raw=raw, row=row, private_fd=pfd,
+                    exit_code=7 if row == failed_row else 0)
+            assert decision["status"] == "ROW_OBSERVED_NONZERO"
+            assert decision["durably_latched"] is True
+            home = anchor / instance.snapshot()["envelope_root_name"]
+            failure = json.loads((
+                home / "command-journal" / "r010-row-failure.json"
+            ).read_text())
+            assert failure["active_row"] == failed_row
+            assert failure["status"] == "JOB_FAILED_LATCHED"
+            assert failure["rows"] == (
+                ["ROW_POSITIVE_SUCCESS"] * (failed_row - 1) +
+                ["ROW_OBSERVED_NONZERO"] + ["ROW_VOID"] * (6 - failed_row))
+            assert failure["native_launch_allowed"] is False
+            with pytest.raises(R010SerialAdmissionDenied):
+                journal.row_state_snapshot()
+            with pytest.raises(GatewayError):
+                service._bind_r010_later_source_model_row(
+                    "a", row=min(6, failed_row + 1),
+                    source_plan=six, journal=journal,
+                    nonce=raw[min(5, failed_row)])
+    finally:
+        os.close(fd)
+        os.close(pfd)
+
+
+def test_r010_worker_exit_zero_source_drift_never_advances(
+        product_service, tmp_path, monkeypatch):
+    """Exact real selected before/after source invalid -> FAILED and VOID."""
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+
+    service, root = product_service
+    fd, anchor, key, raw, hashes = _r010_t0_job_for_shared_service(tmp_path)
+    private = tmp_path / "r010-private-source-drift"
+    private.mkdir(mode=0o700)
+    pfd = os.open(private, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_k:
+                        (_ for _ in ()).throw(AssertionError("no Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as instance:
+            journal = R010SerialNonceJournal(instance, six_nonce_sha256=hashes)
+            six = service._prepare_r010_six_command_source_only("a")
+            decided = _r010_source_model_step(
+                service=service, root=root, journal=journal,
+                six=six, raw=raw, row=1, private_fd=pfd,
+                output_drift=True)
+            assert decided["status"] == (
+                "ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS")
+            home = anchor / instance.snapshot()["envelope_root_name"]
+            failure = json.loads((
+                home / "command-journal" / "r010-row-failure.json"
+            ).read_text())
+            assert failure["rows"] == (
+                ["ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS"] +
+                ["ROW_VOID"] * 5)
+    finally:
+        os.close(fd)
+        os.close(pfd)
+
+
+def test_r010_source_model_row2_cannot_burn_before_owned_row1_result(
+        product_service, tmp_path, monkeypatch):
+    """Blocked row2 cannot run with a matching nonce but missing row1 reap."""
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import (
+        R010SerialAdmissionDenied, R010SerialNonceJournal)
+
+    service, _ = product_service
+    fd, _, key, raw, hashes = _r010_t0_job_for_shared_service(tmp_path)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_k:
+                        (_ for _ in ()).throw(AssertionError("no Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as instance:
+            journal = R010SerialNonceJournal(instance, six_nonce_sha256=hashes)
+            six = service._prepare_r010_six_command_source_only("a")
+            capture = service._bind_r010_first_row_source_only(
+                "a", source_plan=six, journal=journal, nonce=raw[0])
+            assert capture.status()["row"] == 1
+            with pytest.raises(R010SerialAdmissionDenied):
+                journal.burn_source_model_later_nonce(
+                    row=2, nonce=raw[1], service=service,
+                    ctx=service.get("a"), source_plan=six)
+            with pytest.raises(GatewayError):
+                service._bind_r010_later_source_model_row(
+                    "a", row=2, nonce=raw[1], journal=journal,
+                    source_plan=six)
+    finally:
+        os.close(fd)

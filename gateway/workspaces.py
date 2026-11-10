@@ -865,6 +865,151 @@ class WorkspaceService:
                 self._active_operations -= 1
                 self._lifecycle.notify_all()
 
+    def _bind_r010_later_source_model_row(
+        self, name: str, *, source_plan: object, journal: object,
+        row: int, nonce: str, cancelled: threading.Event | None = None,
+    ):
+        """Bind the NEXT ROW of an already source-observed SAME Job/Owner.
+
+        This is a nonoperative product-source state transition. It never
+        returns a Popen/native capability and does not change F1/NativeLauncher
+        admission. Worker invocation remains a separately gated operation.
+        """
+        from .lbe_r010_six_service import (
+            R010SixSourcePlan, recheck_r010_service_six_source)
+        from .lbe_r010_serial_journal import R010SerialNonceJournal
+
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if (self.settings.schema_version != 2 or self._closing
+                    or self._closed or self._exec_state is None
+                    or self._lbe_owner is None or self._r006_pending is not None):
+                raise GatewayError(
+                    "runner_unavailable", "R010 source-model service unavailable.")
+            self._exec_state.require_healthy()
+            if self._exec_active:
+                raise GatewayError("busy", "Another Exec slot is active.")
+            self._active_operations += 1
+        try:
+            try:
+                if (type(journal) is not R010SerialNonceJournal
+                        or type(source_plan) is not R010SixSourcePlan
+                        or source_plan.workspace != ctx.name
+                        or type(row) is not int or not 2 <= row <= 6
+                        or cancelled is not None and (
+                            type(cancelled) is not threading.Event
+                            or cancelled.is_set())):
+                    raise ValueError("invalid source-only row or cancellation")
+                recheck_r010_service_six_source(
+                    service=self, ctx=ctx, snapshot=source_plan)
+                journal.burn_source_model_later_nonce(
+                    row=row, nonce=nonce, service=self,
+                    ctx=ctx, source_plan=source_plan)
+                capture = journal.make_source_model_later_capture(
+                    row=row, owner=self._lbe_owner,
+                    plan=source_plan.rows[row - 1].candidate.plan,
+                    source_plan=source_plan)
+                capture._bind_six_source(
+                    service=self, ctx=ctx, source_plan=source_plan)
+                return capture
+            except Exception:
+                try:
+                    if type(journal) is R010SerialNonceJournal:
+                        journal.latch_failure("source_preexec_denied")
+                except Exception:
+                    pass
+                raise GatewayError(
+                    "runner_unavailable",
+                    "R010 later same-service source-model row failed closed."
+                ) from None
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
+    def _finalize_r010_source_model_row(
+        self, name: str, *, row: int, journal: object, capture: object,
+        private_root_fd: int, private_before: object,
+        go_output_parent_fd: int | None = None, go_output_before: object = None,
+    ) -> dict[str, Any]:
+        """Finish one private real Owner/Worker reservation in SAME service.
+
+        This uses the Service-pinned source Before snapshot and pinned source
+        FD to record a durable SOURCE-MODEL result in its Job Journal. A model
+        next-row index grants no PRODUCT_T1 execution or launch privilege.
+        """
+        from .lbe_r010_serial_journal import R010SerialNonceJournal
+        from .lbe_r010_private_capture import R010PrivateWorkerCapture
+        from .lbe_r010_row_fs import R010PrivateTreeSnapshot
+        from .lbe_r010_six_service import (
+            R010SixSourcePlan, recheck_r010_service_six_source)
+
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if (self.settings.schema_version != 2 or self._closing
+                    or self._closed or self._exec_state is None
+                    or self._lbe_owner is None):
+                raise GatewayError(
+                    "runner_unavailable", "R010 source-model service unavailable.")
+            self._exec_state.require_healthy()
+            self._active_operations += 1
+        try:
+            try:
+                if (type(row) is not int or not 1 <= row <= 6
+                        or type(journal) is not R010SerialNonceJournal
+                        or type(capture) is not R010PrivateWorkerCapture
+                        or type(private_root_fd) is not int
+                        or type(private_before) is not R010PrivateTreeSnapshot
+                        or capture._row != row
+                        or capture._journal is not journal
+                        or capture._owner is not self._lbe_owner):
+                    raise ValueError("wrong Owner/Worker/Journal identity")
+                binding = capture._source_binding
+                if (type(binding) is not tuple or len(binding) != 3
+                        or binding[0] is not self or binding[1] is not ctx
+                        or type(binding[2]) is not R010SixSourcePlan
+                        or journal._six_source_plan is not binding[2]
+                        or capture._plan is not
+                           binding[2].rows[row - 1].candidate.plan):
+                    raise ValueError("not the current same-service source row")
+                # The Worker rechecked all SIX source snapshots immediately
+                # before launcher. At completion we must validate the
+                # selected row's ORIGINAL prelaunch source via its pinned FD.
+                # A valid Go build changes bin/app AFTER launch, so blindly
+                # refreshing all six fixture selections here would reject
+                # that permitted output before its finite artifact check.
+                six = binding[2]
+                record = six.rows[row - 1]
+                fd = os.open(
+                    record.candidate.plan.cwd,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                    | os.O_CLOEXEC,
+                    dir_fd=ctx.gateway._root_fd)
+                try:
+                    return journal.finalize_source_model_row_from_worker_capture(
+                        row=row, capture=capture, selected_root_fd=fd,
+                        selected_before=record.selected.selected_source,
+                        private_root_fd=private_root_fd,
+                        private_before=private_before,
+                        go_output_parent_fd=go_output_parent_fd,
+                        go_output_before=go_output_before)
+                finally:
+                    os.close(fd)
+            except Exception:
+                try:
+                    if type(journal) is R010SerialNonceJournal:
+                        journal.latch_failure("owner_reader_ambiguous")
+                except Exception:
+                    pass
+                raise GatewayError(
+                    "runner_unavailable",
+                    "R010 same-service Owner/Worker/Journal model denied."
+                ) from None
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
     def _prepare_and_bind_r010_first_row_source_only(
         self, name: str, *, journal: object, nonce: str,
         timeout_seconds: int = 120,

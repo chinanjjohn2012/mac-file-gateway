@@ -89,6 +89,12 @@ class R010SerialNonceJournal:
         self._six_source_bound = False
         self._six_source_plan = None
         self._six_source_sha256 = None
+        # A separate SOURCE-MODEL path is allowed to inspect all SIX actual
+        # Worker/Owner reservations but NEVER admits native PRODUCT_T1.
+        self._source_model_completed_rows = 0
+        self._source_model_capture_claimed_rows: set[int] = set()
+        self._source_model_finalization_claimed_rows: set[int] = set()
+        self._source_model_active_capture = None
 
     def _require_live(self) -> None:
         if self._failed:
@@ -474,9 +480,12 @@ class R010SerialNonceJournal:
                 raise R010SerialAdmissionDenied(
                     "private capture plan does not match fixed row") from None
             self._row1_capture_claimed = True
-            return R010PrivateWorkerCapture._issue_source_only(
+            capture = R010PrivateWorkerCapture._issue_source_only(
                 journal=self, owner=owner, plan=plan,
-                nonce_sha256=self._digests[0])
+                nonce_sha256=self._digests[0], row=1)
+            self._source_model_capture_claimed_rows.add(1)
+            self._source_model_active_capture = capture
+            return capture
 
     def finalize_first_row_from_worker_capture_source_only(
         self, *, capture: R010PrivateWorkerCapture,
@@ -517,14 +526,23 @@ class R010SerialNonceJournal:
         """Guard the exact unlatched Job immediately before Worker launcher."""
         with self._envelope._lock:
             self._require_live()
-            if (type(capture) is not R010PrivateWorkerCapture
+            row = capture._row if type(capture) is R010PrivateWorkerCapture else None
+            if (type(row) is not int or not 1 <= row <= 6
                     or capture._journal is not self
-                    or not self._burned or not self._row1_capture_claimed
-                    or self._source_recorded or self._row1_finalization_claimed
-                    or self._state_model.job_state != "JOB_ROW_RUNNING_1"
-                    or self._state_model.active_row != 1
+                    or capture is not self._source_model_active_capture
+                    or not self._burned
+                    or row not in self._source_model_capture_claimed_rows
+                    or row in self._source_model_finalization_claimed_rows
+                    or self._source_recorded and row == 1
+                    or self._row1_finalization_claimed and row == 1
+                    or self._state_model.job_state != "JOB_ROW_RUNNING_" + str(row)
+                    or self._state_model.active_row != row
+                    or self._state_model.expected_row != row
+                    or (row > 1 and
+                        self._source_model_completed_rows != row - 1)
                     or (self._six_source_bound
-                        and source_plan is not self._six_source_plan)):
+                        and source_plan is not self._six_source_plan)
+                    or (row > 1 and not self._six_source_bound)):
                 raise R010SerialAdmissionDenied(
                     "private Worker receipt lost live Job identity")
 
@@ -536,7 +554,256 @@ class R010SerialNonceJournal:
                 **self._state_model.snapshot(),
                 "six_source_durable_binding_present": self._six_source_bound,
                 "six_source_sha256": self._six_source_sha256,
+                "source_only_model_rows_completed": self._source_model_completed_rows,
+                "source_only_worker_journal_connected": (
+                    self._source_model_completed_rows > 0),
+                "product_t1_original_rows_attested": False,
             }
+
+    def burn_source_model_later_nonce(
+        self, *, row: int, nonce: str,
+        service: object, ctx: object, source_plan: object,
+    ) -> dict[str, object]:
+        """Durably burn NEXT row for private SOURCE-ONLY Worker observation.
+
+        The existing begin_later_row and PRODUCT_T1 gates remain DENY.
+        This is a one-use *model* transition, with no launcher, no native
+        authority and no claim that prior FakeChild results were real T1.
+        """
+        from .lbe_r010_six_service import (
+            R010SixSourcePlan, R010SixSourceDenied,
+            recheck_r010_service_six_source,
+        )
+        with self._envelope._lock:
+            self._require_live()
+            if (type(row) is not int or not 2 <= row <= 6
+                    or type(nonce) is not str or _HEX64.fullmatch(nonce) is None
+                    or not self._six_source_bound
+                    or type(source_plan) is not R010SixSourcePlan
+                    or source_plan is not self._six_source_plan
+                    or self._source_model_completed_rows != row - 1
+                    or self._state_model.active_row is not None
+                    or self._state_model.expected_row != row
+                    or self._source_model_active_capture is not None):
+                raise R010SerialAdmissionDenied(
+                    "later SOURCE model row not ready or not same Job")
+            try:
+                recheck_r010_service_six_source(
+                    service=service, ctx=ctx, snapshot=source_plan)
+                next_model = self._state_model.burn_model(row, nonce)
+            except (R010SixSourceDenied, R010SixRowPolicyDenied, ValueError):
+                raise R010SerialAdmissionDenied(
+                    "later source row/nonce/Worker plan drift") from None
+            record = (json.dumps({
+                "version": "R010_OWNER_WORKER_SOURCE_ROW_BURN_V1",
+                "row": row,
+                "nonce_sha256": self._digests[row - 1],
+                "job_key_sha256": self._envelope._key.key_sha256(),
+                "six_source_binding_sha256": self._six_source_sha256,
+                "job_state_model": next_model.job_state,
+                "expected_row_model": next_model.expected_row,
+                "source_only_model": True,
+                "native_launch_allowed": False,
+                "row_positive_success": False,
+                "six_command_product_t1_pass": False,
+            }, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+            try:
+                _write_once(
+                    self._envelope._journal_fd,
+                    "row-%02d-source-model-burn.json" % row, record)
+            except R010JobEnvelopeDenied:
+                self._failed = True
+                raise R010SerialAdmissionDenied(
+                    "later source-model burn uncertain; permanent deny") from None
+            self._state_model = next_model
+            return {
+                "row": row, "source_model_nonce_burned": True,
+                "native_launch_allowed": False, "next_row_allowed": False,
+            }
+
+    def make_source_model_later_capture(
+        self, *, row: int, owner: DirectChildOwner,
+        plan: LbeWorkPlan, source_plan: object,
+    ) -> R010PrivateWorkerCapture:
+        """Mint one private capture of row 2..6 for SAME service Owner.
+
+        Only an already burned model nonce can be captured; this has no
+        permission to call any native launcher (ordinary F1 stays DENY).
+        """
+        from .lbe_r010_six_service import R010SixSourcePlan
+        with self._envelope._lock:
+            self._require_live()
+            if (type(row) is not int or not 2 <= row <= 6
+                    or type(owner) is not DirectChildOwner
+                    or type(plan) is not LbeWorkPlan
+                    or type(source_plan) is not R010SixSourcePlan
+                    or source_plan is not self._six_source_plan
+                    or plan is not source_plan.rows[row - 1].candidate.plan
+                    or row in self._source_model_capture_claimed_rows
+                    or self._state_model.job_state !=
+                       "JOB_ROW_RUNNING_" + str(row)
+                    or self._state_model.active_row != row
+                    or self._source_model_completed_rows != row - 1):
+                raise R010SerialAdmissionDenied(
+                    "later private Worker capture unavailable")
+            try:
+                validate_r010_fixed_row_plan(row, plan)
+            except Exception:
+                raise R010SerialAdmissionDenied(
+                    "later private Worker plan not fixed") from None
+            self._source_model_capture_claimed_rows.add(row)
+            capture = R010PrivateWorkerCapture._issue_source_only(
+                journal=self, owner=owner, plan=plan,
+                nonce_sha256=self._digests[row - 1], row=row)
+            self._source_model_active_capture = capture
+            return capture
+
+    def finalize_source_model_row_from_worker_capture(
+        self, *, row: int, capture: R010PrivateWorkerCapture,
+        selected_root_fd: int, selected_before: R010SelectedSourceSnapshot,
+        private_root_fd: int, private_before: R010PrivateTreeSnapshot,
+        go_output_parent_fd: int | None = None,
+        go_output_before: object = None,
+    ) -> dict[str, object]:
+        """Consume SAME private Worker reservation; fsync finite row outcome.
+
+        An actual Owner.wait / Worker result and finite before/after checks
+        are used, not a caller success string or external ACK. Durable model
+        success may prepare the NEXT SOURCE-MODEL ROW only, never any Popen.
+        The real PRODUCT_T1 path is NOT implemented or authorized.
+        """
+        with self._envelope._lock:
+            self._require_live()
+            if (type(row) is not int or not 1 <= row <= 6
+                    or type(capture) is not R010PrivateWorkerCapture
+                    or capture is not self._source_model_active_capture
+                    or capture._row != row or capture._journal is not self
+                    or not self._six_source_bound
+                    or row in self._source_model_finalization_claimed_rows
+                    or self._source_model_completed_rows != row - 1
+                    or self._state_model.job_state !=
+                       "JOB_ROW_RUNNING_" + str(row)
+                    or self._state_model.active_row != row
+                    or (row == 1 and
+                        (self._source_recorded or self._row1_finalization_claimed))
+                    or selected_before is not self._six_source_plan.rows[
+                        row - 1].selected.selected_source
+                    or capture._plan is not self._six_source_plan.rows[
+                        row - 1].candidate.plan):
+                raise R010SerialAdmissionDenied(
+                    "not the exact live same-service Worker/Journal row")
+            self._source_model_finalization_claimed_rows.add(row)
+            if row == 1:
+                self._row1_finalization_claimed = True
+        try:
+            # Consume before examining mutable Worker response. Replay, lost
+            # ACK, or a conflicting second reservation cannot reclassify.
+            owner, reservation, plan, worker_result, nonce_hash = (
+                capture._take_for_journal(self))
+            if (nonce_hash != self._digests[row - 1]
+                    or capture._source_binding is None
+                    or capture._source_binding[2] is not self._six_source_plan
+                    or capture._source_binding[0]._lbe_owner is not owner):
+                raise R010SerialAdmissionDenied(
+                    "private reservation/Owner/source identity drift")
+            validate_r010_fixed_row_plan(row, plan)
+            owned = observe_r010_private_owner_row(
+                owner=owner, reservation=reservation,
+                plan=plan, worker_result=worker_result,
+                row=row, nonce_sha256=nonce_hash)
+            reasons = {
+                "ROW_OBSERVED_NONZERO": "original_nonzero",
+                "ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS": "invalid_output_or_fs",
+                "ROW_AMBIGUOUS": "owner_reader_ambiguous",
+            }
+            if owned.outcome in reasons:
+                self.latch_failure(reasons[owned.outcome])
+                return {
+                    "row": row, "status": owned.outcome,
+                    "durably_latched": True, "next_row_allowed": False,
+                    "native_launch_allowed": False,
+                    "six_command_product_t1_pass": False,
+                }
+            if (owned.outcome !=
+                    "ORIGINAL_ZERO_READER_HEALTHY_FINITE_FS_NOT_CHECKED"
+                    or owned.original_child_reaped is not True
+                    or owned.owner_reader_healthy is not True
+                    or owned.output_complete is not True
+                    or type(owned.observed_original_exit_code) is not int
+                    or owned.observed_original_exit_code != 0):
+                raise R010SerialAdmissionDenied("unqualified original Owner zero")
+            try:
+                finite = verify_r010_finite_row_after(
+                    row=row, plan=plan,
+                    selected_root_fd=selected_root_fd,
+                    selected_before=selected_before,
+                    private_root_fd=private_root_fd,
+                    private_before=private_before,
+                    go_output_parent_fd=go_output_parent_fd,
+                    go_output_before=go_output_before)
+            except Exception:
+                self.latch_failure("invalid_output_or_fs")
+                return {
+                    "row": row,
+                    "status": "ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS",
+                    "durably_latched": True, "next_row_allowed": False,
+                    "native_launch_allowed": False,
+                    "six_command_product_t1_pass": False,
+                }
+            with self._envelope._lock:
+                self._require_live()
+                next_model = self._state_model.finish_model(
+                    row, "ROW_POSITIVE_SUCCESS")
+                payload = (json.dumps({
+                    "version": "R010_PRIVATE_OWNER_WORKER_SOURCE_ROW_V1",
+                    "row": row,
+                    "nonce_sha256": nonce_hash,
+                    "job_key_sha256": self._envelope._key.key_sha256(),
+                    "six_source_binding_sha256": self._six_source_sha256,
+                    "original_exit_code_observed": 0,
+                    "private_before_sha256": finite.private_tree_before_sha256,
+                    "private_after_sha256": finite.private_tree_after_sha256,
+                    "go_build_artifact_sha256": finite.go_build_artifact_sha256,
+                    "model_outcome": "ROW_POSITIVE_SUCCESS",
+                    "job_state_model": next_model.job_state,
+                    "next_expected_source_model_row": next_model.expected_row,
+                    "source_only_model": True,
+                    "actual_product_t1_attested": False,
+                    "native_launch_allowed": False,
+                    "row_positive_success": False,
+                    "six_command_product_t1_pass": False,
+                }, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+                try:
+                    _write_once(
+                        self._envelope._journal_fd,
+                        "row-%02d-source-model-observed.json" % row, payload)
+                except R010JobEnvelopeDenied:
+                    self._failed = True
+                    raise R010SerialAdmissionDenied(
+                        "Owner/Worker source result uncertain; permanent deny") from None
+                self._state_model = next_model
+                self._source_model_completed_rows = row
+                self._source_model_active_capture = None
+                if row == 1:
+                    self._source_recorded = True
+                return {
+                    "row": row,
+                    "status": "OWNER_WORKER_FINITE_SOURCE_MODEL_ZERO_NOT_T1",
+                    "source_model_next_row": next_model.expected_row,
+                    "next_row_allowed": False,
+                    "native_launch_allowed": False,
+                    "six_command_product_t1_pass": False,
+                }
+        except Exception:
+            # On any unclassified outcome, the original nonce is burned:
+            # latch all remaining model rows, with no late reclassification.
+            if not self._failed:
+                try:
+                    self.latch_failure("owner_reader_ambiguous")
+                except Exception:
+                    self._failed = True
+            raise R010SerialAdmissionDenied(
+                "Owner/Worker model row uncertain; permanently denied") from None
 
     def begin_later_row(self, *_args: object, **_kwargs: object) -> None:
         raise R010SerialAdmissionDenied("trusted row-success adapter not implemented")

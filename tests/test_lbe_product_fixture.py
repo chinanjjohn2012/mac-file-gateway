@@ -6042,3 +6042,100 @@ def test_r010_source_model_row2_cannot_burn_before_owned_row1_result(
                     source_plan=six)
     finally:
         os.close(fd)
+
+
+def test_r010_private_worker_result_detaches_mutable_public_argv(
+        product_service, tmp_path, monkeypatch):
+    """Post-return public response mutation cannot rewrite private receipt."""
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_row_fs import observe_r010_private_tree
+    from gateway.lbe_worker import LbeWorker
+
+    service, _root = product_service
+    fd, _, key, raw, hashes = _r010_t0_job_for_shared_service(tmp_path)
+    private = tmp_path / "private-capture-mutation"
+    private.mkdir(mode=0o700)
+    pfd = os.open(private, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as instance:
+            journal = R010SerialNonceJournal(instance, six_nonce_sha256=hashes)
+            six = service._prepare_r010_six_command_source_only("a")
+            capture = service._bind_r010_first_row_source_only(
+                "a", source_plan=six, journal=journal, nonce=raw[0])
+            before = observe_r010_private_tree(root_fd=pfd)
+            result = LbeWorker(
+                service._lbe_owner,
+                launcher=lambda _p: _r010_fake_completed_child(0),
+            ).run(capture._plan, r010_source_capture=capture)
+            assert result["requested_argv"] == list(capture._plan.requested_argv)
+            result["requested_argv"].append("unreviewed")
+            result["effective_argv"].append("modified-after-return")
+            assert capture._result["requested_argv"] == list(
+                capture._plan.requested_argv)
+            assert capture._result["effective_argv"] == list(
+                capture._plan.effective_argv)
+            observed = service._finalize_r010_source_model_row(
+                "a", row=1, journal=journal, capture=capture,
+                private_root_fd=pfd, private_before=before)
+            assert observed["status"] == (
+                "OWNER_WORKER_FINITE_SOURCE_MODEL_ZERO_NOT_T1")
+            assert observed["native_launch_allowed"] is False
+    finally:
+        os.close(fd)
+        os.close(pfd)
+
+
+def test_r010_owner_health_drift_during_finite_postflight_latches_job(
+        product_service, tmp_path, monkeypatch):
+    """A late Owner unavailable latch cannot become a source-model success."""
+    import json
+    from gateway import lbe_r010_serial_journal as mod
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import (
+        R010SerialAdmissionDenied, R010SerialNonceJournal)
+    from gateway.lbe_r010_row_fs import observe_r010_private_tree
+    from gateway.lbe_worker import LbeWorker
+
+    service, _root = product_service
+    fd, anchor, key, raw, hashes = _r010_t0_job_for_shared_service(tmp_path)
+    private = tmp_path / "private-postflight-drift"
+    private.mkdir(mode=0o700)
+    pfd = os.open(private, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as instance:
+            journal = R010SerialNonceJournal(instance, six_nonce_sha256=hashes)
+            six = service._prepare_r010_six_command_source_only("a")
+            cap = service._bind_r010_first_row_source_only(
+                "a", source_plan=six, journal=journal, nonce=raw[0])
+            before = observe_r010_private_tree(root_fd=pfd)
+            LbeWorker(
+                service._lbe_owner,
+                launcher=lambda _p: _r010_fake_completed_child(0),
+            ).run(cap._plan, r010_source_capture=cap)
+
+            real = mod.verify_r010_finite_row_after
+            def late_latch(**kwargs):
+                valid = real(**kwargs)
+                service._lbe_owner.latch_unavailable(cap._reservation)
+                return valid
+            monkeypatch.setattr(mod, "verify_r010_finite_row_after", late_latch)
+            decided = service._finalize_r010_source_model_row(
+                "a", row=1, journal=journal, capture=cap,
+                private_root_fd=pfd, private_before=before)
+            assert decided["status"] == "ROW_AMBIGUOUS"
+            assert decided["durably_latched"] is True
+            home = anchor / instance.snapshot()["envelope_root_name"]
+            failure = json.loads((
+                home / "command-journal" / "r010-row-failure.json"
+            ).read_text())
+            assert failure["rows"] == ["ROW_AMBIGUOUS"] + ["ROW_VOID"] * 5
+            with pytest.raises(R010SerialAdmissionDenied):
+                journal.row_state_snapshot()
+    finally:
+        os.close(fd)
+        os.close(pfd)

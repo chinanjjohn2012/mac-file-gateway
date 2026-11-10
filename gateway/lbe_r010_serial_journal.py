@@ -750,6 +750,22 @@ class R010SerialNonceJournal:
                     "native_launch_allowed": False,
                     "six_command_product_t1_pass": False,
                 }
+            # A completed real reaper and finite FS check are not enough
+            # if the *same* Owner becomes unavailable during postflight.
+            # Treat the late health drift as AMBIGUOUS, never as success.
+            try:
+                latest_owner = owner.snapshot()
+            except Exception:
+                latest_owner = {}
+            if (latest_owner.get("unavailable") is not False
+                    or latest_owner.get("closing") is not False):
+                self.latch_failure("owner_reader_ambiguous")
+                return {
+                    "row": row, "status": "ROW_AMBIGUOUS",
+                    "durably_latched": True, "next_row_allowed": False,
+                    "native_launch_allowed": False,
+                    "six_command_product_t1_pass": False,
+                }
             with self._envelope._lock:
                 self._require_live()
                 next_model = self._state_model.finish_model(

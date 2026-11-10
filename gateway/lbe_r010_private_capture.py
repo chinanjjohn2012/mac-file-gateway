@@ -23,6 +23,32 @@ class R010PrivateCaptureDenied(ValueError):
     """Private source capture was mismatched, missing or consumed."""
 
 
+def _detached_worker_scalars(result: dict[str, Any]) -> dict[str, Any]:
+    """Copy only actual Worker scalar/list-of-strings result values.
+
+    The public response can be edited after LbeWorker.run returns. Its
+    mutable nested argv lists must never be the private Journal's evidence.
+    Reject unfamiliar object graphs instead of invoking custom copy hooks.
+    """
+    if type(result) is not dict or not 1 <= len(result) <= 48:
+        raise R010PrivateCaptureDenied("unqualified Worker result structure")
+    copy: dict[str, Any] = {}
+    for name, value in result.items():
+        if type(name) is not str or not 1 <= len(name) <= 100:
+            raise R010PrivateCaptureDenied("unqualified Worker result key")
+        if type(value) is list:
+            if (len(value) > 64
+                    or any(type(part) is not str or len(part) > 4096
+                           for part in value)):
+                raise R010PrivateCaptureDenied("unqualified Worker list")
+            copy[name] = list(value)
+        elif type(value) in (str, int, bool) or value is None:
+            copy[name] = value
+        else:
+            raise R010PrivateCaptureDenied("non-scalar Worker result")
+    return copy
+
+
 class R010PrivateWorkerCapture:
     """Source only, never returns a spawn, grant or execution capability."""
 
@@ -147,7 +173,7 @@ class R010PrivateWorkerCapture:
                     or type(result) is not dict):
                 raise R010PrivateCaptureDenied(
                     "returned Worker result is not from reserved attempt")
-            self._result = dict(result)
+            self._result = _detached_worker_scalars(result)
 
     def _take_for_journal(self, journal: object):
         """Consume EXACT original private references once, never an ACK."""
@@ -158,7 +184,8 @@ class R010PrivateWorkerCapture:
                     "first-row Worker capture not complete or already used")
             self._consumed = True
             return (self._owner, self._reservation,
-                    self._plan, dict(self._result), self._nonce_sha256)
+                    self._plan, _detached_worker_scalars(self._result),
+                    self._nonce_sha256)
 
     def status(self) -> dict[str, object]:
         """No reservation, PID, secret, nonce or output in the diagnostic."""

@@ -11,6 +11,11 @@ on:
       - "gateway/lbe_durable_attempt.py"
       - "gateway/lbe_owner_grant.py"
       - "gateway/lbe_r006_macos_allowlist.py"
+      - "gateway/lbe_r010_a1_host.py"
+      - "gateway/lbe_r010_a1_mount.py"
+      - "gateway/lbe_r010_preexec_env.py"
+      - "tools/r010_a1_host_observation_t0.py"
+      - "tests/test_lbe_r010_a1_host.py"
       - "gateway/lbe_owner_grant_bootstrap.py"
       - "gateway/lbe_r006_review_gate.py"
       - "gateway/lbe_r006_runtime_identity.py"
@@ -50,7 +55,19 @@ jobs:
         run: python3 -I -S tools/d4_r006_host_observation_t0.py
       - name: Collect bounded macOS host-file candidates for later review only
         run: python3 -I -S tools/d4_r006_host_source_collect_t0.py
-      - name: Recheck prior-run fixed ImageVersion and selected host-file hashes
+      # R006 A0 contract is UNCHANGED for every other PR.
+      - name: R006 A0 strict host allowlist (non-R010 review targets)
+        if: ${{ github.event.pull_request.number != 114 }}
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: python3 -I -S tools/d4_r006_host_allowlist_verify_t0.py
+      # PR114 Owner explicitly chose A1+B1. The old A0 denial is an
+      # expected negative control, NEVER A1 qualification or T1 authority.
+      # This NEW source-only T0 checks exact pinned selected host files,
+      # the A1 autofs table and only the SSH selector's metadata shape.
+      - name: R010 A1 host source T0 plus unchanged R006 A0 expected DENY (PR114)
+        if: ${{ github.event.pull_request.number == 114 }}
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 -I -S tools/r010_a1_host_observation_t0.py

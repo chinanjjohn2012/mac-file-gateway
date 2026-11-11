@@ -235,7 +235,11 @@ def test_actual_host_probe_marks_a0_expected_deny_without_executable_pass(
         host_readers, monkeypatch, capsys):
     from tools import r010_a1_host_observation_t0 as probe
 
-    monkeypatch.setattr(probe, "inspect_r010_a1_host_source_t0", observed)
+    # The probe requires evidence specifically marked as original OS
+    # observation; ordinary synthetic host rows must remain denied.
+    monkeypatch.setattr(
+        probe, "inspect_r010_a1_host_source_t0",
+        lambda: replace(observed(), host_snapshot_from_original_os=True))
     def expected_a0_deny():
         raise D4R006HostAllowlistDenied(
             "ambient credential-bearing environment is present")
@@ -255,7 +259,11 @@ def test_actual_host_probe_rejects_unexpected_a0_or_a1_error(
         host_readers, monkeypatch, capsys):
     from tools import r010_a1_host_observation_t0 as probe
 
-    monkeypatch.setattr(probe, "inspect_r010_a1_host_source_t0", observed)
+    # The probe requires evidence specifically marked as original OS
+    # observation; ordinary synthetic host rows must remain denied.
+    monkeypatch.setattr(
+        probe, "inspect_r010_a1_host_source_t0",
+        lambda: replace(observed(), host_snapshot_from_original_os=True))
     for reason in (
         None, "current GitHub/macOS image claim mismatch",
         "writable non-local/shared mount is present",
@@ -273,3 +281,18 @@ def test_actual_host_probe_rejects_unexpected_a0_or_a1_error(
         assert "R010_A1_HOST_SOURCE_T0_DENY" in message
         assert SSH not in message
         assert BEARER not in message
+
+
+def test_actual_probe_rejects_synthetic_host_snapshot_even_if_a0_denies(
+        host_readers, monkeypatch, capsys):
+    from tools import r010_a1_host_observation_t0 as probe
+    monkeypatch.setattr(probe, "inspect_r010_a1_host_source_t0", observed)
+    def expected_denied():
+        raise D4R006HostAllowlistDenied(
+            "ambient credential-bearing environment is present")
+    monkeypatch.setattr(probe, "verify_r006_fixed_host_allowlist_t0",
+                        expected_denied)
+    assert probe.main() == 1
+    output = capsys.readouterr().out
+    assert "R010_A1_HOST_SOURCE_T0_DENY" in output
+    assert SSH not in output

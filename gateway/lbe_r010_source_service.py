@@ -334,6 +334,49 @@ class R010ServiceSourceSession:
                 raise R010ServiceSourceDenied(
                     "original Owner/Worker/Journal result not qualified") from None
 
+    def abort_unfinished_source_row(
+        self, *, row: int, capture: R010PrivateWorkerCapture,
+        reason: str,
+    ) -> dict[str, object]:
+        """Durably fail and VOID the rest after original Worker uncertainty.
+
+        This is the only safe in-process fallback for a lost ACK, cancelled
+        waiter, Worker/read failure or indeterminate result. It does NOT call
+        kill/killpg, retry, restore a nonce, or grant any native child access.
+        The failure is recorded in the exact original Job journal, not a
+        per-request or per-client-owned sidecar.
+        """
+        allowed = frozenset({
+            "waiter_disconnected", "worker_capture_missing",
+            "owner_reader_ambiguous", "result_ack_lost",
+            "source_postflight_uncertain",
+        })
+        with self._lock:
+            if (self._failed or self._journal._failed
+                    or type(row) is not int or row != self._next
+                    or type(capture) is not R010PrivateWorkerCapture
+                    or capture is not self._capture
+                    or type(reason) is not str or reason not in allowed):
+                raise R010ServiceSourceDenied(
+                    "unqualified source abort; Job cannot be advanced")
+            self._capture = None
+            self._failed = True
+            try:
+                self._journal.latch_failure("owner_reader_ambiguous")
+            except Exception:
+                # An uncertain fsync is never permission to restart/reissue.
+                self._journal._failed = True
+                raise R010ServiceSourceDenied(
+                    "durable source abort uncertain; permanent deny") from None
+            return {
+                "row": row,
+                "status": "JOB_FAILED_LATCHED",
+                "reason_class": reason,
+                "rows_remaining": "ROW_VOID",
+                "native_launch_allowed": False,
+                "six_command_product_t1_pass": False,
+            }
+
     def status(self) -> R010ServiceSourceStatus:
         """No secrets, no fake runtime authority or exposed reservations."""
         with self._lock:

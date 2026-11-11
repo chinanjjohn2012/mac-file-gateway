@@ -6468,3 +6468,99 @@ def test_r010_service_bridge_uncertain_fsync_is_permanent_deny(
             assert getattr(env, "_r010_source_service_claimed", False) is True
     finally:
         os.close(fd)
+
+
+
+@pytest.mark.parametrize("reason", [
+    "waiter_disconnected", "worker_capture_missing",
+    "owner_reader_ambiguous", "result_ack_lost",
+    "source_postflight_uncertain",
+])
+def test_r010_owner_worker_source_abort_latches_row_and_voids_all_remaining(
+        product_service, tmp_path, monkeypatch, reason):
+    """A lost Worker/HTTP ACK never starts a replay or a later source row."""
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_source_service import R010ServiceSourceDenied
+    from gateway.lbe_worker import LbeWorker
+
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    def forbidden(*_a, **_kw):
+        raise AssertionError("source abort may not launch a native child")
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(os, "kill", forbidden)
+    monkeypatch.setattr(os, "killpg", forbidden, raising=False)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(env, six_nonce_sha256=digests)
+            receipt, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, env, journal)
+            session = service._bind_r010_a1_source_job_only(
+                "a", envelope=env, journal=journal,
+                job_key=key, source=receipt, host=host, closed=closed)
+            cap = session.begin_source_model_row(row=1, nonce=raw[0])
+            if reason == "result_ack_lost":
+                result = LbeWorker(
+                    service._lbe_owner,
+                    launcher=lambda _p: _r010_fake_completed_child(0),
+                ).run(cap._plan, r010_source_capture=cap)
+                assert result["exit_code"] == 0
+                # No receipt was consumed by journal; ACK is ambiguous.
+            with pytest.raises(R010ServiceSourceDenied):
+                session.abort_unfinished_source_row(
+                    row=1, capture=cap, reason="bad-caller-reason")
+            result = session.abort_unfinished_source_row(
+                row=1, capture=cap, reason=reason)
+            assert result["status"] == "JOB_FAILED_LATCHED"
+            assert result["native_launch_allowed"] is False
+            directory = anchor / env.snapshot()["envelope_root_name"] / "command-journal"
+            failure = json.loads((directory / "r010-row-failure.json").read_text())
+            assert failure["rows"] == ["ROW_AMBIGUOUS"] + ["ROW_VOID"] * 5
+            assert failure["active_row"] == 1
+            assert failure["native_launch_allowed"] is False
+            assert session.status().failed is True
+            assert session.status().current_source_model_next_row is None
+            with pytest.raises(R010ServiceSourceDenied):
+                session.abort_unfinished_source_row(
+                    row=1, capture=cap, reason=reason)
+            with pytest.raises(R010ServiceSourceDenied):
+                session.begin_source_model_row(row=2, nonce=raw[1])
+    finally:
+        os.close(fd)
+
+
+def test_r010_source_abort_uncertain_fsync_also_denies_all_future_rows(
+        product_service, tmp_path, monkeypatch):
+    from gateway import lbe_r010_serial_journal as mod
+    from gateway.lbe_r010_job_envelope import (
+        R010JobEnvelopeDenied, _create_once_in_pinned_anchor)
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_source_service import R010ServiceSourceDenied
+
+    service, _ = product_service
+    fd, _, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no native Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(env, six_nonce_sha256=digests)
+            receipt, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, env, journal)
+            session = service._bind_r010_a1_source_job_only(
+                "a", envelope=env, journal=journal,
+                job_key=key, source=receipt, host=host, closed=closed)
+            cap = session.begin_source_model_row(row=1, nonce=raw[0])
+            def fail_disk(*_a, **_kw):
+                raise R010JobEnvelopeDenied("synthetic failure fsync uncertainty")
+            monkeypatch.setattr(mod, "_write_once", fail_disk)
+            with pytest.raises(R010ServiceSourceDenied, match="permanent deny"):
+                session.abort_unfinished_source_row(
+                    row=1, capture=cap, reason="result_ack_lost")
+            assert journal._failed is True
+            assert session.status().failed is True
+            with pytest.raises(R010ServiceSourceDenied):
+                session.begin_source_model_row(row=2, nonce=raw[1])
+    finally:
+        os.close(fd)

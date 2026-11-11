@@ -6666,3 +6666,175 @@ def test_r010_original_host_claim_rejects_bogus_preexec_helper_digest(
                         closed=closed)
     finally:
         os.close(fd)
+
+
+
+def _r010_model_preexec_source(key, receipt, host, closed):
+    """A synthetic source tuple, NEVER live TLS/Provider/Owner authority."""
+    from gateway.lbe_r010_preexec_source import R010PreexecSourceObservation
+    return R010PreexecSourceObservation(
+        design_blob=key.design_blob,
+        owner_choice_comment_id=key.owner_choice_comment_id,
+        job_envelope_key_sha256=key.key_sha256(),
+        oidc_original_jwt_sha256=receipt.oidc_jwt_sha256,
+        full_darwin_mount_table_sha256=host.mount_table_sha256,
+        helper_keys=closed.helper_keys,
+        helper_env_sha256=closed.helper_env_sha256,
+    )
+
+
+def test_r010_preexec_original_jwt_source_reaches_same_owner_worker_journal(
+        product_service, tmp_path, monkeypatch):
+    """Real source-model Service/Owner/Worker/Journal, synthetic JWT receipt."""
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_row_fs import observe_r010_private_tree
+    from gateway.lbe_worker import LbeWorker
+
+    service, root = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    private = tmp_path / "source-preexec-private"
+    private.mkdir(mode=0o700)
+    private_fd = os.open(
+        private, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    def forbid(*_a, **_kw):
+        raise AssertionError("PREEXEC source T0 must never launch native child")
+    monkeypatch.setattr(subprocess, "Popen", forbid)
+    monkeypatch.setattr(os, "kill", forbid)
+    monkeypatch.setattr(os, "killpg", forbid, raising=False)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as envelope:
+            journal = R010SerialNonceJournal(
+                envelope, six_nonce_sha256=digests)
+            authority, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, envelope, journal)
+            closed = replace(closed, helper_env_sha256="e" * 64)
+            preexec = _r010_model_preexec_source(
+                key, authority, host, closed)
+            session = service._bind_r010_a1_composed_preexec_job_source_only(
+                "a", envelope=envelope, journal=journal,
+                job_key=key, source=authority, host=host,
+                closed=closed, preexec_source=preexec)
+            path = (anchor / envelope.snapshot()["envelope_root_name"]
+                    / "command-journal" /
+                    "r010-service-owner-source-bridge.json")
+            record = json.loads(path.read_bytes())
+            assert record["preexec_source_model_joined"] is True
+            assert len(record["preexec_source_model_sha256"]) == 64
+            assert record["live_preexec_attested"] is False
+            assert record["native_launch_allowed"] is False
+            before = observe_r010_private_tree(root_fd=private_fd)
+            capture = session.begin_source_model_row(row=1, nonce=raw[0])
+            response = LbeWorker(
+                service._lbe_owner,
+                launcher=lambda _plan: _r010_fake_completed_child(0),
+            ).run(capture._plan, r010_source_capture=capture)
+            assert response["status"] == "exited"
+            row = session.finish_source_model_row(
+                row=1, capture=capture, private_root_fd=private_fd,
+                private_before=before)
+            assert row["status"] == "OWNER_WORKER_FINITE_SOURCE_MODEL_ZERO_NOT_T1"
+            assert row["native_launch_allowed"] is False
+            assert session.status().source_model_rows_completed == 1
+            assert session.status().provider_runtime_authenticated is False
+            assert session.status().native_launch_allowed is False
+            with pytest.raises(GatewayError) as exc:
+                service.invoke_exec(
+                    "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                    dry_run=False)
+            assert exc.value.code == "exec_cleanup_proof_required"
+    finally:
+        os.close(private_fd)
+        os.close(fd)
+
+
+@pytest.mark.parametrize("mismatch", [
+    "wrong_jwt", "wrong_design", "wrong_choice", "wrong_job",
+    "wrong_mount", "wrong_env", "claimed_live", "claimed_grant",
+])
+def test_r010_composed_preexec_source_cross_job_drift_fails_before_nonce(
+        product_service, tmp_path, mismatch):
+    """SOURCE-only congruence cannot promote forged PREEXEC/Grant booleans."""
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_source_service import R010ServiceSourceDenied
+
+    service, root = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as envelope:
+            journal = R010SerialNonceJournal(
+                envelope, six_nonce_sha256=digests)
+            authority, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, envelope, journal)
+            closed = replace(closed, helper_env_sha256="e" * 64)
+            preexec = _r010_model_preexec_source(
+                key, authority, host, closed)
+            if mismatch == "wrong_jwt":
+                preexec = replace(preexec, oidc_original_jwt_sha256="9" * 64)
+            elif mismatch == "wrong_design":
+                preexec = replace(preexec, design_blob="a" * 40)
+            elif mismatch == "wrong_choice":
+                preexec = replace(preexec, owner_choice_comment_id=1)
+            elif mismatch == "wrong_job":
+                preexec = replace(preexec, job_envelope_key_sha256="b" * 64)
+            elif mismatch == "wrong_mount":
+                preexec = replace(preexec, full_darwin_mount_table_sha256="c" * 64)
+            elif mismatch == "wrong_env":
+                preexec = replace(preexec, helper_env_sha256="d" * 64)
+            elif mismatch == "claimed_live":
+                preexec = replace(preexec, signed_provider_job_live=True)
+            else:
+                preexec = replace(preexec, owner_product_t1_grant_verified=True)
+            with pytest.raises(R010ServiceSourceDenied):
+                service._bind_r010_a1_composed_preexec_job_source_only(
+                    "a", envelope=envelope, journal=journal,
+                    job_key=key, source=authority, host=host,
+                    closed=closed, preexec_source=preexec)
+            path = anchor / envelope.snapshot()["envelope_root_name"]
+            assert not (path / "command-journal" /
+                        "r010-service-owner-source-bridge.json").exists()
+            assert not journal._burned
+    finally:
+        os.close(fd)
+
+
+def test_r010_composed_preexec_source_changed_after_burn_stops_worker(
+        product_service, tmp_path, monkeypatch):
+    """The original preexec tuple is verified again at Worker prelauncher."""
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    launched = []
+    def fake(_plan):
+        launched.append(True)
+        return _r010_fake_completed_child(0)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no T1 Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as envelope:
+            journal = R010SerialNonceJournal(envelope, six_nonce_sha256=digests)
+            authority, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, envelope, journal)
+            closed = replace(closed, helper_env_sha256="e" * 64)
+            preexec = _r010_model_preexec_source(key, authority, host, closed)
+            session = service._bind_r010_a1_composed_preexec_job_source_only(
+                "a", envelope=envelope, journal=journal,
+                job_key=key, source=authority, host=host,
+                closed=closed, preexec_source=preexec)
+            cap = session.begin_source_model_row(row=1, nonce=raw[0])
+            session._preexec = replace(
+                preexec, oidc_original_jwt_sha256="a" * 64)
+            with pytest.raises(LbeWorkerError) as exc:
+                LbeWorker(service._lbe_owner, launcher=fake).run(
+                    cap._plan, r010_source_capture=cap)
+            assert exc.value.code == "invalid_worker_dependency"
+            assert launched == []
+            assert session.status().failed is True
+            assert session.status().native_launch_allowed is False
+    finally:
+        os.close(fd)

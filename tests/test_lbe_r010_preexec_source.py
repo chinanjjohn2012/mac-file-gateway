@@ -1,6 +1,7 @@
 """R010 all-source PREEXEC composition with synthetic RSA/Job/Mount, T0."""
 from dataclasses import replace
 import base64
+import hashlib
 import json
 import os
 import socket
@@ -233,6 +234,9 @@ def test_exact_all_source_only_components_scrub_and_remain_deny(source_inputs):
     assert "ACTIONS_ID_TOKEN_REQUEST_TOKEN" not in env
     assert original_token not in repr(obs)
     assert set(env) == {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"}
+    assert obs.helper_env_sha256 == hashlib.sha256(json.dumps(
+        env, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True).encode("ascii")).hexdigest()
 
 
 @pytest.mark.parametrize("kind", [

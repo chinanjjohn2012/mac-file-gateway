@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
+import hashlib
+import json
 
 from .lbe_r010_owner_choice import (
     R010OwnerChoiceDenied, validate_r010_owner_design_choice_offline,
@@ -43,6 +45,7 @@ class R010PreexecSourceObservation:
     oidc_original_jwt_sha256: str
     full_darwin_mount_table_sha256: str
     helper_keys: tuple[str, ...]
+    helper_env_sha256: str = ""
     status: str = "PREEXEC_SOURCE_ONLY_NONOPERATIVE_NOT_PROVIDER_ATTESTED"
     native_launch_allowed: bool = False
     signed_provider_job_live: bool = False
@@ -142,6 +145,9 @@ def compose_r010_preexec_source_only(
             oidc_original_jwt_sha256=signature.jwt_sha256,
             full_darwin_mount_table_sha256=mount.full_table_sha256,
             helper_keys=tuple(sorted(helper)),
+            helper_env_sha256=hashlib.sha256(json.dumps(
+                helper, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=True).encode("ascii")).hexdigest(),
         )
     except BaseException:
         # Any failing source-only PREEXEC observation must not leave a usable

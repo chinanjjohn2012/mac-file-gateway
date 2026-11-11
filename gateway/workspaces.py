@@ -802,6 +802,26 @@ class WorkspaceService:
             envelope=envelope, journal=journal, job_key=job_key,
             source=source, host=host, closed=closed)
 
+    def _bind_r010_a1_composed_preexec_job_source_only(
+        self, name: str, *, envelope: object, journal: object,
+        job_key: object, source: object, host: object, closed: object,
+        preexec_source: object,
+    ):
+        """Close PREEXEC original-JWT SOURCE -> own Owner/Worker/Journal.
+
+        The PREEXEC certificate is a model-only original-signature source:
+        issuer JWKS TLS/current Job/Owner T1 remain unverified. This method
+        never installs an Exec grant or exposes any positive REST/MCP path.
+        """
+        from .lbe_r010_source_service import (
+            bind_r010_authority_source_to_service_only,
+        )
+        return bind_r010_authority_source_to_service_only(
+            service=self, workspace=name,
+            envelope=envelope, journal=journal, job_key=job_key,
+            source=source, host=host, closed=closed,
+            preexec_source=preexec_source)
+
     def _finalize_r010_first_row_source_only(
         self, name: str, *, journal: object, capture: object,
         private_root_fd: int, private_before: object,

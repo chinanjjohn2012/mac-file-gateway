@@ -28,6 +28,7 @@ from .lbe_r010_job_envelope import (
     R010CreatedJobEnvelope, R010JobEnvelopeDenied, R010JobKey, _write_once,
 )
 from .lbe_r010_private_capture import R010PrivateWorkerCapture
+from .lbe_r010_preexec_source import R010PreexecSourceObservation
 from .lbe_r010_serial_journal import R010SerialNonceJournal
 from .workspaces import WorkspaceContext, WorkspaceService
 
@@ -102,6 +103,54 @@ def _check_real_post_scrub_product_environment(
     if _digest(raw) != closed.helper_env_sha256:
         raise R010ServiceSourceDenied(
             "A1 PREEXEC helper environment changed after original scrub")
+
+
+def _composed_preexec_sha256(
+    *, preexec: R010PreexecSourceObservation,
+    key: R010JobKey, source: R010AuthoritySourceBinding,
+    host: R010A1HostSource, closed: R010A1ClosedPreexecSource,
+) -> str:
+    """Join ORIGINAL-JWT-verified PREEXEC source data to same Job/host/helper.
+
+    A PREEXEC source observation proves only that cryptographic verification
+    worked against supplied *untrusted* JWKS/issuer bytes. It is NOT provider
+    TLS provenance, a current live Job/Owner attestation, or T1 authority.
+    """
+    if (type(preexec) is not R010PreexecSourceObservation
+            or preexec.status !=
+                "PREEXEC_SOURCE_ONLY_NONOPERATIVE_NOT_PROVIDER_ATTESTED"
+            or preexec.native_launch_allowed is not False
+            or preexec.signed_provider_job_live is not False
+            or preexec.owner_product_t1_grant_verified is not False
+            or preexec.full_code_review_pass is not False
+            or preexec.six_command_product_t1_pass is not False
+            or preexec.design_blob != key.design_blob
+            or preexec.owner_choice_comment_id != key.owner_choice_comment_id
+            or preexec.job_envelope_key_sha256 != key.key_sha256()
+            or preexec.oidc_original_jwt_sha256 != source.oidc_jwt_sha256
+            or preexec.full_darwin_mount_table_sha256
+               != host.mount_table_sha256
+            or preexec.full_darwin_mount_table_sha256
+               != closed.mount_table_sha256
+            or preexec.helper_keys != _HELPER_KEYS
+            or preexec.helper_env_sha256 != closed.helper_env_sha256
+            or not _sha256(preexec.helper_env_sha256)):
+        raise R010ServiceSourceDenied(
+            "PREEXEC signed source/Owner/Job/host binding mismatched")
+    payload = {
+        "version": "R010_PREEXEC_JOB_SOURCE_LINK_V1",
+        "job_key_sha256": key.key_sha256(),
+        "design_blob": preexec.design_blob,
+        "owner_choice_comment_id": preexec.owner_choice_comment_id,
+        "original_jwt_sha256": preexec.oidc_original_jwt_sha256,
+        "host_mount_sha256": preexec.full_darwin_mount_table_sha256,
+        "helper_env_sha256": preexec.helper_env_sha256,
+        "source_only": True,
+        "native_launch_allowed": False,
+    }
+    return _digest((json.dumps(
+        payload, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True) + "\n").encode("ascii"))
 
 
 def _read_durable_authority_source(
@@ -210,6 +259,10 @@ def _read_durable_bridge_source(
                 or record.get("host_original_os_source_claim")
                     is not session._host.host_snapshot_from_original_os
                 or record.get("preexec_source_scrubbed") is not True
+                or record.get("preexec_source_model_joined")
+                   is not (session._preexec is not None)
+                or record.get("preexec_source_model_sha256")
+                   != session._preexec_sha256
                 or record.get("live_preexec_attested") is not False
                 or record.get("native_launch_allowed") is not False
                 or record.get("row_positive_success") is not False
@@ -230,7 +283,7 @@ class R010ServiceSourceSession:
     __slots__ = (
         "_service", "_ctx", "_envelope", "_journal", "_source",
         "_host", "_closed", "_key", "_bridge_digest", "_next",
-        "_capture", "_failed", "_lock",
+        "_capture", "_failed", "_lock", "_preexec", "_preexec_sha256",
     )
 
     def __init__(self, marker: object, *,
@@ -240,7 +293,9 @@ class R010ServiceSourceSession:
                  source: R010AuthoritySourceBinding,
                  host: R010A1HostSource,
                  closed: R010A1ClosedPreexecSource,
-                 key: R010JobKey, bridge_digest: str):
+                 key: R010JobKey, bridge_digest: str,
+                 preexec: R010PreexecSourceObservation | None,
+                 preexec_sha256: str | None):
         if marker is not _MARKER:
             raise R010ServiceSourceDenied("not a first-party source session")
         self._service = service
@@ -250,6 +305,8 @@ class R010ServiceSourceSession:
         self._source = source
         self._host = host
         self._closed = closed
+        self._preexec = preexec
+        self._preexec_sha256 = preexec_sha256
         self._key = key
         self._bridge_digest = bridge_digest
         self._next = 1
@@ -275,6 +332,13 @@ class R010ServiceSourceSession:
         _read_durable_authority_source(
             self._envelope, self._source, self._key)
         _read_durable_bridge_source(self._envelope, self)
+        if self._preexec is not None:
+            observed_sha = _composed_preexec_sha256(
+                preexec=self._preexec, key=self._key,
+                source=self._source, host=self._host, closed=self._closed)
+            if observed_sha != self._preexec_sha256:
+                raise R010ServiceSourceDenied(
+                    "composed PREEXEC source changed before Worker")
         _check_real_post_scrub_product_environment(
             self._host, self._closed)
 
@@ -436,6 +500,7 @@ def bind_r010_authority_source_to_service_only(
     envelope: R010CreatedJobEnvelope, journal: R010SerialNonceJournal,
     job_key: R010JobKey, source: R010AuthoritySourceBinding,
     host: R010A1HostSource, closed: R010A1ClosedPreexecSource,
+    preexec_source: R010PreexecSourceObservation | None = None,
 ) -> R010ServiceSourceSession:
     """Persist EXACT source->SAME service/Owner bind before any nonce burn.
 
@@ -498,6 +563,11 @@ def bind_r010_authority_source_to_service_only(
             raise R010ServiceSourceDenied("wrong source/Owner/Job contract")
         service._exec_state.require_healthy()
         _check_real_post_scrub_product_environment(host, closed)
+        preexec_sha = None
+        if preexec_source is not None:
+            preexec_sha = _composed_preexec_sha256(
+                preexec=preexec_source, key=job_key,
+                source=source, host=host, closed=closed)
     except (R010ServiceSourceDenied, ValueError, TypeError, AttributeError):
         raise R010ServiceSourceDenied(
             "R010 service or PREEXEC source contract unavailable") from None
@@ -524,6 +594,8 @@ def bind_r010_authority_source_to_service_only(
                 "host_full_mount_sha256": host.mount_table_sha256,
                 "host_original_os_source_claim": host.host_snapshot_from_original_os,
                 "preexec_source_scrubbed": True,
+                "preexec_source_model_joined": preexec_source is not None,
+                "preexec_source_model_sha256": preexec_sha,
                 "live_preexec_attested": False,
                 "native_launch_allowed": False,
                 "row_positive_success": False,
@@ -538,7 +610,8 @@ def bind_r010_authority_source_to_service_only(
             session = R010ServiceSourceSession(
                 _MARKER, service=service, ctx=ctx, envelope=envelope,
                 journal=journal, source=source, host=host, closed=closed,
-                key=job_key, bridge_digest=_digest(payload))
+                key=job_key, bridge_digest=_digest(payload),
+                preexec=preexec_source, preexec_sha256=preexec_sha)
             journal._r010_source_session = session
             return session
         except R010JobEnvelopeDenied:

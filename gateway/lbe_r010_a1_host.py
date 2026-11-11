@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from collections.abc import MutableMapping
 from dataclasses import dataclass
+import hashlib
+import json
 import os
 import platform
 import re
@@ -76,6 +78,9 @@ class R010A1ClosedPreexecSource:
     mount_table_sha256: str
     helper_keys: tuple[str, ...]
     child_keys: tuple[str, ...]
+    # SHA of exact canonical five-key post-scrub map. This is an
+    # in-process equality witness ONLY, not provider or Owner attestation.
+    helper_env_sha256: str = ""
     status: str = "R010_A1_SOURCE_ONLY_SCRUBBED_NOT_LIVE_PREEXEC"
     live_oidc_token_requested: bool = False
     ssh_agent_protocol_called: bool = False
@@ -228,6 +233,9 @@ def close_r010_a1_preexec_source_t0(
             mount_table_sha256=host.mount_table_sha256,
             helper_keys=tuple(sorted(helper)),
             child_keys=tuple(sorted(child)),
+            helper_env_sha256=hashlib.sha256(json.dumps(
+                helper, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=True).encode("ascii")).hexdigest(),
         )
     except BaseException:
         # All failure modes remove the original selectors from mutable maps;

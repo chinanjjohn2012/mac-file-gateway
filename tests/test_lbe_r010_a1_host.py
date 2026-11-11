@@ -4,6 +4,8 @@ No real SSH agent connect, OIDC token, autofs target access, child Popen,
 Go/Pipenv/Python PRODUCT_T1 or destructive test. All host sources are injected.
 """
 from dataclasses import replace
+import hashlib
+import json
 from types import SimpleNamespace
 import os
 import socket
@@ -189,6 +191,9 @@ def test_a1_exact_18_plus_2_preexec_scrubs_into_closed_five_keys(host_readers):
         "TMPDIR": "/private/tmp/r010-reviewed-tmp",
         "LANG": "C", "LC_ALL": "C",
     }
+    assert result.helper_env_sha256 == hashlib.sha256(
+        json.dumps(original, sort_keys=True, separators=(",", ":"),
+                   ensure_ascii=True).encode("ascii")).hexdigest()
     for bad in ("SSH_AUTH_SOCK", "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
                 "ACTIONS_ID_TOKEN_REQUEST_URL"):
         assert bad not in original

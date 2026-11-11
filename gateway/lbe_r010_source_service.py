@@ -67,6 +67,43 @@ def _sha256(value: object) -> bool:
             and all(c in _HEX for c in value))
 
 
+def _check_real_post_scrub_product_environment(
+    host: R010A1HostSource, closed: R010A1ClosedPreexecSource,
+) -> None:
+    """A1 physical-host SOURCE claim requires the ACTUAL five-key OS map.
+
+    Synthetic/source-only fixtures are intentionally not authenticated
+    provider evidence. An actual-host candidate must not silently borrow
+    the T0 helper key NAMES while the process still holds SSH/OIDC
+    credential selectors. This is a live in-process environment check,
+    not a proof of no other same-UID access or a native execution grant.
+    """
+    if host.host_snapshot_from_original_os is not True:
+        return
+    if not _sha256(closed.helper_env_sha256):
+        raise R010ServiceSourceDenied(
+            "no original five-key PREEXEC helper digest")
+    current = dict(os.environ)
+    if (frozenset(current) != frozenset(_HELPER_KEYS)
+            or any(type(key) is not str or type(val) is not str
+                   for key, val in current.items())
+            or current.get("PATH") != "/usr/bin:/bin"
+            or current.get("LANG") != "C"
+            or current.get("LC_ALL") != "C"
+            or any(
+                not current.get(key, "").startswith("/")
+                or ".." in current.get(key, "").split("/")
+                for key in ("HOME", "TMPDIR"))):
+        raise R010ServiceSourceDenied(
+            "unclosed real A1 product process environment")
+    raw = json.dumps(
+        current, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True).encode("ascii")
+    if _digest(raw) != closed.helper_env_sha256:
+        raise R010ServiceSourceDenied(
+            "A1 PREEXEC helper environment changed after original scrub")
+
+
 def _read_durable_authority_source(
     envelope: R010CreatedJobEnvelope,
     source: R010AuthoritySourceBinding,
@@ -238,6 +275,8 @@ class R010ServiceSourceSession:
         _read_durable_authority_source(
             self._envelope, self._source, self._key)
         _read_durable_bridge_source(self._envelope, self)
+        _check_real_post_scrub_product_environment(
+            self._host, self._closed)
 
     def _check(self) -> None:
         """Validate pinned source+service identities before Worker transition."""
@@ -458,6 +497,7 @@ def bind_r010_authority_source_to_service_only(
                 or closed.child_keys != _HELPER_KEYS):
             raise R010ServiceSourceDenied("wrong source/Owner/Job contract")
         service._exec_state.require_healthy()
+        _check_real_post_scrub_product_environment(host, closed)
     except (R010ServiceSourceDenied, ValueError, TypeError, AttributeError):
         raise R010ServiceSourceDenied(
             "R010 service or PREEXEC source contract unavailable") from None

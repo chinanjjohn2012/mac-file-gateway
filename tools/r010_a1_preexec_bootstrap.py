@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from collections.abc import MutableMapping
 from dataclasses import dataclass
+import hashlib
+import json
 import os
 import re
 from urllib.parse import urlsplit
@@ -56,6 +58,7 @@ class R010BootstrapClosedSource:
     """Real map scrub, but no signed Job/Owner/native execution evidence."""
 
     helper_names: tuple[str, ...]
+    helper_env_sha256: str
     status: str = "R010_A1_PREIMPORT_SCRUB_SOURCE_ONLY"
     original_oidc_token_requested: bool = False
     ssh_agent_protocol_calls: int = 0
@@ -153,7 +156,11 @@ def close_r010_a1_preimport_bootstrap(
         env.update(helper)
         if frozenset(env) != _HELPER or dict(env) != helper:
             raise R010BootstrapDenied("bootstrap scrub not verified")
-        return R010BootstrapClosedSource(helper_names=tuple(sorted(helper)))
+        return R010BootstrapClosedSource(
+            helper_names=tuple(sorted(helper)),
+            helper_env_sha256=hashlib.sha256(json.dumps(
+                helper, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=True).encode("ascii")).hexdigest())
     except BaseException:
         # Credential-bearing selector *values* are never logged or returned.
         # Clear even on invalid input; no fallback to R006 or a product Popen.

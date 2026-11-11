@@ -4,6 +4,8 @@ No actual OIDC request, Github Job, SSH agent, autofs activation or product
 Popen. This guards the pre-gateway-import bootstrap SOURCE contract only.
 """
 from dataclasses import replace
+import hashlib
+import json
 import ast
 import inspect
 import os
@@ -91,6 +93,9 @@ def test_exact_18_plus_2_preexec_scrub_matches_existing_product_rule():
         "PATH": "/usr/bin:/bin", "HOME": "/private/tmp/r010-test-home",
         "TMPDIR": "/private/tmp/r010-test-tmp", "LANG": "C", "LC_ALL": "C"}
     assert set(observed.helper_names) == set(env)
+    assert observed.helper_env_sha256 == hashlib.sha256(
+        json.dumps(env, sort_keys=True, separators=(",", ":"),
+                   ensure_ascii=True).encode("ascii")).hexdigest()
     assert "SSH_AUTH_SOCK" not in env
     assert BEARER not in repr(observed)
     assert SOCK not in repr(observed)

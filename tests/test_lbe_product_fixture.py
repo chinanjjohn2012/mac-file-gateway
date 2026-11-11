@@ -6564,3 +6564,105 @@ def test_r010_source_abort_uncertain_fsync_also_denies_all_future_rows(
                 session.begin_source_model_row(row=2, nonce=raw[1])
     finally:
         os.close(fd)
+
+
+
+def test_r010_original_host_claim_requires_actual_closed_product_os_environment(
+        product_service, tmp_path, monkeypatch):
+    """At the Worker boundary, a *real-host claim* cannot keep SSH/OIDC env."""
+    import hashlib
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_source_service import R010ServiceSourceDenied
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    helper = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/private/tmp/r010-private-home",
+        "TMPDIR": "/private/tmp/r010-private-tmp",
+        "LANG": "C", "LC_ALL": "C",
+    }
+    digest = hashlib.sha256(json.dumps(
+        helper, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True).encode("ascii")).hexdigest()
+    launched = []
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no native Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(env, six_nonce_sha256=digests)
+            receipt, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, env, journal)
+            # Deliberately mark a T0 synthetic host as if original. This
+            # DOES NOT authenticate it, but now requires actual OS env
+            # strictness to avoid treating a dataclass as a scrub.
+            host = replace(host, host_snapshot_from_original_os=True)
+            closed = replace(closed, helper_env_sha256=digest)
+            # Current inherited pytest/GitHub ambient env is not the exact
+            # five-key product-helper environment; it must be refused.
+            with monkeypatch.context() as m:
+                m.setattr(os, "environ", {**helper,
+                                         "SSH_AUTH_SOCK": "/private/tmp/agent"})
+                with pytest.raises(R010ServiceSourceDenied):
+                    service._bind_r010_a1_source_job_only(
+                        "a", envelope=env, journal=journal,
+                        job_key=key, source=receipt, host=host,
+                        closed=closed)
+            # Only the exact five-key map may be SOURCE-bound.
+            with monkeypatch.context() as m:
+                m.setattr(os, "environ", helper)
+                session = service._bind_r010_a1_source_job_only(
+                    "a", envelope=env, journal=journal,
+                    job_key=key, source=receipt, host=host,
+                    closed=closed)
+                assert session.status().native_launch_allowed is False
+                cap = session.begin_source_model_row(row=1, nonce=raw[0])
+                # A new ambient selector between nonce burn and the actual
+                # Worker callback MUST be rejected before the fake launcher.
+                helper["SSH_AUTH_SOCK"] = "/private/tmp/t0-ssh"
+                def fake_launcher(_plan):
+                    launched.append(True)
+                    return _r010_fake_completed_child()
+                with pytest.raises(LbeWorkerError) as exc:
+                    LbeWorker(
+                        service._lbe_owner, launcher=fake_launcher).run(
+                        cap._plan, r010_source_capture=cap)
+                assert exc.value.code == "invalid_worker_dependency"
+                assert launched == []
+                assert session.status().failed is True
+    finally:
+        os.close(fd)
+
+
+def test_r010_original_host_claim_rejects_bogus_preexec_helper_digest(
+        product_service, tmp_path, monkeypatch):
+    """No client-authored matching key names may bypass map-value drift."""
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_source_service import R010ServiceSourceDenied
+
+    service, _ = product_service
+    fd, _, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    helper = {
+        "PATH": "/usr/bin:/bin", "HOME": "/private/tmp/r010-private-home",
+        "TMPDIR": "/private/tmp/r010-private-tmp", "LANG": "C", "LC_ALL": "C",
+    }
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(env, six_nonce_sha256=digests)
+            receipt, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, env, journal)
+            host = replace(host, host_snapshot_from_original_os=True)
+            closed = replace(closed, helper_env_sha256="a" * 64)
+            with monkeypatch.context() as m:
+                m.setattr(os, "environ", helper)
+                with pytest.raises(R010ServiceSourceDenied):
+                    service._bind_r010_a1_source_job_only(
+                        "a", envelope=env, journal=journal,
+                        job_key=key, source=receipt, host=host,
+                        closed=closed)
+    finally:
+        os.close(fd)

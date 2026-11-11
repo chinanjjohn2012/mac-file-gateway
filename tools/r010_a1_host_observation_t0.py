@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -22,13 +23,32 @@ from gateway.lbe_r010_a1_host import (
 )
 
 
+_SAFE_REASONS = {
+    "unqualified ambient SSH selector shape": "SSH_SELECTOR_MISSING_OR_BAD_SHAPE",
+    "unreviewed Darwin ARM64 build": "DARWIN_ARCH_OR_RELEASE_DRIFT",
+    "reviewed Job/image source claim mismatch": "GITHUB_IMAGE_CLAIM_DRIFT",
+    "unreviewed Head/run/attempt/job source": "JOB_IDENTITY_DRIFT",
+    "ambient network proxy selector present": "AMBIENT_PROXY_PRESENT",
+    "injected system version invalid": "SYSTEM_VERSION_INJECTION_DENIED",
+    "host OS build mismatch": "HOST_OS_BUILD_DRIFT",
+    "host selected source receipt invalid": "SELECTED_SOURCE_RECEIPT_INVALID",
+    "host A1 mount source invalid": "A1_MOUNT_SOURCE_INVALID",
+    "A1 selected host source unavailable": "HOST_OS_OR_MOUNT_SOURCE_UNAVAILABLE",
+    "not actual source-only A1 observation": "NOT_ACTUAL_OS_OBSERVATION",
+    "unexpected R006 A0 result": "A0_UNEXPECTED_DENY_REASON",
+    "R006 A0 unexpectedly accepted A1 source": "A0_UNEXPECTED_ALLOW",
+}
+
+
 def main() -> int:
+    phase = "A1_SOURCE"
     try:
         a1 = inspect_r010_a1_host_source_t0()
         if (a1.status != "R010_A1_HOST_SOURCE_ONLY_NO_PRODUCT_T1"
                 or a1.native_launch_allowed is not False
                 or a1.host_snapshot_from_original_os is not True):
             raise R010A1HostDenied("not actual source-only A1 observation")
+        phase = "A0_NEGATIVE_CONTROL"
         try:
             verify_r006_fixed_host_allowlist_t0()
         except D4R006HostAllowlistDenied as exc:
@@ -53,11 +73,16 @@ def main() -> int:
         print(json.dumps(report, sort_keys=True, separators=(",", ":")))
         return 0
     except (R010A1HostDenied, D4R006HostAllowlistDenied,
-            OSError, ValueError):
-        # No SSH socket path, agent identities, local secret value or raw
-        # system source is exposed in failure output.
+            OSError, ValueError) as exc:
+        # Only whitelisted static error CODES may be logged, never the
+        # exception body, SSH socket PATH, bearer, JWT or raw source.
+        reason = _SAFE_REASONS.get(str(exc), "UNQUALIFIED_SOURCE")
         print(json.dumps({
             "status": "R010_A1_HOST_SOURCE_T0_DENY",
+            "phase": phase,
+            "reason_code": reason,
+            "ssh_selector_name_present": bool(
+                os.environ.get("SSH_AUTH_SOCK")),
             "native_launch_allowed": False,
             "r006_a0_authority_replaced": False,
         }, sort_keys=True, separators=(",", ":")))

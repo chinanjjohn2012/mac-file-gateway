@@ -6139,3 +6139,249 @@ def test_r010_owner_health_drift_during_finite_postflight_latches_job(
     finally:
         os.close(fd)
         os.close(pfd)
+
+
+
+def _r010_synthetic_chain_before_same_service_worker(key, env, journal):
+    """Synthetic signed/current/Owner references, but an ACTUAL private file."""
+    from gateway.lbe_r010_authority_source import (
+        bind_r010_authority_source_to_job)
+    from gateway.lbe_r010_grant_candidate import (
+        R010GrantExpected, R010GrantSourceObservation)
+    from gateway.lbe_r010_owner_choice import R010OwnerDesignChoiceObservation
+    from gateway.lbe_r010_provider_transport import R010GithubOwnerRead
+    from gateway.lbe_r010_provider_job import R010CurrentJobSource
+    from gateway.lbe_r010_a1_host import (
+        R010A1HostSource, R010A1ClosedPreexecSource)
+
+    choice = R010OwnerDesignChoiceObservation(
+        comment_id=key.owner_choice_comment_id, body_sha256="1" * 64,
+        design_id=key.design_id, design_blob=key.design_blob,
+        b_review_node_id="PRR_R014_B", c_review_node_id="PRR_R014_C",
+        options=("A1", "B1"),
+        risk_marker="R010_REAFFIRM_R006_RISK1_9_PLUS_RISK10_11",
+    )
+    owner = R010GithubOwnerRead(
+        choice=choice, raw_choice_sha256="2" * 64,
+        raw_reviews_sha256="3" * 64)
+    current = R010CurrentJobSource(
+        run_id=key.run_id, run_attempt=key.run_attempt,
+        job_id=3001, check_run_id=key.check_run_id,
+        head_sha=key.head_sha, run_body_sha256="4" * 64,
+        jobs_body_sha256="5" * 64, oidc_jwt_sha256="6" * 64)
+    grant = R010GrantSourceObservation(
+        grant_comment_id=987654321, body_sha256="7" * 64,
+        implementation_head_sha=key.head_sha,
+        standards_review_node_id="PRR_CODE_B",
+        spec_review_node_id="PRR_CODE_C",
+        signed_jwt_sha256="6" * 64,
+        job_envelope_key_sha256=key.key_sha256(),
+        grant_expires_unix=1800000100)
+    values = {n: "f" * 64 for n in R010GrantExpected.__dataclass_fields__}
+    values.update(
+        base_sha="b" * 40, head_sha=key.head_sha, tree_sha="c" * 40,
+        job_envelope_key_sha256=key.key_sha256())
+    receipt = bind_r010_authority_source_to_job(
+        envelope=env, job_key=key, journal=journal,
+        owner_source=owner, current_job=current,
+        grant_source=grant, expected=R010GrantExpected(**values))
+    host = R010A1HostSource(
+        head_sha=key.head_sha, run_id=str(key.run_id),
+        run_attempt=str(key.run_attempt), job_name=key.job_name,
+        image_version="20261104.0514.1",
+        host_source_sha256="8" * 64,
+        mount_table_sha256="9" * 64,
+        ssh_selector_observed=True, host_snapshot_from_original_os=False)
+    helper = ("HOME", "LANG", "LC_ALL", "PATH", "TMPDIR")
+    closed = R010A1ClosedPreexecSource(
+        head_sha=key.head_sha, run_id=str(key.run_id),
+        mount_table_sha256=host.mount_table_sha256,
+        helper_keys=helper, child_keys=helper)
+    return receipt, host, closed
+
+
+def test_r010_actual_service_owner_worker_and_persisted_source_join_six_rows(
+        product_service, tmp_path, monkeypatch):
+    """Actual internal service/Worker/Owner/Journal; six FakeChildren T0."""
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_source_service import (
+        bind_r010_authority_source_to_service_only,
+        R010ServiceSourceDenied)
+    from gateway.lbe_r010_row_fs import observe_r010_private_tree
+    from gateway.lbe_r010_finite_integrity import observe_go_output_absent
+    from gateway.lbe_worker import LbeWorker
+
+    service, root = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    work = tmp_path / "private-source-bridge"
+    work.mkdir(mode=0o700)
+    pfd = os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    def denied(*_a, **_kw):
+        raise AssertionError("R010 source bridge must never start native child")
+    monkeypatch.setattr(subprocess, "Popen", denied)
+    monkeypatch.setattr(os, "kill", denied)
+    monkeypatch.setattr(os, "killpg", denied, raising=False)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(
+                env, six_nonce_sha256=digests)
+            receipt, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, env, journal)
+            session = bind_r010_authority_source_to_service_only(
+                service=service, workspace="a", envelope=env,
+                journal=journal, job_key=key, source=receipt,
+                host=host, closed=closed)
+            assert session.status().native_launch_allowed is False
+            assert session.status().provider_runtime_authenticated is False
+            directory = anchor / env.snapshot()["envelope_root_name"] / "command-journal"
+            record = json.loads(
+                (directory / "r010-service-owner-source-bridge.json").read_text())
+            assert record["authority_source_sha256"] == receipt.source_digest_sha256
+            assert record["host_original_os_source_claim"] is False
+            assert record["live_preexec_attested"] is False
+            assert record["native_launch_allowed"] is False
+            with pytest.raises(R010ServiceSourceDenied, match="already claimed"):
+                bind_r010_authority_source_to_service_only(
+                    service=service, workspace="a", envelope=env,
+                    journal=journal, job_key=key, source=receipt,
+                    host=host, closed=closed)
+
+            for row in range(1, 7):
+                before = observe_r010_private_tree(root_fd=pfd)
+                capture = session.begin_source_model_row(
+                    row=row, nonce=raw[row - 1])
+                assert capture.status()["same_service_source_bound"] is True
+                assert capture.status()["row"] == row
+                go_fd = -1
+                go_before = None
+                if row == 6:
+                    go_fd = os.open(
+                        root / "go-project" / "bin",
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    go_before = observe_go_output_absent(parent_fd=go_fd)
+                def fake_launcher(plan):
+                    if row == 6:
+                        output = root / "go-project" / "bin" / "app"
+                        output.write_bytes(b"model-go-compiler-output\n")
+                        output.chmod(0o700)
+                    return _r010_fake_completed_child(0)
+                try:
+                    result = LbeWorker(
+                        service._lbe_owner, launcher=fake_launcher
+                    ).run(capture._plan, r010_source_capture=capture)
+                    assert result["status"] == "exited"
+                    decision = session.finish_source_model_row(
+                        row=row, capture=capture,
+                        private_root_fd=pfd, private_before=before,
+                        go_output_parent_fd=go_fd if go_fd >= 0 else None,
+                        go_output_before=go_before)
+                finally:
+                    if go_fd >= 0:
+                        os.close(go_fd)
+                assert decision["status"] == (
+                    "OWNER_WORKER_FINITE_SOURCE_MODEL_ZERO_NOT_T1")
+                assert session.status().source_model_rows_completed == row
+                assert session.status().six_command_product_t1_pass is False
+                assert decision["native_launch_allowed"] is False
+                assert journal.row_state_snapshot()["source_only_model_rows_completed"] == row
+                with pytest.raises(R010ServiceSourceDenied):
+                    session.begin_source_model_row(row=row, nonce=raw[row-1])
+            assert session.status().current_source_model_next_row is None
+            assert journal.row_state_snapshot()["job_state_model"] == "JOB_SIX_COMMAND_COMPLETE"
+            for cwd, argv in _ROWS:
+                with pytest.raises(GatewayError) as denied_exec:
+                    service.invoke_exec("a", cwd, argv, dry_run=False)
+                assert denied_exec.value.code == "exec_cleanup_proof_required"
+    finally:
+        os.close(fd)
+        os.close(pfd)
+    assert service._active_operations == 0
+
+
+@pytest.mark.parametrize("drift", [
+    "wrong_head", "wrong_run", "wrong_mount", "claimed_native",
+    "wrong_service", "missing_original_record", "tampered_source_record",
+])
+def test_r010_source_service_bridge_rejects_cross_job_and_untrusted_source(
+        product_service, tmp_path, monkeypatch, drift):
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_source_service import (
+        R010ServiceSourceDenied, bind_r010_authority_source_to_service_only)
+
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no native Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(env, six_nonce_sha256=digests)
+            receipt, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, env, journal)
+            workspace = "a"
+            if drift == "wrong_head":
+                host = replace(host, head_sha="e" * 40)
+            elif drift == "wrong_run":
+                host = replace(host, run_id="999")
+            elif drift == "wrong_mount":
+                closed = replace(closed, mount_table_sha256="0" * 64)
+            elif drift == "claimed_native":
+                receipt = replace(receipt, native_launch_allowed=True)
+            elif drift == "wrong_service":
+                workspace = "foreign"
+            elif drift == "missing_original_record":
+                os.unlink(
+                    "r010-authority-source-binding.json",
+                    dir_fd=env._journal_fd)
+            elif drift == "tampered_source_record":
+                with open(
+                    anchor / env.snapshot()["envelope_root_name"]
+                    / "command-journal" / "r010-authority-source-binding.json",
+                    "ab") as out:
+                    out.write(b"tamper")
+            with pytest.raises((R010ServiceSourceDenied, GatewayError)):
+                bind_r010_authority_source_to_service_only(
+                    service=service, workspace=workspace, envelope=env,
+                    journal=journal, job_key=key, source=receipt,
+                    host=host, closed=closed)
+            assert not (
+                anchor / env.snapshot()["envelope_root_name"]
+                / "command-journal" / "r010-service-owner-source-bridge.json"
+            ).exists()
+    finally:
+        os.close(fd)
+
+
+def test_r010_source_service_lost_ack_or_record_tamper_permanently_latches(
+        product_service, tmp_path, monkeypatch):
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_source_service import (
+        R010ServiceSourceDenied, bind_r010_authority_source_to_service_only)
+
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no native Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(env, six_nonce_sha256=digests)
+            receipt, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, env, journal)
+            session = bind_r010_authority_source_to_service_only(
+                service=service, workspace="a", envelope=env,
+                journal=journal, job_key=key, source=receipt,
+                host=host, closed=closed)
+            # Actual persisted source is gone after binding; dataclass alone
+            # cannot authorize the Worker on a later first-row attempt.
+            os.unlink("r010-authority-source-binding.json",
+                      dir_fd=env._journal_fd)
+            with pytest.raises(R010ServiceSourceDenied):
+                session.begin_source_model_row(row=1, nonce=raw[0])
+            assert session.status().failed is True
+            with pytest.raises(R010ServiceSourceDenied):
+                session.begin_source_model_row(row=1, nonce=raw[0])
+    finally:
+        os.close(fd)

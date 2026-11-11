@@ -6385,3 +6385,86 @@ def test_r010_source_service_lost_ack_or_record_tamper_permanently_latches(
                 session.begin_source_model_row(row=1, nonce=raw[0])
     finally:
         os.close(fd)
+
+
+
+@pytest.mark.parametrize("corruption", [
+    "bridge_deleted", "bridge_appended", "authority_changed",
+])
+def test_r010_source_bridge_rechecks_persisted_bytes_before_actual_worker(
+        product_service, tmp_path, monkeypatch, corruption):
+    """No FakeChild launcher when an original source changes AFTER row burn."""
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_source_service import R010ServiceSourceDenied
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    calls = []
+    def fake_launcher(_plan):
+        calls.append("attempted")
+        return _r010_fake_completed_child()
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(env, six_nonce_sha256=digests)
+            receipt, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, env, journal)
+            # Use the actual internal WorkspaceService entrypoint rather than
+            # manufacturing a Session directly.
+            session = service._bind_r010_a1_source_job_only(
+                "a", envelope=env, journal=journal,
+                job_key=key, source=receipt, host=host, closed=closed)
+            cap = session.begin_source_model_row(row=1, nonce=raw[0])
+            directory = anchor / env.snapshot()["envelope_root_name"] / "command-journal"
+            if corruption == "bridge_deleted":
+                os.unlink(directory / "r010-service-owner-source-bridge.json")
+            elif corruption == "bridge_appended":
+                with open(directory / "r010-service-owner-source-bridge.json", "ab") as f:
+                    f.write(b"tamper-after-burn")
+            else:
+                with open(directory / "r010-authority-source-binding.json", "ab") as f:
+                    f.write(b"tamper-after-burn")
+            with pytest.raises(LbeWorkerError) as exc:
+                LbeWorker(service._lbe_owner, launcher=fake_launcher).run(
+                    cap._plan, r010_source_capture=cap)
+            assert exc.value.code == "invalid_worker_dependency"
+            assert calls == []
+            assert session.status().failed is True
+            assert session.status().native_launch_allowed is False
+            with pytest.raises(R010ServiceSourceDenied):
+                session.begin_source_model_row(row=1, nonce=raw[0])
+    finally:
+        os.close(fd)
+
+
+def test_r010_service_bridge_uncertain_fsync_is_permanent_deny(
+        product_service, tmp_path, monkeypatch):
+    """Disk-error after claim is not a renewed bridge to another Worker."""
+    from gateway import lbe_r010_source_service as source
+    from gateway.lbe_r010_job_envelope import (
+        R010JobEnvelopeDenied, _create_once_in_pinned_anchor)
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+
+    service, _ = product_service
+    fd, _, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(env, six_nonce_sha256=digests)
+            receipt, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, env, journal)
+            def uncertain(*_a, **_kw):
+                raise R010JobEnvelopeDenied("synthetic fsync fault")
+            monkeypatch.setattr(source, "_write_once", uncertain)
+            for i in range(2):
+                with pytest.raises(source.R010ServiceSourceDenied):
+                    service._bind_r010_a1_source_job_only(
+                        "a", envelope=env, journal=journal,
+                        job_key=key, source=receipt,
+                        host=host, closed=closed)
+            assert journal._failed is True
+            assert getattr(env, "_r010_source_service_claimed", False) is True
+    finally:
+        os.close(fd)

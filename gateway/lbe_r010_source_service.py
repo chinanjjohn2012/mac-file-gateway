@@ -121,6 +121,72 @@ def _read_durable_authority_source(
             os.close(fd)
 
 
+def _read_durable_bridge_source(
+    envelope: R010CreatedJobEnvelope,
+    session: "R010ServiceSourceSession",
+) -> None:
+    """Re-read the O_EXCL bridge inode before each actual Worker boundary.
+
+    A digest of a caller-supplied dataclass alone is not durable authority;
+    recheck exact pinned bytes, mode, inode and the job/source instance tuple.
+    This never grants native PRODUCT_T1 even when all source fields match.
+    """
+    fd = -1
+    try:
+        fd = os.open(
+            _BRIDGE_RECORD,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+            dir_fd=envelope._journal_fd)
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
+                or before.st_nlink != 1
+                or stat.S_IMODE(before.st_mode) != 0o600
+                or not 1 <= before.st_size <= 8192):
+            raise R010ServiceSourceDenied("unqualified service bridge inode")
+        raw = os.read(fd, before.st_size + 1)
+        after = os.fstat(fd)
+        identity = lambda st: (
+            st.st_dev, st.st_ino, st.st_uid, st.st_nlink, st.st_mode,
+            st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        if (len(raw) != before.st_size or identity(before) != identity(after)
+                or _digest(raw) != session._bridge_digest):
+            raise R010ServiceSourceDenied("service bridge source bytes changed")
+        record = json.loads(raw)
+        if (type(record) is not dict
+                or record.get("version")
+                    != "R010_SERVICE_OWNER_WORKER_SOURCE_BRIDGE_V1"
+                or record.get("job_key_sha256")
+                    != session._key.key_sha256()
+                or record.get("service_instance_nonce_sha256")
+                    != envelope._instance_sha256
+                or record.get("workspace") != session._ctx.name
+                or record.get("authority_source_sha256")
+                    != session._source.source_digest_sha256
+                or record.get("provider_oidc_jwt_sha256")
+                    != session._source.oidc_jwt_sha256
+                or record.get("provider_signed_check_run_id")
+                    != session._key.check_run_id
+                or record.get("host_selected_source_sha256")
+                    != session._host.host_source_sha256
+                or record.get("host_full_mount_sha256")
+                    != session._host.mount_table_sha256
+                or record.get("host_original_os_source_claim")
+                    is not session._host.host_snapshot_from_original_os
+                or record.get("preexec_source_scrubbed") is not True
+                or record.get("live_preexec_attested") is not False
+                or record.get("native_launch_allowed") is not False
+                or record.get("row_positive_success") is not False
+                or record.get("six_command_product_t1_pass") is not False):
+            raise R010ServiceSourceDenied(
+                "durable source bridge tuple mismatched")
+    except (OSError, ValueError, TypeError, IndexError):
+        raise R010ServiceSourceDenied(
+            "pinned service bridge missing or changed") from None
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 class R010ServiceSourceSession:
     """One live service+Owner+Journal source traversal, never a native grant."""
 
@@ -154,17 +220,29 @@ class R010ServiceSourceSession:
         self._failed = False
         self._lock = threading.Lock()
 
+    def _recheck_durable_locked(self) -> None:
+        """Called with the canonical envelope lock HELD, including at Worker.
+
+        MUST NOT acquire the service lifecycle lock here: Service operations
+        can already hold the lifecycle lock before entering the Job journal.
+        """
+        self._envelope._require_live()
+        if (self._journal._envelope is not self._envelope
+                or self._journal._failed
+                or getattr(self._journal, "_r010_source_session", None)
+                   is not self
+                or self._service._lbe_owner is None
+                or self._service._workspaces.get(self._ctx.name)
+                   is not self._ctx):
+            raise R010ServiceSourceDenied("not the unique live Job/service")
+        _read_durable_authority_source(
+            self._envelope, self._source, self._key)
+        _read_durable_bridge_source(self._envelope, self)
+
     def _check(self) -> None:
-        """Validate all pinned sources again before a Worker transition."""
+        """Validate pinned source+service identities before Worker transition."""
         with self._envelope._lock:
-            self._envelope._require_live()
-            if (self._journal._envelope is not self._envelope
-                    or self._journal._failed
-                    or getattr(self._journal, "_r010_source_session", None)
-                       is not self):
-                raise R010ServiceSourceDenied("not the unique live Job session")
-            _read_durable_authority_source(
-                self._envelope, self._source, self._key)
+            self._recheck_durable_locked()
         with self._service._lifecycle:
             if (self._service._closed or self._service._closing
                     or self._service._workspaces.get(self._ctx.name)
@@ -265,9 +343,10 @@ class R010ServiceSourceSession:
                 authority_source_sha256=self._source.source_digest_sha256,
                 service_bridge_sha256=self._bridge_digest,
                 current_source_model_next_row=(
-                    self._next if not self._failed and self._next <= 6 else None),
+                    self._next if not self._failed and not self._journal._failed
+                    and self._next <= 6 else None),
                 source_model_rows_completed=completed,
-                failed=self._failed)
+                failed=self._failed or self._journal._failed)
 
 
 def bind_r010_authority_source_to_service_only(
@@ -306,10 +385,12 @@ def bind_r010_authority_source_to_service_only(
                 or source.six_command_product_t1_pass is not False
                 or source.job_key_sha256 != job_key.key_sha256()
                 or source.signed_check_run_id != job_key.check_run_id
+                or len(source.review_nodes) != 2
                 or source.review_nodes[0] == source.review_nodes[1]
                 or not all(_sha256(x) for x in (
                     source.grant_body_sha256, source.oidc_jwt_sha256,
-                    source.source_digest_sha256, host.mount_table_sha256))
+                    source.source_digest_sha256, host.mount_table_sha256,
+                    host.host_source_sha256))
                 or host.status != "R010_A1_HOST_SOURCE_ONLY_NO_PRODUCT_T1"
                 or host.native_launch_allowed is not False
                 or host.current_provider_job_authenticated is not False

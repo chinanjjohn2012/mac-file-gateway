@@ -545,6 +545,25 @@ class R010SerialNonceJournal:
                     or (row > 1 and not self._six_source_bound)):
                 raise R010SerialAdmissionDenied(
                     "private Worker receipt lost live Job identity")
+            # If this Job has the new SOURCE-only authority bridge, its
+            # ORIGINAL pinned Provider/Owner source AND bridge bytes must
+            # still match immediately before the Worker launcher. The old
+            # synthetic first-row adapter without this bridge remains
+            # nonoperative and unchanged.
+            session = getattr(self, "_r010_source_session", None)
+            if session is not None:
+                try:
+                    if (capture is not session._capture
+                            or source_plan is not self._six_source_plan):
+                        raise R010SerialAdmissionDenied(
+                            "cross-session Worker reservation")
+                    session._recheck_durable_locked()
+                except Exception:
+                    # A corrupt/unavailable original source can never produce
+                    # a runnable source capture. No rerun/root adoption.
+                    self._failed = True
+                    raise R010SerialAdmissionDenied(
+                        "source bridge changed before Worker launcher") from None
 
     def row_state_snapshot(self) -> dict[str, object]:
         """Status-only six-row observability; never a source of authority."""

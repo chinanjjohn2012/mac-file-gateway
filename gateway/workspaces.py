@@ -784,6 +784,24 @@ class WorkspaceService:
 
 
 
+    def _bind_r010_a1_source_job_only(
+        self, name: str, *, envelope: object, journal: object,
+        job_key: object, source: object, host: object, closed: object,
+    ):
+        """Internal R010 source -> OWN service/Owner/Journal entrypoint.
+
+        This is not reachable from REST/MCP/client configuration and does
+        not create a NativeLauncher grant. Its source receipts remain
+        untrusted for PRODUCT_T1 until a later independent qualification.
+        """
+        from .lbe_r010_source_service import (
+            bind_r010_authority_source_to_service_only,
+        )
+        return bind_r010_authority_source_to_service_only(
+            service=self, workspace=name,
+            envelope=envelope, journal=journal, job_key=job_key,
+            source=source, host=host, closed=closed)
+
     def _finalize_r010_first_row_source_only(
         self, name: str, *, journal: object, capture: object,
         private_root_fd: int, private_before: object,

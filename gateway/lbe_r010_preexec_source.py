@@ -28,6 +28,10 @@ from .lbe_r010_preexec_env import (
     R010ExpectedRunnerEnv, R010PreexecEnvDenied,
     build_closed_product_child_env, scrub_preexec_mapping,
 )
+from .lbe_r010_preimport_gate import (
+    R010PreimportScrubReceipt, R010PreimportScrubDenied,
+    validate_r010_preimport_receipt_source,
+)
 from .lbe_r010_a1_mount import (
     R010A1MountDenied, R010A1MountSnapshot, recheck_r010_a1_mounts,
 )
@@ -179,3 +183,159 @@ def compose_r010_preexec_source_only(
                 pass
         raise R010PreexecSourceDenied(
             "R010 PREEXEC source-only composition failed closed") from None
+
+def compose_r010_postscrub_preexec_source_only(
+    *, comment: Mapping[str, object],
+    standards_review: Mapping[str, object],
+    spec_review: Mapping[str, object],
+    job_key: R010JobKey,
+    envelope: R010CreatedJobEnvelope,
+    oidc_expected: R010OIDCExpected,
+    provider_source: object,
+    preimport_receipt: R010PreimportScrubReceipt,
+    env_expected: R010ExpectedRunnerEnv,
+    helper_env: Mapping[str, str],
+    original_mount_snapshot: R010A1MountSnapshot,
+    mount_rows_t0: tuple[tuple[str, str, str, int], ...],
+) -> R010PreexecSourceObservation:
+    """Compose from a scrubbed five-key env and verified Provider source.
+
+    This is the product-shaped post-scrub counterpart to the legacy synthetic
+    bootstrap composer above.  It accepts no bearer, OIDC selector or raw JWT.
+    Provider signature evidence remains source-only: current Job, Owner grant,
+    native execution and full review are still independently unqualified.
+    """
+    from .lbe_r010_provider_transport import (
+        R010ProviderOIDCSource,
+        r010_oidc_expected_identity_sha256,
+    )
+
+    if not isinstance(helper_env, Mapping):
+        raise R010PreexecSourceDenied("no post-scrub helper environment")
+    try:
+        if (type(job_key) is not R010JobKey
+                or type(envelope) is not R010CreatedJobEnvelope
+                or type(oidc_expected) is not R010OIDCExpected
+                or type(env_expected) is not R010ExpectedRunnerEnv
+                or type(provider_source) is not R010ProviderOIDCSource
+                or type(preimport_receipt) is not R010PreimportScrubReceipt):
+            raise R010PreexecSourceDenied(
+                "unqualified post-scrub PREEXEC component type")
+
+        choice = validate_r010_owner_design_choice_offline(
+            comment=comment, standards_review=standards_review,
+            spec_review=spec_review)
+        job_key.checked()
+        env_expected.checked()
+        oidc_expected.checked()
+        if (choice.native_launch_allowed is not False
+                or choice.product_t1_grant_verified is not False
+                or job_key.owner_choice_comment_id != choice.comment_id
+                or job_key.design_blob != choice.design_blob
+                or job_key.host_option != "A1"
+                or job_key.review_sequence_option != "B1"
+                or env_expected.head_sha != job_key.head_sha
+                or env_expected.run_id != str(job_key.run_id)
+                or env_expected.run_attempt != str(job_key.run_attempt)
+                or env_expected.job_name != job_key.job_name
+                or oidc_expected.implementation_head_sha != job_key.head_sha
+                or oidc_expected.run_id != str(job_key.run_id)
+                or oidc_expected.run_attempt != str(job_key.run_attempt)
+                or oidc_expected.check_run_id != str(job_key.check_run_id)
+                or oidc_expected.workflow_ref != job_key.workflow_ref
+                or oidc_expected.design_blob != job_key.design_blob):
+            raise R010PreexecSourceDenied(
+                "post-scrub Job/Choice expectation drift")
+
+        helper = dict(helper_env)
+        expected_helper = {
+            "PATH": "/usr/bin:/bin",
+            "HOME": env_expected.private_home,
+            "TMPDIR": env_expected.private_tmp,
+            "LANG": "C",
+            "LC_ALL": "C",
+        }
+        if (helper != expected_helper
+                or any(type(k) is not str or type(v) is not str
+                       for k, v in helper.items())):
+            raise R010PreexecSourceDenied(
+                "post-scrub helper environment drift")
+        helper_sha = hashlib.sha256(json.dumps(
+            helper, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True).encode("ascii")).hexdigest()
+        try:
+            validate_r010_preimport_receipt_source(
+                preimport_receipt,
+                head_sha=job_key.head_sha,
+                run_id=str(job_key.run_id),
+                run_attempt=str(job_key.run_attempt),
+                job_name=job_key.job_name,
+                helper_keys=tuple(sorted(helper)),
+                helper_env_sha256=helper_sha,
+            )
+        except R010PreimportScrubDenied:
+            raise R010PreexecSourceDenied(
+                "pre-import scrub receipt does not bind helper source") from None
+
+        signature = provider_source.signature
+        if (provider_source.status
+                != "ORIGINAL_HTTPS_SOURCE_SIGNATURE_VALID_JOB_NOT_ATTESTED"
+                or provider_source.current_job_independently_verified is not False
+                or provider_source.owner_product_t1_grant_verified is not False
+                or provider_source.native_launch_allowed is not False
+                or provider_source.expected_identity_sha256
+                   != r010_oidc_expected_identity_sha256(oidc_expected)
+                or provider_source.original_jwt_sha256 != signature.jwt_sha256
+                or provider_source.metadata_sha256
+                   != signature.issuer_metadata_sha256
+                or provider_source.jwks_sha256 != signature.jwks_sha256
+                or signature.checked_run_id != str(job_key.run_id)
+                or signature.checked_run_attempt != str(job_key.run_attempt)
+                or signature.checked_check_run_id != str(job_key.check_run_id)
+                or signature.native_launch_allowed is not False):
+            raise R010PreexecSourceDenied(
+                "verified Provider source does not bind current Job expectation")
+
+        mount = recheck_r010_a1_mounts(
+            original_mount_snapshot, observed_rows=mount_rows_t0)
+        state = envelope.snapshot()
+        if (state.get("status") != "JOB_PREEXEC_HOLD"
+                or state.get("job_envelope_key") != job_key.key_sha256()
+                or state.get("job_local_secret_sha256")
+                   != oidc_expected.job_local_secret_sha256
+                or state.get("native_launch_allowed") is not False
+                or state.get("provider_verified") is not False
+                or state.get("owner_product_t1_grant_verified") is not False
+                or mount.native_launch_allowed is not False):
+            raise R010PreexecSourceDenied(
+                "Job envelope not in exact post-scrub HOLD state")
+
+        child = build_closed_product_child_env(helper)
+        if child != helper:
+            raise R010PreexecSourceDenied("post-scrub child env drift")
+        return R010PreexecSourceObservation(
+            design_blob=choice.design_blob,
+            owner_choice_comment_id=choice.comment_id,
+            job_envelope_key_sha256=job_key.key_sha256(),
+            oidc_original_jwt_sha256=provider_source.original_jwt_sha256,
+            full_darwin_mount_table_sha256=mount.full_table_sha256,
+            helper_keys=tuple(sorted(helper)),
+            helper_env_sha256=helper_sha,
+            signed_input_sha256=signature.signing_input_sha256,
+            signed_issuer_metadata_sha256=signature.issuer_metadata_sha256,
+            signed_jwks_sha256=signature.jwks_sha256,
+            signed_run_id=signature.checked_run_id,
+            signed_run_attempt=signature.checked_run_attempt,
+            signed_check_run_id=signature.checked_check_run_id,
+            verified_at_unix=signature.verified_at_unix,
+            expires_unix=signature.expires_unix,
+        )
+    except BaseException:
+        if type(envelope) is R010CreatedJobEnvelope:
+            try:
+                envelope.latch_failure("source_preexec_denied")
+            except BaseException:
+                pass
+        raise R010PreexecSourceDenied(
+            "R010 post-scrub PREEXEC composition failed closed") from None
+

@@ -6701,6 +6701,24 @@ def _r010_model_preexec_source(key, receipt, host, closed):
     )
 
 
+
+def _r010_synthetic_preimport_receipt(key, closed):
+    """Synthetic pre-import scrub source receipt; never provider/T1 authority."""
+    from gateway.lbe_r010_preimport_gate import R010PreimportScrubReceipt
+    return R010PreimportScrubReceipt(
+        head_sha=key.head_sha,
+        run_id=str(key.run_id),
+        run_attempt=str(key.run_attempt),
+        job_name=key.job_name,
+        helper_keys=closed.helper_keys,
+        helper_env_sha256=closed.helper_env_sha256,
+        selectors_scrubbed=True,
+        product_modules_absent_before_scrub=True,
+        source_original_os=False,
+    )
+
+
+
 def test_r010_preexec_original_jwt_source_reaches_same_owner_worker_journal(
         product_service, tmp_path, monkeypatch):
     """Real source-model Service/Owner/Worker/Journal, synthetic JWT receipt."""
@@ -6977,14 +6995,15 @@ def test_r010_uncertain_original_preexec_fsync_never_retries(
 
 def test_r010_first_party_source_pipeline_original_job_to_worker_and_journal(
         product_service, tmp_path, monkeypatch):
-    """One actual source pipeline -> private Owner/Worker/Journal FakeChild T0."""
+    """One PREIMPORT->PREEXEC->Owner/Worker/Journal path spans all six rows."""
     import json
     from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
     from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
     from gateway.lbe_r010_row_fs import observe_r010_private_tree
+    from gateway.lbe_r010_finite_integrity import observe_go_output_absent
     from gateway.lbe_worker import LbeWorker
 
-    service, _ = product_service
+    service, root = product_service
     fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
     work = tmp_path / "pipeline-owned-private-output"
     work.mkdir(mode=0o700)
@@ -7002,14 +7021,19 @@ def test_r010_first_party_source_pipeline_original_job_to_worker_and_journal(
             closed = replace(closed, helper_env_sha256="e" * 64)
             preexec = _r010_model_preexec_source(
                 key, parts["current_job"], host, closed)
+            preimport = _r010_synthetic_preimport_receipt(key, closed)
             source = service._prepare_r010_a1_product_source_pipeline_only(
                 "a", envelope=envelope, job_key=key, journal=journal,
+                preimport_receipt=preimport,
                 preexec_source=preexec, host=host, closed=closed, **parts)
             assert source.status == "ONE_JOB_PROVIDER_OWNER_WORKER_SOURCE_ONLY_NO_T1"
+            assert source.preimport_receipt is preimport
             assert source.native_launch_allowed is False
             assert source.current_provider_job_authenticated is False
             assert source.current_owner_grant_authenticated is False
             assert source.sealed_preexec.native_launch_allowed is False
+            assert source.sealed_preexec.preimport_receipt_sha256 == (
+                preimport.receipt_sha256)
             assert source.authority_source.native_launch_allowed is False
             assert source.session.status().native_launch_allowed is False
             path = anchor / envelope.snapshot()["envelope_root_name"] / "command-journal"
@@ -7019,29 +7043,58 @@ def test_r010_first_party_source_pipeline_original_job_to_worker_and_journal(
                 (path / "r010-service-owner-source-bridge.json").read_text())
             assert record["preexec_original_record_sha256"] == (
                 source.sealed_preexec.record_sha256)
+            assert record["preimport_scrub_receipt_sha256"] == (
+                preimport.receipt_sha256)
             assert record["authority_source_sha256"] == (
                 source.authority_source.source_digest_sha256)
             assert record["native_launch_allowed"] is False
-            before = observe_r010_private_tree(root_fd=pfd)
-            cap = source.session.begin_source_model_row(
-                row=1, nonce=raw[0])
-            result = LbeWorker(
-                service._lbe_owner,
-                launcher=lambda _plan: _r010_fake_completed_child(0),
-            ).run(cap._plan, r010_source_capture=cap)
-            assert result["status"] == "exited"
-            decided = source.session.finish_source_model_row(
-                row=1, capture=cap,
-                private_root_fd=pfd, private_before=before)
-            assert decided["status"] == (
-                "OWNER_WORKER_FINITE_SOURCE_MODEL_ZERO_NOT_T1")
-            assert source.session.status().source_model_rows_completed == 1
-            assert decided["native_launch_allowed"] is False
-            with pytest.raises(GatewayError) as ex:
-                service.invoke_exec(
-                    "a", "py-direct", ["python", "-m", "pytest", "-q"],
-                    dry_run=False)
-            assert ex.value.code == "exec_cleanup_proof_required"
+
+            for row in range(1, 7):
+                before = observe_r010_private_tree(root_fd=pfd)
+                cap = source.session.begin_source_model_row(
+                    row=row, nonce=raw[row - 1])
+                go_fd = -1
+                go_before = None
+                if row == 6:
+                    go_fd = os.open(
+                        root / "go-project" / "bin",
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    go_before = observe_go_output_absent(parent_fd=go_fd)
+                def fake_launcher(_plan):
+                    if row == 6:
+                        output = root / "go-project" / "bin" / "app"
+                        output.write_bytes(b"pipeline-source-model-go-build\n")
+                        output.chmod(0o700)
+                    return _r010_fake_completed_child(0)
+                try:
+                    result = LbeWorker(
+                        service._lbe_owner, launcher=fake_launcher,
+                    ).run(cap._plan, r010_source_capture=cap)
+                    assert result["status"] == "exited"
+                    decided = source.session.finish_source_model_row(
+                        row=row, capture=cap,
+                        private_root_fd=pfd, private_before=before,
+                        go_output_parent_fd=go_fd if go_fd >= 0 else None,
+                        go_output_before=go_before)
+                finally:
+                    if go_fd >= 0:
+                        os.close(go_fd)
+                assert decided["status"] == (
+                    "OWNER_WORKER_FINITE_SOURCE_MODEL_ZERO_NOT_T1")
+                assert source.session.status().source_model_rows_completed == row
+                assert decided["native_launch_allowed"] is False
+                assert decided["six_command_product_t1_pass"] is False
+
+            assert source.session.status().current_source_model_next_row is None
+            assert source.session.status().six_command_product_t1_pass is False
+            state = journal.row_state_snapshot()
+            assert state["job_state_model"] == "JOB_SIX_COMMAND_COMPLETE"
+            assert state["source_only_model_rows_completed"] == 6
+            assert state["product_t1_original_rows_attested"] is False
+            for cwd, argv in _ROWS:
+                with pytest.raises(GatewayError) as ex:
+                    service.invoke_exec("a", cwd, argv, dry_run=False)
+                assert ex.value.code == "exec_cleanup_proof_required"
     finally:
         os.close(fd)
         os.close(pfd)
@@ -7067,12 +7120,14 @@ def test_r010_source_pipeline_partial_provider_owner_failure_poisoned_job(
             closed = replace(closed, helper_env_sha256="e" * 64)
             preexec = _r010_model_preexec_source(
                 key, parts["current_job"], host, closed)
+            preimport = _r010_synthetic_preimport_receipt(key, closed)
             parts["grant_source"] = replace(
                 parts["grant_source"], implementation_head_sha="9" * 40)
             for attempt in range(2):
                 with pytest.raises(R010ProductSourcePipelineDenied):
                     service._prepare_r010_a1_product_source_pipeline_only(
                         "a", envelope=envelope, job_key=key, journal=journal,
+                        preimport_receipt=preimport,
                         preexec_source=preexec, host=host, closed=closed,
                         **parts)
             directory = anchor / envelope.snapshot()["envelope_root_name"] / "command-journal"
@@ -7083,5 +7138,41 @@ def test_r010_source_pipeline_partial_provider_owner_failure_poisoned_job(
             assert rows["status"] == "JOB_FAILED_LATCHED"
             assert rows["rows"] == ["ROW_VOID"] * 6
             assert rows["native_launch_allowed"] is False
+    finally:
+        os.close(fd)
+
+
+def test_r010_product_pipeline_preimport_receipt_drift_poisoned_before_row(
+        product_service, tmp_path):
+    """A forged pre-import receipt cannot reach Provider/Owner or burn row 1."""
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_product_pipeline import R010ProductSourcePipelineDenied
+
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as envelope:
+            journal = R010SerialNonceJournal(envelope, six_nonce_sha256=digests)
+            parts, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, envelope, journal, raw_only=True)
+            closed = replace(closed, helper_env_sha256="e" * 64)
+            preexec = _r010_model_preexec_source(
+                key, parts["current_job"], host, closed)
+            preimport = replace(
+                _r010_synthetic_preimport_receipt(key, closed),
+                helper_env_sha256="f" * 64)
+            with pytest.raises(R010ProductSourcePipelineDenied):
+                service._prepare_r010_a1_product_source_pipeline_only(
+                    "a", envelope=envelope, job_key=key, journal=journal,
+                    preimport_receipt=preimport,
+                    preexec_source=preexec, host=host, closed=closed, **parts)
+            directory = (
+                anchor / envelope.snapshot()["envelope_root_name"]
+                / "command-journal")
+            assert not (directory / "r010-preexec-original-source.json").exists()
+            assert not (directory / "r010-authority-source-binding.json").exists()
+            assert journal._failed is True
+            assert journal._burned is False
     finally:
         os.close(fd)

@@ -110,9 +110,26 @@ def test_entry_rejects_extra_bootstrap_key_without_secret_echo():
     assert result.returncode != 0
     combined = result.stdout + result.stderr
     assert "R010_PREEXEC_SOURCE_ENTRY_DENY" in combined
+    payload = json.loads(result.stderr)
+    assert payload["reason_code"] == "SCRUB_ENV_KEYSET"
+    assert payload["runtime_extra_keys"] == []
+    assert payload["other_extra_key_count"] == 1
+    assert payload["missing_bootstrap_keys"] == []
     assert TOKEN not in combined
     assert SOCK not in combined
     assert URL not in combined
+
+
+def test_entry_reports_only_bounded_known_macos_runtime_key_names():
+    env = _env(extra={"__CF_USER_TEXT_ENCODING": "synthetic-value"})
+    result = _run(env=env)
+    assert result.returncode != 0
+    payload = json.loads(result.stderr)
+    assert payload["reason_code"] == "SCRUB_ENV_KEYSET"
+    assert payload["runtime_extra_keys"] == ["__CF_USER_TEXT_ENCODING"]
+    assert payload["other_extra_key_count"] == 0
+    assert payload["missing_bootstrap_keys"] == []
+    assert "synthetic-value" not in result.stderr
 
 
 def test_entry_rejects_if_gateway_package_was_loaded_before_file_execution():

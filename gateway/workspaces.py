@@ -806,6 +806,7 @@ class WorkspaceService:
         self, name: str, *, envelope: object, journal: object,
         job_key: object, source: object, host: object, closed: object,
         preexec_source: object, preexec_seal: object,
+        preimport_receipt: object = None,
     ):
         """Close PREEXEC original-JWT SOURCE -> own Owner/Worker/Journal.
 
@@ -820,11 +821,13 @@ class WorkspaceService:
             service=self, workspace=name,
             envelope=envelope, journal=journal, job_key=job_key,
             source=source, host=host, closed=closed,
-            preexec_source=preexec_source, preexec_seal=preexec_seal)
+            preexec_source=preexec_source, preexec_seal=preexec_seal,
+            preimport_receipt=preimport_receipt)
 
     def _prepare_r010_a1_product_source_pipeline_only(
         self, name: str, *, envelope: object, job_key: object,
-        journal: object, preexec_source: object, host: object,
+        journal: object, preimport_receipt: object,
+        preexec_source: object, host: object,
         closed: object, owner_source: object, current_job: object,
         grant_source: object, expected: object,
     ):
@@ -840,6 +843,7 @@ class WorkspaceService:
         return assemble_r010_a1_source_pipeline_only(
             service=self, workspace=name, envelope=envelope,
             job_key=job_key, journal=journal,
+            preimport_receipt=preimport_receipt,
             preexec_source=preexec_source, host=host, closed=closed,
             owner_source=owner_source, current_job=current_job,
             grant_source=grant_source, expected=expected)

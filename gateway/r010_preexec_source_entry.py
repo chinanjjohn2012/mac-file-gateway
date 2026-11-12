@@ -25,6 +25,10 @@ import sys
 _MAX_GATE_BYTES = 65536
 _PRIVATE_MODULE = "_mfg_r010_preimport_gate_bootstrap"
 _HELPER_KEYS = ("HOME", "LANG", "LC_ALL", "PATH", "TMPDIR")
+_KNOWN_MAC_RUNTIME_KEYS = frozenset({
+    "__CF_USER_TEXT_ENCODING", "LC_CTYPE", "CPATH",
+    "LIBRARY_PATH", "MANPATH", "SDKROOT",
+})
 _SAFE_REASON_CODES = {
     "gateway package already loaded before PREEXEC entry": "GATEWAY_PRELOADED",
     "entrypoint is a symlink": "ENTRYPOINT_SYMLINK",
@@ -86,6 +90,17 @@ _SAFE_REASON_CODES = {
 
 class R010PreexecSourceEntryDenied(ValueError):
     """Pre-product import ordering or exact source identity was not preserved."""
+
+    def __init__(
+        self, message: str, *,
+        runtime_extra_keys: tuple[str, ...] = (),
+        other_extra_key_count: int = 0,
+        missing_bootstrap_keys: tuple[str, ...] = (),
+    ):
+        super().__init__(message)
+        self.runtime_extra_keys = runtime_extra_keys
+        self.other_extra_key_count = other_extra_key_count
+        self.missing_bootstrap_keys = missing_bootstrap_keys
 
 
 def _gateway_modules() -> tuple[str, ...]:
@@ -170,16 +185,30 @@ def bootstrap_r010_preexec_source_entry(
             run_id=run_id, run_attempt=run_attempt, head_sha=head_sha,
             job_name=job_name, image_version=image_version,
             private_home=private_home, private_tmp=private_tmp)
+        observed_keys = frozenset(os.environ)
+        expected_keys = frozenset(module._BOOTSTRAP_KEYS)
+        extra_keys = observed_keys - expected_keys
+        runtime_extra_keys = tuple(sorted(
+            extra_keys & _KNOWN_MAC_RUNTIME_KEYS))
+        other_extra_key_count = len(
+            extra_keys - _KNOWN_MAC_RUNTIME_KEYS)
+        missing_bootstrap_keys = tuple(sorted(
+            expected_keys - observed_keys))
         try:
             receipt = module.scrub_r010_preimport_environment(expected=expected)
         except BaseException as exc:
             # The private bootstrap module is deliberately not imported through
-            # gateway, so its exception class has a private identity.  Only map
-            # a fixed reviewed message set; never emit its raw value or repr.
+            # gateway, so its exception class has a private identity. Only map
+            # fixed reviewed messages and bounded key-name diagnostics.
             reason = str(exc)
             if reason not in _SAFE_REASON_CODES:
                 reason = "R010 pre-product import scrub failed closed"
-            raise R010PreexecSourceEntryDenied(reason) from None
+            raise R010PreexecSourceEntryDenied(
+                reason,
+                runtime_extra_keys=runtime_extra_keys,
+                other_extra_key_count=other_extra_key_count,
+                missing_bootstrap_keys=missing_bootstrap_keys,
+            ) from None
         after_scrub = _gateway_modules()
         if after_scrub:
             raise R010PreexecSourceEntryDenied(
@@ -397,6 +426,12 @@ def main(argv=None) -> int:
         if import_symbol is not None:
             report["import_symbol"] = import_symbol
             report["import_module"] = import_module
+        if (type(exc) is R010PreexecSourceEntryDenied
+                and reason == "SCRUB_ENV_KEYSET"):
+            report["runtime_extra_keys"] = list(exc.runtime_extra_keys)
+            report["other_extra_key_count"] = exc.other_extra_key_count
+            report["missing_bootstrap_keys"] = list(
+                exc.missing_bootstrap_keys)
         print(json.dumps(
             report, sort_keys=True, separators=(",", ":"), ensure_ascii=True),
             file=sys.stderr)

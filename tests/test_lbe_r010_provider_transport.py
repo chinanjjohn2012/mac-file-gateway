@@ -1,11 +1,14 @@
 """R010 provider/Owner HTTPS transport code under offline SAFE T0 only."""
 
 import base64
+from dataclasses import replace
+import hashlib
 import json
 import os
 import socket
 import subprocess
 import urllib.request
+from urllib.parse import quote
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -15,8 +18,10 @@ from gateway.lbe_r010_provider_transport import (
     R010HttpsSourceDenied, R010GithubOwnerEvidenceReader,
     _ConstrainedHttps, request_r010_provider_oidc_source,
     verify_r010_provider_oidc_original_bytes_source,
+    verify_r010_preexec_oidc_acquisition_source,
 )
 from gateway.lbe_r010_oidc_verify import R010OIDCExpected
+from gateway.r010_preexec_oidc_acquire import R010PreexecOIDCAcquisition
 
 REPO = "chinanjjohn2012/mac-file-gateway"
 API = "https://api.github.com/repos/" + REPO
@@ -136,6 +141,81 @@ def test_prefetched_original_jwt_bytes_verify_after_scrub_without_bearer(
     assert source.current_job_independently_verified is False
     assert source.owner_product_t1_grant_verified is False
     assert source.native_launch_allowed is False
+    assert opener.calls == []
+
+
+
+def _preexec_acquisition_fixture(jwt, exp):
+    request_url = BASE + "&audience=" + quote(exp.audience, safe="")
+    return R010PreexecOIDCAcquisition(
+        original_jwt_bytes=jwt,
+        original_jwt_sha256=hashlib.sha256(jwt).hexdigest(),
+        request_url_sha256=hashlib.sha256(
+            request_url.encode("ascii")).hexdigest(),
+        response_sha256="f" * 64,
+    )
+
+
+def test_acquired_original_receipt_binds_post_scrub_verifier_without_network(
+        opener):
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    exp = expected()
+    jwt, metadata, jwks = signed_jwt(key, exp)
+    acquisition = _preexec_acquisition_fixture(jwt, exp)
+    source = verify_r010_preexec_oidc_acquisition_source(
+        acquisition=acquisition,
+        request_base_url=BASE,
+        issuer_metadata_bytes=metadata,
+        issuer_jwks_bytes=jwks,
+        expected=exp,
+        now_unix=NOW,
+    )
+    assert source.signature.algorithm == "RS256"
+    assert source.original_jwt_sha256 == acquisition.original_jwt_sha256
+    assert source.expected_identity_sha256 and len(
+        source.expected_identity_sha256) == 64
+    assert source.current_job_independently_verified is False
+    assert source.owner_product_t1_grant_verified is False
+    assert source.native_launch_allowed is False
+    assert opener.calls == []
+
+
+@pytest.mark.parametrize("drift", [
+    "jwt_bytes", "jwt_hash", "url_hash", "response_hash",
+    "source_status", "claimed_grant", "wrong_endpoint", "wrong_expected",
+    "wrong_type",
+])
+def test_acquisition_to_verifier_drift_denied_without_network(opener, drift):
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    exp = expected()
+    jwt, metadata, jwks = signed_jwt(key, exp)
+    receipt = _preexec_acquisition_fixture(jwt, exp)
+    base = BASE
+    if drift == "jwt_bytes":
+        receipt = replace(receipt, original_jwt_bytes=jwt + b"x")
+    elif drift == "jwt_hash":
+        receipt = replace(receipt, original_jwt_sha256="0" * 64)
+    elif drift == "url_hash":
+        receipt = replace(receipt, request_url_sha256="0" * 64)
+    elif drift == "response_hash":
+        receipt = replace(receipt, response_sha256="invalid")
+    elif drift == "source_status":
+        receipt = replace(receipt, status="PROVIDER_VERIFIED")
+    elif drift == "claimed_grant":
+        receipt = replace(receipt, native_launch_allowed=True)
+    elif drift == "wrong_endpoint":
+        base = BASE.replace("pipelinesghubeus15", "foreign")
+    elif drift == "wrong_expected":
+        exp = replace(exp, implementation_head_sha="b" * 40)
+    elif drift == "wrong_type":
+        receipt = object()
+    with pytest.raises(R010HttpsSourceDenied):
+        verify_r010_preexec_oidc_acquisition_source(
+            acquisition=receipt, request_base_url=base,
+            issuer_metadata_bytes=metadata,
+            issuer_jwks_bytes=jwks,
+            expected=exp, now_unix=NOW,
+        )
     assert opener.calls == []
 
 

@@ -2,3 +2,4 @@
 mcp==2.3.0  # Reviewed MCPServer.call_tool(context) and streamable_http_app contract
 starlette>=0.50,<1
 uvicorn>=0.34,<1
+httpx>=0.28,<0.29  # Gemini Adapter's explicit loopback MCP client

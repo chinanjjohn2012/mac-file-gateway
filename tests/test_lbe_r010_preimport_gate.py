@@ -105,7 +105,8 @@ def test_preimport_gate_denies_if_product_module_loaded_first_and_clears_env():
     script = _bootstrap_script(preload="import gateway.workspaces") + r"""
 try:
     scrub_r010_preimport_environment(expected=expected)
-except R010PreimportScrubDenied:
+except R010PreimportScrubDenied as exc:
+    assert str(exc) == "gateway product module loaded before PREEXEC scrub"
     assert dict(os.environ) == {}
 else:
     raise AssertionError("product import before PREEXEC scrub was accepted")
@@ -118,7 +119,8 @@ def test_preimport_gate_denies_extra_selector_and_clears_env():
     script = _bootstrap_script(extra='values["HTTP_PROXY"] = "http://bad.example"') + r"""
 try:
     scrub_r010_preimport_environment(expected=expected)
-except R010PreimportScrubDenied:
+except R010PreimportScrubDenied as exc:
+    assert str(exc) == "PREEXEC inherited extra/missing keys"
     assert dict(os.environ) == {}
 else:
     raise AssertionError("extra selector was accepted")

@@ -6143,7 +6143,8 @@ def test_r010_owner_health_drift_during_finite_postflight_latches_job(
 
 
 
-def _r010_synthetic_chain_before_same_service_worker(key, env, journal):
+def _r010_synthetic_chain_before_same_service_worker(
+        key, env, journal, *, raw_only=False):
     """Synthetic signed/current/Owner references, but an ACTUAL private file."""
     from gateway.lbe_r010_authority_source import (
         bind_r010_authority_source_to_job)
@@ -6182,10 +6183,13 @@ def _r010_synthetic_chain_before_same_service_worker(key, env, journal):
     values.update(
         base_sha="b" * 40, head_sha=key.head_sha, tree_sha="c" * 40,
         job_envelope_key_sha256=key.key_sha256())
-    receipt = bind_r010_authority_source_to_job(
-        envelope=env, job_key=key, journal=journal,
-        owner_source=owner, current_job=current,
-        grant_source=grant, expected=R010GrantExpected(**values))
+    grant_expected = R010GrantExpected(**values)
+    receipt = None
+    if not raw_only:
+        receipt = bind_r010_authority_source_to_job(
+            envelope=env, job_key=key, journal=journal,
+            owner_source=owner, current_job=current,
+            grant_source=grant, expected=grant_expected)
     host = R010A1HostSource(
         head_sha=key.head_sha, run_id=str(key.run_id),
         run_attempt=str(key.run_attempt), job_name=key.job_name,
@@ -6198,6 +6202,11 @@ def _r010_synthetic_chain_before_same_service_worker(key, env, journal):
         head_sha=key.head_sha, run_id=str(key.run_id),
         mount_table_sha256=host.mount_table_sha256,
         helper_keys=helper, child_keys=helper)
+    if raw_only:
+        return {
+            "owner_source": owner, "current_job": current,
+            "grant_source": grant, "expected": grant_expected,
+        }, host, closed
     return receipt, host, closed
 
 
@@ -6961,5 +6970,118 @@ def test_r010_uncertain_original_preexec_fsync_never_retries(
                         envelope=envelope, job_key=key,
                         preexec=preexec, host=host, closed=closed)
             assert getattr(envelope, "_r010_preexec_source_claimed", False)
+    finally:
+        os.close(fd)
+
+
+
+def test_r010_first_party_source_pipeline_original_job_to_worker_and_journal(
+        product_service, tmp_path, monkeypatch):
+    """One actual source pipeline -> private Owner/Worker/Journal FakeChild T0."""
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_row_fs import observe_r010_private_tree
+    from gateway.lbe_worker import LbeWorker
+
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    work = tmp_path / "pipeline-owned-private-output"
+    work.mkdir(mode=0o700)
+    pfd = os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    def forbidden(*_a, **_kw):
+        raise AssertionError("R010 source pipeline cannot call native Popen")
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(os, "kill", forbidden)
+    monkeypatch.setattr(os, "killpg", forbidden, raising=False)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as envelope:
+            journal = R010SerialNonceJournal(envelope, six_nonce_sha256=digests)
+            parts, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, envelope, journal, raw_only=True)
+            closed = replace(closed, helper_env_sha256="e" * 64)
+            preexec = _r010_model_preexec_source(
+                key, parts["current_job"], host, closed)
+            source = service._prepare_r010_a1_product_source_pipeline_only(
+                "a", envelope=envelope, job_key=key, journal=journal,
+                preexec_source=preexec, host=host, closed=closed, **parts)
+            assert source.status == "ONE_JOB_PROVIDER_OWNER_WORKER_SOURCE_ONLY_NO_T1"
+            assert source.native_launch_allowed is False
+            assert source.current_provider_job_authenticated is False
+            assert source.current_owner_grant_authenticated is False
+            assert source.sealed_preexec.native_launch_allowed is False
+            assert source.authority_source.native_launch_allowed is False
+            assert source.session.status().native_launch_allowed is False
+            path = anchor / envelope.snapshot()["envelope_root_name"] / "command-journal"
+            assert (path / "r010-preexec-original-source.json").exists()
+            assert (path / "r010-authority-source-binding.json").exists()
+            record = json.loads(
+                (path / "r010-service-owner-source-bridge.json").read_text())
+            assert record["preexec_original_record_sha256"] == (
+                source.sealed_preexec.record_sha256)
+            assert record["authority_source_sha256"] == (
+                source.authority_source.source_digest_sha256)
+            assert record["native_launch_allowed"] is False
+            before = observe_r010_private_tree(root_fd=pfd)
+            cap = source.session.begin_source_model_row(
+                row=1, nonce=raw[0])
+            result = LbeWorker(
+                service._lbe_owner,
+                launcher=lambda _plan: _r010_fake_completed_child(0),
+            ).run(cap._plan, r010_source_capture=cap)
+            assert result["status"] == "exited"
+            decided = source.session.finish_source_model_row(
+                row=1, capture=cap,
+                private_root_fd=pfd, private_before=before)
+            assert decided["status"] == (
+                "OWNER_WORKER_FINITE_SOURCE_MODEL_ZERO_NOT_T1")
+            assert source.session.status().source_model_rows_completed == 1
+            assert decided["native_launch_allowed"] is False
+            with pytest.raises(GatewayError) as ex:
+                service.invoke_exec(
+                    "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                    dry_run=False)
+            assert ex.value.code == "exec_cleanup_proof_required"
+    finally:
+        os.close(fd)
+        os.close(pfd)
+
+
+def test_r010_source_pipeline_partial_provider_owner_failure_poisoned_job(
+        product_service, tmp_path, monkeypatch):
+    """One PREEXEC seal + invalid Owner source must persist ALL ROW_VOID."""
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_product_pipeline import R010ProductSourcePipelineDenied
+
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as envelope:
+            journal = R010SerialNonceJournal(envelope, six_nonce_sha256=digests)
+            parts, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, envelope, journal, raw_only=True)
+            closed = replace(closed, helper_env_sha256="e" * 64)
+            preexec = _r010_model_preexec_source(
+                key, parts["current_job"], host, closed)
+            parts["grant_source"] = replace(
+                parts["grant_source"], implementation_head_sha="9" * 40)
+            for attempt in range(2):
+                with pytest.raises(R010ProductSourcePipelineDenied):
+                    service._prepare_r010_a1_product_source_pipeline_only(
+                        "a", envelope=envelope, job_key=key, journal=journal,
+                        preexec_source=preexec, host=host, closed=closed,
+                        **parts)
+            directory = anchor / envelope.snapshot()["envelope_root_name"] / "command-journal"
+            assert (directory / "r010-preexec-original-source.json").exists()
+            assert not (directory / "r010-service-owner-source-bridge.json").exists()
+            assert journal._failed is True
+            rows = json.loads((directory / "r010-row-failure.json").read_text())
+            assert rows["status"] == "JOB_FAILED_LATCHED"
+            assert rows["rows"] == ["ROW_VOID"] * 6
+            assert rows["native_launch_allowed"] is False
     finally:
         os.close(fd)

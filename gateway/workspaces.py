@@ -822,6 +822,28 @@ class WorkspaceService:
             source=source, host=host, closed=closed,
             preexec_source=preexec_source, preexec_seal=preexec_seal)
 
+    def _prepare_r010_a1_product_source_pipeline_only(
+        self, name: str, *, envelope: object, job_key: object,
+        journal: object, preexec_source: object, host: object,
+        closed: object, owner_source: object, current_job: object,
+        grant_source: object, expected: object,
+    ):
+        """Bind PREEXEC -> Provider/Owner -> SAME Service/Worker/Journal.
+
+        An internal nonoperative source-only model, never a positive Exec
+        route. The actual live OIDC/Owner T1/isolated Runner admission
+        remains unqualified and must not bypass F1 or NativeLauncher.
+        """
+        from .lbe_r010_product_pipeline import (
+            assemble_r010_a1_source_pipeline_only,
+        )
+        return assemble_r010_a1_source_pipeline_only(
+            service=self, workspace=name, envelope=envelope,
+            job_key=job_key, journal=journal,
+            preexec_source=preexec_source, host=host, closed=closed,
+            owner_source=owner_source, current_job=current_job,
+            grant_source=grant_source, expected=expected)
+
     def _finalize_r010_first_row_source_only(
         self, name: str, *, journal: object, capture: object,
         private_root_fd: int, private_before: object,

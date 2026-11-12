@@ -138,7 +138,18 @@ def _composed_preexec_sha256(
                != closed.mount_table_sha256
             or preexec.helper_keys != _HELPER_KEYS
             or preexec.helper_env_sha256 != closed.helper_env_sha256
-            or not _sha256(preexec.helper_env_sha256)):
+            or preexec.signed_run_id != str(key.run_id)
+            or preexec.signed_run_attempt != str(key.run_attempt)
+            or preexec.signed_check_run_id != str(key.check_run_id)
+            or type(preexec.verified_at_unix) is not int
+            or type(preexec.expires_unix) is not int
+            or preexec.verified_at_unix <= 0
+            or not preexec.verified_at_unix < preexec.expires_unix
+            or preexec.expires_unix - preexec.verified_at_unix > 600
+            or not all(_sha256(item) for item in (
+                preexec.helper_env_sha256, preexec.signed_input_sha256,
+                preexec.signed_issuer_metadata_sha256,
+                preexec.signed_jwks_sha256))):
         raise R010ServiceSourceDenied(
             "PREEXEC signed source/Owner/Job/host binding mismatched")
     payload = {
@@ -147,6 +158,12 @@ def _composed_preexec_sha256(
         "design_blob": preexec.design_blob,
         "owner_choice_comment_id": preexec.owner_choice_comment_id,
         "original_jwt_sha256": preexec.oidc_original_jwt_sha256,
+        "original_signed_input_sha256": preexec.signed_input_sha256,
+        "signed_issuer_metadata_sha256": preexec.signed_issuer_metadata_sha256,
+        "signed_jwks_sha256": preexec.signed_jwks_sha256,
+        "signed_check_run_id": preexec.signed_check_run_id,
+        "verified_at_unix": preexec.verified_at_unix,
+        "expires_unix": preexec.expires_unix,
         "host_mount_sha256": preexec.full_darwin_mount_table_sha256,
         "helper_env_sha256": preexec.helper_env_sha256,
         "source_only": True,

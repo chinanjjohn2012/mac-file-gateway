@@ -85,6 +85,14 @@ def _record_bytes(
                != closed.mount_table_sha256
             or preexec.helper_keys != _HELPER
             or preexec.helper_env_sha256 != closed.helper_env_sha256
+            or preexec.signed_run_id != str(key.run_id)
+            or preexec.signed_run_attempt != str(key.run_attempt)
+            or preexec.signed_check_run_id != str(key.check_run_id)
+            or type(preexec.verified_at_unix) is not int
+            or type(preexec.expires_unix) is not int
+            or preexec.verified_at_unix <= 0
+            or not preexec.verified_at_unix < preexec.expires_unix
+            or preexec.expires_unix - preexec.verified_at_unix > 600
             or host.status != "R010_A1_HOST_SOURCE_ONLY_NO_PRODUCT_T1"
             or host.native_launch_allowed is not False
             or host.current_provider_job_authenticated is not False
@@ -109,6 +117,9 @@ def _record_bytes(
             or closed.child_keys != _HELPER
             or not all(_hex64(v) for v in (
                 preexec.oidc_original_jwt_sha256,
+                preexec.signed_input_sha256,
+                preexec.signed_issuer_metadata_sha256,
+                preexec.signed_jwks_sha256,
                 preexec.helper_env_sha256,
                 preexec.full_darwin_mount_table_sha256,
                 host.host_source_sha256))):
@@ -119,6 +130,14 @@ def _record_bytes(
         "design_blob": preexec.design_blob,
         "owner_design_choice_comment_id": preexec.owner_choice_comment_id,
         "original_jwt_sha256": preexec.oidc_original_jwt_sha256,
+        "original_signed_input_sha256": preexec.signed_input_sha256,
+        "signed_issuer_metadata_sha256": preexec.signed_issuer_metadata_sha256,
+        "signed_jwks_sha256": preexec.signed_jwks_sha256,
+        "signed_run_id": preexec.signed_run_id,
+        "signed_run_attempt": preexec.signed_run_attempt,
+        "signed_check_run_id": preexec.signed_check_run_id,
+        "source_verified_at_unix": preexec.verified_at_unix,
+        "source_expires_unix": preexec.expires_unix,
         "mount_table_sha256": preexec.full_darwin_mount_table_sha256,
         "host_selected_source_sha256": host.host_source_sha256,
         "original_host_source_observed": host.host_snapshot_from_original_os,

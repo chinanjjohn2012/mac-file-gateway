@@ -312,6 +312,13 @@ def test_original_rsa_preexec_source_is_one_use_pinned_job_record(source_inputs)
         envelope=envelope, job_key=key,
         preexec=record, host=host, closed=closed)
     assert sealed.original_jwt_sha256 == original_sha
+    assert record.signed_run_id == str(key.run_id)
+    assert record.signed_run_attempt == str(key.run_attempt)
+    assert record.signed_check_run_id == str(key.check_run_id)
+    assert len(record.signed_input_sha256) == 64
+    assert len(record.signed_issuer_metadata_sha256) == 64
+    assert len(record.signed_jwks_sha256) == 64
+    assert record.verified_at_unix < record.expires_unix
     assert sealed.native_launch_allowed is False
     assert sealed.provider_runtime_authenticated is False
     assert sealed.owner_product_t1_grant_verified is False

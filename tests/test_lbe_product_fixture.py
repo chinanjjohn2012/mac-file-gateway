@@ -6681,6 +6681,14 @@ def _r010_model_preexec_source(key, receipt, host, closed):
         full_darwin_mount_table_sha256=host.mount_table_sha256,
         helper_keys=closed.helper_keys,
         helper_env_sha256=closed.helper_env_sha256,
+        signed_input_sha256="c" * 64,
+        signed_issuer_metadata_sha256="b" * 64,
+        signed_jwks_sha256="d" * 64,
+        signed_run_id=str(key.run_id),
+        signed_run_attempt=str(key.run_attempt),
+        signed_check_run_id=str(key.check_run_id),
+        verified_at_unix=1800000000,
+        expires_unix=1800000100,
     )
 
 
@@ -6757,6 +6765,8 @@ def test_r010_preexec_original_jwt_source_reaches_same_owner_worker_journal(
 @pytest.mark.parametrize("mismatch", [
     "wrong_jwt", "wrong_design", "wrong_choice", "wrong_job",
     "wrong_mount", "wrong_env", "claimed_live", "claimed_grant",
+    "wrong_signed_run", "wrong_signed_attempt", "wrong_signed_check_run",
+    "stale_expiry", "bad_jwks",
 ])
 def test_r010_composed_preexec_source_cross_job_drift_fails_before_nonce(
         product_service, tmp_path, mismatch):
@@ -6793,8 +6803,18 @@ def test_r010_composed_preexec_source_cross_job_drift_fails_before_nonce(
                 preexec = replace(preexec, helper_env_sha256="d" * 64)
             elif mismatch == "claimed_live":
                 preexec = replace(preexec, signed_provider_job_live=True)
-            else:
+            elif mismatch == "claimed_grant":
                 preexec = replace(preexec, owner_product_t1_grant_verified=True)
+            elif mismatch == "wrong_signed_run":
+                preexec = replace(preexec, signed_run_id="999")
+            elif mismatch == "wrong_signed_attempt":
+                preexec = replace(preexec, signed_run_attempt="2")
+            elif mismatch == "wrong_signed_check_run":
+                preexec = replace(preexec, signed_check_run_id="999")
+            elif mismatch == "stale_expiry":
+                preexec = replace(preexec, expires_unix=1799999999)
+            else:
+                preexec = replace(preexec, signed_jwks_sha256="not-a-hash")
             with pytest.raises(R010ServiceSourceDenied):
                 service._bind_r010_a1_composed_preexec_job_source_only(
                     "a", envelope=envelope, journal=journal,

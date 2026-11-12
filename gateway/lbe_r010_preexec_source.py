@@ -46,6 +46,14 @@ class R010PreexecSourceObservation:
     full_darwin_mount_table_sha256: str
     helper_keys: tuple[str, ...]
     helper_env_sha256: str = ""
+    signed_input_sha256: str = ""
+    signed_issuer_metadata_sha256: str = ""
+    signed_jwks_sha256: str = ""
+    signed_run_id: str = ""
+    signed_run_attempt: str = ""
+    signed_check_run_id: str = ""
+    verified_at_unix: int = 0
+    expires_unix: int = 0
     status: str = "PREEXEC_SOURCE_ONLY_NONOPERATIVE_NOT_PROVIDER_ATTESTED"
     native_launch_allowed: bool = False
     signed_provider_job_live: bool = False
@@ -148,6 +156,14 @@ def compose_r010_preexec_source_only(
             helper_env_sha256=hashlib.sha256(json.dumps(
                 helper, sort_keys=True, separators=(",", ":"),
                 ensure_ascii=True).encode("ascii")).hexdigest(),
+            signed_input_sha256=signature.signing_input_sha256,
+            signed_issuer_metadata_sha256=signature.issuer_metadata_sha256,
+            signed_jwks_sha256=signature.jwks_sha256,
+            signed_run_id=signature.checked_run_id,
+            signed_run_attempt=signature.checked_run_attempt,
+            signed_check_run_id=signature.checked_check_run_id,
+            verified_at_unix=signature.verified_at_unix,
+            expires_unix=signature.expires_unix,
         )
     except BaseException:
         # Any failing source-only PREEXEC observation must not leave a usable

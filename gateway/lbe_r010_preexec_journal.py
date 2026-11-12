@@ -19,6 +19,10 @@ from .lbe_r010_job_envelope import (
     R010CreatedJobEnvelope, R010JobEnvelopeDenied, R010JobKey, _write_once,
 )
 from .lbe_r010_preexec_source import R010PreexecSourceObservation
+from .lbe_r010_preimport_gate import (
+    R010PreimportScrubReceipt, R010PreimportScrubDenied,
+    validate_r010_preimport_receipt_source,
+)
 
 _RECORD = "r010-preexec-original-source.json"
 _HELPER = ("HOME", "LANG", "LC_ALL", "PATH", "TMPDIR")
@@ -36,6 +40,7 @@ class R010PreexecSourceSeal:
     mount_sha256: str
     record_sha256: str
     record_identity: tuple[int, ...]
+    preimport_receipt_sha256: str | None = None
     status: str = "PREEXEC_SOURCE_RECORDED_NO_NATIVE_T1"
     provider_runtime_authenticated: bool = False
     owner_product_t1_grant_verified: bool = False
@@ -59,6 +64,7 @@ def _record_bytes(
     preexec: R010PreexecSourceObservation,
     host: R010A1HostSource,
     closed: R010A1ClosedPreexecSource,
+    preimport_receipt: R010PreimportScrubReceipt | None = None,
 ) -> bytes:
     if (type(key) is not R010JobKey
             or type(preexec) is not R010PreexecSourceObservation
@@ -124,6 +130,22 @@ def _record_bytes(
                 preexec.full_darwin_mount_table_sha256,
                 host.host_source_sha256))):
         raise R010PreexecSealDenied("PREEXEC/Job/host source identity mismatch")
+    preimport_sha = None
+    if preimport_receipt is not None:
+        try:
+            validate_r010_preimport_receipt_source(
+                preimport_receipt,
+                head_sha=job_key.head_sha,
+                run_id=str(job_key.run_id),
+                run_attempt=str(job_key.run_attempt),
+                job_name=job_key.job_name,
+                helper_keys=_HELPER,
+                helper_env_sha256=preexec.helper_env_sha256,
+            )
+            preimport_sha = preimport_receipt.receipt_sha256
+        except R010PreimportScrubDenied:
+            raise R010PreexecSealDenied(
+                "PREEXEC missing exact pre-import scrub source") from None
     record = {
         "version": "R010_ONE_USE_PREEXEC_SOURCE_V1",
         "job_key_sha256": key.key_sha256(),
@@ -142,6 +164,7 @@ def _record_bytes(
         "host_selected_source_sha256": host.host_source_sha256,
         "original_host_source_observed": host.host_snapshot_from_original_os,
         "helper_env_sha256": preexec.helper_env_sha256,
+        "preimport_scrub_receipt_sha256": preimport_sha,
         "source_model_only": True,
         "live_provider_job_verified": False,
         "live_owner_t1_grant_verified": False,
@@ -156,11 +179,14 @@ def seal_r010_preexec_source_in_job(
     *, envelope: R010CreatedJobEnvelope, job_key: R010JobKey,
     preexec: R010PreexecSourceObservation,
     host: R010A1HostSource, closed: R010A1ClosedPreexecSource,
+    preimport_receipt: R010PreimportScrubReceipt | None = None,
 ) -> R010PreexecSourceSeal:
     """Persist one noncredential PREEXEC receipt before source row burn."""
     if type(envelope) is not R010CreatedJobEnvelope:
         raise R010PreexecSealDenied("not canonical Job envelope")
-    raw = _record_bytes(job_key, preexec, host, closed)
+    raw = _record_bytes(
+        job_key, preexec, host, closed,
+        preimport_receipt=preimport_receipt)
     with envelope._lock:
         try:
             envelope._require_live()
@@ -205,6 +231,9 @@ def seal_r010_preexec_source_in_job(
         mount_sha256=preexec.full_darwin_mount_table_sha256,
         record_sha256=hashlib.sha256(raw).hexdigest(),
         record_identity=original_inode,
+        preimport_receipt_sha256=(
+            preimport_receipt.receipt_sha256
+            if preimport_receipt is not None else None),
     )
 
 
@@ -212,6 +241,7 @@ def recheck_r010_sealed_preexec_source_locked(
     *, envelope: R010CreatedJobEnvelope, job_key: R010JobKey,
     preexec: R010PreexecSourceObservation, seal: R010PreexecSourceSeal,
     host: R010A1HostSource, closed: R010A1ClosedPreexecSource,
+    preimport_receipt: R010PreimportScrubReceipt | None = None,
 ) -> None:
     """Read original pinned 0600 bytes while caller holds Job envelope lock.
 
@@ -227,13 +257,18 @@ def recheck_r010_sealed_preexec_source_locked(
             or not getattr(envelope, "_r010_preexec_source_claimed", False)
             or envelope._key != job_key):
         raise R010PreexecSealDenied("missing exact original PREEXEC seal")
-    raw = _record_bytes(job_key, preexec, host, closed)
+    raw = _record_bytes(
+        job_key, preexec, host, closed,
+        preimport_receipt=preimport_receipt)
     digest = hashlib.sha256(raw).hexdigest()
     if (seal.job_key_sha256 != job_key.key_sha256()
             or seal.original_jwt_sha256 != preexec.oidc_original_jwt_sha256
             or seal.helper_env_sha256 != preexec.helper_env_sha256
             or seal.mount_sha256 != preexec.full_darwin_mount_table_sha256
-            or seal.record_sha256 != digest):
+            or seal.record_sha256 != digest
+            or seal.preimport_receipt_sha256 != (
+                preimport_receipt.receipt_sha256
+                if preimport_receipt is not None else None)):
         raise R010PreexecSealDenied("PREEXEC seal source tuple changed")
     fd = -1
     try:

@@ -245,9 +245,29 @@ def bootstrap_r010_preexec_source_entry(
                             "cryptography.hazmat.primitives.asymmetric",
                         })):
                 import_name = ""
+            symbol = ""
+            module_name = ""
+            if kind == "ImportError":
+                parts = str(exc).split("'")
+                if len(parts) >= 4 and parts[0].startswith("cannot import name "):
+                    candidate_symbol = parts[1]
+                    candidate_module = parts[3]
+                    if (1 <= len(candidate_symbol) <= 120
+                            and candidate_symbol.replace("_", "a").isalnum()):
+                        symbol = candidate_symbol
+                    if (1 <= len(candidate_module) <= 160
+                            and (candidate_module == "gateway"
+                                 or candidate_module.startswith("gateway."))):
+                        module_name = candidate_module
+                elif str(exc).startswith(
+                        "attempted relative import with no known parent package"):
+                    module_name = "RELATIVE_NO_PARENT"
             suffix = ":" + import_name if import_name else ""
+            detail = ""
+            if symbol and module_name:
+                detail = ":" + symbol + ":" + module_name
             raise R010PreexecSourceEntryDenied(
-                "product import failed:" + kind + suffix) from None
+                "product import failed:" + kind + suffix + detail) from None
         if product.__name__ != "gateway.lbe_r010_product_pipeline":
             raise R010PreexecSourceEntryDenied("wrong product module imported")
         return {
@@ -304,16 +324,28 @@ def main(argv=None) -> int:
             pass
         raw_reason = str(exc)
         import_name = None
+        import_symbol = None
+        import_module = None
         if (type(exc) is R010PreexecSourceEntryDenied
-                and raw_reason.startswith("product import failed:ImportError:")):
-            candidate = raw_reason.split(":", 2)[2]
-            if (candidate == "gateway" or candidate.startswith("gateway.")
-                    or candidate in {
-                        "cryptography", "cryptography.exceptions",
-                        "cryptography.hazmat.primitives",
-                        "cryptography.hazmat.primitives.asymmetric",
-                    }):
-                import_name = candidate
+                and raw_reason.startswith("product import failed:ImportError")):
+            parts = raw_reason.split(":")
+            tail = parts[2:]
+            if tail and (tail[0] == "gateway"
+                         or tail[0].startswith("gateway.")
+                         or tail[0] in {
+                             "cryptography", "cryptography.exceptions",
+                             "cryptography.hazmat.primitives",
+                             "cryptography.hazmat.primitives.asymmetric",
+                         }):
+                import_name = tail.pop(0)
+            if len(tail) == 2:
+                candidate_symbol, candidate_module = tail
+                if (candidate_symbol.replace("_", "a").isalnum()
+                        and (candidate_module == "gateway"
+                             or candidate_module.startswith("gateway.")
+                             or candidate_module == "RELATIVE_NO_PARENT")):
+                    import_symbol = candidate_symbol
+                    import_module = candidate_module
             raw_reason = "product import failed:ImportError"
         reason = (
             _SAFE_REASON_CODES.get(raw_reason, "UNQUALIFIED_SOURCE")
@@ -328,6 +360,9 @@ def main(argv=None) -> int:
         }
         if import_name is not None:
             report["import_name"] = import_name
+        if import_symbol is not None:
+            report["import_symbol"] = import_symbol
+            report["import_module"] = import_module
         print(json.dumps(
             report, sort_keys=True, separators=(",", ":"), ensure_ascii=True),
             file=sys.stderr)

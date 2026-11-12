@@ -46,6 +46,16 @@ _SAFE_REASON_CODES = {
     "canonical receipt validation failed": "CANONICAL_RECEIPT_INVALID",
     "receipt did not come from current process environment":
         "RECEIPT_NOT_PROCESS_SOURCE",
+    "service import failed:ImportError": "SERVICE_IMPORT_IMPORT_ERROR",
+    "service import failed:ModuleNotFoundError": "SERVICE_IMPORT_MODULE_MISSING",
+    "service import failed:FileNotFoundError": "SERVICE_IMPORT_FILE_MISSING",
+    "service import failed:OSError": "SERVICE_IMPORT_OS_ERROR",
+    "service import failed:RuntimeError": "SERVICE_IMPORT_RUNTIME_ERROR",
+    "service import failed:TypeError": "SERVICE_IMPORT_TYPE_ERROR",
+    "service import failed:ValueError": "SERVICE_IMPORT_VALUE_ERROR",
+    "service import failed:KeyError": "SERVICE_IMPORT_KEY_ERROR",
+    "service import failed:AttributeError": "SERVICE_IMPORT_ATTRIBUTE_ERROR",
+    "service import failed:OTHER": "SERVICE_IMPORT_OTHER",
     "product import failed:ImportError": "PRODUCT_IMPORT_IMPORT_ERROR",
     "product import failed:ModuleNotFoundError": "PRODUCT_IMPORT_MODULE_MISSING",
     "product import failed:FileNotFoundError": "PRODUCT_IMPORT_FILE_MISSING",
@@ -192,6 +202,26 @@ def bootstrap_r010_preexec_source_entry(
         if canonical.source_original_os is not True:
             raise R010PreexecSourceEntryDenied(
                 "receipt did not come from current process environment")
+
+        # WorkspaceService is the canonical service owner imported by the
+        # product pipeline.  Import it only AFTER selector destruction, and
+        # before the R010 pipeline, so the package's existing runtime import
+        # graph is initialized in its normal first-party order.
+        try:
+            service_module = importlib.import_module("gateway.workspaces")
+        except BaseException as exc:
+            kind = type(exc).__name__
+            if kind not in {
+                "ImportError", "ModuleNotFoundError", "FileNotFoundError",
+                "OSError", "RuntimeError", "TypeError", "ValueError",
+                "KeyError", "AttributeError",
+            }:
+                kind = "OTHER"
+            raise R010PreexecSourceEntryDenied(
+                "service import failed:" + kind) from None
+        if getattr(service_module, "WorkspaceService", None) is None:
+            raise R010PreexecSourceEntryDenied(
+                "service import failed:AttributeError")
         try:
             product = importlib.import_module(
                 "gateway.lbe_r010_product_pipeline")

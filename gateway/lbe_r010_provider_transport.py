@@ -203,6 +203,38 @@ def _valid_jwks_url(url: str) -> bool:
         return False
 
 
+def r010_oidc_expected_identity_sha256(
+    expected: R010OIDCExpected,
+) -> str:
+    """Canonical caller expectation identity bound into a verified receipt."""
+    if type(expected) is not R010OIDCExpected:
+        raise R010HttpsSourceDenied("missing typed OIDC expected identity")
+    try:
+        expected.checked()
+        payload = {
+            "version": "R010_OIDC_EXPECTED_IDENTITY_V1",
+            "repository": expected.repository,
+            "design_blob": expected.design_blob,
+            "implementation_head_sha": expected.implementation_head_sha,
+            "job_local_secret_sha256": expected.job_local_secret_sha256,
+            "run_id": expected.run_id,
+            "run_attempt": expected.run_attempt,
+            "check_run_id": expected.check_run_id,
+            "workflow_ref": expected.workflow_ref,
+            "workflow_sha": expected.workflow_sha,
+            "signed_source_sha": expected.signed_source_sha,
+            "subject": expected.subject,
+            "audience": expected.audience,
+        }
+        raw = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True).encode("ascii")
+    except (R010OIDCDenied, UnicodeError, TypeError, ValueError):
+        raise R010HttpsSourceDenied(
+            "OIDC expected identity unqualified") from None
+    return hashlib.sha256(raw).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class R010ProviderOIDCSource:
     """Signature verified over original bytes, CURRENT Job still unproven."""
@@ -211,6 +243,7 @@ class R010ProviderOIDCSource:
     metadata_sha256: str
     jwks_sha256: str
     original_jwt_sha256: str
+    expected_identity_sha256: str
     status: str = "ORIGINAL_HTTPS_SOURCE_SIGNATURE_VALID_JOB_NOT_ATTESTED"
     current_job_independently_verified: bool = False
     owner_product_t1_grant_verified: bool = False
@@ -256,6 +289,8 @@ def verify_r010_provider_oidc_original_bytes_source(
         jwks_sha256=hashlib.sha256(issuer_jwks_bytes).hexdigest(),
         original_jwt_sha256=hashlib.sha256(
             original_jwt_bytes).hexdigest(),
+        expected_identity_sha256=r010_oidc_expected_identity_sha256(
+            expected),
     )
 
 

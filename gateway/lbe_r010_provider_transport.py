@@ -31,6 +31,7 @@ from .lbe_r010_owner_choice import (
     R010OwnerDesignChoiceObservation,
     validate_r010_owner_design_choice_offline,
 )
+from .r010_preexec_oidc_acquire import R010PreexecOIDCAcquisition
 
 _REPO = "chinanjjohn2012/mac-file-gateway"
 _API = "https://api.github.com/repos/" + _REPO
@@ -291,6 +292,70 @@ def verify_r010_provider_oidc_original_bytes_source(
             original_jwt_bytes).hexdigest(),
         expected_identity_sha256=r010_oidc_expected_identity_sha256(
             expected),
+    )
+
+
+def verify_r010_preexec_oidc_acquisition_source(
+    *, acquisition: R010PreexecOIDCAcquisition,
+    request_base_url: str,
+    issuer_metadata_bytes: bytes,
+    issuer_jwks_bytes: bytes,
+    expected: R010OIDCExpected,
+    now_unix: int,
+) -> R010ProviderOIDCSource:
+    """Bind an acquired original response to the post-scrub verifier.
+
+    This is source-only consistency, not proof of the transport's provenance:
+    a private PREEXEC module receipt needs canonical reconstruction AFTER
+    scrub, and the original issuer metadata/JWKS still require independent
+    live TLS/provider and Job checks before any operational authority.
+    It never reads a bearer, invokes a network opener, or grants PRODUCT_T1.
+    """
+    if (type(acquisition) is not R010PreexecOIDCAcquisition
+            or type(expected) is not R010OIDCExpected):
+        raise R010HttpsSourceDenied(
+            "unqualified pre-scrub acquisition source type")
+    try:
+        expected.checked()
+        _reviewed_oidc_base(request_base_url)
+        token = acquisition.original_jwt_bytes
+        if (type(token) is not bytes or not 5 <= len(token) <= 16384
+                or type(acquisition.original_jwt_sha256) is not str
+                or acquisition.original_jwt_sha256
+                   != hashlib.sha256(token).hexdigest()
+                or type(acquisition.request_url_sha256) is not str
+                or type(acquisition.response_sha256) is not str
+                or re.fullmatch(r"[0-9a-f]{64}\Z",
+                                acquisition.response_sha256, re.ASCII)
+                   is None
+                or acquisition.status
+                   != "PREEXEC_ORIGINAL_OIDC_RESPONSE_SOURCE_ONLY_NOT_VERIFIED"
+                or acquisition.provider_signature_verified is not False
+                or acquisition.current_job_independently_verified is not False
+                or acquisition.owner_product_t1_grant_verified is not False
+                or acquisition.native_launch_allowed is not False):
+            raise R010HttpsSourceDenied(
+                "pre-scrub original response identity drift")
+        target = (
+            request_base_url + "&audience="
+            + urllib.parse.quote(expected.audience, safe="")
+        )
+        if acquisition.request_url_sha256 != hashlib.sha256(
+                target.encode("ascii")).hexdigest():
+            raise R010HttpsSourceDenied(
+                "original request target not bound to current audience")
+    except R010HttpsSourceDenied:
+        raise
+    except (R010OIDCDenied, R010PreexecEnvDenied,
+            TypeError, ValueError, UnicodeError):
+        raise R010HttpsSourceDenied(
+            "pre-scrub acquisition identity unqualified") from None
+    return verify_r010_provider_oidc_original_bytes_source(
+        original_jwt_bytes=token,
+        issuer_metadata_bytes=issuer_metadata_bytes,
+        issuer_jwks_bytes=issuer_jwks_bytes,
+        expected=expected,
+        now_unix=now_unix,
     )
 
 

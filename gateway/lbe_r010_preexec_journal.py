@@ -135,10 +135,10 @@ def _record_bytes(
         try:
             validate_r010_preimport_receipt_source(
                 preimport_receipt,
-                head_sha=job_key.head_sha,
-                run_id=str(job_key.run_id),
-                run_attempt=str(job_key.run_attempt),
-                job_name=job_key.job_name,
+                head_sha=key.head_sha,
+                run_id=str(key.run_id),
+                run_attempt=str(key.run_attempt),
+                job_name=key.job_name,
                 helper_keys=_HELPER,
                 helper_env_sha256=preexec.helper_env_sha256,
             )

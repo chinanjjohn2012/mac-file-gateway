@@ -220,6 +220,15 @@ def scrub_r010_preimport_environment(
             product_modules_absent_before_scrub=True,
             source_original_os=True,
         )
+    except R010PreimportScrubDenied:
+        # Preserve only this module's fixed, reviewed denial classes after
+        # destroying the process environment.  These messages never contain
+        # selector values, paths from the caller, JWT bytes or response data.
+        try:
+            os.environ.clear()
+        except BaseException:
+            pass
+        raise
     except BaseException:
         try:
             os.environ.clear()

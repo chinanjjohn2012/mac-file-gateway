@@ -217,6 +217,48 @@ class R010ProviderOIDCSource:
     native_launch_allowed: bool = False
 
 
+def verify_r010_provider_oidc_original_bytes_source(
+    *, original_jwt_bytes: bytes,
+    issuer_metadata_bytes: bytes,
+    issuer_jwks_bytes: bytes,
+    expected: R010OIDCExpected,
+    now_unix: int,
+) -> R010ProviderOIDCSource:
+    """Verify already-acquired original OIDC bytes without bearer/network.
+
+    This is the post-scrub canonical verifier boundary for a future PREEXEC
+    flow.  The raw runner bearer is neither accepted nor retained here.
+    Successful signature verification still does NOT establish current Job,
+    Owner PRODUCT_T1 grant or native launch authority.
+    """
+    if type(expected) is not R010OIDCExpected:
+        raise R010HttpsSourceDenied("missing typed OIDC expected identity")
+    if (type(original_jwt_bytes) is not bytes
+            or type(issuer_metadata_bytes) is not bytes
+            or type(issuer_jwks_bytes) is not bytes):
+        raise R010HttpsSourceDenied("original OIDC source bytes unavailable")
+    try:
+        expected.checked()
+        signature = verify_r010_oidc_original_bytes_offline(
+            jwt_bytes=original_jwt_bytes,
+            issuer_metadata_bytes=issuer_metadata_bytes,
+            jwks_bytes=issuer_jwks_bytes,
+            expected=expected,
+            verified_at_unix=now_unix,
+        )
+    except (R010OIDCDenied, UnicodeError, ValueError, TypeError):
+        raise R010HttpsSourceDenied(
+            "OIDC original source or signature unqualified") from None
+    return R010ProviderOIDCSource(
+        signature=signature,
+        metadata_sha256=hashlib.sha256(
+            issuer_metadata_bytes).hexdigest(),
+        jwks_sha256=hashlib.sha256(issuer_jwks_bytes).hexdigest(),
+        original_jwt_sha256=hashlib.sha256(
+            original_jwt_bytes).hexdigest(),
+    )
+
+
 def request_r010_provider_oidc_source(
     *, request_base_url: str, bearer: str,
     expected: R010OIDCExpected, now_unix: int,
@@ -248,20 +290,17 @@ def request_r010_provider_oidc_source(
         metadata_obj = _object(metadata, 65536)
         jwks_url = _jwks_url(metadata_obj.get("jwks_uri"))
         jwks = transport.get(jwks_url, limit=65536)
-        signature = verify_r010_oidc_original_bytes_offline(
-            jwt_bytes=jwt, issuer_metadata_bytes=metadata,
-            jwks_bytes=jwks, expected=expected,
-            verified_at_unix=now_unix)
+        return verify_r010_provider_oidc_original_bytes_source(
+            original_jwt_bytes=jwt,
+            issuer_metadata_bytes=metadata,
+            issuer_jwks_bytes=jwks,
+            expected=expected,
+            now_unix=now_unix,
+        )
     except (R010OIDCDenied, UnicodeError, ValueError,
             R010HttpsSourceDenied):
         raise R010HttpsSourceDenied(
             "OIDC original source or signature unqualified") from None
-    return R010ProviderOIDCSource(
-        signature=signature,
-        metadata_sha256=hashlib.sha256(metadata).hexdigest(),
-        jwks_sha256=hashlib.sha256(jwks).hexdigest(),
-        original_jwt_sha256=hashlib.sha256(jwt).hexdigest(),
-    )
 
 
 @dataclass(frozen=True, slots=True)

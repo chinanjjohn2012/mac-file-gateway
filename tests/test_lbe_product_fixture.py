@@ -17,6 +17,7 @@ import pytest
 from gateway.core import GatewayError
 from gateway.exec_state import ExecStateStore
 from gateway.lbe_product_fixture import D4FixtureDenied, check_d4_r003_fixture
+from gateway.lbe_r010_preexec_journal import seal_r010_preexec_source_in_job
 from gateway.workspaces import ActiveRuntimeInventory, WorkspaceService
 from gateway.workspaces_config import parse_workspace_config
 
@@ -6712,16 +6713,20 @@ def test_r010_preexec_original_jwt_source_reaches_same_owner_worker_journal(
             closed = replace(closed, helper_env_sha256="e" * 64)
             preexec = _r010_model_preexec_source(
                 key, authority, host, closed)
+            seal = seal_r010_preexec_source_in_job(
+                envelope=envelope, job_key=key,
+                preexec=preexec, host=host, closed=closed)
             session = service._bind_r010_a1_composed_preexec_job_source_only(
                 "a", envelope=envelope, journal=journal,
                 job_key=key, source=authority, host=host,
-                closed=closed, preexec_source=preexec)
+                closed=closed, preexec_source=preexec, preexec_seal=seal)
             path = (anchor / envelope.snapshot()["envelope_root_name"]
                     / "command-journal" /
                     "r010-service-owner-source-bridge.json")
             record = json.loads(path.read_bytes())
             assert record["preexec_source_model_joined"] is True
             assert len(record["preexec_source_model_sha256"]) == 64
+            assert record["preexec_original_record_sha256"] == seal.record_sha256
             assert record["live_preexec_attested"] is False
             assert record["native_launch_allowed"] is False
             before = observe_r010_private_tree(root_fd=private_fd)
@@ -6771,6 +6776,9 @@ def test_r010_composed_preexec_source_cross_job_drift_fails_before_nonce(
             closed = replace(closed, helper_env_sha256="e" * 64)
             preexec = _r010_model_preexec_source(
                 key, authority, host, closed)
+            seal = seal_r010_preexec_source_in_job(
+                envelope=envelope, job_key=key,
+                preexec=preexec, host=host, closed=closed)
             if mismatch == "wrong_jwt":
                 preexec = replace(preexec, oidc_original_jwt_sha256="9" * 64)
             elif mismatch == "wrong_design":
@@ -6791,7 +6799,7 @@ def test_r010_composed_preexec_source_cross_job_drift_fails_before_nonce(
                 service._bind_r010_a1_composed_preexec_job_source_only(
                     "a", envelope=envelope, journal=journal,
                     job_key=key, source=authority, host=host,
-                    closed=closed, preexec_source=preexec)
+                    closed=closed, preexec_source=preexec, preexec_seal=seal)
             path = anchor / envelope.snapshot()["envelope_root_name"]
             assert not (path / "command-journal" /
                         "r010-service-owner-source-bridge.json").exists()
@@ -6822,10 +6830,13 @@ def test_r010_composed_preexec_source_changed_after_burn_stops_worker(
                 key, envelope, journal)
             closed = replace(closed, helper_env_sha256="e" * 64)
             preexec = _r010_model_preexec_source(key, authority, host, closed)
+            seal = seal_r010_preexec_source_in_job(
+                envelope=envelope, job_key=key,
+                preexec=preexec, host=host, closed=closed)
             session = service._bind_r010_a1_composed_preexec_job_source_only(
                 "a", envelope=envelope, journal=journal,
                 job_key=key, source=authority, host=host,
-                closed=closed, preexec_source=preexec)
+                closed=closed, preexec_source=preexec, preexec_seal=seal)
             cap = session.begin_source_model_row(row=1, nonce=raw[0])
             session._preexec = replace(
                 preexec, oidc_original_jwt_sha256="a" * 64)
@@ -6836,5 +6847,99 @@ def test_r010_composed_preexec_source_changed_after_burn_stops_worker(
             assert launched == []
             assert session.status().failed is True
             assert session.status().native_launch_allowed is False
+    finally:
+        os.close(fd)
+
+
+
+@pytest.mark.parametrize("mutation", [
+    "delete_preexec", "append_preexec", "chmod_preexec", "replace_preexec",
+])
+def test_r010_original_preexec_receipt_tamper_denied_at_worker_boundary(
+        product_service, tmp_path, monkeypatch, mutation):
+    """Private O_EXCL PREEXEC source file is mandatory at Worker prelauncher."""
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    launched = []
+    def fake(_plan):
+        launched.append("unexpected-launch")
+        return _r010_fake_completed_child(0)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("native Popen forbidden")))
+    monkeypatch.setattr(os, "kill", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no kill")))
+    monkeypatch.setattr(os, "killpg", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no killpg")),
+                        raising=False)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as envelope:
+            journal = R010SerialNonceJournal(envelope, six_nonce_sha256=digests)
+            authority, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, envelope, journal)
+            closed = replace(closed, helper_env_sha256="e" * 64)
+            preexec = _r010_model_preexec_source(key, authority, host, closed)
+            seal = seal_r010_preexec_source_in_job(
+                envelope=envelope, job_key=key,
+                preexec=preexec, host=host, closed=closed)
+            session = service._bind_r010_a1_composed_preexec_job_source_only(
+                "a", envelope=envelope, journal=journal,
+                job_key=key, source=authority, host=host, closed=closed,
+                preexec_source=preexec, preexec_seal=seal)
+            cap = session.begin_source_model_row(row=1, nonce=raw[0])
+            record = (anchor / envelope.snapshot()["envelope_root_name"]
+                      / "command-journal" / "r010-preexec-original-source.json")
+            if mutation == "delete_preexec":
+                record.unlink()
+            elif mutation == "append_preexec":
+                with open(record, "ab") as f:
+                    f.write(b"tamper")
+            elif mutation == "chmod_preexec":
+                record.chmod(0o644)
+            else:
+                raw_bytes = record.read_bytes()
+                record.unlink()
+                record.write_bytes(raw_bytes)
+                record.chmod(0o600)
+            with pytest.raises(LbeWorkerError) as exc:
+                LbeWorker(service._lbe_owner, launcher=fake).run(
+                    cap._plan, r010_source_capture=cap)
+            assert exc.value.code == "invalid_worker_dependency"
+            assert launched == []
+            assert session.status().failed is True
+            assert session.status().native_launch_allowed is False
+    finally:
+        os.close(fd)
+
+
+def test_r010_uncertain_original_preexec_fsync_never_retries(
+        product_service, tmp_path, monkeypatch):
+    """Partial record write is an irrevocable Job consumption, not a retry."""
+    from gateway import lbe_r010_preexec_journal as mod
+    from gateway.lbe_r010_job_envelope import (
+        R010JobEnvelopeDenied, _create_once_in_pinned_anchor)
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+
+    service, _ = product_service
+    fd, _, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as envelope:
+            journal = R010SerialNonceJournal(envelope, six_nonce_sha256=digests)
+            authority, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, envelope, journal)
+            closed = replace(closed, helper_env_sha256="e" * 64)
+            preexec = _r010_model_preexec_source(key, authority, host, closed)
+            def failed_write(*_a, **_kw):
+                raise R010JobEnvelopeDenied("synthetic failed fsync")
+            monkeypatch.setattr(mod, "_write_once", failed_write)
+            for _ in range(2):
+                with pytest.raises(mod.R010PreexecSealDenied):
+                    seal_r010_preexec_source_in_job(
+                        envelope=envelope, job_key=key,
+                        preexec=preexec, host=host, closed=closed)
+            assert getattr(envelope, "_r010_preexec_source_claimed", False)
     finally:
         os.close(fd)

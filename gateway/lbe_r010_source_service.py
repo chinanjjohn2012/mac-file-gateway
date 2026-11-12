@@ -29,6 +29,10 @@ from .lbe_r010_job_envelope import (
 )
 from .lbe_r010_private_capture import R010PrivateWorkerCapture
 from .lbe_r010_preexec_source import R010PreexecSourceObservation
+from .lbe_r010_preexec_journal import (
+    R010PreexecSourceSeal, R010PreexecSealDenied,
+    recheck_r010_sealed_preexec_source_locked,
+)
 from .lbe_r010_serial_journal import R010SerialNonceJournal
 from .workspaces import WorkspaceContext, WorkspaceService
 
@@ -263,6 +267,9 @@ def _read_durable_bridge_source(
                    is not (session._preexec is not None)
                 or record.get("preexec_source_model_sha256")
                    != session._preexec_sha256
+                or record.get("preexec_original_record_sha256")
+                   != (session._preexec_seal.record_sha256
+                       if session._preexec_seal is not None else None)
                 or record.get("live_preexec_attested") is not False
                 or record.get("native_launch_allowed") is not False
                 or record.get("row_positive_success") is not False
@@ -284,6 +291,7 @@ class R010ServiceSourceSession:
         "_service", "_ctx", "_envelope", "_journal", "_source",
         "_host", "_closed", "_key", "_bridge_digest", "_next",
         "_capture", "_failed", "_lock", "_preexec", "_preexec_sha256",
+        "_preexec_seal",
     )
 
     def __init__(self, marker: object, *,
@@ -295,7 +303,8 @@ class R010ServiceSourceSession:
                  closed: R010A1ClosedPreexecSource,
                  key: R010JobKey, bridge_digest: str,
                  preexec: R010PreexecSourceObservation | None,
-                 preexec_sha256: str | None):
+                 preexec_sha256: str | None,
+                 preexec_seal: R010PreexecSourceSeal | None):
         if marker is not _MARKER:
             raise R010ServiceSourceDenied("not a first-party source session")
         self._service = service
@@ -307,6 +316,7 @@ class R010ServiceSourceSession:
         self._closed = closed
         self._preexec = preexec
         self._preexec_sha256 = preexec_sha256
+        self._preexec_seal = preexec_seal
         self._key = key
         self._bridge_digest = bridge_digest
         self._next = 1
@@ -339,6 +349,10 @@ class R010ServiceSourceSession:
             if observed_sha != self._preexec_sha256:
                 raise R010ServiceSourceDenied(
                     "composed PREEXEC source changed before Worker")
+            recheck_r010_sealed_preexec_source_locked(
+                envelope=self._envelope, job_key=self._key,
+                preexec=self._preexec, seal=self._preexec_seal,
+                host=self._host, closed=self._closed)
         _check_real_post_scrub_product_environment(
             self._host, self._closed)
 
@@ -501,6 +515,7 @@ def bind_r010_authority_source_to_service_only(
     job_key: R010JobKey, source: R010AuthoritySourceBinding,
     host: R010A1HostSource, closed: R010A1ClosedPreexecSource,
     preexec_source: R010PreexecSourceObservation | None = None,
+    preexec_seal: R010PreexecSourceSeal | None = None,
 ) -> R010ServiceSourceSession:
     """Persist EXACT source->SAME service/Owner bind before any nonce burn.
 
@@ -564,6 +579,9 @@ def bind_r010_authority_source_to_service_only(
         service._exec_state.require_healthy()
         _check_real_post_scrub_product_environment(host, closed)
         preexec_sha = None
+        if (preexec_source is None) is not (preexec_seal is None):
+            raise R010ServiceSourceDenied(
+                "composed PREEXEC requires one durable original seal")
         if preexec_source is not None:
             preexec_sha = _composed_preexec_sha256(
                 preexec=preexec_source, key=job_key,
@@ -581,6 +599,15 @@ def bind_r010_authority_source_to_service_only(
                     or journal._six_source_bound):
                 raise R010ServiceSourceDenied("service bridge already claimed")
             _read_durable_authority_source(envelope, source, job_key)
+            if preexec_source is not None:
+                try:
+                    recheck_r010_sealed_preexec_source_locked(
+                        envelope=envelope, job_key=job_key,
+                        preexec=preexec_source, seal=preexec_seal,
+                        host=host, closed=closed)
+                except R010PreexecSealDenied:
+                    raise R010ServiceSourceDenied(
+                        "pinned PREEXEC source receipt unavailable") from None
             envelope._r010_source_service_claimed = True
             payload = (json.dumps({
                 "version": "R010_SERVICE_OWNER_WORKER_SOURCE_BRIDGE_V1",
@@ -596,6 +623,9 @@ def bind_r010_authority_source_to_service_only(
                 "preexec_source_scrubbed": True,
                 "preexec_source_model_joined": preexec_source is not None,
                 "preexec_source_model_sha256": preexec_sha,
+                "preexec_original_record_sha256": (
+                    preexec_seal.record_sha256
+                    if preexec_seal is not None else None),
                 "live_preexec_attested": False,
                 "native_launch_allowed": False,
                 "row_positive_success": False,
@@ -611,7 +641,8 @@ def bind_r010_authority_source_to_service_only(
                 _MARKER, service=service, ctx=ctx, envelope=envelope,
                 journal=journal, source=source, host=host, closed=closed,
                 key=job_key, bridge_digest=_digest(payload),
-                preexec=preexec_source, preexec_sha256=preexec_sha)
+                preexec=preexec_source, preexec_sha256=preexec_sha,
+                preexec_seal=preexec_seal)
             journal._r010_source_session = session
             return session
         except R010JobEnvelopeDenied:

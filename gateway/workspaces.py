@@ -805,7 +805,7 @@ class WorkspaceService:
     def _bind_r010_a1_composed_preexec_job_source_only(
         self, name: str, *, envelope: object, journal: object,
         job_key: object, source: object, host: object, closed: object,
-        preexec_source: object,
+        preexec_source: object, preexec_seal: object,
     ):
         """Close PREEXEC original-JWT SOURCE -> own Owner/Worker/Journal.
 
@@ -820,7 +820,7 @@ class WorkspaceService:
             service=self, workspace=name,
             envelope=envelope, journal=journal, job_key=job_key,
             source=source, host=host, closed=closed,
-            preexec_source=preexec_source)
+            preexec_source=preexec_source, preexec_seal=preexec_seal)
 
     def _finalize_r010_first_row_source_only(
         self, name: str, *, journal: object, capture: object,

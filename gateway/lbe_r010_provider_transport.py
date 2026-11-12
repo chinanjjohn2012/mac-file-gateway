@@ -243,7 +243,7 @@ class R010ProviderOIDCSource:
     metadata_sha256: str
     jwks_sha256: str
     original_jwt_sha256: str
-    expected_identity_sha256: str
+    expected_identity_sha256: str = ""
     status: str = "ORIGINAL_HTTPS_SOURCE_SIGNATURE_VALID_JOB_NOT_ATTESTED"
     current_job_independently_verified: bool = False
     owner_product_t1_grant_verified: bool = False

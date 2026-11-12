@@ -150,3 +150,33 @@ def test_entry_rejects_if_gateway_package_was_loaded_before_file_execution():
     assert TOKEN not in combined
     assert SOCK not in combined
     assert URL not in combined
+
+
+def test_entry_executes_only_pinned_gate_bytes():
+    # Guard against executing different path bytes after the checked FD read.
+    # SourceFileLoader.exec_module is a second mutable-path load, not the
+    # originally hashed bytes. The pinned-byte path must not call it.
+    code = "\n".join([
+        "import importlib.machinery,runpy,sys",
+        "real_exec=importlib.machinery.SourceFileLoader.exec_module",
+        "def trap(loader,module):",
+        "    if module.__name__=='_mfg_r010_preimport_gate_bootstrap':",
+        "        raise AssertionError('second path gate load')",
+        "    return real_exec(loader,module)",
+        "importlib.machinery.SourceFileLoader.exec_module=trap",
+        "sys.argv=" + repr(["gateway/r010_preexec_source_entry.py", *_args()]),
+        "runpy.run_path('gateway/r010_preexec_source_entry.py',run_name='__main__')",
+    ])
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=ROOT, env=_env(),
+        capture_output=True, text=True, check=False, timeout=20)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "PREIMPORT_ENTRY_PRODUCT_IMPORTED_SOURCE_ONLY_NO_T1"
+    assert payload["gateway_modules_before_scrub"] == []
+    assert payload["gateway_modules_after_scrub"] == []
+    assert payload["native_launch_allowed"] is False
+    assert payload["product_t1"] == "NOT_RUN"
+    assert TOKEN not in result.stdout + result.stderr
+    assert SOCK not in result.stdout + result.stderr
+    assert URL not in result.stdout + result.stderr

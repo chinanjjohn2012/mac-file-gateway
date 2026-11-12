@@ -13,10 +13,17 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from gateway.lbe_r010_preexec_source import (
     R010PreexecSourceDenied, compose_r010_preexec_source_only,
+    compose_r010_postscrub_preexec_source_only,
 )
 from gateway.lbe_r010_job_envelope import R010JobKey, _create_once_in_pinned_anchor
 from gateway.lbe_r010_oidc_verify import R010OIDCExpected
-from gateway.lbe_r010_preexec_env import R010ExpectedRunnerEnv
+from gateway.lbe_r010_preexec_env import (
+    R010ExpectedRunnerEnv, scrub_preexec_mapping,
+)
+from gateway.lbe_r010_preimport_gate import R010PreimportScrubReceipt
+from gateway.lbe_r010_provider_transport import (
+    verify_r010_provider_oidc_original_bytes_source,
+)
 from gateway.lbe_r010_a1_mount import inspect_r010_a1_mounts
 from gateway.lbe_r010_a1_host import (
     R010A1ClosedPreexecSource, R010A1HostSource,
@@ -244,6 +251,99 @@ def test_exact_all_source_only_components_scrub_and_remain_deny(source_inputs):
     assert obs.helper_env_sha256 == hashlib.sha256(json.dumps(
         env, sort_keys=True, separators=(",", ":"),
         ensure_ascii=True).encode("ascii")).hexdigest()
+
+
+def test_postscrub_composer_uses_provider_receipt_without_bootstrap_selectors(
+        source_inputs):
+    data = source_inputs
+    helper = scrub_preexec_mapping(
+        data["bootstrap_env"], data["env_expected"])
+    helper_sha = hashlib.sha256(json.dumps(
+        helper, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True).encode("ascii")).hexdigest()
+    receipt = R010PreimportScrubReceipt(
+        head_sha=data["job_key"].head_sha,
+        run_id=str(data["job_key"].run_id),
+        run_attempt=str(data["job_key"].run_attempt),
+        job_name=data["job_key"].job_name,
+        helper_keys=tuple(sorted(helper)),
+        helper_env_sha256=helper_sha,
+        selectors_scrubbed=True,
+        product_modules_absent_before_scrub=True,
+        source_original_os=False,
+    )
+    provider = verify_r010_provider_oidc_original_bytes_source(
+        original_jwt_bytes=data["original_jwt_bytes"],
+        issuer_metadata_bytes=data["issuer_metadata_bytes"],
+        issuer_jwks_bytes=data["issuer_jwks_bytes"],
+        expected=data["oidc_expected"],
+        now_unix=data["verified_at_unix"],
+    )
+    obs = compose_r010_postscrub_preexec_source_only(
+        comment=data["comment"],
+        standards_review=data["standards_review"],
+        spec_review=data["spec_review"],
+        job_key=data["job_key"],
+        envelope=data["envelope"],
+        oidc_expected=data["oidc_expected"],
+        provider_source=provider,
+        preimport_receipt=receipt,
+        env_expected=data["env_expected"],
+        helper_env=helper,
+        original_mount_snapshot=data["original_mount_snapshot"],
+        mount_rows_t0=data["mount_rows_t0"],
+    )
+    assert set(helper) == {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"}
+    assert obs.oidc_original_jwt_sha256 == provider.original_jwt_sha256
+    assert obs.helper_env_sha256 == receipt.helper_env_sha256
+    assert obs.signed_input_sha256 == provider.signature.signing_input_sha256
+    assert obs.signed_provider_job_live is False
+    assert obs.owner_product_t1_grant_verified is False
+    assert obs.native_launch_allowed is False
+
+
+def test_postscrub_composer_rejects_provider_expected_identity_drift(
+        source_inputs):
+    data = source_inputs
+    helper = scrub_preexec_mapping(
+        data["bootstrap_env"], data["env_expected"])
+    helper_sha = hashlib.sha256(json.dumps(
+        helper, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True).encode("ascii")).hexdigest()
+    receipt = R010PreimportScrubReceipt(
+        head_sha=data["job_key"].head_sha,
+        run_id=str(data["job_key"].run_id),
+        run_attempt=str(data["job_key"].run_attempt),
+        job_name=data["job_key"].job_name,
+        helper_keys=tuple(sorted(helper)),
+        helper_env_sha256=helper_sha,
+        selectors_scrubbed=True,
+        product_modules_absent_before_scrub=True,
+        source_original_os=False,
+    )
+    provider = verify_r010_provider_oidc_original_bytes_source(
+        original_jwt_bytes=data["original_jwt_bytes"],
+        issuer_metadata_bytes=data["issuer_metadata_bytes"],
+        issuer_jwks_bytes=data["issuer_jwks_bytes"],
+        expected=data["oidc_expected"],
+        now_unix=data["verified_at_unix"],
+    )
+    drift = replace(data["oidc_expected"], run_attempt="2")
+    with pytest.raises(R010PreexecSourceDenied):
+        compose_r010_postscrub_preexec_source_only(
+            comment=data["comment"],
+            standards_review=data["standards_review"],
+            spec_review=data["spec_review"],
+            job_key=data["job_key"],
+            envelope=data["envelope"],
+            oidc_expected=drift,
+            provider_source=provider,
+            preimport_receipt=receipt,
+            env_expected=data["env_expected"],
+            helper_env=helper,
+            original_mount_snapshot=data["original_mount_snapshot"],
+            mount_rows_t0=data["mount_rows_t0"],
+        )
 
 
 @pytest.mark.parametrize("kind", [

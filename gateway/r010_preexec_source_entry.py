@@ -151,7 +151,11 @@ def _load_gate_without_gateway(gate: Path):
             raise R010PreexecSourceEntryDenied("scrub source loader unavailable")
         module = importlib.util.module_from_spec(spec)
         sys.modules[_PRIVATE_MODULE] = module
-        spec.loader.exec_module(module)
+        # The identity-checked FD bytes, not a later path/pyc lookup, are
+        # the executable gate source. A second loader read could execute
+        # different bytes if the path changes after the checked FD read.
+        exec(compile(raw, str(gate), "exec", dont_inherit=True),
+             module.__dict__)
     except R010PreexecSourceEntryDenied:
         raise
     except BaseException:

@@ -69,6 +69,18 @@ _SAFE_REASON_CODES = {
     "product import failed:OTHER": "PRODUCT_IMPORT_OTHER",
     "wrong product module imported": "WRONG_PRODUCT_MODULE",
     "pre-product source entry failed closed": "UNQUALIFIED_SOURCE",
+    "PREEXEC inherited extra/missing keys": "SCRUB_ENV_KEYSET",
+    "non-string PREEXEC environment": "SCRUB_ENV_TYPE",
+    "bootstrap differs from current Job": "SCRUB_JOB_IDENTITY",
+    "noncanonical SSH selector": "SCRUB_SSH_SELECTOR",
+    "unqualified runner OIDC bearer": "SCRUB_OIDC_BEARER",
+    "unqualified runner OIDC endpoint": "SCRUB_OIDC_ENDPOINT",
+    "malformed runner OIDC endpoint": "SCRUB_OIDC_ENDPOINT",
+    "unreviewed runner OIDC endpoint": "SCRUB_OIDC_ENDPOINT",
+    "credential disguised in helper value": "SCRUB_HELPER_LEAK",
+    "gateway product module loaded before PREEXEC scrub": "SCRUB_PRODUCT_PRELOADED",
+    "post-scrub process boundary drift": "SCRUB_POST_ENV_DRIFT",
+    "R010 pre-product import scrub failed closed": "SCRUB_UNQUALIFIED",
 }
 
 
@@ -158,7 +170,16 @@ def bootstrap_r010_preexec_source_entry(
             run_id=run_id, run_attempt=run_attempt, head_sha=head_sha,
             job_name=job_name, image_version=image_version,
             private_home=private_home, private_tmp=private_tmp)
-        receipt = module.scrub_r010_preimport_environment(expected=expected)
+        try:
+            receipt = module.scrub_r010_preimport_environment(expected=expected)
+        except BaseException as exc:
+            # The private bootstrap module is deliberately not imported through
+            # gateway, so its exception class has a private identity.  Only map
+            # a fixed reviewed message set; never emit its raw value or repr.
+            reason = str(exc)
+            if reason not in _SAFE_REASON_CODES:
+                reason = "R010 pre-product import scrub failed closed"
+            raise R010PreexecSourceEntryDenied(reason) from None
         after_scrub = _gateway_modules()
         if after_scrub:
             raise R010PreexecSourceEntryDenied(

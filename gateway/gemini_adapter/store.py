@@ -180,4 +180,7 @@ class Store:
 
     def revoke_all(self):
         with self.lock:
+            # An emergency operator revoke must also invalidate pending
+            # browser consents and already-issued unredeemed codes.
+            self.db.execute("UPDATE requests SET status='denied', code_hash=NULL WHERE status IN ('pending','approved','code')")
             self.db.execute("INSERT OR IGNORE INTO revoked_grants SELECT DISTINCT grant_id FROM tokens")

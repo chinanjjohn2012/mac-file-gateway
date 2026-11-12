@@ -23,7 +23,9 @@ def context(tmp_path):
     home.mkdir(mode=0o700)
     config = Config(public_url="https://gemini-mcp.example.com",client_id="gemini-test-client-id",
                     client_secret="s"*48,state_file=home/"gemini-state.sqlite3",
-                    workspaces=("a",),scopes=("files:read","files:write","files:delete"))
+                    workspaces=("a",),scopes=("files:read","files:write","files:delete"),
+                    redirect_uris=("https://oauth-redirect.googleusercontent.com/r/testclient",
+                                   "https://oauth-redirect.googleusercontent.com/r/abc"))
     store=Store(config.state_file)
     calls=[]
     async def fake_upstream(req):
@@ -184,7 +186,10 @@ def test_config_private_and_redirect_validation(tmp_path):
     config=initialize_config(path,public_url="https://example.com",workspaces=("project",))
     assert path.stat().st_mode & 0o777 == 0o600
     assert load_config(path).workspaces == ("project",)
-    assert config.validate_redirect("https://oauth-redirect.googleusercontent.com/r/abc")
+    assert not config.validate_redirect("https://oauth-redirect.googleusercontent.com/r/abc")
+    from dataclasses import replace
+    approved=replace(config,redirect_uris=("https://oauth-redirect.googleusercontent.com/r/abc",))
+    assert approved.validate_redirect("https://oauth-redirect.googleusercontent.com/r/abc")
     for target in ("https://evil.example.com/r/abc",
                    "https://oauth-redirect.googleusercontent.com.evil.com/r/abc",
                    "https://oauth-redirect.googleusercontent.com/r/../evil",
@@ -254,3 +259,30 @@ def test_store_operator_pending_limit_and_oauth_replay(tmp_path):
         assert store.exchange_code(code=code,client="c",redirect="https://oauth-redirect.googleusercontent.com/r/a",verifier="a"*64) is None
     finally:
         store.close()
+
+
+def test_emergency_revoke_invalidates_unredeemed_authorization(context):
+    config,store,client,calls=context
+    verifier="A"*64
+    params={"client_id":config.client_id,
+            "redirect_uri":"https://oauth-redirect.googleusercontent.com/r/abc",
+            "response_type":"code","scope":"files:read",
+            "code_challenge":challenge_for(verifier),"code_challenge_method":"S256"}
+    auth=client.get("/oauth/authorize",params=params)
+    rid=re.search(r"Request ID: <code>([^<]+)</code>",auth.text).group(1)
+    store.approve(rid)
+    code=parse_qs(urlparse(client.post("/oauth/continue",data={"request_id":rid},follow_redirects=False).headers["location"]).query)["code"][0]
+    store.revoke_all()
+    result=client.post("/oauth/token",data={"grant_type":"authorization_code",
+                 "client_id":config.client_id,"client_secret":config.client_secret,
+                 "redirect_uri":params["redirect_uri"],"code_verifier":verifier,"code":code})
+    assert result.status_code==400
+    assert result.json()["error"]=="invalid_grant"
+
+
+def test_exact_oauth_redirect_allowlist(context):
+    config,store,client,calls=context
+    payload={"client_id":config.client_id,"response_type":"code","scope":"files:read",
+             "code_challenge":challenge_for("A"*64),"code_challenge_method":"S256"}
+    assert client.get("/oauth/authorize",params={**payload,"redirect_uri":"https://oauth-redirect.googleusercontent.com/r/unknown"}).status_code==400
+    assert client.get("/oauth/authorize",params={**payload,"redirect_uri":"https://oauth-redirect.googleusercontent.com/r/abc"}).status_code==200

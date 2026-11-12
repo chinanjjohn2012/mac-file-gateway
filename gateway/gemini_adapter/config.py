@@ -43,22 +43,20 @@ class Config:
         return f"http://127.0.0.1:{self.gateway_port}/mcp"
 
     def validate_redirect(self, value: str) -> bool:
-        if not isinstance(value, str) or len(value) > 2048 or value.count("#") or "\\" in value:
+        """Only operator-approved exact redirect URIs; never trust host alone."""
+        if not isinstance(value, str) or len(value) > 2048 or "\\" in value:
             return False
         try:
             p = urlsplit(value)
             if p.scheme != "https" or p.port is not None or p.username or p.password or p.query or p.fragment:
                 return False
-            if value in self.redirect_uris:
-                return True
             if p.hostname not in GOOGLE_REDIRECT_HOSTS or p.netloc != p.hostname:
                 return False
-            # Google's /r/* or /a/*: require a nonempty clean path segment.
             if not re.fullmatch(r"/(?:r|a)/[A-Za-z0-9_./~-]{1,512}", p.path):
                 return False
             if "/../" in p.path or "/./" in p.path or p.path.endswith("/.."):
                 return False
-            return True
+            return value in self.redirect_uris
         except (ValueError, AttributeError):
             return False
 
@@ -105,6 +103,8 @@ def load_config(path: str | Path) -> Config:
         scopes=tuple(scopes), workspaces=tuple(workspaces), redirect_uris=tuple(redirects),
         state_file=path.with_name("gemini-state.sqlite3"),
     )
+    if len(set(redirects)) != len(redirects):
+        raise ValueError("Duplicate redirect URI")
     if any(not config.validate_redirect(x) for x in redirects):
         raise ValueError("Disallowed redirect URI")
     return config

@@ -49,6 +49,8 @@ python -m gateway.gemini_adapter init \
 
 `init` 只创建一次，拒绝覆盖原文件。生成的配置文件和 SQLite 状态数据库必须只对当前 OS 用户可读（0600，父目录 0700）。`init` 输出的 Client ID/Secret 不要复制到版本库或聊天记录。
 
+**重要：必须预先登记精确的 Google OAuth 回调 URL。** 确认 Google Custom Apps 对该应用实际分配的回调 URL 后，将完整 URL 加入私有 `gemini.json` 文件的 `redirect_uris` 数组。不能使用通配符，也不要猜测回调地址。没有明确登记的回调将被拒绝，必须在 Gemini Developer Mode 验证。
+
 校验配置（不显示密钥）：
 
 ```bash

@@ -42,6 +42,7 @@ _SAFE_REASON_CODES = {
         "PRODUCT_PRELOADED_AFTER_SCRUB",
     "post-scrub process environment is not closed": "POST_SCRUB_ENV_DRIFT",
     "scrub gate source drift": "GATE_SOURCE_DRIFT",
+    "product import path unavailable": "PRODUCT_IMPORT_PATH_UNAVAILABLE",
     "canonical gate import failed": "CANONICAL_GATE_IMPORT_FAILED",
     "canonical receipt validation failed": "CANONICAL_RECEIPT_INVALID",
     "receipt did not come from current process environment":
@@ -169,9 +170,22 @@ def bootstrap_r010_preexec_source_entry(
         if gate_sha_after != gate_sha:
             raise R010PreexecSourceEntryDenied("scrub gate source drift")
 
-        repo_root = str(entry.resolve().parent.parent)
-        if repo_root not in sys.path:
-            sys.path.insert(0, repo_root)
+        entry_dir = entry.resolve().parent
+        repo_root_path = entry_dir.parent
+        sanitized_path = []
+        for item in sys.path:
+            raw = Path.cwd() if item == "" else Path(item)
+            try:
+                resolved = raw.resolve(strict=False)
+            except (OSError, RuntimeError, ValueError):
+                raise R010PreexecSourceEntryDenied(
+                    "product import path unavailable") from None
+            # File execution places the package directory at sys.path[0].
+            # Remove it so gateway/http.py cannot shadow stdlib http.
+            if resolved == entry_dir or resolved == repo_root_path:
+                continue
+            sanitized_path.append(item)
+        sys.path[:] = [str(repo_root_path), *sanitized_path]
         try:
             canonical_gate = importlib.import_module(
                 "gateway.lbe_r010_preimport_gate")

@@ -233,8 +233,21 @@ def bootstrap_r010_preexec_source_entry(
                 "KeyError", "AttributeError",
             }:
                 kind = "OTHER"
+            import_name = getattr(exc, "name", None)
+            if (type(import_name) is not str
+                    or not 1 <= len(import_name) <= 160
+                    or not (
+                        import_name == "gateway"
+                        or import_name.startswith("gateway.")
+                        or import_name in {
+                            "cryptography", "cryptography.exceptions",
+                            "cryptography.hazmat.primitives",
+                            "cryptography.hazmat.primitives.asymmetric",
+                        })):
+                import_name = ""
+            suffix = ":" + import_name if import_name else ""
             raise R010PreexecSourceEntryDenied(
-                "product import failed:" + kind) from None
+                "product import failed:" + kind + suffix) from None
         if product.__name__ != "gateway.lbe_r010_product_pipeline":
             raise R010PreexecSourceEntryDenied("wrong product module imported")
         return {
@@ -289,18 +302,35 @@ def main(argv=None) -> int:
             os.environ.clear()
         except BaseException:
             pass
+        raw_reason = str(exc)
+        import_name = None
+        if (type(exc) is R010PreexecSourceEntryDenied
+                and raw_reason.startswith("product import failed:ImportError:")):
+            candidate = raw_reason.split(":", 2)[2]
+            if (candidate == "gateway" or candidate.startswith("gateway.")
+                    or candidate in {
+                        "cryptography", "cryptography.exceptions",
+                        "cryptography.hazmat.primitives",
+                        "cryptography.hazmat.primitives.asymmetric",
+                    }):
+                import_name = candidate
+            raw_reason = "product import failed:ImportError"
         reason = (
-            _SAFE_REASON_CODES.get(str(exc), "UNQUALIFIED_SOURCE")
+            _SAFE_REASON_CODES.get(raw_reason, "UNQUALIFIED_SOURCE")
             if type(exc) is R010PreexecSourceEntryDenied
             else "UNQUALIFIED_SOURCE"
         )
-        print(json.dumps({
+        report = {
             "status": "R010_PREEXEC_SOURCE_ENTRY_DENY",
             "reason_code": reason,
             "native_launch_allowed": False,
             "product_t1": "NOT_RUN",
-        }, sort_keys=True, separators=(",", ":"), ensure_ascii=True),
-              file=sys.stderr)
+        }
+        if import_name is not None:
+            report["import_name"] = import_name
+        print(json.dumps(
+            report, sort_keys=True, separators=(",", ":"), ensure_ascii=True),
+            file=sys.stderr)
         return 2
 
 

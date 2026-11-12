@@ -130,6 +130,9 @@ def test_prefetched_original_jwt_bytes_verify_after_scrub_without_bearer(
     assert source.original_jwt_sha256 == source.signature.jwt_sha256
     assert source.metadata_sha256 == source.signature.issuer_metadata_sha256
     assert source.jwks_sha256 == source.signature.jwks_sha256
+    assert len(source.expected_identity_sha256) == 64
+    assert source.expected_identity_sha256 == (
+        source.expected_identity_sha256.lower())
     assert source.current_job_independently_verified is False
     assert source.owner_product_t1_grant_verified is False
     assert source.native_launch_allowed is False

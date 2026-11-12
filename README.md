@@ -159,7 +159,7 @@ Legacy 必须同时使用 `--allow-git` 和至少一个 `--git-command NAME`；M
 - 单次读取最多 **300 行**
 - 搜索单次最多返回 **100 条结果**
 - 只处理允许范围内的 UTF-8 代码和文本文件
-- 文件扩展名白名单包含 `.sha256`；固定文件名白名单包含 `CURRENT`、`ACTIVE_TASK`（匹配不区分大小写）。读写使用同一白名单，仍受隐藏目录授权、写入范围和敏感内容检查约束；访问 `.scratch/review-handoff/` 需显式授权 `--allow-hidden-path .scratch`。
+- 文件扩展名白名单包含 `.log`、`.sha256`；固定文件名白名单包含 `CURRENT`、`ACTIVE_TASK`（匹配不区分大小写）。读写使用同一白名单，仍受隐藏目录授权、写入范围和敏感内容检查约束；访问 `.scratch/review-handoff/` 需显式授权 `--allow-hidden-path .scratch`。`.log` 不再按扩展名拒绝，文件名仍命中密钥、凭据等拒绝规则时继续拒绝。Python、Go、Java、JavaScript/TypeScript 以及其他源码扩展名不受文件名拒绝规则限制；父目录命中拒绝规则、以及 json/yaml/密钥容器等非源码文件，仍然拒绝。源码内容里的凭据行仍会脱敏。
 - 默认屏蔽隐藏文件/目录；可用 `--allow-hidden-path` 精确授权某个隐藏目录及其子项（可重复，默认不授权）
 - 即使授权也拒绝 `.git`、`.env`、`.ssh`、`.venv`、`.gateway-backups` 等敏感路径；仍拒绝依赖目录、数据库和密钥文件
 - 拒绝路径越界、符号链接和多链接普通文件

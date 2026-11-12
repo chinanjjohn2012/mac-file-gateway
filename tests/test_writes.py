@@ -93,6 +93,17 @@ def test_create_empty_file(root):
     assert r["applied"] is True
 
 
+def test_log_files_can_be_created_and_updated(root):
+    (root / "logs").mkdir()
+    with writer(root) as g:
+        created = g.create_file("logs/app.log", "started\n", dry_run=False)
+        assert created["applied"] is True
+        assert (root / "logs" / "app.log").read_bytes() == b"started\n"
+        updated = g.write_file("logs/app.log", "started\nready\n", created["new_sha256"], dry_run=False)
+        assert updated["applied"] is True
+        assert (root / "logs" / "app.log").read_text() == "started\nready\n"
+
+
 @pytest.mark.parametrize("name", ["manifest.sha256", "CURRENT", "ACTIVE_TASK"])
 @pytest.mark.parametrize("directory", ["src", ".scratch/review-handoff/T06/r0001"])
 def test_handoff_files_preview_create_read_and_update(root, name, directory):

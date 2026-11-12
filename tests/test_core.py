@@ -59,12 +59,36 @@ def test_bad_paths_blocked(gateway, path):
     with pytest.raises(GatewayError):
         gateway.read_file(path)
 
-@pytest.mark.parametrize("name", [".env", ".ENV.production", "private.pem", "PRIVATE.KEY", "credentials.json", "service-account.json", "secrets.py", "id_rsa", "local.sqlite", "archive.zip", "photo.png", "production-us3-kubeconfig.yaml", "KUBECONFIG-prod.yml"])
+@pytest.mark.parametrize("name", [".env", ".ENV.production", "private.pem", "PRIVATE.KEY", "credentials.json", "service-account.json", "id_rsa", "local.sqlite", "archive.zip", "photo.png", "production-us3-kubeconfig.yaml", "KUBECONFIG-prod.yml"])
 def test_secret_or_unsupported_files_hidden(root, gateway, name):
     (root / name).write_text("supersecret")
     assert name not in [x["name"] for x in gateway.list_files()["entries"]]
     with pytest.raises(GatewayError):
         gateway.read_file(name)
+
+
+@pytest.mark.parametrize("name", [
+    "credential_contract.py", "secrets.py", "SECRETS.PY", "my_password.go",
+    "Service_Account.java", "api_secret.js", "id_rsa.py",
+])
+def test_source_code_filenames_ignore_denied_name_patterns(root, gateway, name):
+    (root / "src" / name).write_text("value = 1\n", encoding="utf-8")
+    listed = {entry["name"] for entry in gateway.list_files("src")["entries"]}
+    assert name in listed
+    assert gateway.read_file(f"src/{name}")["content"] == "1: value = 1"
+    matches = {match["path"] for match in gateway.search_files("value = 1", path="src")["matches"]}
+    assert f"src/{name}" in matches
+
+
+@pytest.mark.parametrize("path", ["secrets/reader.py", "my_credentials/reader.js"])
+def test_source_code_inside_denied_directory_stays_blocked(root, gateway, path):
+    folder = root / path.split("/", 1)[0]
+    folder.mkdir()
+    (folder / path.split("/", 1)[1]).write_text("value = 1\n", encoding="utf-8")
+    with pytest.raises(GatewayError) as exc:
+        gateway.read_file(path)
+    assert exc.value.code == "blocked_path"
+    assert path not in {match["path"] for match in gateway.search_files("value = 1")["matches"]}
 
 @pytest.mark.parametrize("name", [".git", ".ssh", "node_modules", "__pycache__", ".venv", "Library"])
 def test_blocked_directories(root, gateway, name):
@@ -285,3 +309,24 @@ def test_equals_dotted_code_reference_is_not_redacted(root, gateway):
 
 def test_gateway_info_reports_current_version(root, gateway):
     assert gateway.info()["version"] == "2.5.0"
+
+
+def test_log_files_can_be_listed_read_and_searched(root, gateway):
+    (root / "logs").mkdir()
+    (root / "logs" / "app.log").write_text("request accepted\npassword = 'actual-secret-value'\n")
+    (root / "APP.LOG").write_text("request accepted\n")
+    (root / "logs" / "app.log.bak").write_text("old\n")
+    (root / "logs" / "secret.log").write_text("hidden\n")
+    names = {entry["name"] for entry in gateway.list_files("logs")["entries"]}
+    assert names == {"app.log"}
+    shown = gateway.read_file("logs/app.log")
+    assert "request accepted" in shown["content"]
+    assert shown["redacted_lines"] == 1
+    assert "actual-secret-value" not in shown["content"]
+    assert "request accepted" in gateway.read_file("APP.LOG")["content"]
+    matches = {match["path"] for match in gateway.search_files("request accepted", file_glob="*.log")["matches"]}
+    assert matches == {"logs/app.log", "APP.LOG"}
+    for path in ("logs/app.log.bak", "logs/secret.log"):
+        with pytest.raises(GatewayError) as exc:
+            gateway.read_file(path)
+        assert exc.value.code == "blocked_path"

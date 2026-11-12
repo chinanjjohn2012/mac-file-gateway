@@ -50,7 +50,7 @@ DENIED_NAMES = (
     "*credential*", "*secret*", "*password*", "*service-account*", "*service_account*",
     "token.json", "tokens.json", "*token*.yaml", "*token*.yml",
     "*kubeconfig*",
-    "*.sqlite*", "*.db", "*.bak", "*.swp", "*.log",
+    "*.sqlite*", "*.db", "*.bak", "*.swp",
 )
 ALLOWED_EXTENSIONS = frozenset({
     ".py", ".pyi", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx",
@@ -59,7 +59,16 @@ ALLOWED_EXTENSIONS = frozenset({
     ".sql", ".html", ".htm", ".css", ".scss", ".less", ".vue", ".svelte",
     ".md", ".mdx", ".rst", ".txt", ".json", ".jsonl", ".toml", ".yaml",
     ".yml", ".xml", ".ini", ".conf", ".cfg", ".graphql", ".gql", ".proto",
-    ".properties", ".csv", ".tsv", ".r", ".lua", ".dart", ".ex", ".exs", ".sha256",
+    ".properties", ".csv", ".tsv", ".r", ".lua", ".dart", ".ex", ".exs", ".log", ".sha256",
+})
+# Source files keep the extension allowlist, but their own filename is not
+# subject to DENIED_NAMES. Parent directories and non-code files still are.
+CODE_EXTENSIONS = frozenset({
+    ".py", ".pyi", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx",
+    ".go", ".rs", ".java", ".kt", ".kts", ".swift", ".c", ".h", ".cpp",
+    ".hpp", ".cc", ".cs", ".rb", ".php", ".sh", ".bash", ".zsh", ".fish",
+    ".sql", ".vue", ".svelte", ".graphql", ".gql", ".proto",
+    ".r", ".lua", ".dart", ".ex", ".exs",
 })
 ALLOWED_FILENAMES = frozenset({
     "readme", "license", "copying", "dockerfile", "makefile", "gemfile",
@@ -403,7 +412,12 @@ class Gateway:
                 return False
             if lower.startswith(".") and not self._in_hidden_scope(parts[:index + 1]):
                 return False
-            if any(fnmatchcase(lower, pattern) for pattern in DENIED_NAMES):
+            filename_exempt = (
+                is_file
+                and index == len(parts) - 1
+                and Path(part).suffix.casefold() in CODE_EXTENSIONS
+            )
+            if not filename_exempt and any(fnmatchcase(lower, pattern) for pattern in DENIED_NAMES):
                 return False
             relative = "/".join(parts[:index + 1]).casefold()
             if any(fnmatchcase(relative, pattern) or fnmatchcase(lower, pattern) for pattern in self.excludes):

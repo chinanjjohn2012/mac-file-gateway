@@ -2,7 +2,7 @@
 a248a4a4ac7da92f555f034bbb9637fb77fab91a7078f5d093366cf8a937f88f  ./.github/workflows/sensitive-content-macos.yml
 ef06acea97a3c12d0a236a36d6d1bd74b735c62b712e3ad69e50c6f87ac90b90  ./.gitignore
 c628bc1938af816701f0f9a4818ebdd5115cbac6945f6f7a736caf1f58a0de19  ./BUILD_INFO.json
-d913fef94b1ef82ee94a50ccb866e652a83329dc51f8266354d4195f4861be7f  ./README.md
+bab44e676174fc8b2fa2d3c11f26b0d565973fb0db1fb41f466250f21a173443  ./README.md
 c8032dbe30ecd8d0e1395b1d97d12cba82c696e31b011d22eea53e222343fd76  ./README.zh-CN.md
 218322b0ad7ecb49967fd93d4e51a80cc24e3ce371002a03b2300494128f1db9  ./docs/2026-10-01-local-skill-bridge.md
 4c67f17c350d405e65b82585a922ad2ef2bb08ce1c3c56a085f6dd4271b06e02  ./docs/CONTROLLED_EXEC.md
@@ -40,7 +40,7 @@ e6e33d32444f7537854d51c0216b4268be2f50bc4059dc304a79b54523bfecf0  ./docs/superpo
 b39276abb8efec6c54c37c87c638c26813a715e19562c50d8240f62d4a11cad2  ./docs/superpowers/specs/2026-11-09-audit-admits-hard-lines-design.md
 3b613ae203e10b106b59310c947c4101d98e0f01b5143b85569a8e05f6b062e4  ./gateway/__init__.py
 653bf1feeaefb07acf91fea694a79ddf3027fd6b8c683c65da7a44591a1ee3de  ./gateway/__main__.py
-886c780b742a4db19189e999ac202689c82b691e098aa7a77db3ca44b6dcb6a5  ./gateway/core.py
+8524936c03e66ed0d1cbf72a7d06f6b6ea995d837b6bf1b6245ec6a7f7b292dd  ./gateway/core.py
 706b26a2ffcda94aff3f62d3b6e15ee7c7afeefa01d15aedc6d759b3eb6a75c7  ./gateway/directories.py
 e793dfcde357c81b66d532b9e3378d8bf08ac2e09b5d14c9263f1ad40c5f7c27  ./gateway/executor.py
 faa276baba4e78ba9ff5f9415b53d25d7ae78bf4bd1ad268dce7993c769a9347  ./gateway/file_ops.py
@@ -99,7 +99,7 @@ c9fef2eacae28b923ec43e9591f6576a241fd864b7876806f566bf97b9818257  ./tests/smoke_
 a49f83dad813890816cbadc7bf07f94d7a6c7e493bd6e791a0b12b4895d64389  ./tests/test_command_runner.py
 8f702647100b65caf93a7a1dfb9379d32089acec5025bd3d4aa0693404c7f8ae  ./tests/test_contextvar_review_p2.py
 cbea6ae610a1dd679e3300d8081d33c901827f2ed432ea6bbb77e12b0aab18f2  ./tests/test_contextvar_review_p2_03.py
-a4457295a6ee79fb9a0b08e93d4a61a6e7eda9f9f4bb4d75f748be6ad374b084  ./tests/test_core.py
+73fa8a0d9dd24a0bdb9e44f8b1267cc35eda3efaaa0cef93adc9dd96ca324957  ./tests/test_core.py
 8df94244c9e5b2e1ecd6647d20a71de0a240bd0620b00bb146f534a255d6e8bc  ./tests/test_directories.py
 44a6e485ec557d71d5e80691ee034e9d1595c9ce30def449164d9f077cb38830  ./tests/test_directory_http.py
 b6309e55d4507c94493708c7028a1ceafa51bcba6eb9a4bf1d4f43db9b37abd1  ./tests/test_exec_cli.py
@@ -168,7 +168,7 @@ f29816054e494090a780920e8e52d9ef08fa0535cdbe0dc57dc8ea51fc2fdb43  ./tests/test_s
 bac125c05534906bb50254fec6f51c1417c8c2985fbd7b2a56a2ebf529bb5391  ./tests/test_write_cli.py
 491483cb374291806ba43c17d07ecedd7bff4ea92f90d2c4e5976e90829a486d  ./tests/test_write_http.py
 073cb7afa6985329564ee7c4b765184b7991685f7e0cc3ee59670d0b6a229454  ./tests/test_write_review.py
-7198e6667c36062a0f4246ddc1f2861e5cb0e33a8da5bee766de79a3a8a22791  ./tests/test_writes.py
+059aefe954049b48f9e6db3cdc3d1ac90d24885c6a2828690e58ded2a26558c3  ./tests/test_writes.py
 d4c009b8db994234522713addff672089869728d0ac81788dc27effba3168fdb  ./tools/check_local_skill_bridge.py
 9c2fe6459eed7ef8fffe08891971c25ec3d142c859fba6386c161ac97bb8c120  ./tools/collect_local_skill_policy.py
 6b0a5f1252e90d7b3479993a37bf9be265bb28680f0aff62552c6f4f863b23ab  ./tools/diagnose_lock.py

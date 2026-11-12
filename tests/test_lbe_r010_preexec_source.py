@@ -18,6 +18,13 @@ from gateway.lbe_r010_job_envelope import R010JobKey, _create_once_in_pinned_anc
 from gateway.lbe_r010_oidc_verify import R010OIDCExpected
 from gateway.lbe_r010_preexec_env import R010ExpectedRunnerEnv
 from gateway.lbe_r010_a1_mount import inspect_r010_a1_mounts
+from gateway.lbe_r010_a1_host import (
+    R010A1ClosedPreexecSource, R010A1HostSource,
+)
+from gateway.lbe_r010_preexec_journal import (
+    R010PreexecSealDenied, seal_r010_preexec_source_in_job,
+    recheck_r010_sealed_preexec_source_locked,
+)
 
 REPO = "chinanjjohn2012/mac-file-gateway"
 DESIGN = "f57e39543a6fe3d64fe99b8669fc7da854b93a64"
@@ -276,3 +283,52 @@ def test_no_object_can_claim_runtime_execution_from_source_receipt(source_inputs
     result = compose_r010_preexec_source_only(**source_inputs)
     for name in ("grant", "start_row", "spawn", "open_socket", "launch"):
         assert not hasattr(result, name)
+
+
+
+def test_original_rsa_preexec_source_is_one_use_pinned_job_record(source_inputs):
+    """Original test RSA signature -> one durable Job source, no real issuer."""
+    data = source_inputs
+    original_sha = hashlib.sha256(data["original_jwt_bytes"]).hexdigest()
+    record = compose_r010_preexec_source_only(**data)
+    key = data["job_key"]
+    envelope = data["envelope"]
+    host = R010A1HostSource(
+        head_sha=key.head_sha, run_id=str(key.run_id),
+        run_attempt=str(key.run_attempt), job_name=key.job_name,
+        image_version="20261104.0514.1",
+        host_source_sha256="8" * 64,
+        mount_table_sha256=record.full_darwin_mount_table_sha256,
+        ssh_selector_observed=True,
+        host_snapshot_from_original_os=False,
+    )
+    closed = R010A1ClosedPreexecSource(
+        head_sha=key.head_sha, run_id=str(key.run_id),
+        mount_table_sha256=record.full_darwin_mount_table_sha256,
+        helper_keys=record.helper_keys, child_keys=record.helper_keys,
+        helper_env_sha256=record.helper_env_sha256,
+    )
+    sealed = seal_r010_preexec_source_in_job(
+        envelope=envelope, job_key=key,
+        preexec=record, host=host, closed=closed)
+    assert sealed.original_jwt_sha256 == original_sha
+    assert sealed.native_launch_allowed is False
+    assert sealed.provider_runtime_authenticated is False
+    assert sealed.owner_product_t1_grant_verified is False
+    assert sealed.status == "PREEXEC_SOURCE_RECORDED_NO_NATIVE_T1"
+    assert len(sealed.record_identity) == 8
+    with envelope._lock:
+        recheck_r010_sealed_preexec_source_locked(
+            envelope=envelope, job_key=key, preexec=record,
+            seal=sealed, host=host, closed=closed)
+    with pytest.raises(R010PreexecSealDenied):
+        seal_r010_preexec_source_in_job(
+            envelope=envelope, job_key=key,
+            preexec=record, host=host, closed=closed)
+    # A matching in-memory dataclass cannot stand in for a missing original.
+    os.unlink("r010-preexec-original-source.json",
+              dir_fd=envelope._journal_fd)
+    with envelope._lock, pytest.raises(R010PreexecSealDenied):
+        recheck_r010_sealed_preexec_source_locked(
+            envelope=envelope, job_key=key, preexec=record,
+            seal=sealed, host=host, closed=closed)

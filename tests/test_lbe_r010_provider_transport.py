@@ -14,6 +14,7 @@ import pytest
 from gateway.lbe_r010_provider_transport import (
     R010HttpsSourceDenied, R010GithubOwnerEvidenceReader,
     _ConstrainedHttps, request_r010_provider_oidc_source,
+    verify_r010_provider_oidc_original_bytes_source,
 )
 from gateway.lbe_r010_oidc_verify import R010OIDCExpected
 
@@ -111,6 +112,54 @@ def signed_jwt(key, ex):
     metadata = {"issuer": ISSUER, "jwks_uri": ISSUER + "/.well-known/jwks"}
     return (signing + b"." + b64(signature).encode("ascii"),
             json.dumps(metadata).encode(), json.dumps(jwks).encode())
+
+
+def test_prefetched_original_jwt_bytes_verify_after_scrub_without_bearer(
+        opener):
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ex = expected()
+    jwt, metadata, jwks = signed_jwt(key, ex)
+    source = verify_r010_provider_oidc_original_bytes_source(
+        original_jwt_bytes=jwt,
+        issuer_metadata_bytes=metadata,
+        issuer_jwks_bytes=jwks,
+        expected=ex,
+        now_unix=NOW,
+    )
+    assert source.signature.algorithm == "RS256"
+    assert source.original_jwt_sha256 == source.signature.jwt_sha256
+    assert source.metadata_sha256 == source.signature.issuer_metadata_sha256
+    assert source.jwks_sha256 == source.signature.jwks_sha256
+    assert source.current_job_independently_verified is False
+    assert source.owner_product_t1_grant_verified is False
+    assert source.native_launch_allowed is False
+    assert opener.calls == []
+
+
+@pytest.mark.parametrize("field", [
+    "jwt", "metadata", "jwks",
+])
+def test_prefetched_original_source_bytes_drift_denied_without_network(
+        opener, field):
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ex = expected()
+    jwt, metadata, jwks = signed_jwt(key, ex)
+    values = {
+        "original_jwt_bytes": jwt,
+        "issuer_metadata_bytes": metadata,
+        "issuer_jwks_bytes": jwks,
+        "expected": ex,
+        "now_unix": NOW,
+    }
+    key_name = {
+        "jwt": "original_jwt_bytes",
+        "metadata": "issuer_metadata_bytes",
+        "jwks": "issuer_jwks_bytes",
+    }[field]
+    values[key_name] = values[key_name] + b"x"
+    with pytest.raises(R010HttpsSourceDenied):
+        verify_r010_provider_oidc_original_bytes_source(**values)
+    assert opener.calls == []
 
 
 def test_real_https_source_code_is_synthetic_network_only(opener):

@@ -46,7 +46,16 @@ _SAFE_REASON_CODES = {
     "canonical receipt validation failed": "CANONICAL_RECEIPT_INVALID",
     "receipt did not come from current process environment":
         "RECEIPT_NOT_PROCESS_SOURCE",
-    "product import failed": "PRODUCT_IMPORT_FAILED",
+    "product import failed:ImportError": "PRODUCT_IMPORT_IMPORT_ERROR",
+    "product import failed:ModuleNotFoundError": "PRODUCT_IMPORT_MODULE_MISSING",
+    "product import failed:FileNotFoundError": "PRODUCT_IMPORT_FILE_MISSING",
+    "product import failed:OSError": "PRODUCT_IMPORT_OS_ERROR",
+    "product import failed:RuntimeError": "PRODUCT_IMPORT_RUNTIME_ERROR",
+    "product import failed:TypeError": "PRODUCT_IMPORT_TYPE_ERROR",
+    "product import failed:ValueError": "PRODUCT_IMPORT_VALUE_ERROR",
+    "product import failed:KeyError": "PRODUCT_IMPORT_KEY_ERROR",
+    "product import failed:AttributeError": "PRODUCT_IMPORT_ATTRIBUTE_ERROR",
+    "product import failed:OTHER": "PRODUCT_IMPORT_OTHER",
     "wrong product module imported": "WRONG_PRODUCT_MODULE",
     "pre-product source entry failed closed": "UNQUALIFIED_SOURCE",
 }
@@ -186,9 +195,16 @@ def bootstrap_r010_preexec_source_entry(
         try:
             product = importlib.import_module(
                 "gateway.lbe_r010_product_pipeline")
-        except BaseException:
+        except BaseException as exc:
+            kind = type(exc).__name__
+            if kind not in {
+                "ImportError", "ModuleNotFoundError", "FileNotFoundError",
+                "OSError", "RuntimeError", "TypeError", "ValueError",
+                "KeyError", "AttributeError",
+            }:
+                kind = "OTHER"
             raise R010PreexecSourceEntryDenied(
-                "product import failed") from None
+                "product import failed:" + kind) from None
         if product.__name__ != "gateway.lbe_r010_product_pipeline":
             raise R010PreexecSourceEntryDenied("wrong product module imported")
         return {

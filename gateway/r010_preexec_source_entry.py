@@ -25,6 +25,31 @@ import sys
 _MAX_GATE_BYTES = 65536
 _PRIVATE_MODULE = "_mfg_r010_preimport_gate_bootstrap"
 _HELPER_KEYS = ("HOME", "LANG", "LC_ALL", "PATH", "TMPDIR")
+_SAFE_REASON_CODES = {
+    "gateway package already loaded before PREEXEC entry": "GATEWAY_PRELOADED",
+    "entrypoint is a symlink": "ENTRYPOINT_SYMLINK",
+    "gateway package loaded before selector scrub": "GATEWAY_PRELOADED",
+    "source path is a symlink": "GATE_SOURCE_SYMLINK",
+    "source file identity unsafe": "GATE_SOURCE_IDENTITY",
+    "source changed while reading": "GATE_SOURCE_DRIFT",
+    "source file unavailable": "GATE_SOURCE_UNAVAILABLE",
+    "scrub source loader unavailable": "GATE_LOADER_UNAVAILABLE",
+    "scrub source could not be loaded": "GATE_LOAD_FAILED",
+    "scrub source imported gateway before environment destruction":
+        "GATE_IMPORTED_PRODUCT",
+    "scrub source changed after load": "GATE_SOURCE_DRIFT",
+    "gateway product loaded before selector scrub completed":
+        "PRODUCT_PRELOADED_AFTER_SCRUB",
+    "post-scrub process environment is not closed": "POST_SCRUB_ENV_DRIFT",
+    "scrub gate source drift": "GATE_SOURCE_DRIFT",
+    "canonical gate import failed": "CANONICAL_GATE_IMPORT_FAILED",
+    "canonical receipt validation failed": "CANONICAL_RECEIPT_INVALID",
+    "receipt did not come from current process environment":
+        "RECEIPT_NOT_PROCESS_SOURCE",
+    "product import failed": "PRODUCT_IMPORT_FAILED",
+    "wrong product module imported": "WRONG_PRODUCT_MODULE",
+    "pre-product source entry failed closed": "UNQUALIFIED_SOURCE",
+}
 
 
 class R010PreexecSourceEntryDenied(ValueError):
@@ -128,8 +153,12 @@ def bootstrap_r010_preexec_source_entry(
         repo_root = str(entry.resolve().parent.parent)
         if repo_root not in sys.path:
             sys.path.insert(0, repo_root)
-        canonical_gate = importlib.import_module(
-            "gateway.lbe_r010_preimport_gate")
+        try:
+            canonical_gate = importlib.import_module(
+                "gateway.lbe_r010_preimport_gate")
+        except BaseException:
+            raise R010PreexecSourceEntryDenied(
+                "canonical gate import failed") from None
         canonical = canonical_gate.R010PreimportScrubReceipt(
             head_sha=receipt.head_sha,
             run_id=receipt.run_id,
@@ -142,15 +171,24 @@ def bootstrap_r010_preexec_source_entry(
                 receipt.product_modules_absent_before_scrub),
             source_original_os=receipt.source_original_os,
         )
-        canonical_gate.validate_r010_preimport_receipt_source(
-            canonical,
-            head_sha=head_sha, run_id=run_id, run_attempt=run_attempt,
-            job_name=job_name, helper_keys=_HELPER_KEYS,
-            helper_env_sha256=canonical.helper_env_sha256)
+        try:
+            canonical_gate.validate_r010_preimport_receipt_source(
+                canonical,
+                head_sha=head_sha, run_id=run_id, run_attempt=run_attempt,
+                job_name=job_name, helper_keys=_HELPER_KEYS,
+                helper_env_sha256=canonical.helper_env_sha256)
+        except BaseException:
+            raise R010PreexecSourceEntryDenied(
+                "canonical receipt validation failed") from None
         if canonical.source_original_os is not True:
             raise R010PreexecSourceEntryDenied(
                 "receipt did not come from current process environment")
-        product = importlib.import_module("gateway.lbe_r010_product_pipeline")
+        try:
+            product = importlib.import_module(
+                "gateway.lbe_r010_product_pipeline")
+        except BaseException:
+            raise R010PreexecSourceEntryDenied(
+                "product import failed") from None
         if product.__name__ != "gateway.lbe_r010_product_pipeline":
             raise R010PreexecSourceEntryDenied("wrong product module imported")
         return {
@@ -200,12 +238,23 @@ def main(argv=None) -> int:
         print(json.dumps(
             result, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
         return 0
-    except BaseException:
+    except BaseException as exc:
         try:
             os.environ.clear()
         except BaseException:
             pass
-        print("R010_PREEXEC_SOURCE_ENTRY_DENY", file=sys.stderr)
+        reason = (
+            _SAFE_REASON_CODES.get(str(exc), "UNQUALIFIED_SOURCE")
+            if type(exc) is R010PreexecSourceEntryDenied
+            else "UNQUALIFIED_SOURCE"
+        )
+        print(json.dumps({
+            "status": "R010_PREEXEC_SOURCE_ENTRY_DENY",
+            "reason_code": reason,
+            "native_launch_allowed": False,
+            "product_t1": "NOT_RUN",
+        }, sort_keys=True, separators=(",", ":"), ensure_ascii=True),
+              file=sys.stderr)
         return 2
 
 

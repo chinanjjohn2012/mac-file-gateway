@@ -236,14 +236,10 @@ def bootstrap_r010_preexec_source_entry(
             import_name = getattr(exc, "name", None)
             if (type(import_name) is not str
                     or not 1 <= len(import_name) <= 160
-                    or not (
-                        import_name == "gateway"
-                        or import_name.startswith("gateway.")
-                        or import_name in {
-                            "cryptography", "cryptography.exceptions",
-                            "cryptography.hazmat.primitives",
-                            "cryptography.hazmat.primitives.asymmetric",
-                        })):
+                    or not all(
+                        part and part.replace("_", "a").isalnum()
+                        and not part[0].isdigit()
+                        for part in import_name.split("."))):
                 import_name = ""
             symbol = ""
             module_name = ""
@@ -256,8 +252,10 @@ def bootstrap_r010_preexec_source_entry(
                             and candidate_symbol.replace("_", "a").isalnum()):
                         symbol = candidate_symbol
                     if (1 <= len(candidate_module) <= 160
-                            and (candidate_module == "gateway"
-                                 or candidate_module.startswith("gateway."))):
+                            and all(
+                                part and part.replace("_", "a").isalnum()
+                                and not part[0].isdigit()
+                                for part in candidate_module.split("."))):
                         module_name = candidate_module
                 elif str(exc).startswith(
                         "attempted relative import with no known parent package"):
@@ -330,20 +328,21 @@ def main(argv=None) -> int:
                 and raw_reason.startswith("product import failed:ImportError")):
             parts = raw_reason.split(":")
             tail = parts[2:]
-            if tail and (tail[0] == "gateway"
-                         or tail[0].startswith("gateway.")
-                         or tail[0] in {
-                             "cryptography", "cryptography.exceptions",
-                             "cryptography.hazmat.primitives",
-                             "cryptography.hazmat.primitives.asymmetric",
-                         }):
+            if (tail and 1 <= len(tail[0]) <= 160
+                    and all(
+                        part and part.replace("_", "a").isalnum()
+                        and not part[0].isdigit()
+                        for part in tail[0].split("."))):
                 import_name = tail.pop(0)
             if len(tail) == 2:
                 candidate_symbol, candidate_module = tail
                 if (candidate_symbol.replace("_", "a").isalnum()
-                        and (candidate_module == "gateway"
-                             or candidate_module.startswith("gateway.")
-                             or candidate_module == "RELATIVE_NO_PARENT")):
+                        and (candidate_module == "RELATIVE_NO_PARENT"
+                             or (1 <= len(candidate_module) <= 160
+                                 and all(
+                                     part and part.replace("_", "a").isalnum()
+                                     and not part[0].isdigit()
+                                     for part in candidate_module.split("."))))):
                     import_symbol = candidate_symbol
                     import_module = candidate_module
             raw_reason = "product import failed:ImportError"

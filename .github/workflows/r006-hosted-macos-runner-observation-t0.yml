@@ -14,6 +14,10 @@ on:
       - "gateway/lbe_r010_a1_host.py"
       - "gateway/lbe_r010_a1_mount.py"
       - "gateway/lbe_r010_preexec_env.py"
+      - "gateway/lbe_r010_preimport_gate.py"
+      - "gateway/r010_preexec_source_entry.py"
+      - "gateway/lbe_r010_product_pipeline.py"
+      - "tests/test_lbe_r010_preexec_source_entry.py"
       - "tools/r010_a1_host_observation_t0.py"
       - "tests/test_lbe_r010_a1_host.py"
       - "gateway/lbe_owner_grant_bootstrap.py"
@@ -55,6 +59,48 @@ jobs:
         run: python3 -I -S tools/d4_r006_host_observation_t0.py
       - name: Collect bounded macOS host-file candidates for later review only
         run: python3 -I -S tools/d4_r006_host_source_collect_t0.py
+      # Synthetic exact-env process test only: no live OIDC request, no agent
+      # protocol, no product child and no PRODUCT_T1 authority.
+      - name: R010 tracked PREEXEC scrub then product-import SAFE T0 (PR114)
+        if: ${{ github.event.pull_request.number == 114 }}
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -eu
+          py="$(command -v python3)"
+          home="$RUNNER_TEMP/r010-preexec-source-home"
+          tmp="$RUNNER_TEMP/r010-preexec-source-tmp"
+          mkdir -m 700 "$home" "$tmp"
+          /usr/bin/env -i \
+            "PATH=/usr/bin:/bin" \
+            "HOME=$home" \
+            "TMPDIR=$tmp" \
+            "LANG=C" \
+            "LC_ALL=C" \
+            "GITHUB_ACTIONS=true" \
+            "GITHUB_EVENT_NAME=pull_request" \
+            "GITHUB_REPOSITORY=chinanjjohn2012/mac-file-gateway" \
+            "GITHUB_RUN_ID=$GITHUB_RUN_ID" \
+            "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "GITHUB_JOB=$GITHUB_JOB" \
+            "G05_EXPECTED_HEAD=$G05_EXPECTED_HEAD" \
+            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
+            "RUNNER_OS=macOS" \
+            "RUNNER_ARCH=ARM64" \
+            "ImageOS=macos15" \
+            "ImageVersion=$ImageVersion" \
+            "SSH_AUTH_SOCK=/private/tmp/r010-safe-t0-agent.sock" \
+            "ACTIONS_ID_TOKEN_REQUEST_URL=https://synthetic.actions.githubusercontent.com/_apis/oidc/token?api-version=2.0" \
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN=synthetic-safe-t0-bearer-1234567890" \
+            "$py" -B gateway/r010_preexec_source_entry.py \
+            --expected-run-id "$GITHUB_RUN_ID" \
+            --expected-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --expected-head "$G05_EXPECTED_HEAD" \
+            --expected-job "$GITHUB_JOB" \
+            --expected-image-version "$ImageVersion" \
+            --expected-home "$home" \
+            --expected-tmp "$tmp"
       # R006 A0 contract is UNCHANGED for every other PR.
       - name: R006 A0 strict host allowlist (non-R010 review targets)
         if: ${{ github.event.pull_request.number != 114 }}

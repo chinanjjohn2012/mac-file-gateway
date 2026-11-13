@@ -82,14 +82,14 @@ def build_multi_mcp(service: WorkspaceService, *, port: int = 8765) -> MCPServer
         ) -> dict[str, Any]:
             """Run an allowlisted command only in an explicitly enabled Workspace.
 
-            Ordinary schema-v2 apply is F1-denied. A separately reviewed,
-            exact R006 one-shot may be installed only by trusted in-process
-            bootstrap code; clients cannot supply its owner/review/run
-            evidence. If present, this same tool consumes it through the
-            shared WorkspaceService invoke gate. R006 is best-effort: direct
-            child completion never proves descendant cleanup or rollback.
-            Never automatically retry after a lost response. Git remains
-            independently admitted.
+            Preview is default and never spawns. Schema-v2 positive apply
+            requires BOTH explicit server/workspace Exec switches, a healthy
+            existing owner.lock, operator-selected native tools, and EXACTLY
+            one of the six fixed Python/Pipenv/Go request vectors. A separate
+            historical private R006 one-shot, when present, is not a public
+            client grant. A timeout, cancellation or direct-child exit never
+            proves descendant cleanup. Never automatically retry after an
+            uncertain or lost response. Git/File authorization is separate.
             """
             try:
                 return await invoke_exec_with_cancel(

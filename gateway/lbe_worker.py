@@ -313,6 +313,11 @@ class LbeWorker:
         # Recheck before invoking the only launcher callback. This is still
         # a proven no-child path; release its reservation and pipe resources.
         # Never start a new command for a waiter already observed as cancelled.
+        # This last observed check is the best-effort launch-commit boundary:
+        # if cancellation arrives AFTER this check (even before native Popen
+        # returns), the launcher may already have started a child. Treat
+        # postcheck cancellation as possibly started and leave child/reaper
+        # ownership intact. No atomic OS Event/Popen guarantee is claimed.
         if cancelled is not None and cancelled.is_set():
             try:
                 self._owner.spawn_failed(reservation)

@@ -260,3 +260,168 @@ def test_mvp_status_uses_actual_configuration_and_old_state(mvp):
         assert status["workspaces"][0]["exec_apply_available"]
     finally:
         s.close()
+
+
+@pytest.mark.parametrize("command_id", ["py-direct-pytest", "go-test"])
+def test_rest_and_official_mcp_share_same_mocked_positive_service(
+        mvp, monkeypatch, command_id):
+    """Real Starlette/MCP SDK adapters; only native Worker is a T0 Fake."""
+    pytest.importorskip("mcp")
+    from starlette.testclient import TestClient
+    from gateway.http_multi import create_multi_app
+
+    make, *_ = mvp
+    row = next(r for r in SIX_FIXED_COMMANDS if r.command_id == command_id)
+    s = make()
+    visited = []
+
+    def fake_run(self, plan, *, cancelled=None, **kwargs):
+        visited.append((plan.workspace, plan.cwd, plan.requested_argv))
+        return {"status": "exited", "executed": True, "exit_code": 0,
+                "stdout": "T0 FakeChild only", "stderr": "",
+                "timed_out": False, "process_may_be_running": True,
+                "cleanup_proven": False, "output_complete": True}
+
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda *a, **kw: pytest.fail("No native T1 grant"))
+    monkeypatch.setattr(LbeWorker, "run", fake_run)
+    args = {"workspace": "a", "cwd": row.cwd,
+            "argv": list(row.requested_argv), "dry_run": False}
+    headers = {"Accept": "application/json, text/event-stream",
+               "Content-Type": "application/json"}
+
+    def rpc(client, method, params, request_id):
+        response = client.post("/mcp", headers=headers, json={
+            "jsonrpc": "2.0", "id": request_id,
+            "method": method, "params": params})
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    try:
+        with TestClient(create_multi_app(s),
+                        base_url="http://127.0.0.1:8765") as client:
+            assert client.get("/health").json()["exec_policy"] == (
+                client.get("/info").json()["exec_policy"])
+            rest = client.post("/run", json=args)
+            assert rest.status_code == 200, rest.text
+            assert rest.json()["status"] == "exited"
+            assert rest.json()["exit_code"] == 0
+
+            initial = rpc(client, "initialize", {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "six-mvp-t0", "version": "1"},
+            }, 10)
+            assert "result" in initial
+            client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+            })
+            mcp = rpc(client, "tools/call", {
+                "name": "run_command", "arguments": args}, 11)
+            result = mcp["result"]
+            assert not result.get("isError"), result
+            structured = result.get("structuredContent", {})
+            assert structured["status"] == "exited"
+            assert structured["exit_code"] == 0
+
+            # A generic wider Go preview must never acquire a positive
+            # Worker through either adapter, even under both opt-ins.
+            illegal = dict(args, cwd="go-project",
+                           argv=["go", "test", "./another"])
+            err_rest = client.post("/run", json=illegal)
+            assert err_rest.json()["error"] == "command_not_allowed"
+            err_mcp = rpc(client, "tools/call", {
+                "name": "run_command", "arguments": illegal}, 12)
+            assert err_mcp["result"]["isError"] is True
+            assert (err_mcp["result"]["structuredContent"]["error"]
+                    == "command_not_allowed")
+        assert len(visited) == 2
+        assert visited[0] == visited[1] == (
+            "a", row.cwd, row.requested_argv)
+    finally:
+        s.close()
+
+
+def test_known_prelaunch_cancel_proves_no_child_and_no_slot(mvp, monkeypatch):
+    import threading
+
+    make, *_ = mvp
+    s = make()
+    cancelled = threading.Event()
+    cancelled.set()
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("cancelled launch"))
+    try:
+        with pytest.raises(GatewayError) as denied:
+            s.invoke_exec("a", "py-direct",
+                          ["python", "-m", "pytest", "-q"],
+                          dry_run=False, cancelled=cancelled)
+        assert denied.value.code == "waiter_disconnected"
+        assert denied.value.details["process_may_be_running"] is False
+        assert s._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        s.close()
+
+
+def test_tool_changed_since_startup_is_proven_prelaunch_failure(mvp, monkeypatch):
+    make, root, private, tool_config, bin_dir = mvp
+    s = make()
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("tool changed before Popen"))
+    try:
+        (bin_dir / "go").unlink()
+        result = s.invoke_exec("a", "go-project", ["go", "test", "./..."],
+                               dry_run=False)
+        assert result["status"] == "launch_failed"
+        assert result["executed"] is False
+        assert result["exit_code"] is None
+        assert not result["process_may_be_running"]
+        assert s._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        s.close()
+
+
+def test_unqualified_pipenv_console_shebang_rejected_at_startup(mvp):
+    make, root, private, tool_config, bin_dir = mvp
+    (bin_dir / "pipenv").write_bytes(
+        b"#!/usr/bin/env python\n# no native execution\n")
+    s = make()
+    try:
+        policy = s.info()["exec_policy"]
+        assert policy["apply_configured"]
+        assert not policy["tool_selection_ready"]
+        assert not policy["available"]
+        with pytest.raises(GatewayError) as denied:
+            s.invoke_exec("a", "py-pipenv",
+                          ["python", "-m", "pytest", "-q"], dry_run=False)
+        assert denied.value.code == "runner_unavailable"
+    finally:
+        s.close()
+
+
+def test_ambiguous_native_launch_exception_preserves_uncertain_slot(mvp, monkeypatch):
+    """Popen OSError cannot prove no child: owner latches, no silent retry."""
+    make, *_ = mvp
+    s = make()
+    raised = []
+
+    def synthetic_exception(*args, **kwargs):
+        raised.append(True)
+        raise OSError("synthetic Popen may have started a child")
+
+    monkeypatch.setattr(subprocess, "Popen", synthetic_exception)
+    try:
+        with pytest.raises(GatewayError) as denied:
+            s.invoke_exec("a", "py-direct",
+                          ["python", "-m", "pytest", "-q"], dry_run=False)
+        assert raised == [True]
+        assert denied.value.code == "exec_state_unavailable"
+        assert denied.value.details["process_may_be_running"] is True
+        assert s._lbe_owner.snapshot()["unavailable"] is True
+        with pytest.raises(GatewayError):
+            s.invoke_exec("a", "py-direct",
+                          ["python", "-m", "pytest", "-q"], dry_run=False)
+        assert raised == [True], "uncertain attempt must not be retried"
+    finally:
+        s.close()

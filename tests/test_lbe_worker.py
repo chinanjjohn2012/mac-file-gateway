@@ -1010,3 +1010,44 @@ def test_r013_source_fake_worker_reader_or_owner_fault_forbids_later_row(
             env.begin_row(1, "second", "second")
     finally:
         owner.close()
+
+
+def test_cancel_at_postcheck_launch_boundary_is_possibly_started():
+    """Deterministically close the Worker-check/Popen-observation race (T0).
+
+    The last Worker cancellation check has already returned false when the
+    launcher callback is entered.  A cancellation signaled inside that
+    callback is POST-COMMIT from the Worker perspective: we must never claim
+    no child or release its owner lease while the direct child is still alive.
+    No native Popen, OS pipe, PID signal, or real child is involved.
+    """
+    event = threading.Event()
+    fake = FakeChild()
+    selector = FakeSelector()
+    calls = []
+
+    def launch(_plan):
+        calls.append("launcher_entered_after_last_check")
+        event.set()
+        return fake
+
+    worker, owner, selector = driver(selector=selector, launch=launch)
+    try:
+        with pytest.raises(LbeWorkerError) as exc:
+            worker.run(plan(), cancelled=event)
+        assert exc.value.code == "waiter_disconnected"
+        assert exc.value.process_may_be_running is True
+        assert calls == ["launcher_entered_after_last_check"]
+        assert owner.snapshot()["reserved_slots"] == 1
+        assert owner.snapshot()["running_direct_children"] == 1
+        # No replay while the original direct child is unobserved.
+        with pytest.raises(LbeWorkerError, match="busy"):
+            worker.run(plan())
+        selector.enqueue(91, b"")
+        selector.enqueue(92, b"")
+        fake.exit.set()
+        wait_until(lambda: owner.snapshot()["reserved_slots"] == 0)
+        assert fake.wait_calls == 1
+    finally:
+        fake.exit.set()
+        owner.close()

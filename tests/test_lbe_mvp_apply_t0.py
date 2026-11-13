@@ -221,8 +221,14 @@ def test_launcher_selects_absolute_tool_and_fresh_environment_without_spawn(
             assert "GOFLAGS" not in env
         if expected_program == "pipenv":
             assert env["PIPENV_PIPFILE"] == str(root / "py-pipenv" / "Pipfile")
+            assert env["PIPENV_PYTHON"] == str(
+                root / "py-pipenv" / ".venv" / "bin" / "python")
+            assert env["PIPENV_VENV_IN_PROJECT"] == "1"
+            assert env["PIPENV_IGNORE_VIRTUALENVS"] == "1"
+            assert env["PIPENV_DONT_LOAD_ENV"] == "1"
         else:
             assert "PIPENV_PIPFILE" not in env
+            assert "PIPENV_PYTHON" not in env
     finally:
         s.close()
 
@@ -423,5 +429,53 @@ def test_ambiguous_native_launch_exception_preserves_uncertain_slot(mvp, monkeyp
             s.invoke_exec("a", "py-direct",
                           ["python", "-m", "pytest", "-q"], dry_run=False)
         assert raised == [True], "uncertain attempt must not be retried"
+    finally:
+        s.close()
+
+
+def test_pipenv_project_interpreter_must_be_executable_before_spawn(
+        mvp, monkeypatch):
+    """An interpreter changed to a non-executable is a witnessed NO child."""
+    make, root, *_ = mvp
+    s = make()
+    binary = root / "py-pipenv" / ".venv" / "bin" / "python"
+    # Fixture state was already admitted; malicious/swapped executable bytes
+    # are not executed in this test (Popen stays forbidden).
+    binary.chmod(0o600)
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("Pipenv launched bad python"))
+    try:
+        out = s.invoke_exec("a", "py-pipenv",
+                            ["python", "-m", "pytest", "-q"],
+                            dry_run=False)
+        assert out["status"] == "launch_failed"
+        assert out["executed"] is False and out["exit_code"] is None
+        assert out["process_may_be_running"] is False
+        assert s._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        s.close()
+
+
+def test_pipenv_python_env_ignores_ambient_override(mvp, monkeypatch):
+    """Pipenv uses selected project-local interpreter, never inherited env."""
+    make, root, *_ = mvp
+    s = make()
+    calls = []
+    monkeypatch.setenv("PIPENV_PYTHON", "/untrusted/fake")
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda argv, **kwargs: calls.append((argv, kwargs)))
+    try:
+        ctx = s.get("a")
+        plan = prepare_lbe_work_plan(
+            ctx, cwd="py-pipenv",
+            argv=["python", "-m", "pytest", "-q"])
+        make_trusted_lbe_launcher(ctx, mvp_tools=s._mvp_tools)(plan)
+        assert len(calls) == 1
+        env = calls[0][1]["env"]
+        assert env["PIPENV_PYTHON"] == str(
+            root / "py-pipenv" / ".venv" / "bin" / "python")
+        assert env["PIPENV_PYTHON"] != "/untrusted/fake"
+        assert env["PIPENV_PIPFILE"] == str(
+            root / "py-pipenv" / "Pipfile")
     finally:
         s.close()

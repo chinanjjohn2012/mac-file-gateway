@@ -16,7 +16,6 @@ import os
 from pathlib import Path
 import pwd
 import stat
-import tempfile
 from typing import TYPE_CHECKING
 
 from .private_fs import PrivateFileError, read_private_json
@@ -167,8 +166,17 @@ class MvpTrustedTools:
                         or not python.is_file()
                         or not os.access(python, os.X_OK)):
                     raise ValueError("selected Pipenv project is incomplete")
+                # PIPENV_VENV_IN_PROJECT alone documents the preferred
+                # location, but does not select the exact interpreter.
+                # Validate the existing project-local interpreter's resolved
+                # executable before asking Pipenv to run the fixed command.
+                # An ordinary venv/bin/python symlink is allowed; its target
+                # must be a regular executable controlled by this operator.
+                selected_python = str(python.resolve(strict=True))
+                _identity(selected_python)
                 env.update(
                     PIPENV_PIPFILE=str(pipfile),
+                    PIPENV_PYTHON=str(python),
                     PIPENV_NOSPIN="1",
                     PIPENV_IGNORE_VIRTUALENVS="1",
                     PIPENV_VENV_IN_PROJECT="1",

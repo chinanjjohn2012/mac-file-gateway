@@ -163,7 +163,10 @@ def test_v2_missing_old_state_root_fails_without_auto_creation(scene):
             with pytest.raises(GatewayError) as exc:
                 svc.invoke_exec("a", "python-project", ["python", "hello.py"],
                                 dry_run=dry)
-            assert exc.value.code == "exec_state_unavailable"
+            # Design-002: disabled positive v2 opt-ins precede the old-state
+            # scan; nonspawning preview still reports missing old state.
+            assert exc.value.code == (
+                "exec_state_unavailable" if dry else "exec_disabled")
         assert svc.invoke("b", "read_file", "safe.txt", 1, 5)["workspace"] == "b"
         assert not (private / "exec-state").exists()
     finally:

@@ -552,7 +552,8 @@ class WorkspaceService:
             if (not dry_run and self.settings.schema_version == 2
                     and not self._lbe_positive_authorized
                     and self._r006_pending is None
-                    and self._exec_state is None
+                    and (self._exec_state is None
+                         or self._exec_state.durability_state == "unavailable")
                     and not (self.settings.exec_apply_enabled
                              and ctx.settings.exec_apply_enabled)):
                 raise GatewayError(

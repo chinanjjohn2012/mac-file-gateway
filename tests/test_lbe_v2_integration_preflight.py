@@ -2204,7 +2204,7 @@ def test_r006_v1_workspace_discovery_schema_does_not_change(scene):
         with pytest.raises(GatewayError) as denied:
             svc.invoke_exec("a", "python-project",
                             ["python", "hello.py"], dry_run=False)
-        assert denied.value.code == "exec_disabled"
+        assert denied.value.code == "exec_cleanup_proof_required"
     finally:
         svc.close()
 

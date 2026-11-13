@@ -104,10 +104,12 @@ def test_full_config_refuses_wrong_schema_versions(scene, version):
 
 
 @pytest.mark.parametrize("bad", [
-    lambda c: c["server"].update(exec={"enabled": False}),
-    lambda c: c["server"].update(exec={"enabled": True}),
-    lambda c: c["workspaces"]["a"]["exec"].update(enabled=False),
-    lambda c: c["workspaces"]["a"]["exec"].update(enabled=True),
+    # DESIGN-002 explicitly ALLOWS strict Boolean opt-ins. Retain malformed
+    # type/unknown-field negatives rather than the obsolete no-switch rule.
+    lambda c: c["server"].update(exec={"enabled": 1}),
+    lambda c: c["server"].update(exec={"enabled": "yes"}),
+    lambda c: c["workspaces"]["a"]["exec"].update(enabled=1),
+    lambda c: c["workspaces"]["a"]["exec"].update(enabled=None),
     lambda c: c["workspaces"]["a"]["exec"].update(paths=["../b"]),
     lambda c: c["workspaces"]["a"]["exec"].update(paths=["/tmp"]),
     lambda c: c["workspaces"]["a"]["exec"].update(paths=["project", "Project"]),
@@ -2202,3 +2204,21 @@ def test_r006_v1_workspace_discovery_schema_does_not_change(scene):
         assert denied.value.code == "exec_cleanup_proof_required"
     finally:
         svc.close()
+
+
+def test_v2_dual_optin_is_new_legal_grammar_not_legacy_implicit_apply(scene):
+    a, b, _private, _runtime = scene
+    c = v2_config(a, b)
+    # V2 path-only is still valid preview configuration, not apply consent.
+    old = parse_workspace_config(c)
+    assert old.exec_enabled and not old.exec_apply_enabled
+    assert not old.workspaces[0].exec_apply_enabled
+    c["server"]["exec"] = {"enabled": True}
+    server_only = parse_workspace_config(c)
+    assert server_only.exec_apply_enabled
+    assert not server_only.workspaces[0].exec_apply_enabled
+    c["workspaces"]["a"]["exec"]["enabled"] = True
+    both = parse_workspace_config(c)
+    assert both.exec_enabled and both.exec_apply_enabled
+    assert both.workspaces[0].exec_apply_enabled
+    # Neither fragment parse nor a valid preview is a process launch.

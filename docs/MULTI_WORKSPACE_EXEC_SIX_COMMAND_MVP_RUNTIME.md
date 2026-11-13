@@ -62,3 +62,25 @@ Status should distinguish preview availability, positive opt-ins, private tool r
 ## Evidence and release
 
 Allowed now: source and nonspawning SAFE T0 tests (FakeChild or monkeypatched Popen). NOT authorized by this document: real Python/Pipenv/Go native product T1 on an unapproved host, live OIDC/SSH/autofs, T2 kill/forced restart, T3 shared/production, merge, tag, release or deployment. New code needs an immutable complete milestone Head/Base/Tree/Manifest and original CI, independent B/C FULL role reviews, and separate actual integration/R10 signoff.
+
+
+## Explicit fresh-install provisioning (not recovery)
+
+The schema-v2 service deliberately does NOT create an absent exec-state directory
+on startup. On a genuinely NEW installation only, first STOP every Gateway
+instance that could use the private control plane, verify there has been no
+previous Exec state/lock/history and that the private config directory already
+exists, belongs to this user and has POSIX mode 0700. Then an operator can
+explicitly initialize an EMPTY state root/owner.lock once:
+
+    python -m tools.mvp_exec_first_install \
+      --config-dir /ABS/PRIVATE/GATEWAY_CONFIG_DIR \
+      --confirm-first-install --confirm-gateway-stopped
+
+This operator-only offline command creates exec-state (0700) and owner.lock
+(0600), fsyncs them and returns a nonexecution receipt. It does not start
+the Gateway, touch any Workspace source, run Python/Pipenv/Go or grant Exec.
+It deliberately refuses when ANY exec-state entry (including a symlink or
+incomplete previous attempt) already exists. Never use it to recover a missing
+old lock, UNKNOWN/PREPARED/RUNNING/RETIRED state, corrupt history or a live
+Gateway; those cases remain blocked for separate operator investigation.

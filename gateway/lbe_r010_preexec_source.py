@@ -339,3 +339,76 @@ def compose_r010_postscrub_preexec_source_only(
         raise R010PreexecSourceDenied(
             "R010 post-scrub PREEXEC composition failed closed") from None
 
+
+def compose_r010_acquired_postscrub_source_only(
+    *, comment: Mapping[str, object],
+    standards_review: Mapping[str, object],
+    spec_review: Mapping[str, object],
+    job_key: R010JobKey,
+    envelope: R010CreatedJobEnvelope,
+    oidc_expected: R010OIDCExpected,
+    acquisition: object,
+    request_base_url: str,
+    issuer_metadata_bytes: bytes,
+    issuer_jwks_bytes: bytes,
+    now_unix: int,
+    preimport_receipt: R010PreimportScrubReceipt,
+    env_expected: R010ExpectedRunnerEnv,
+    helper_env: Mapping[str, str],
+    original_mount_snapshot: R010A1MountSnapshot,
+    mount_rows_t0: tuple[tuple[str, str, str, int], ...],
+) -> R010PreexecSourceObservation:
+    """Compose acquired OIDC evidence into the SAME held Job after scrub.
+
+    This is a nonoperative first-party product source connector. It has no
+    bearer argument, does not fetch OIDC/JWKS, and never spawns a process.
+    Any unqualified acquisition, signature, environment, mount or Job record
+    permanently invalidates the supplied held Job, including failures before
+    the existing post-scrub composer is entered. Only source data is returned;
+    no provider-current-Job, Owner Grant or native T1 is authorized.
+    """
+    from .lbe_r010_provider_transport import (
+        verify_r010_preexec_oidc_acquisition_source,
+    )
+
+    try:
+        if (type(job_key) is not R010JobKey
+                or type(envelope) is not R010CreatedJobEnvelope
+                or type(oidc_expected) is not R010OIDCExpected
+                or type(preimport_receipt) is not R010PreimportScrubReceipt):
+            raise R010PreexecSourceDenied(
+                "unqualified acquired PREEXEC Job input types")
+        # Verify original bytes and request/audience identity before touching
+        # any one-use Job source state. A transport receipt does not attest
+        # issuer TLS/JWKS provenance or the actual signed current Job.
+        provider = verify_r010_preexec_oidc_acquisition_source(
+            acquisition=acquisition,
+            request_base_url=request_base_url,
+            issuer_metadata_bytes=issuer_metadata_bytes,
+            issuer_jwks_bytes=issuer_jwks_bytes,
+            expected=oidc_expected,
+            now_unix=now_unix,
+        )
+        return compose_r010_postscrub_preexec_source_only(
+            comment=comment,
+            standards_review=standards_review,
+            spec_review=spec_review,
+            job_key=job_key,
+            envelope=envelope,
+            oidc_expected=oidc_expected,
+            provider_source=provider,
+            preimport_receipt=preimport_receipt,
+            env_expected=env_expected,
+            helper_env=helper_env,
+            original_mount_snapshot=original_mount_snapshot,
+            mount_rows_t0=mount_rows_t0,
+        )
+    except BaseException:
+        if type(envelope) is R010CreatedJobEnvelope:
+            try:
+                envelope.latch_failure("source_preexec_denied")
+            except BaseException:
+                pass
+        raise R010PreexecSourceDenied(
+            "R010 acquired post-scrub Job source failed closed") from None
+

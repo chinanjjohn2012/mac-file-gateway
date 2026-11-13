@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from gateway.lbe_r010_preexec_source import (
     R010PreexecSourceDenied, compose_r010_preexec_source_only,
     compose_r010_postscrub_preexec_source_only,
+    compose_r010_acquired_postscrub_source_only,
 )
 from gateway.lbe_r010_job_envelope import R010JobKey, _create_once_in_pinned_anchor
 from gateway.lbe_r010_oidc_verify import R010OIDCExpected
@@ -24,6 +25,8 @@ from gateway.lbe_r010_preimport_gate import R010PreimportScrubReceipt
 from gateway.lbe_r010_provider_transport import (
     verify_r010_provider_oidc_original_bytes_source,
 )
+from gateway.r010_preexec_oidc_acquire import R010PreexecOIDCAcquisition
+from urllib.parse import quote
 from gateway.lbe_r010_a1_mount import inspect_r010_a1_mounts
 from gateway.lbe_r010_a1_host import (
     R010A1ClosedPreexecSource, R010A1HostSource,
@@ -344,6 +347,112 @@ def test_postscrub_composer_rejects_provider_expected_identity_drift(
             original_mount_snapshot=data["original_mount_snapshot"],
             mount_rows_t0=data["mount_rows_t0"],
         )
+
+
+
+def _acquired_postscrub_fixture(data):
+    helper = scrub_preexec_mapping(data["bootstrap_env"], data["env_expected"])
+    helper_sha = hashlib.sha256(json.dumps(
+        helper, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True).encode("ascii")).hexdigest()
+    key = data["job_key"]
+    receipt = R010PreimportScrubReceipt(
+        head_sha=key.head_sha,
+        run_id=str(key.run_id),
+        run_attempt=str(key.run_attempt),
+        job_name=key.job_name,
+        helper_keys=tuple(sorted(helper)),
+        helper_env_sha256=helper_sha,
+        selectors_scrubbed=True,
+        product_modules_absent_before_scrub=True,
+        source_original_os=False,
+    )
+    base_url = (
+        "https://pipelinesghubeus15.actions.githubusercontent.com/"
+        "_apis/oidc/token?api-version=2.0"
+    )
+    jwt = data["original_jwt_bytes"]
+    request_url = base_url + "&audience=" + quote(
+        data["oidc_expected"].audience, safe="")
+    acquired = R010PreexecOIDCAcquisition(
+        original_jwt_bytes=jwt,
+        original_jwt_sha256=hashlib.sha256(jwt).hexdigest(),
+        request_url_sha256=hashlib.sha256(
+            request_url.encode("ascii")).hexdigest(),
+        response_sha256="f" * 64,
+    )
+    args = {
+        "comment": data["comment"],
+        "standards_review": data["standards_review"],
+        "spec_review": data["spec_review"],
+        "job_key": key,
+        "envelope": data["envelope"],
+        "oidc_expected": data["oidc_expected"],
+        "acquisition": acquired,
+        "request_base_url": base_url,
+        "issuer_metadata_bytes": data["issuer_metadata_bytes"],
+        "issuer_jwks_bytes": data["issuer_jwks_bytes"],
+        "now_unix": data["verified_at_unix"],
+        "preimport_receipt": receipt,
+        "env_expected": data["env_expected"],
+        "helper_env": helper,
+        "original_mount_snapshot": data["original_mount_snapshot"],
+        "mount_rows_t0": data["mount_rows_t0"],
+    }
+    return args
+
+
+def test_acquired_postscrub_source_composes_same_job_without_bearer(
+        source_inputs):
+    args = _acquired_postscrub_fixture(source_inputs)
+    obs = compose_r010_acquired_postscrub_source_only(**args)
+    assert obs.oidc_original_jwt_sha256 == (
+        args["acquisition"].original_jwt_sha256)
+    assert obs.helper_env_sha256 == (
+        args["preimport_receipt"].helper_env_sha256)
+    assert set(args["helper_env"]) == {
+        "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"}
+    assert obs.signed_provider_job_live is False
+    assert obs.native_launch_allowed is False
+    assert obs.owner_product_t1_grant_verified is False
+    assert obs.six_command_product_t1_pass is False
+    assert "test-oidc-bearer-do-not-log" not in repr(obs)
+
+
+@pytest.mark.parametrize("drift", [
+    "jwt_changed", "jwt_hash", "url_hash", "wrong_audience",
+    "bad_metadata", "helper_key", "scrub_receipt", "claimed_native",
+])
+def test_acquired_postscrub_source_drift_latches_same_job(
+        source_inputs, drift):
+    args = _acquired_postscrub_fixture(source_inputs)
+    receipt = args["acquisition"]
+    if drift == "jwt_changed":
+        args["acquisition"] = replace(
+            receipt, original_jwt_bytes=receipt.original_jwt_bytes + b"x")
+    elif drift == "jwt_hash":
+        args["acquisition"] = replace(
+            receipt, original_jwt_sha256="0" * 64)
+    elif drift == "url_hash":
+        args["acquisition"] = replace(
+            receipt, request_url_sha256="0" * 64)
+    elif drift == "wrong_audience":
+        args["oidc_expected"] = replace(
+            args["oidc_expected"], implementation_head_sha="b" * 40)
+    elif drift == "bad_metadata":
+        args["issuer_metadata_bytes"] = b'{"issuer":"untrusted"}'
+    elif drift == "helper_key":
+        args["helper_env"]["SSH_AUTH_SOCK"] = "/private/tmp/foreign.sock"
+    elif drift == "scrub_receipt":
+        args["preimport_receipt"] = replace(
+            args["preimport_receipt"], helper_env_sha256="0" * 64)
+    elif drift == "claimed_native":
+        args["acquisition"] = replace(
+            receipt, native_launch_allowed=True)
+    with pytest.raises(R010PreexecSourceDenied):
+        compose_r010_acquired_postscrub_source_only(**args)
+    with pytest.raises(Exception):
+        source_inputs["envelope"].snapshot()
 
 
 @pytest.mark.parametrize("kind", [

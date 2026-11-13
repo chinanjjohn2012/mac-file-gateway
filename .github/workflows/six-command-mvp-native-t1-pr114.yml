@@ -18,7 +18,10 @@ jobs:
       github.event.pull_request.head.ref == 'feat/lbe-five-day-d2-nonoperative-prelaunch-20261106' &&
       github.event.label.name == 'mvp-native-t1-approved' &&
       github.actor == 'chinanjjohn2012'
-    runs-on: macos-15-arm64
+    # Repo PR114 source-only macos-15 job 132047463161 actually resolved
+    # GitHub image macos-15-arm64; DO NOT TRUST THE LABEL for CPU authority.
+    # The next step fails BEFORE any dependency setup on a non-ARM64 host.
+    runs-on: macos-15
     timeout-minutes: 20
     env:
       PYTHONDONTWRITEBYTECODE: "1"
@@ -38,6 +41,20 @@ jobs:
         env:
           G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: python3 -I -S tools/g05_ci_admission.py --expected-head "$G05_EXPECTED_HEAD"
+
+      - name: Fail closed on wrong host BEFORE Python Go or Pipenv setup
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -eu
+          test "$(uname -s)" = "Darwin"
+          test "$(uname -m)" = "arm64"
+          test "$RUNNER_OS" = "macOS"
+          test "$RUNNER_ARCH" = "ARM64"
+          test "$RUNNER_ENVIRONMENT" = "github-hosted"
+          test "${ImageOS:-}" = "macos15"
+          test -n "${ImageVersion:-}"
+          test -n "$RUNNER_TEMP"
 
       - name: Set up Python 3.13
         uses: actions/setup-python@v5

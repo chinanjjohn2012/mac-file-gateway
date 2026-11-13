@@ -1,12 +1,11 @@
 name: six-command-mvp-native-t1-pr114
 
 on:
+  # PR paths filters match the cumulative Base..Head diff: using them here
+  # would schedule EXTRA native T1 on every unrelated PR synchronize.
+  # Only a deliberate owner label event may initiate one 18-row T1 attempt.
   pull_request:
-    # Owner-approved PRODUCT_T1 only for PR #114. Other file changes do not
-    # auto-trigger new native runs.
-    paths:
-      - ".github/workflows/six-command-mvp-native-t1-pr114.yml"
-      - "tools/mvp_six_native_t1.py"
+    types: [labeled]
 
 permissions:
   contents: read
@@ -16,7 +15,9 @@ jobs:
     if: >-
       github.event.pull_request.number == 114 &&
       github.event.pull_request.head.repo.full_name == 'chinanjjohn2012/mac-file-gateway' &&
-      github.event.pull_request.head.ref == 'feat/lbe-five-day-d2-nonoperative-prelaunch-20261106'
+      github.event.pull_request.head.ref == 'feat/lbe-five-day-d2-nonoperative-prelaunch-20261106' &&
+      github.event.label.name == 'mvp-native-t1-approved' &&
+      github.actor == 'chinanjjohn2012'
     runs-on: macos-15-arm64
     timeout-minutes: 20
     env:

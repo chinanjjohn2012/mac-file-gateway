@@ -543,12 +543,22 @@ class WorkspaceService:
         mvp = False
         with self._lifecycle:
             ctx = self.require_exec(name)
+            if type(dry_run) is not bool:
+                raise GatewayError("invalid_argument", "dry_run must be boolean.")
+            # Design-002: ordinary v2 positive apply without both explicit
+            # operator opt-ins is disabled BEFORE scanning historical state.
+            # Preserve the separately bound R006 private one-shot path.
+            if (not dry_run and self.settings.schema_version == 2
+                    and not self._lbe_positive_authorized
+                    and self._r006_pending is None
+                    and not (self.settings.exec_apply_enabled
+                             and ctx.settings.exec_apply_enabled)):
+                raise GatewayError(
+                    "exec_disabled", "Both v2 Exec apply opt-ins are required.")
             if self._exec_state is None:
                 raise GatewayError(
                     "exec_state_unavailable", "Exec durable state is unavailable.")
             self._exec_state.require_healthy()
-            if type(dry_run) is not bool:
-                raise GatewayError("invalid_argument", "dry_run must be boolean.")
             if cancelled is not None and type(cancelled) is not threading.Event:
                 raise GatewayError(
                     "invalid_argument", "Invalid internal cancellation token.")

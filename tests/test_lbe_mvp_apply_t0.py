@@ -138,7 +138,7 @@ def test_false_or_missing_apply_flag_keeps_legacy_preview_only(mvp, monkeypatch,
             s.invoke_exec("a", "py-direct",
                           ["python", "-m", "pytest", "-q"],
                           dry_run=False)
-        assert denied.value.code == "exec_disabled"
+        assert denied.value.code == "exec_cleanup_proof_required"
         assert not s.info()["exec_policy"]["apply_configured"]
     finally:
         s.close()

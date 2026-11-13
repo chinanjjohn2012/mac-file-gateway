@@ -212,7 +212,7 @@ def test_v2_existing_healthy_state_previews_and_refuses_invalid_apply(scene, mon
                 svc.invoke_exec("a", "python-project",
                                 ["python", "-c", "print('blocked')"],
                                 dry_run=False)
-            assert exc.value.code == "exec_disabled"
+            assert exc.value.code == "exec_cleanup_proof_required"
 
         with TestClient(create_multi_app(svc, enable_mcp=False),
                         base_url="http://127.0.0.1:8765") as client:
@@ -224,8 +224,8 @@ def test_v2_existing_healthy_state_previews_and_refuses_invalid_apply(scene, mon
             assert res.json()["executed"] is False
             failed = client.post("/run", json={
                 **body, "argv": ["go", "run", "./..."], "dry_run": False})
-            assert failed.status_code == 403
-            assert failed.json()["error"] == "exec_disabled"
+            assert failed.status_code == 503
+            assert failed.json()["error"] == "exec_cleanup_proof_required"
             info = client.get("/health").json()["exec_policy"]
             assert info["mode"] == "local_best_effort"
             assert info["available"] is False
@@ -278,7 +278,7 @@ def test_r006_owner_latch_does_not_hide_nonspawning_preview(scene):
         with pytest.raises(GatewayError) as denied:
             svc.invoke_exec("a", "go-project", ["go", "test", "./..."],
                             dry_run=False)
-        assert denied.value.code == "exec_disabled"
+        assert denied.value.code == "exec_cleanup_proof_required"
     finally:
         svc.close()
 
@@ -529,8 +529,8 @@ def test_v2_python_invalid_worker_plan_is_sanitized_at_public_boundary(
             denied = client.post("/run", json={
                 "workspace": "a", "cwd": "default-project",
                 "argv": argv, "dry_run": False})
-            assert denied.status_code == 403
-            assert denied.json()["error"] == "exec_disabled"
+            assert denied.status_code == 503
+            assert denied.json()["error"] == "exec_cleanup_proof_required"
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
@@ -572,7 +572,7 @@ def test_v2_go_preview_is_direct_and_never_spawns(scene, monkeypatch, argv):
         with pytest.raises(GatewayError) as exc:
             svc.invoke_exec("a", "go-project", ["go", "run", "./..."],
                             dry_run=False)
-        assert exc.value.code == "exec_disabled"
+        assert exc.value.code == "exec_cleanup_proof_required"
     finally:
         svc.close()
 
@@ -641,8 +641,8 @@ def test_v2_go_test_vet_rest_preview_refuses_old_flag_bypass(scene, monkeypatch)
                     assert refused.json()["error"] == "command_not_allowed"
                     still_denied = client.post(
                         "/run", json={**bad, "dry_run": False})
-                    assert still_denied.status_code == 403
-                    assert still_denied.json()["error"] == "exec_disabled"
+                    assert still_denied.status_code == 503
+                    assert still_denied.json()["error"] == "exec_cleanup_proof_required"
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
@@ -674,8 +674,8 @@ def test_v2_go_build_preview_rejects_linked_output(scene):
                 "workspace": "a", "cwd": "go-project",
                 "argv": ["go", "build", "-o", "alias/child", "./cmd/server"],
                 "dry_run": False})
-            assert denied.status_code == 403
-            assert denied.json()["error"] == "exec_disabled"
+            assert denied.status_code == 503
+            assert denied.json()["error"] == "exec_cleanup_proof_required"
     finally:
         svc.close()
 
@@ -717,7 +717,7 @@ def test_v2_go_build_output_denies_gateway_blocked_names_and_excludes(
                         ["go", "build", "-o", target, "./cmd/server"],
                         timeout_seconds=5, dry_run=dry)
                 assert denied.value.code == (
-                    "command_not_allowed" if dry else "exec_disabled")
+                    "command_not_allowed" if dry else "exec_cleanup_proof_required")
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
         assert svc._lbe_owner.snapshot()["unavailable"] is False
         assert not (a / "go-project" / target).exists()
@@ -785,8 +785,8 @@ def test_v2_owner_status_tracks_fake_child_and_refuses_busy_apply(scene):
             refused = client.post("/run", json={
                 "workspace": "a", "cwd": "go-project",
                 "argv": ["go", "build", "./..."], "dry_run": False})
-            assert refused.status_code == 403
-            assert refused.json()["error"] == "exec_disabled"
+            assert refused.status_code == 503
+            assert refused.json()["error"] == "exec_cleanup_proof_required"
         assert svc.invoke("b", "read_file", "safe.txt", 1, 5)["workspace"] == "b"
     finally:
         # Graceful close must not wait for or signal the simulated child.
@@ -865,7 +865,7 @@ def test_dormant_prepared_plans_use_real_v2_gateway_policies(scene, monkeypatch)
                 svc.invoke_exec(
                     "a", "go-project", ["go", "run", "./..."],
                     dry_run=False)
-            assert denied.value.code == "exec_disabled"
+            assert denied.value.code == "exec_cleanup_proof_required"
         assert svc.info()["exec_policy"]["available"] is False
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
@@ -960,7 +960,7 @@ def test_v2_go_preview_and_future_dormant_plan_share_exact_values(scene, args):
         with pytest.raises(GatewayError) as error:
             svc.invoke_exec("a", "go-project", ["go", "run", "./..."],
                             dry_run=False)
-        assert error.value.code == "exec_disabled"
+        assert error.value.code == "exec_cleanup_proof_required"
         assert not (a / "go-project" / "bin" / "tool").exists()
     finally:
         svc.close()
@@ -1062,7 +1062,7 @@ def test_v2_pipenv_runner_respects_workspace_excluded_pipfile(
                         "a", "python-project", ["python", "hello.py"],
                         timeout_seconds=5, dry_run=dry)
                 assert err.value.code == (
-                    "runner_unavailable" if dry else "exec_disabled")
+                    "runner_unavailable" if dry else "exec_cleanup_proof_required")
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
         assert svc._lbe_owner.snapshot()["unavailable"] is False
     finally:
@@ -1093,7 +1093,7 @@ def test_v2_pipenv_hardlinked_pipfile_denied_in_preview_and_real_preflight(
                         "a", "python-project", ["python", "hello.py"],
                         timeout_seconds=5, dry_run=dry)
                 assert error.value.code == (
-                    "runner_unavailable" if dry else "exec_disabled")
+                    "runner_unavailable" if dry else "exec_cleanup_proof_required")
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
         assert svc._lbe_owner.snapshot()["unavailable"] is False
     finally:
@@ -1216,11 +1216,11 @@ def test_d4_all_three_ingresses_same_plan_and_f1_denial_no_native(
                 with pytest.raises(GatewayError) as error:
                     svc.invoke_exec("a", cwd, argv, timeout_seconds=5,
                                     dry_run=False)
-                assert error.value.code == "exec_disabled"
+                assert error.value.code == "exec_cleanup_proof_required"
                 blocked = {**args, "dry_run": False}
                 rest_block = client.post("/run", json=blocked)
-                assert rest_block.status_code == 403
-                assert rest_block.json()["error"] == "exec_disabled"
+                assert rest_block.status_code == 503
+                assert rest_block.json()["error"] == "exec_cleanup_proof_required"
                 mcp_block = client.post("/mcp", headers=hdr, json={
                     "jsonrpc": "2.0", "id": 3, "method": "tools/call",
                     "params": {"name": "run_command", "arguments": blocked},
@@ -1229,7 +1229,7 @@ def test_d4_all_three_ingresses_same_plan_and_f1_denial_no_native(
                 failed = mcp_block.json()["result"]
                 assert failed["isError"] is True
                 assert (failed["structuredContent"]["error"] ==
-                        "exec_disabled")
+                        "exec_cleanup_proof_required")
                 policies = [
                     client.get("/info").json()["exec_policy"],
                     client.get("/health").json()["exec_policy"],
@@ -1348,7 +1348,7 @@ def test_r006_go_build_preview_returns_canonical_planned_output(
                 svc.invoke_exec(
                     "a", "go-project", argv, timeout_seconds=5,
                     dry_run=False)
-            assert denied.value.code == "exec_disabled"
+            assert denied.value.code == "exec_cleanup_proof_required"
         assert not (a / "go-project" / "bin" / "app").exists()
         assert sorted(p.name for p in state.iterdir()) == before
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
@@ -1574,7 +1574,7 @@ def test_r006_python_script_untrusted_mode_denied_in_shared_plan(
         assert denied.value.code == "runner_unavailable"
         with pytest.raises(GatewayError) as denied:
             svc.invoke_exec("a", cwd, ["python", "hello.py"], dry_run=False)
-        assert denied.value.code == "exec_disabled"
+        assert denied.value.code == "exec_cleanup_proof_required"
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
@@ -1723,7 +1723,7 @@ def test_r006_private_apply_passes_cancel_token_and_public_f1_stays_denied(
             svc.invoke_exec(
                 "a", "go-project", ["go", "test", "./..."], 5,
                 dry_run=False, cancelled=token)
-        assert denied.value.code == "exec_disabled"
+        assert denied.value.code == "exec_cleanup_proof_required"
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
@@ -1848,7 +1848,7 @@ def test_r006_go_output_parent_permission_denied_across_all_transports(scene):
             assert result["structuredContent"]["error"] == "command_not_allowed"
         with pytest.raises(GatewayError) as apply:
             svc.invoke_exec("a", "go-project", argv, dry_run=False)
-        assert apply.value.code == "exec_disabled"
+        assert apply.value.code == "exec_cleanup_proof_required"
         assert not (output_parent / "app").exists()
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
@@ -1915,7 +1915,7 @@ def test_r006_source_parent_writable_refused_by_live_preview(scene, cwd, poison,
         assert exc.value.code == "runner_unavailable"
         with pytest.raises(GatewayError) as denied:
             svc.invoke_exec("a", cwd, ["python", "hello.py"], dry_run=False)
-        assert denied.value.code == "exec_disabled"
+        assert denied.value.code == "exec_cleanup_proof_required"
     finally:
         target.chmod(0o755)
         svc.close()
@@ -2039,7 +2039,7 @@ def test_r006_source_ancestor_mutated_after_plan_rejected_before_private_popen(
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
         with pytest.raises(GatewayError) as denied:
             svc.invoke_exec("a", "go-project", argv, dry_run=False)
-        assert denied.value.code == "exec_disabled"
+        assert denied.value.code == "exec_cleanup_proof_required"
 
         changed.chmod(0o755)
         again = svc.invoke_exec("a", "go-project", argv, dry_run=True)
@@ -2068,7 +2068,7 @@ def test_r006_go_without_output_source_parent_denied_across_transports(scene):
         assert blocked.value.code == "command_not_allowed"
         with pytest.raises(GatewayError) as hard_stop:
             svc.invoke_exec("a", "go-project", args["argv"], dry_run=False)
-        assert hard_stop.value.code == "exec_disabled"
+        assert hard_stop.value.code == "exec_cleanup_proof_required"
         with TestClient(create_multi_app(svc),
                         base_url="http://127.0.0.1:8765") as client:
             rest = client.post("/run", json=args)
@@ -2136,7 +2136,7 @@ def test_r006_workspace_discovery_distinguishes_preview_from_positive_exec(
             with pytest.raises(GatewayError) as denied:
                 svc.invoke_exec("a", "go-project", ["go", "test", "./..."],
                                 dry_run=False)
-            assert denied.value.code == "exec_disabled"
+            assert denied.value.code == "exec_cleanup_proof_required"
             assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
@@ -2201,7 +2201,7 @@ def test_r006_v1_workspace_discovery_schema_does_not_change(scene):
         with pytest.raises(GatewayError) as denied:
             svc.invoke_exec("a", "python-project",
                             ["python", "hello.py"], dry_run=False)
-        assert denied.value.code == "exec_disabled"
+        assert denied.value.code == "exec_cleanup_proof_required"
     finally:
         svc.close()
 

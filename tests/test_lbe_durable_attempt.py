@@ -305,7 +305,7 @@ def test_real_service_owner_locked_source_only_journal_restart(tmp_path, monkeyp
             with pytest.raises(GatewayError) as denied:
                 with_service.invoke_exec("a", "src", ["python", "-m", "pytest", "-q"],
                                          dry_run=False)
-            assert denied.value.code == "exec_disabled"
+            assert denied.value.code == "exec_cleanup_proof_required"
         finally:
             with_service.close()
     assert len(list((private / "d4-journal").iterdir())) == 1

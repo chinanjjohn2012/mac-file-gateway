@@ -545,12 +545,14 @@ class WorkspaceService:
             ctx = self.require_exec(name)
             if type(dry_run) is not bool:
                 raise GatewayError("invalid_argument", "dry_run must be boolean.")
-            # Design-002: ordinary v2 positive apply without both explicit
-            # operator opt-ins is disabled BEFORE scanning historical state.
-            # Preserve the separately bound R006 private one-shot path.
+            # A disabled v2 apply with MISSING historical state refuses
+            # before leaking that state. For an existing healthy state, keep
+            # the historical F1 proof-required error for old preview configs;
+            # private R006 one-shot semantics and v1 denial are unchanged.
             if (not dry_run and self.settings.schema_version == 2
                     and not self._lbe_positive_authorized
                     and self._r006_pending is None
+                    and self._exec_state is None
                     and not (self.settings.exec_apply_enabled
                              and ctx.settings.exec_apply_enabled)):
                 raise GatewayError(

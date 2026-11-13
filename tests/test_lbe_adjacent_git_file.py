@@ -99,7 +99,7 @@ def test_v2_granted_git_file_and_exec_preview_in_same_disposable_service(
         svc.close()
 
 
-def test_v2_same_instance_real_git_and_file_write_after_proof_denial_and_unknown(
+def test_v2_same_instance_real_git_and_file_write_after_disabled_denial_and_unknown(
     tmp_path: Path, monkeypatch,
 ):
     """D0 §0.1: one actual service keeps legitimate Git/File after both denials.
@@ -176,7 +176,7 @@ def test_v2_same_instance_real_git_and_file_write_after_proof_denial_and_unknown
                 svc.invoke_exec(
                     "a", "src", ["python", "ok.py"],
                     timeout_seconds=5, dry_run=False)
-            assert denied.value.code == "exec_cleanup_proof_required"
+            assert denied.value.code == "exec_disabled"
             assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
         assert list((private / "exec-state").glob("r-*.json")) == []
 

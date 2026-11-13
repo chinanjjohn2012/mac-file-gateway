@@ -75,7 +75,7 @@ def _verify_no_exec_intent(
     Witness, records = _frozen_intent_witness()
     scene = SimpleNamespace(state=state_root)
     witness = Witness(state_root)
-    expected_http_code = 503
+    expected_http_code = 403 if expected == "exec_disabled" else 503
     before = records(scene)
     with monkeypatch.context() as patch:
         witness.install(patch)
@@ -232,7 +232,7 @@ def test_r005_v2_rest_mcp_denial_and_real_git_file_both_old_state_modes(
             assert preview.json()["executed"] is False
             _verify_no_exec_intent(
                 client, svc, monkeypatch, state_root,
-                "exec_cleanup_proof_required", first_id=2)
+                "exec_disabled", first_id=2)
 
             # Real Git and physical File writes, SAME live instance/Workspace.
             _real_rest_git(client)

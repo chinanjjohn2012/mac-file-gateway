@@ -1,7 +1,7 @@
 """Safe T0 of actual private WorkspaceService D4 R003 fixture preflight.
 
 The tests never start Go/Pipenv/Python children or create a new public
-authorization. A source-only candidate cannot change F1 positive denial.
+authorization. A source-only candidate cannot create either v2 positive apply opt-in.
 """
 from __future__ import annotations
 
@@ -130,7 +130,7 @@ def test_d4_actual_service_preflight_checks_six_exact_inputs(
         assert tuple(preview["effective_argv"]) == candidate.plan.effective_argv
         with pytest.raises(GatewayError) as denied:
             service.invoke_exec("a", cwd, argv, dry_run=False)
-        assert denied.value.code == "exec_cleanup_proof_required"
+        assert denied.value.code == "exec_disabled"
     assert not (root / "go-project" / "bin" / "app").exists()
 
 
@@ -368,7 +368,7 @@ def test_d4_attempt_marker_not_a_client_or_native_authority(product_service):
     with pytest.raises(GatewayError) as public:
         service.invoke_exec("a", "go-project", ["go", "test", "./..."],
                             dry_run=False)
-    assert public.value.code == "exec_cleanup_proof_required"
+    assert public.value.code == "exec_disabled"
 
 @pytest.mark.parametrize("cwd,argv,excluded", [
     ("py-direct", ["python", "-m", "compileall", "-q", "./src"],
@@ -827,7 +827,7 @@ def test_d4_go_qualified_simple_module_has_no_native_authority(
             service.invoke_exec(
                 "a", "go-project", ["go", "test", "./..."],
                 dry_run=False)
-    assert denied.value.code == "exec_cleanup_proof_required"
+    assert denied.value.code == "exec_disabled"
 
 
 @pytest.mark.parametrize("cwd,argv", _ROWS)
@@ -1026,7 +1026,7 @@ def test_d4_service_observes_real_staged_sources_and_closed_child_environment(
         authorize_d4_native_from_observation(actual)
     with pytest.raises(GatewayError) as refused:
         service.invoke_exec("a", cwd, argv, dry_run=False)
-    assert refused.value.code == "exec_cleanup_proof_required"
+    assert refused.value.code == "exec_disabled"
 
 
 @pytest.mark.parametrize("kind,cwd,argv,changed_key,changed_relative", [
@@ -1489,7 +1489,7 @@ def test_d4_all_six_commands_produce_private_source_only_native_recipe(
             launch_d4_native_from_recipe(recipe)
         with pytest.raises(GatewayError) as denied:
             service.invoke_exec("a", cwd, argv, dry_run=False)
-        assert denied.value.code == "exec_cleanup_proof_required"
+        assert denied.value.code == "exec_disabled"
         result = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher).run(
             candidate.plan, product_attempt=marker)
         assert result["status"] == "launch_failed"
@@ -1739,7 +1739,7 @@ def test_d4_host_preflight_observes_actual_kernel_and_private_root_not_t1(
             require_d4_native_runner_admission(host, recipe)
         with pytest.raises(GatewayError) as denial:
             service.invoke_exec("a", cwd, argv, dry_run=False)
-        assert denial.value.code == "exec_cleanup_proof_required"
+        assert denial.value.code == "exec_disabled"
 
 
 def test_d4_host_probe_real_rlimits_and_ci_labels_never_equal_domain_proof(
@@ -1987,7 +1987,7 @@ def test_d4_product_stages_real_runtime_bytes_then_prepares_six_recipes(
         assert result["executed"] is False
         with pytest.raises(GatewayError) as denied:
             service.invoke_exec("a", cwd, argv, dry_run=False)
-        assert denied.value.code == "exec_cleanup_proof_required"
+        assert denied.value.code == "exec_disabled"
 
 
 def test_d4_service_staging_cannot_select_foreign_source_kind(
@@ -2204,7 +2204,7 @@ def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
             assert attempted == []
         with pytest.raises(GatewayError) as refused:
             service.invoke_exec("a", cwd, argv, dry_run=False)
-        assert refused.value.code == "exec_cleanup_proof_required"
+        assert refused.value.code == "exec_disabled"
 
 
 def test_d4_bundle_invalid_manifest_selection_denied_before_any_staging(
@@ -2355,7 +2355,7 @@ def test_d4_service_selects_real_static_arm64_loader_in_six_source_recipes(
             authorize_d4_native_from_static_macho(macho)
         with pytest.raises(GatewayError) as denied:
             service.invoke_exec("a", cwd, argv, dry_run=False)
-        assert denied.value.code == "exec_cleanup_proof_required"
+        assert denied.value.code == "exec_disabled"
 
 
 def test_d4_service_macho_loader_rejects_non_macho_even_with_exact_source_hash(
@@ -2457,7 +2457,7 @@ def test_d4_actual_static_selected_native_set_and_one_use_worker(
         assert no_child["executed"] is False
         with pytest.raises(GatewayError) as refused:
             service.invoke_exec("a", cwd, argv, dry_run=False)
-        assert refused.value.code == "exec_cleanup_proof_required"
+        assert refused.value.code == "exec_disabled"
 
 
 def test_d4_go_compiler_invalid_macho_blocks_full_selected_loader_set(
@@ -2583,7 +2583,7 @@ def test_d4_product_bundle_rejects_hash_matched_non_macho_go_compiler(
         with pytest.raises(GatewayError) as public:
             service.invoke_exec("a", "go-project", ["go", "test", "./..."],
                                 dry_run=False)
-        assert public.value.code == "exec_cleanup_proof_required"
+        assert public.value.code == "exec_disabled"
 
 
 def test_d4_private_dylib_recheck_burns_one_use_attempt_before_launcher(
@@ -2689,7 +2689,7 @@ def test_d4_pipenv_source_rejects_unqualified_pyvenv_loader_selectors(
         service.invoke_exec(
             "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
             dry_run=False)
-    assert public.value.code == "exec_cleanup_proof_required"
+    assert public.value.code == "exec_disabled"
 
 
 def test_d4_pipenv_source_pins_private_home_without_claiming_import_attestation(
@@ -2888,7 +2888,7 @@ def test_d4_service_observes_operator_sources_for_six_reviewable_recipes(
             assert item.go_1_27_3_p007_stage_manifest_matched is False
     with pytest.raises(GatewayError) as denied:
         service.invoke_exec("a", cwd, argv, dry_run=False)
-    assert denied.value.code == "exec_cleanup_proof_required"
+    assert denied.value.code == "exec_disabled"
 
 
 def test_d4_service_operator_source_selection_does_not_self_approve_workspace(
@@ -2954,7 +2954,7 @@ def test_d4_pipenv_first_party_venv_source_manifest_includes_real_site_files(
     with pytest.raises(GatewayError) as refused:
         service.invoke_exec("a", "py-pipenv",
                             ["python", "-m", "pytest", "-q"], dry_run=False)
-    assert refused.value.code == "exec_cleanup_proof_required"
+    assert refused.value.code == "exec_disabled"
 
 
 @pytest.mark.parametrize("mutation", ["pth", "symlink_interpreter",
@@ -3084,7 +3084,7 @@ def test_d4_go_strict_p007_source_bundle_rejects_incomplete_toolchain_before_cop
     assert not (private / "home").exists()
     with pytest.raises(GatewayError) as public:
         service.invoke_exec("a", cwd, argv, dry_run=False)
-    assert public.value.code == "exec_cleanup_proof_required"
+    assert public.value.code == "exec_disabled"
 
 
 @pytest.mark.parametrize("cwd,argv,required,expected_error", [
@@ -3186,7 +3186,7 @@ def test_d4_product_pipenv_record_source_observer_prepares_closed_site(
         service.invoke_exec(
             "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
             dry_run=False)
-    assert denied.value.code == "exec_cleanup_proof_required"
+    assert denied.value.code == "exec_disabled"
 
 
 @pytest.mark.parametrize("mutation", [
@@ -3343,7 +3343,7 @@ def test_d4_service_observes_pipenv_records_in_real_source_bundle(
         service.invoke_exec(
             "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
             dry_run=False)
-    assert denied.value.code == "exec_cleanup_proof_required"
+    assert denied.value.code == "exec_disabled"
 
 
 def test_d4_service_record_selection_denies_wrong_command_without_source_access(
@@ -3401,7 +3401,7 @@ def test_d4_go_embed_directive_rejects_uninventoried_compiler_input(
         assert denied.value.code == "command_not_allowed"
         with pytest.raises(GatewayError) as apply:
             service.invoke_exec("a", "go-project", argv, dry_run=False)
-        assert apply.value.code == "exec_cleanup_proof_required"
+        assert apply.value.code == "exec_disabled"
 
 
 def test_d4_go_source_regular_comment_and_string_are_not_embed_directives(
@@ -3461,7 +3461,7 @@ def test_d4_go_cgo_pseudo_import_requires_unqualified_compiler(
     assert denied.value.code == "command_not_allowed"
     with pytest.raises(GatewayError) as apply:
         service.invoke_exec("a", "go-project", argv, dry_run=False)
-    assert apply.value.code == "exec_cleanup_proof_required"
+    assert apply.value.code == "exec_disabled"
 
 
 def test_d4_go_non_cgo_imports_and_C_text_remain_legal_source(
@@ -3531,7 +3531,7 @@ def test_d4_service_pipenv_record_mismatched_pinned_lock_refused_no_spawn(
     with pytest.raises(GatewayError) as apply:
         service.invoke_exec(
             "a", "py-pipenv", ["python", "-m", "pytest", "-q"], dry_run=False)
-    assert apply.value.code == "exec_cleanup_proof_required"
+    assert apply.value.code == "exec_disabled"
 
 
 def test_d4_service_pipenv_lock_denied_before_staging_private_runner(
@@ -3589,7 +3589,7 @@ def test_d4_go_direct_import_source_maps_pinned_stdlib_without_native(
     assert record.native_launch_allowed is False
     with pytest.raises(GatewayError) as denied:
         service.invoke_exec("a", "go-project", argv, dry_run=False)
-    assert denied.value.code == "exec_cleanup_proof_required"
+    assert denied.value.code == "exec_disabled"
 
 
 def test_d4_go_direct_import_local_package_mapping_from_selected_tree(
@@ -3706,7 +3706,7 @@ def test_d4_service_pipfile_to_lock_to_record_mismatch_denied(
     with pytest.raises(GatewayError) as public:
         service.invoke_exec(
             "a", "py-pipenv", ["python", "-m", "pytest", "-q"], dry_run=False)
-    assert public.value.code == "exec_cleanup_proof_required"
+    assert public.value.code == "exec_disabled"
 
 
 
@@ -3738,7 +3738,7 @@ def test_d4_actual_service_selects_python_first_party_import_edges_without_spawn
         assert receipt.native_launch_allowed is False
         with pytest.raises(GatewayError) as denied:
             service.invoke_exec("a", "py-direct", argv, dry_run=False)
-        assert denied.value.code == "exec_cleanup_proof_required"
+        assert denied.value.code == "exec_disabled"
 
 
 def test_d4_actual_pipenv_without_tests_has_empty_truthful_python_import_receipt(
@@ -3775,7 +3775,7 @@ def test_d4_actual_service_refuses_unsafe_python_selected_imports(
             service.invoke_exec(
                 "a", "py-direct", ["python", "-m", "pytest", "-q"],
                 dry_run=False)
-        assert public.value.code == "exec_cleanup_proof_required"
+        assert public.value.code == "exec_disabled"
 
 
 def test_d4_python_source_recheck_catches_same_bytes_new_inode(
@@ -3853,7 +3853,7 @@ def test_d4_real_service_first_party_from_import_submodule_is_selected(
         with pytest.raises(GatewayError) as blocked:
             service.invoke_exec(
                 "a", "py-direct", ["python", "-m", "pytest", "-q"], dry_run=False)
-        assert blocked.value.code == "exec_cleanup_proof_required"
+        assert blocked.value.code == "exec_disabled"
 
 
 @pytest.mark.parametrize("forge", ["unselected", "native", "missing"])
@@ -3964,7 +3964,7 @@ def test_d4_go_darwin_arm64_source_selection_ignores_unbuilt_platform_imports(
                 "a", "go-project",
                 ["go", "build", "-o", "bin/app", "./cmd/app"],
                 dry_run=False)
-        assert denied.value.code == "exec_cleanup_proof_required"
+        assert denied.value.code == "exec_disabled"
     assert not (workspace / "go-project/bin/app").exists()
 
 
@@ -4123,7 +4123,7 @@ def test_d4_go_build_ignores_only_test_imports_and_selects_darwin_stdlib(
                 "a", "go-project",
                 ["go", "build", "-o", "bin/app", "./cmd/app"],
                 dry_run=False)
-        assert exc.value.code == "exec_cleanup_proof_required"
+        assert exc.value.code == "exec_disabled"
     assert not (project / "bin/app").exists()
 
 
@@ -4233,7 +4233,7 @@ def test_d4_go_actual_service_build_header_with_license_block_is_accepted(
                 "a", "go-project",
                 ["go", "build", "-o", "bin/app", "./cmd/app"],
                 dry_run=False)
-        assert exc.value.code == "exec_cleanup_proof_required"
+        assert exc.value.code == "exec_disabled"
 
 
 def test_d4_go_actual_service_missing_legacy_blank_cannot_exclude_source(
@@ -4323,7 +4323,7 @@ def test_d4_service_macos_runner_launch_boundary_is_bound_but_native_denied(
         assert replay.value.code == "attempt_replay_denied"
         with pytest.raises(GatewayError) as public:
             service.invoke_exec("a", cwd, argv, dry_run=False)
-        assert public.value.code == "exec_cleanup_proof_required"
+        assert public.value.code == "exec_disabled"
     assert calls == []
 
 
@@ -4564,7 +4564,7 @@ def test_d4_service_owns_nonoperative_worker_for_all_six_commands(
         assert service._exec_active == set()
         with pytest.raises(GatewayError) as public:
             service.invoke_exec("a", cwd, argv, dry_run=False)
-        assert public.value.code == "exec_cleanup_proof_required"
+        assert public.value.code == "exec_disabled"
     assert calls == []
 
 
@@ -4779,7 +4779,7 @@ def test_d4_actual_service_assembles_operator_source_and_burns_real_worker(
         assert service._lbe_owner.snapshot()["unavailable"] is False
         with pytest.raises(GatewayError) as denied:
             service.invoke_exec("a", cwd, argv, dry_run=False)
-        assert denied.value.code == "exec_cleanup_proof_required"
+        assert denied.value.code == "exec_disabled"
     assert forbidden_calls == []
     assert not (workspace / "go-project/bin/app").exists()
 
@@ -4965,7 +4965,7 @@ def test_d4_service_worker_binds_real_selected_host_fd_source_without_native(
         assert service._lbe_owner.snapshot()["reserved_slots"] == 0
         with pytest.raises(GatewayError) as denied:
             service.invoke_exec("a", cwd, argv, dry_run=False)
-        assert denied.value.code == "exec_cleanup_proof_required"
+        assert denied.value.code == "exec_disabled"
     assert calls == []
 
 
@@ -5150,7 +5150,7 @@ def test_r010_d4_actual_workspace_service_selection_binds_six_sources(
     assert observed.six_command_product_t1_pass is False
     with pytest.raises(GatewayError) as denied:
         service.invoke_exec("a", cwd, argv, dry_run=False)
-    assert denied.value.code == "exec_cleanup_proof_required"
+    assert denied.value.code == "exec_disabled"
 
 
 def test_r010_d4_rejects_actual_service_selected_source_drift(product_service):
@@ -5230,7 +5230,7 @@ def test_r010_full_six_source_selection_is_one_real_shared_service(
         for cwd, argv in _ROWS:
             with pytest.raises(GatewayError) as ex:
                 service.invoke_exec("a", cwd, argv, dry_run=False)
-            assert ex.value.code == "exec_cleanup_proof_required"
+            assert ex.value.code == "exec_disabled"
     assert service._active_operations == 0
     assert service._exec_active == set()
     assert not (root / "go-project" / "bin" / "app").exists()
@@ -5355,7 +5355,7 @@ def test_r010_shared_service_canonically_binds_one_row1_nonce_without_launch(
                     service.invoke_exec(
                         "a", "py-direct",
                         ["python", "-m", "pytest", "-q"], dry_run=False)
-                assert denied.value.code == "exec_cleanup_proof_required"
+                assert denied.value.code == "exec_disabled"
         finally:
             os.close(fd)
     assert service._active_operations == 0
@@ -5668,7 +5668,7 @@ def test_r010_shared_service_single_source_to_first_row_transaction(
             for cwd, argv in _ROWS:
                 with pytest.raises(GatewayError) as denied:
                     service.invoke_exec("a", cwd, argv, dry_run=False)
-                assert denied.value.code == "exec_cleanup_proof_required"
+                assert denied.value.code == "exec_disabled"
     finally:
         os.close(fd)
     assert service._active_operations == 0
@@ -5921,7 +5921,7 @@ def test_r010_one_real_service_owner_worker_journal_six_rows_fake_t0(
             for cwd, argv in _ROWS:
                 with pytest.raises(GatewayError) as denied:
                     service.invoke_exec("a", cwd, argv, dry_run=False)
-                assert denied.value.code == "exec_cleanup_proof_required"
+                assert denied.value.code == "exec_disabled"
     finally:
         os.close(fd)
         os.close(pfd)
@@ -6303,7 +6303,7 @@ def test_r010_actual_service_owner_worker_and_persisted_source_join_six_rows(
             for cwd, argv in _ROWS:
                 with pytest.raises(GatewayError) as denied_exec:
                     service.invoke_exec("a", cwd, argv, dry_run=False)
-                assert denied_exec.value.code == "exec_cleanup_proof_required"
+                assert denied_exec.value.code == "exec_disabled"
     finally:
         os.close(fd)
         os.close(pfd)
@@ -6783,7 +6783,7 @@ def test_r010_preexec_original_jwt_source_reaches_same_owner_worker_journal(
                 service.invoke_exec(
                     "a", "py-direct", ["python", "-m", "pytest", "-q"],
                     dry_run=False)
-            assert exc.value.code == "exec_cleanup_proof_required"
+            assert exc.value.code == "exec_disabled"
     finally:
         os.close(private_fd)
         os.close(fd)
@@ -7094,7 +7094,7 @@ def test_r010_first_party_source_pipeline_original_job_to_worker_and_journal(
             for cwd, argv in _ROWS:
                 with pytest.raises(GatewayError) as ex:
                     service.invoke_exec("a", cwd, argv, dry_run=False)
-                assert ex.value.code == "exec_cleanup_proof_required"
+                assert ex.value.code == "exec_disabled"
     finally:
         os.close(fd)
         os.close(pfd)

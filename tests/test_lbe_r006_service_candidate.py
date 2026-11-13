@@ -243,7 +243,7 @@ def test_private_candidate_consumes_grant_before_worker_but_public_exec_stays_de
             service.invoke_exec(
                 "a", "py-direct", ["python", "-m", "pytest", "-q"],
                 timeout_seconds=120, dry_run=False)
-        assert denied.value.code == "exec_cleanup_proof_required"
+        assert denied.value.code == "exec_disabled"
     finally:
         service.close()
 
@@ -313,7 +313,7 @@ def test_shared_invoke_exec_consumes_only_exact_installed_r006_one_shot(
             service.invoke_exec(
                 "a", "py-direct", ["python", "-m", "pytest", "-q"],
                 timeout_seconds=120, dry_run=False)
-        assert replay.value.code == "exec_cleanup_proof_required"
+        assert replay.value.code == "exec_disabled"
     finally:
         service.close()
 
@@ -535,7 +535,7 @@ def test_final_host_safety_denial_burns_durable_nonce_and_has_zero_popen(
             service.invoke_exec(
                 "a", "py-direct", ["python", "-m", "pytest", "-q"],
                 timeout_seconds=120, dry_run=False)
-        assert replay.value.code == "exec_cleanup_proof_required"
+        assert replay.value.code == "exec_disabled"
         assert len(list((private / "d4-journal").iterdir())) == 1
     finally:
         service.close()

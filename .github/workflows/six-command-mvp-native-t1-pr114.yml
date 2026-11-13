@@ -17,7 +17,7 @@ jobs:
       github.event.pull_request.number == 114 &&
       github.event.pull_request.head.repo.full_name == 'chinanjjohn2012/mac-file-gateway' &&
       github.event.pull_request.head.ref == 'feat/lbe-five-day-d2-nonoperative-prelaunch-20261106'
-    runs-on: macos-15
+    runs-on: macos-15-arm64
     timeout-minutes: 20
     env:
       PYTHONDONTWRITEBYTECODE: "1"

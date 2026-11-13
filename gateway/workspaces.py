@@ -174,6 +174,11 @@ class WorkspaceService:
         # Healthy no-proof admission is separately gated in B1/C.
         self._exec_state: ExecStateStore | None = None
         self._exec_state_issue: str | None = None
+        # The operator-owned startup tool file is not an Exec grant.  V2
+        # config booleans, exact plan, durable state and child capacity are
+        # checked independently.  Missing private tools disable apply only.
+        self._mvp_tools = None
+        self._mvp_tools_issue: str | None = None
         # Optional, existing-only R006 durable consumed-nonce witness.
         # No owner-signed grant, native T1 or public positive exception.
         self._d4_attempt_journal = None
@@ -225,6 +230,17 @@ class WorkspaceService:
                     gateway.close()
                     raise PrivateFileError("Workspace root changed before Gateway initialization.")
                 self._workspaces[item.name] = WorkspaceContext(item.name, item, pin, gateway)
+            if (settings.schema_version == 2
+                    and settings.exec_apply_enabled
+                    and any(w.exec_apply_enabled and w.exec_paths
+                            for w in settings.workspaces)):
+                from .lbe_mvp_tools import MvpTrustedTools
+                try:
+                    self._mvp_tools = MvpTrustedTools.load(
+                        config_dir,
+                        workspace_roots=tuple(w.root for w in settings.workspaces))
+                except (PrivateFileError, OSError, ValueError):
+                    self._mvp_tools_issue = "operator_tool_selection_unavailable"
             # Scan and acquire the private state before REST/MCP can accept
             # work. State IO/ownership failure must not disable File/Git.
             if settings.exec_enabled and any(w.exec_enabled for w in settings.workspaces):
@@ -418,11 +434,13 @@ class WorkspaceService:
     def _lbe_apply(ctx: WorkspaceContext, owner: DirectChildOwner,
                    cwd: str, argv: list[str],
                    timeout_seconds: int, *,
-                   cancelled: threading.Event | None = None) -> dict[str, Any]:
-        """Worker apply, reachable only from the approved hosted Python T1.
+                   cancelled: threading.Event | None = None,
+                   mvp_tools: object = None) -> dict[str, Any]:
+        """Worker apply for private legacy T1 or approved exact-six MVP.
 
-        Ordinary schema-v2 public requests are denied before this method.
-        This is not an operative production D0 exception or security signoff.
+        A public MVP request reaches this method only after its explicit
+        dual-config flags.  A second exact plan check precedes owner reserve,
+        and the launcher repeats it immediately before native Popen.
         """
         from .lbe_plan import prepare_lbe_work_plan
         from .lbe_native_launcher import make_trusted_lbe_launcher
@@ -430,8 +448,17 @@ class WorkspaceService:
 
         plan = prepare_lbe_work_plan(
             ctx, cwd=cwd, argv=argv, timeout_seconds=timeout_seconds)
+        if mvp_tools is not None:
+            from .lbe_mvp_tools import MvpTrustedTools
+            from .lbe_six_fixed_commands import match_fixed_six_command
+            if (type(mvp_tools) is not MvpTrustedTools
+                    or match_fixed_six_command(**vars(plan)) is None):
+                raise GatewayError(
+                    "command_not_allowed",
+                    "Only the six fixed MVP commands may be executed.")
         worker = LbeWorker(
-            owner, launcher=make_trusted_lbe_launcher(ctx))
+            owner, launcher=make_trusted_lbe_launcher(
+                ctx, mvp_tools=mvp_tools))
         try:
             return worker.run(plan, cancelled=cancelled)
         except LbeWorkerError as exc:
@@ -507,12 +534,13 @@ class WorkspaceService:
                     cancelled: threading.Event | None = None) -> dict[str, Any]:
         """Single synchronous v1/v2 admission boundary for every adapter.
 
-        Ordinary schema-v2 apply remains F1-denied. A future exact R006 T1
-        can succeed only when trusted bootstrap code has installed one private,
-        process-bound capability whose plan exactly matches this request.
-        Clients never submit owner/review/runtime evidence or capability IDs.
+        Schema-v2 positive execution requires BOTH explicit operator opt-ins,
+        healthy old state and exact six fixed commands, or a historical private
+        one-shot R006 grant.  Other requests remain F1-denied.  Clients cannot
+        mint a tool selection, owner grant or native launcher through RPC.
         """
         r006 = None
+        mvp = False
         with self._lifecycle:
             ctx = self.require_exec(name)
             if self._exec_state is None:
@@ -546,20 +574,30 @@ class WorkspaceService:
                         and name == plan.workspace and cwd == plan.cwd
                         and tuple(argv) == plan.requested_argv
                         and timeout_seconds == plan.timeout_seconds)
-                if not matched:
+                if matched:
+                    # Preserve the old private R006 one-shot mechanism and
+                    # its nonce semantics without converting it to MVP.
+                    if cancelled is not None and cancelled.is_set():
+                        raise GatewayError(
+                            "waiter_disconnected",
+                            "Request cancelled before R006 one-shot admission.")
+                    self._r006_pending = None
+                    r006 = pending
+                elif (self.settings.exec_apply_enabled
+                      and ctx.settings.exec_apply_enabled):
+                    # Only this exact v2 opt-in pair replaces ordinary F1 for
+                    # the six-command MVP, never for preview-only old configs.
+                    if self._mvp_tools is None:
+                        raise GatewayError(
+                            "runner_unavailable",
+                            "Trusted operator MVP executable configuration "
+                            "is unavailable.")
+                    mvp = True
+                else:
                     raise GatewayError(
                         "exec_cleanup_proof_required",
                         "Schema-v2 Exec apply needs separately approved operative "
                         "authority; configured paths permit preview only.")
-                # Known cancellation before accepting the request does not take
-                # the capability. After this atomic take, any cancellation race
-                # is handled only after durable nonce consumption.
-                if cancelled is not None and cancelled.is_set():
-                    raise GatewayError(
-                        "waiter_disconnected",
-                        "Request cancelled before R006 one-shot admission.")
-                self._r006_pending = None
-                r006 = pending
             if r006 is None:
                 if name in self._exec_active or len(self._exec_active) >= 4:
                     raise GatewayError(
@@ -580,7 +618,8 @@ class WorkspaceService:
                     assert self._lbe_owner is not None
                     result = self._lbe_apply(
                         ctx, self._lbe_owner, cwd, argv, timeout_seconds,
-                        cancelled=cancelled)
+                        cancelled=cancelled,
+                        mvp_tools=(self._mvp_tools if mvp else None))
             else:
                 result = ctx.gateway.run_command(
                     cwd, argv, timeout_seconds, dry_run)
@@ -2316,11 +2355,16 @@ class WorkspaceService:
                 preview = bool(
                     granted and preview_capacity
                     and ctx.name not in self._exec_active)
+                mvp_configured = bool(
+                    v2 and self.settings.exec_apply_enabled
+                    and ctx.settings.exec_apply_enabled
+                    and ctx.settings.exec_paths)
                 apply = bool(
                     preview
                     and (self._lbe_positive_authorized
                          or (pending_plan is not None
-                             and pending_plan.workspace == ctx.name))
+                             and pending_plan.workspace == ctx.name)
+                         or (mvp_configured and self._mvp_tools is not None))
                     and self._lbe_owner is not None
                     and self._lbe_owner.can_admit_any((ctx.name,)))
                 result.append({
@@ -2329,6 +2373,7 @@ class WorkspaceService:
                     "exec": granted,
                     # Never reinterpret existing v1 grants or response shape.
                     **({"exec_preview_available": preview,
+                        "exec_apply_configured": mvp_configured,
                         "exec_apply_available": apply} if v2 else {}),
                     "local_skills": False,
                     "sensitive_content": ctx.gateway.sensitive_audit.status(),
@@ -2378,8 +2423,23 @@ class WorkspaceService:
             ordinary_positive_ready = bool(
                 v2_state_healthy and self._lbe_positive_authorized
                 and self._lbe_owner.can_admit_any(eligible_names))
+            mvp_configured = bool(
+                is_v2 and self.settings.exec_apply_enabled
+                and any(ctx.settings.exec_apply_enabled
+                        and ctx.settings.exec_paths
+                        for ctx in self._workspaces.values()))
+            mvp_names = tuple(
+                ctx.name for ctx in self._workspaces.values()
+                if (ctx.settings.exec_enabled
+                    and ctx.settings.exec_apply_enabled
+                    and ctx.name not in self._exec_active))
+            mvp_positive_ready = bool(
+                v2_state_healthy and mvp_configured
+                and self._mvp_tools is not None
+                and self._lbe_owner.can_admit_any(mvp_names))
             v2_available = bool(
-                ordinary_positive_ready or r006_one_shot_ready)
+                ordinary_positive_ready or r006_one_shot_ready
+                or mvp_positive_ready)
             # A healthy schema-v2 service may support an entirely
             # nonspawning plan even though positive Exec remains F1-denied.
             # Preview requests share the synchronous request slot gate, not
@@ -2404,7 +2464,9 @@ class WorkspaceService:
                         self.any_write or self.any_git or
                         (is_v2 and (
                             self._lbe_positive_authorized
-                            or r006_one_shot_ready))),
+                            or r006_one_shot_ready
+                            or (mvp_configured
+                                and self._mvp_tools is not None)))),
                     "file_read_only": not self.any_write, "path_base": ".",
                     "workspaces": self.list_workspaces()["workspaces"],
                     "exec_policy": {
@@ -2417,14 +2479,17 @@ class WorkspaceService:
                            if self._lbe_owner is not None else {}),
                         "enabled": self.settings.exec_enabled,
                         "available": v2_available if is_v2 else False,
-                        **({"preview_available": v2_preview_available}
-                           if is_v2 else {}),
+                        **({"preview_available": v2_preview_available,
+                            "apply_configured": mvp_configured,
+                            "tool_selection_ready": (
+                                self._mvp_tools is not None),
+                            "supported_apply_commands": [
+                                "py-direct-pytest", "py-direct-compileall",
+                                "py-pipenv-pytest", "go-test", "go-vet",
+                                "go-build"],
+                           } if is_v2 else {}),
                         "completion_capability": (
-                            "best_effort" if (
-                                v2_state_healthy and (
-                                    self._lbe_positive_authorized
-                                    or r006_one_shot_ready))
-                            else "none"),
+                            "best_effort" if v2_available else "none"),
                         **({"r006_one_shot_ready": r006_one_shot_ready}
                            if is_v2 else {}),
                         "adapter_exposed": self._exec_adapter_exposed,

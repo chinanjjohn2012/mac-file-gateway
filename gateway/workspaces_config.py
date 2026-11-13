@@ -34,6 +34,7 @@ class WorkspaceSettings:
     exec_enabled: bool = False
     exec_paths: tuple[str, ...] = ()
     exec_runners: tuple[str, ...] = ()
+    exec_apply_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class GatewaySettings:
     git_enabled: bool = False
     exec_enabled: bool = False
     schema_version: int = 1
+    exec_apply_enabled: bool = False
 
 
 def _keys(obj: Any, allowed: set[str], context: str) -> dict[str, Any]:
@@ -115,12 +117,13 @@ def parse_workspace_config(config: dict[str, Any]) -> GatewaySettings:
     server = _keys(obj.get("server", {}), {"port", "transport", "git", "exec"}, "server")
     git = _keys(server.get("git", {}), {"enabled"}, "server.git")
     git_enabled = _bool_field(git, "enabled", False)
+    server_apply_enabled = False
     if schema_version == 1:
         server_exec = _keys(server.get("exec", {}), {"enabled"}, "server.exec")
         exec_enabled = _bool_field(server_exec, "enabled", False)
     else:
-        # V2 has no server-level Exec authority. The shared service remains
-        # F1 deny-only for positive execution until the contract is approved.
+        # V2 preview remains paths-only. Positive apply uses separate explicit
+        # server/workspace booleans, never implicit legacy paths consent.
         exec_enabled = False
     port = server.get("port", 8765)
     if type(port) is not int or not 1024 <= port <= 65535:
@@ -174,6 +177,7 @@ def parse_workspace_config(config: dict[str, Any]) -> GatewaySettings:
                 raise PrivateFileError("Sensitive audit requires writable scope, paths and expiry.")
         elif audit_paths or audit_until is not None:
             raise PrivateFileError("Sensitive audit paths/expiry require mode=audit.")
+        workspace_apply_enabled = False
         if schema_version == 1:
             # Preserve every legacy v1 two-switch and validation rule.
             exec_config = _keys(item.get("exec", {}), {"enabled", "paths", "runners"}, "workspace.exec")
@@ -207,6 +211,8 @@ def parse_workspace_config(config: dict[str, Any]) -> GatewaySettings:
             except LbeConfigError as exc:
                 raise PrivateFileError("Invalid v2 Exec fragment: " + str(exc)) from None
             workspace_exec = fragment.enabled
+            workspace_apply_enabled = fragment.workspace_apply_enabled
+            server_apply_enabled = fragment.server_apply_enabled
             exec_paths = tuple("/".join(p) or "." for p in fragment.paths)
             exec_runners = tuple((("/".join(p) or ".") + "=" + runner)
                                  for p, runner in fragment.runners)
@@ -224,9 +230,10 @@ def parse_workspace_config(config: dict[str, Any]) -> GatewaySettings:
         result.append(WorkspaceSettings(name, root, excludes, hidden, allow_write,
                                         write_paths, retention, commands,
                                         audit_paths, audit_until,
-                                        workspace_exec, exec_paths, exec_runners))
+                                        workspace_exec, exec_paths, exec_runners,
+                                        workspace_apply_enabled))
     return GatewaySettings(port, tuple(result), git_enabled, exec_enabled,
-                           schema_version)
+                           schema_version, server_apply_enabled)
 
 
 def read_workspace_config(path: str) -> GatewaySettings:

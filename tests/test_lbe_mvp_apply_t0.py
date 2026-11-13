@@ -138,8 +138,37 @@ def test_false_or_missing_apply_flag_keeps_legacy_preview_only(mvp, monkeypatch,
             s.invoke_exec("a", "py-direct",
                           ["python", "-m", "pytest", "-q"],
                           dry_run=False)
-        assert denied.value.code == "exec_cleanup_proof_required"
+        assert denied.value.code == "exec_disabled"
         assert not s.info()["exec_policy"]["apply_configured"]
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize("server,workspace", [
+    (False, False), (False, True), (True, False),
+])
+def test_v2_missing_private_state_still_denies_disabled_apply_first(
+        mvp, monkeypatch, server, workspace):
+    """Missing old state cannot expose pre-opt-in Exec state or run a child.
+
+    The preserved directory is merely renamed in this disposable T0 fixture;
+    this test never resets a real historical Exec state.
+    """
+    make, _root, private, *_ = mvp
+    (private / "exec-state").rename(private / "preserved-test-state")
+    s = make(server_enabled=server, workspace_enabled=workspace)
+    monkeypatch.setattr(
+        subprocess, "Popen",
+        lambda *a, **k: pytest.fail("v2 disabled Exec spawned a native child"),
+    )
+    try:
+        with pytest.raises(GatewayError) as denied:
+            s.invoke_exec(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                dry_run=False,
+            )
+        assert denied.value.code == "exec_disabled"
+        assert not s.info()["exec_policy"]["available"]
     finally:
         s.close()
 

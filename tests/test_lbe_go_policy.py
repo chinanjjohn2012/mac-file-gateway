@@ -95,14 +95,14 @@ def test_explicit_scope_root_and_nested_cwd(project):
 
 
 @pytest.mark.parametrize("mode", [0o666, 0o660, 0o444])
-def test_r006_existing_go_output_requires_owner_safe_write_mode(project, mode):
+def test_phase1_regular_go_output_is_local_os_trust(project, mode):
     """Go -o must not plan overwriting an unsafe or unwritable existing leaf."""
     target = project / "go-project" / "bin" / "app"
     target.write_bytes(b"existing binary")
     target.chmod(mode)
     before = target.read_bytes()
-    with pytest.raises(GoPolicyError):
-        plan(project, ["go", "build", "-o=bin/app", "./cmd/server"])
+    accepted = plan(project, ["go", "build", "-o=bin/app", "./cmd/server"])
+    assert accepted.output_relative_to_workspace == "go-project/bin/app"
     assert target.read_bytes() == before
 
 
@@ -263,13 +263,14 @@ def test_gateway_output_policy_must_return_exact_boolean_true(project):
 # No compiler or native Go executable is launched by these source-only tests.
 @pytest.mark.parametrize("mode", [0o777, 0o775, 0o733])
 @pytest.mark.parametrize("target_dir", ["bin", "go-project"])
-def test_r006_go_output_parent_requires_owner_control(project, mode, target_dir):
+def test_phase1_go_output_parent_mode_is_local_os_trust(project, mode, target_dir):
     selected = (project / "go-project" / "bin"
                 if target_dir == "bin" else project / "go-project")
     selected.chmod(mode)
     try:
-        with pytest.raises(GoPolicyError, match="owner-controlled"):
-            plan(project, ["go", "build", "-o=bin/app", "./cmd/server"])
+        accepted = plan(project, ["go", "build", "-o=bin/app", "./cmd/server"])
+        assert accepted.output_relative_to_workspace == "go-project/bin/app"
+        assert not (project / "go-project" / "bin" / "app").exists()
     finally:
         selected.chmod(0o755)
 
@@ -287,7 +288,7 @@ def test_r006_go_output_parent_accepts_safe_owner_directories(project, mode):
 @pytest.mark.parametrize("verb", ["test", "vet", "build"])
 @pytest.mark.parametrize("target", ["workspace", "go-project", "cmd"])
 @pytest.mark.parametrize("mode", [0o777, 0o775])
-def test_r006_go_without_output_rejects_mutable_project_ancestors(
+def test_phase1_go_source_root_mode_is_local_os_trust(
     project, verb, target, mode,
 ):
     path = (project if target == "workspace" else
@@ -295,8 +296,9 @@ def test_r006_go_without_output_rejects_mutable_project_ancestors(
             project / "go-project" / "cmd")
     path.chmod(mode)
     try:
-        with pytest.raises(GoPolicyError, match="owner-controlled"):
-            plan(project, ["go", verb, "./..."], cwd="go-project/cmd")
+        accepted = plan(project, ["go", verb, "./..."], cwd="go-project/cmd")
+        assert accepted.argv == ("go", verb, "./...")
+        assert accepted.output_relative_to_workspace is None
     finally:
         path.chmod(0o755)
 

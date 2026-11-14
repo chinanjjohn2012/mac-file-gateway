@@ -1051,3 +1051,51 @@ def test_cancel_at_postcheck_launch_boundary_is_possibly_started():
     finally:
         fake.exit.set()
         owner.close()
+
+
+def test_full003_delayed_reader_finalization_never_false_green(monkeypatch):
+    """Both EOFs, block final selector.close > grace, then fault. SAFE T0 only."""
+    class LateCloseFault(FakeSelector):
+        def __init__(self):
+            super().__init__()
+            self.entered = threading.Event()
+            self.release = threading.Event()
+        def close(self):
+            assert not self.registered, "must observe both EOFs before cleanup"
+            self.entered.set()
+            if not self.release.wait(timeout=4):
+                raise AssertionError("test cleanup not released")
+            super().close()
+            raise OSError("delayed selector cleanup fault")
+    child = FakeChild(exit_code=0)
+    sel = LateCloseFault()
+    def launch(_plan):
+        sel.enqueue(91, b"stdout")
+        sel.enqueue(91, b"")
+        sel.enqueue(92, b"stderr")
+        sel.enqueue(92, b"")
+        child.exit.set()
+        return child
+    worker, owner, _ = driver(selector=sel, launch=launch, grace=0.025)
+    def forbidden(*_args, **_kw):
+        pytest.fail("T0 cannot run subprocess or signal PIDs")
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(subprocess, "Popen", forbidden)
+            patch.setattr(os, "kill", forbidden)
+            patch.setattr(os, "killpg", forbidden, raising=False)
+            result = worker.run(plan())
+        assert sel.entered.is_set()
+        assert result["status"] == "exited"
+        assert result["executed"] is True and result["exit_code"] == 0
+        assert result["pipe_reader_finished"] is False
+        assert result["output_complete"] is False
+        assert result["cleanup_proven"] is False
+        assert result["full_descendant_tree_clean"] == "not_proven"
+        assert child.wait_calls == 1
+        sel.release.set()
+        wait_until(lambda: owner.snapshot()["unavailable"] is True)
+    finally:
+        sel.release.set()
+        child.exit.set()
+        owner.close()

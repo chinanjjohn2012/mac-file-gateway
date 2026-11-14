@@ -580,3 +580,57 @@ def test_native_t1_receipt_rejects_last_row_reader_fault_and_owner_latch():
     with pytest.raises(AssertionError):
         _check_result(clean, command_id="last-row", mode="MCP",
                       owner_health={"unavailable": True, "closing": False})
+
+
+@pytest.mark.parametrize("row", SIX_FIXED_COMMANDS[2:],
+                         ids=lambda r: r.command_id)
+def test_phase1_0777_workspace_and_0775_project_allow_s3_to_s6(mvp, monkeypatch, row):
+    """Legal trusted-local source roots must reach exact six FakeWorker, zero Popen."""
+    make, root, *_ = mvp
+    root.chmod(0o777)
+    (root / row.cwd).chmod(0o775)
+    (root / "go-project" / "bin").chmod(0o777)
+    (root / "py-pipenv" / "Pipfile").chmod(0o666)
+    output = root / "go-project" / "bin" / "app"
+    output.write_bytes(b"existing go output")
+    output.chmod(0o666)
+    calls = []
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda *a, **kw: pytest.fail("SAFE T0 cannot spawn"))
+    def fake_worker(self, plan, *, cancelled=None, **kw):
+        calls.append(plan)
+        return {"status": "exited", "executed": True, "exit_code": 0}
+    monkeypatch.setattr(LbeWorker, "run", fake_worker)
+    service = make()
+    try:
+        preview = service.invoke_exec(
+            "a", row.cwd, list(row.requested_argv), dry_run=True)
+        assert preview["status"] == "preview" and not preview["executed"]
+        observed = service.invoke_exec(
+            "a", row.cwd, list(row.requested_argv), dry_run=False)
+        assert observed["status"] == "exited"
+        assert len(calls) == 1
+        assert calls[0].effective_argv == row.effective_argv
+        assert output.read_bytes() == b"existing go output"
+    finally:
+        service.close()
+
+
+def test_native_receipt_requires_finished_reader_not_only_eof():
+    from tools.mvp_six_native_t1 import _check_result
+    result = {
+        "status": "exited", "executed": True, "exit_code": 0,
+        "stdout": "ok", "stderr": "", "workspace": "a",
+        "timed_out": False, "output_complete": True,
+        "pipe_reader_failed": False, "pipe_reader_finished": True,
+        "stdout_truncated": False, "stderr_truncated": False,
+        "cleanup_proven": False,
+        "full_descendant_tree_clean": "not_proven",
+        "process_may_be_running": True,
+    }
+    owner = {"unavailable": False, "closing": False}
+    _check_result(result, command_id="last", mode="MCP",
+                  owner_health=owner)
+    with pytest.raises(AssertionError):
+        _check_result({**result, "pipe_reader_finished": False},
+                      command_id="last", mode="MCP", owner_health=owner)

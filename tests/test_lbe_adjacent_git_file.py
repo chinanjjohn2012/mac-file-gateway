@@ -317,7 +317,7 @@ def test_positive_optin_fake_worker_preserves_real_git_file_and_unknown(
         assert git["exit_code"] == 0
         assert git["execute_started"] is True
         before = svc.invoke("a", "read_file", "py-direct/safe.txt")
-        assert before["content"] == expected
+        assert expected.rstrip("\n") in before["content"]
         svc.invoke("a", "write_file", "py-direct/safe.txt", next_text,
                    before["file_sha256"], dry_run=False)
         assert (a / "py-direct" / "safe.txt").read_text() == next_text

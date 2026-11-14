@@ -85,6 +85,52 @@ def _digest(path: Path) -> str:
     return h.hexdigest()
 
 
+def _disposable_venv_python(directory: Path) -> Path:
+    """Make an operator-owned Python COPY inside this single-use RUNNER_TEMP.
+
+    The stock macOS image Python is group-writable (0775), so it cannot pass
+    the unchanged MvpTrustedTools identity gate. Never chmod the host binary,
+    change the product gate, or accept a symlink back outside the fixture.
+    """
+    venv.EnvBuilder(system_site_packages=True, symlinks=False,
+                    with_pip=False).create(directory)
+    python = directory / "bin" / "python"
+    target = python.resolve(strict=True)
+    root = directory.resolve(strict=True)
+    st = target.stat()
+    if (not target.is_relative_to(root)
+            or not stat.S_ISREG(st.st_mode)
+            or st.st_nlink != 1 or st.st_uid != os.geteuid()
+            or not os.access(target, os.X_OK)):
+        raise RuntimeError("Disposable Python was not privately copied")
+    target.chmod(0o700)
+    if stat.S_IMODE(target.stat().st_mode) != 0o700:
+        raise RuntimeError("Disposable Python executable mode not pinned")
+    return python
+
+
+def _disposable_pipenv_script(source: Path, python: Path) -> Path:
+    """Copy Pipenv's installed Python console entrypoint, pinning interpreter.
+
+    Preserve the original CLI body, but select the private qualified Python
+    instead of the macOS 0775 shebang interpreter. No shell/script fallback.
+    """
+    raw = source.read_bytes()
+    if (len(raw) > 32768 or not raw.startswith(b"#!")
+            or b"\n" not in raw or b"\x00" in raw):
+        raise RuntimeError("Selected Pipenv console entrypoint unavailable")
+    _, body = raw.split(b"\n", 1)
+    if b"pipenv" not in body or b"import" not in body:
+        raise RuntimeError("Selected Pipenv entrypoint is not Python console")
+    staged = python.parent / "pipenv"
+    staged.write_bytes(b"#!" + os.fsencode(str(python)) + b"\n" + body)
+    staged.chmod(0o700)
+    if (staged.is_symlink() or staged.stat().st_nlink != 1
+            or staged.stat().st_uid != os.geteuid()):
+        raise RuntimeError("Disposable Pipenv script is not owner-controlled")
+    return staged
+
+
 def _fixture(root: Path) -> None:
     direct = root / "py-direct"
     (direct / "src").mkdir(parents=True)
@@ -97,9 +143,7 @@ def _fixture(root: Path) -> None:
     pip.mkdir()
     (pip / "Pipfile").write_text(
         "[packages]\npytest = '*'\n[requires]\npython_version = '3.13'\n")
-    venv.EnvBuilder(system_site_packages=True, with_pip=False).create(
-        pip / ".venv")
-    python = pip / ".venv" / "bin" / "python"
+    python = _disposable_venv_python(pip / ".venv")
     if not python.is_file() or not os.access(python, os.X_OK):
         raise RuntimeError("Pipenv fixture venv interpreter unavailable")
     (pip / "test_fixture.py").write_text(
@@ -229,11 +273,17 @@ def main() -> None:
         runtime = boundary / "runtime"
         runtime.mkdir()
         _fixture(root)
+        # Choose independent, operator-owned disposable *copies* of the
+        # already installed Python/Pipenv toolchain. Never mutate the host
+        # image, selected Go executable or the product's trust requirements.
+        staged_python = _disposable_venv_python(boundary / "operator-tools")
+        staged_pipenv = _disposable_pipenv_script(
+            Path(pipenv_path), staged_python)
         config_file = private / "mvp-exec-tools.json"
         config_file.write_text(json.dumps({
             "executables": {
-                "python": sys.executable,
-                "pipenv": str(Path(pipenv_path).absolute()),
+                "python": str(staged_python),
+                "pipenv": str(staged_pipenv),
                 "go": str(Path(go_path).absolute()),
             },
         }))
@@ -253,12 +303,15 @@ def main() -> None:
             }},
         })
         report["tools"] = {
-            "python_path": str(Path(sys.executable).resolve()),
-            "pipenv_path": str(Path(pipenv_path).resolve()),
+            "python_path": str(staged_python.resolve()),
+            "pipenv_path": str(staged_pipenv.resolve()),
             "go_path": str(Path(go_path).resolve()),
-            "python_sha256": _digest(Path(sys.executable).resolve()),
-            "pipenv_sha256": _digest(Path(pipenv_path).resolve()),
+            "python_sha256": _digest(staged_python.resolve()),
+            "pipenv_sha256": _digest(staged_pipenv.resolve()),
             "go_sha256": _digest(Path(go_path).resolve()),
+            "source_python_sha256": _digest(Path(sys.executable).resolve()),
+            "source_pipenv_sha256": _digest(Path(pipenv_path).resolve()),
+            "disposable_test_tool_copies": True,
         }
         # Diagnose operator-pinned tools without starting or qualifying a
         # child.  This reads ONLY three already selected local executables.
@@ -267,8 +320,8 @@ def main() -> None:
         from gateway.private_fs import read_private_json, PrivateFileError
         probes = {}
         for name, selected in (
-                ("python", sys.executable),
-                ("pipenv", str(Path(pipenv_path).absolute())),
+                ("python", str(staged_python)),
+                ("pipenv", str(staged_pipenv)),
                 ("go", str(Path(go_path).absolute()))):
             try:
                 _snapshot(selected)

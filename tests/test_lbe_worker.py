@@ -1054,48 +1054,67 @@ def test_cancel_at_postcheck_launch_boundary_is_possibly_started():
 
 
 def test_full003_delayed_reader_finalization_never_false_green(monkeypatch):
-    """Both EOFs, block final selector.close > grace, then fault. SAFE T0 only."""
-    class LateCloseFault(FakeSelector):
-        def __init__(self):
-            super().__init__()
+    """Both real EOFs then pause stderr pipe close OUTSIDE selector/reader lock.
+
+    This exactly preserves C's interleaving: capture reports both EOFs, while
+    final pipe/selector cleanup is still pending. Worker must return truthful
+    original-child exit 0 but INCOMPLETE output, never a clean T1 receipt.
+    On release, delayed selector.close faults and Owner latches unavailable.
+    SAFE T0: no real Popen, PID signals, destructive runner or kill.
+    """
+    class PendingLastPipe(FakePipe):
+        def __init__(self, fd):
+            super().__init__(fd)
             self.entered = threading.Event()
             self.release = threading.Event()
         def close(self):
-            assert not self.registered, "must observe both EOFs before cleanup"
             self.entered.set()
-            if not self.release.wait(timeout=4):
-                raise AssertionError("test cleanup not released")
+            if not self.release.wait(timeout=5):
+                raise AssertionError("test pipe-close synchronization not released")
             super().close()
-            raise OSError("delayed selector cleanup fault")
+
+    class FaultOnTerminalSelector(FakeSelector):
+        def close(self):
+            assert not self.registered, "both EOFs must precede close"
+            super().close()
+            raise OSError("terminal selector.close failure after pipe release")
+
     child = FakeChild(exit_code=0)
-    sel = LateCloseFault()
+    pending = PendingLastPipe(92)
+    child.stderr = pending
+    selector = FaultOnTerminalSelector()
     def launch(_plan):
-        sel.enqueue(91, b"stdout")
-        sel.enqueue(91, b"")
-        sel.enqueue(92, b"stderr")
-        sel.enqueue(92, b"")
+        selector.enqueue(91, b"stdout")
+        selector.enqueue(91, b"")
+        selector.enqueue(92, b"stderr")
+        selector.enqueue(92, b"")
         child.exit.set()
         return child
-    worker, owner, _ = driver(selector=sel, launch=launch, grace=0.025)
+
+    worker, owner, _ = driver(selector=selector, launch=launch, grace=0.025)
     def forbidden(*_args, **_kw):
-        pytest.fail("T0 cannot run subprocess or signal PIDs")
+        pytest.fail("SAFE T0 must never start/kill a native child")
     try:
         with monkeypatch.context() as patch:
             patch.setattr(subprocess, "Popen", forbidden)
             patch.setattr(os, "kill", forbidden)
             patch.setattr(os, "killpg", forbidden, raising=False)
             result = worker.run(plan())
-        assert sel.entered.is_set()
+        assert pending.entered.is_set()
         assert result["status"] == "exited"
         assert result["executed"] is True and result["exit_code"] == 0
         assert result["pipe_reader_finished"] is False
+        assert result["pipe_reader_failed"] is False
         assert result["output_complete"] is False
         assert result["cleanup_proven"] is False
         assert result["full_descendant_tree_clean"] == "not_proven"
         assert child.wait_calls == 1
-        sel.release.set()
+        # Releasing the actual post-EOF finalizer produces a late error
+        # that MUST latch unavailable, not retroactively make a clean receipt.
+        pending.release.set()
         wait_until(lambda: owner.snapshot()["unavailable"] is True)
+        assert pending.closed
     finally:
-        sel.release.set()
+        pending.release.set()
         child.exit.set()
         owner.close()

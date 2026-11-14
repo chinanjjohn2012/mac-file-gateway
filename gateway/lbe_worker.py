@@ -223,6 +223,10 @@ class LbeWorker:
             "stderr_truncated": bool(output.get("stderr_truncated", False)),
             "output_complete": bool(output.get("output_complete", False)),
             "pipe_reader_failed": bool(output.get("pipe_reader_failed", False)),
+            # EOF is not terminal cleanup: expose the observed Reader finish
+            # witness so every native/REST/MCP result can reject early clean
+            # acceptance while selector.close is pending or faulting.
+            "pipe_reader_finished": bool(output.get("pipe_reader_finished", False)),
             "output_limit_chars": 48000,
             "content_trust": "untrusted_command_output",
         }

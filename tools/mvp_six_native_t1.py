@@ -216,13 +216,26 @@ def _mcp(base: str, name: str, args: dict, request_id: int) -> dict:
     return result["result"]
 
 
-def _check_result(result: dict, *, command_id: str, mode: str) -> dict:
+def _check_result(result: dict, *, command_id: str, mode: str,
+                  owner_health: dict) -> dict:
+    # A genuine observed exit 0 is necessary but NOT sufficient for clean
+    # native acceptance. A final-row pipe fault must fail the whole receipt,
+    # even when the original child exited and no later row exercises the
+    # Owner's latched refusal.
     if (result.get("status") != "exited" or result.get("executed") is not True
             or result.get("exit_code") != 0
             or not isinstance(result.get("stdout"), str)
             or not isinstance(result.get("stderr"), str)
             or result.get("workspace") != "a"
-            or result.get("timed_out") is not False):
+            or result.get("timed_out") is not False
+            or result.get("pipe_reader_failed") is not False
+            or result.get("output_complete") is not True
+            or result.get("stdout_truncated") is not False
+            or result.get("stderr_truncated") is not False
+            or result.get("cleanup_proven") is not False
+            or result.get("full_descendant_tree_clean") != "not_proven"
+            or owner_health.get("unavailable") is not False
+            or owner_health.get("closing") is not False):
         raise AssertionError(
             f"T1 {mode}/{command_id} failed: "
             f"status={result.get('status')} code={result.get('exit_code')} "
@@ -388,7 +401,8 @@ def main() -> None:
                     timeout_seconds=120, dry_run=False,
                 )
                 observations.append(_check_result(
-                    result, command_id=row.command_id, mode="Direct"))
+                    result, command_id=row.command_id, mode="Direct",
+                    owner_health=service._lbe_owner.snapshot()))
             app = create_multi_app(service, port=port, enable_mcp=True)
             server = uvicorn.Server(uvicorn.Config(
                 app, host="127.0.0.1", port=port, log_level="warning",
@@ -418,7 +432,8 @@ def main() -> None:
                         f"REST {row.command_id}: HTTP={status} "
                         f"error={rest.get('error')}")
                 observations.append(_check_result(
-                    rest, command_id=row.command_id, mode="REST"))
+                    rest, command_id=row.command_id, mode="REST",
+                    owner_health=service._lbe_owner.snapshot()))
             for idx, row in enumerate(SIX_FIXED_COMMANDS, 1):
                 args = {
                     "workspace": "a", "cwd": row.cwd,
@@ -432,7 +447,8 @@ def main() -> None:
                         f"{mcp.get('structuredContent', {}).get('error')}")
                 observations.append(_check_result(
                     mcp["structuredContent"],
-                    command_id=row.command_id, mode="MCP"))
+                    command_id=row.command_id, mode="MCP",
+                    owner_health=service._lbe_owner.snapshot()))
             if len(observations) != 18:
                 raise AssertionError("T1 expected exactly 18 native executions")
             # Negative controls on each route must NEVER invoke a seventh

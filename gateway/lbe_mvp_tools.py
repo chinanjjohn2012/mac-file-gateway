@@ -39,11 +39,13 @@ class _Executable:
 
 def _identity(path: str) -> tuple[int, int, int, int, int]:
     st = os.stat(path)
-    if (not stat.S_ISREG(st.st_mode)
-            or not os.access(path, os.X_OK)
-            or st.st_uid not in (0, os.geteuid())
-            or st.st_mode & 0o022):
-        raise ValueError("selected tool is not an owner-controlled executable")
+    # The operator-selected native tool is a trusted LOCAL OS input, not
+    # an independently private 0700 control file. Phase1 explicitly permits
+    # Homebrew-style 0775 binaries. Keep immutable metadata identity and
+    # absolute selector checks, but do not impose an unapproved owner/mode
+    # admission policy on legitimate local binaries.
+    if not stat.S_ISREG(st.st_mode) or not os.access(path, os.X_OK):
+        raise ValueError("selected tool is not a regular executable")
     return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_mode)
 
 
@@ -162,7 +164,19 @@ class MvpTrustedTools:
                 project = workspace_root / plan.runner_project
                 pipfile = project / "Pipfile"
                 python = project / ".venv" / "bin" / "python"
+                venv_dir = project / ".venv"
+                venv_bin = venv_dir / "bin"
+                # The project-local virtualenv directory, and its bin
+                # directory, must themselves be real directories. Resolving
+                # python alone silently follows a .venv -> external symlink,
+                # allowing Pipenv to select an unapproved external venv.
+                # A standard bin/python executable symlink is still accepted
+                # when its target independently passes trusted-tool checks.
+                venv_st = os.lstat(venv_dir)
+                bin_st = os.lstat(venv_bin)
                 if (not pipfile.is_file() or pipfile.is_symlink()
+                        or not stat.S_ISDIR(venv_st.st_mode)
+                        or not stat.S_ISDIR(bin_st.st_mode)
                         or not python.is_file()
                         or not os.access(python, os.X_OK)):
                     raise ValueError("selected Pipenv project is incomplete")

@@ -259,6 +259,34 @@ def main() -> None:
             "pipenv_sha256": _digest(Path(pipenv_path).resolve()),
             "go_sha256": _digest(Path(go_path).resolve()),
         }
+        # Diagnose operator-pinned tools without starting or qualifying a
+        # child.  This reads ONLY three already selected local executables.
+        # Keep the original MvpTrustedTools/WorkspaceService gates unchanged.
+        from gateway.lbe_mvp_tools import _snapshot
+        from gateway.private_fs import read_private_json, PrivateFileError
+        probes = {}
+        for name, selected in (
+                ("python", sys.executable),
+                ("pipenv", str(Path(pipenv_path).absolute())),
+                ("go", str(Path(go_path).absolute()))):
+            try:
+                _snapshot(selected)
+            except ValueError as exc:
+                # Only fixed developer-authored error text, no path/secret.
+                probes[name] = "DENY:" + str(exc)
+            except (OSError, UnicodeError, RuntimeError) as exc:
+                probes[name] = "DENY:" + type(exc).__name__
+            else:
+                probes[name] = "QUALIFIED"
+        try:
+            read_private_json(config_file)
+        except PrivateFileError:
+            probes["private_file"] = "DENIED"
+        else:
+            probes["private_file"] = "READ_OK"
+        report["tool_qualification_probe"] = probes
+        print("MVP_T1_TOOL_QUALIFICATION=" + json.dumps(
+            probes, sort_keys=True), flush=True)
         service = WorkspaceService(
             config, config_dir=private,
             inventory=ActiveRuntimeInventory(paths=(runtime,)),

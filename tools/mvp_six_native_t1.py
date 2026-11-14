@@ -268,6 +268,21 @@ def main() -> None:
         thread = None
         try:
             policy = service.info()["exec_policy"]
+            # Read-only diagnostic: only booleans/status codes; never tool
+            # paths, credentials, retained private records or launch grants.
+            admission = {
+                "apply_configured": policy["apply_configured"],
+                "available": policy["available"],
+                "tool_selection_ready": policy["tool_selection_ready"],
+                "durability_state": policy["durability_state"],
+                "quarantined": policy["quarantined"],
+                "owner_unavailable": policy["owner_unavailable"],
+                "tool_selection_issue": service._mvp_tools_issue,
+                "state_issue": service._exec_state_issue,
+            }
+            report["admission"] = admission
+            print("MVP_T1_ADMISSION=" + json.dumps(admission, sort_keys=True),
+                  flush=True)
             if (not policy["apply_configured"] or not policy["available"]
                     or not policy["tool_selection_ready"]):
                 raise AssertionError("Native MVP positive Exec admission unavailable")

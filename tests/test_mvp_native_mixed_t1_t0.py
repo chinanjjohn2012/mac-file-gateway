@@ -20,6 +20,7 @@ def test_mixed_native_exit_never_accepts_fault_as_clean_result():
     healthy = {
         "executed": True, "status": "exited", "exit_code": 0,
         "output_complete": True, "pipe_reader_failed": False,
+        "pipe_reader_finished": True,
         "stdout_truncated": False, "stderr_truncated": False,
         "cleanup_proven": False,
         "full_descendant_tree_clean": "not_proven",
@@ -27,7 +28,8 @@ def test_mixed_native_exit_never_accepts_fault_as_clean_result():
     owner = {"unavailable": False, "closing": False, "reserved_slots": 0}
     assert _native_exit(healthy, owner) is None
     for defect in (
-        {"pipe_reader_failed": True}, {"output_complete": False},
+        {"pipe_reader_failed": True}, {"pipe_reader_finished": False},
+        {"output_complete": False},
         {"exit_code": 1}, {"cleanup_proven": True},
         {"full_descendant_tree_clean": "proven"},
     ):

@@ -561,6 +561,7 @@ def test_native_t1_receipt_rejects_last_row_reader_fault_and_owner_latch():
         "workspace": "a", "timed_out": False,
         "stdout": "ok", "stderr": "",
         "output_complete": True, "pipe_reader_failed": False,
+        "pipe_reader_finished": True,
         "stdout_truncated": False, "stderr_truncated": False,
         "cleanup_proven": False, "full_descendant_tree_clean": "not_proven",
         "process_may_be_running": True,
@@ -569,6 +570,7 @@ def test_native_t1_receipt_rejects_last_row_reader_fault_and_owner_latch():
                          owner_health=healthy)["output_complete"] is True
     for defect in (
         {"pipe_reader_failed": True},
+        {"pipe_reader_finished": False},
         {"output_complete": False},
         {"stdout_truncated": True},
         {"stderr_truncated": True},

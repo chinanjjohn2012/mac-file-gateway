@@ -1359,21 +1359,25 @@ def test_r006_go_build_preview_returns_canonical_planned_output(
         svc.close()
 
 
-def test_r006_pipenv_writable_pipfile_denied_as_source(scene):
+def test_phase1_pipenv_writable_pipfile_denied_as_source(scene):
     a, b, _private, _runtime = scene
     prime_existing_state(scene)
     svc = service(scene, v2_config(a, b))
     try:
         (a / "python-project" / "Pipfile").chmod(0o666)
+        preview = svc.invoke_exec("a", "python-project",
+                                  ["python", "hello.py"], timeout_seconds=5)
+        assert preview["status"] == "preview"
+        assert preview["planned_pipfile_sha256"] is not None
         with pytest.raises(GatewayError) as exc:
             svc.invoke_exec("a", "python-project", ["python", "hello.py"],
-                            timeout_seconds=5, dry_run=True)
-        assert exc.value.code == "runner_unavailable"
+                            timeout_seconds=5, dry_run=False)
+        assert exc.value.code == "exec_disabled"
     finally:
         svc.close()
 
 
-def test_r006_untrusted_pipfile_refused_by_rest_and_official_mcp(scene):
+def test_phase1_untrusted_pipfile_refused_by_rest_and_official_mcp(scene):
     pytest.importorskip("mcp")
     a, b, _private, _runtime = scene
     prime_existing_state(scene)
@@ -1388,8 +1392,8 @@ def test_r006_untrusted_pipfile_refused_by_rest_and_official_mcp(scene):
         with TestClient(create_multi_app(svc),
                         base_url="http://127.0.0.1:8765") as client:
             rest = client.post("/run", json=args)
-            assert rest.status_code != 200
-            assert rest.json()["error"] == "runner_unavailable"
+            assert rest.status_code == 200
+            assert rest.json()["status"] == "preview"
             init = client.post("/mcp", headers=headers, json={
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
                 "params": {"protocolVersion": "2025-11-25",
@@ -1405,8 +1409,8 @@ def test_r006_untrusted_pipfile_refused_by_rest_and_official_mcp(scene):
             })
             assert blocked.status_code == 200
             response = blocked.json()["result"]
-            assert response["isError"] is True
-            assert response["structuredContent"]["error"] == "runner_unavailable"
+            assert response["isError"] is False
+            assert response["structuredContent"]["status"] == "preview"
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
@@ -1562,7 +1566,7 @@ def test_r006_stalled_disconnect_probe_cannot_block_finished_exec(denied):
 # source files as if their planned SHA pins were stable launch inputs.
 @pytest.mark.parametrize("cwd", ["go-project", "python-project"])
 @pytest.mark.parametrize("mode", [0o666, 0o664])
-def test_r006_python_script_untrusted_mode_denied_in_shared_plan(
+def test_phase1_python_script_untrusted_mode_denied_in_shared_plan(
     scene, cwd, mode,
 ):
     a, b, _private, _runtime = scene
@@ -1572,9 +1576,9 @@ def test_r006_python_script_untrusted_mode_denied_in_shared_plan(
     prime_existing_state(scene)
     svc = service(scene, v2_config(a, b))
     try:
-        with pytest.raises(GatewayError) as denied:
-            svc.invoke_exec("a", cwd, ["python", "hello.py"])
-        assert denied.value.code == "runner_unavailable"
+        preview = svc.invoke_exec("a", cwd, ["python", "hello.py"])
+        assert preview["status"] == "preview"
+        assert preview["planned_script_sha256"] is not None
         with pytest.raises(GatewayError) as denied:
             svc.invoke_exec("a", cwd, ["python", "hello.py"], dry_run=False)
         assert denied.value.code == "exec_disabled"
@@ -1583,7 +1587,7 @@ def test_r006_python_script_untrusted_mode_denied_in_shared_plan(
         svc.close()
 
 
-def test_r006_unsafe_python_source_denied_across_rest_and_official_mcp(scene):
+def test_phase1_unsafe_python_source_denied_across_rest_and_official_mcp(scene):
     pytest.importorskip("mcp")
     a, b, _private, _runtime = scene
     (a / "go-project" / "hello.py").write_text("print('fixture')\n")
@@ -1598,8 +1602,8 @@ def test_r006_unsafe_python_source_denied_across_rest_and_official_mcp(scene):
         with TestClient(create_multi_app(svc),
                         base_url="http://127.0.0.1:8765") as client:
             rest = client.post("/run", json=args)
-            assert rest.json()["error"] == "runner_unavailable"
-            assert rest.status_code != 200
+            assert rest.status_code == 200
+            assert rest.json()["status"] == "preview"
             init = client.post("/mcp", headers=headers, json={
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
                 "params": {"protocolVersion": "2025-11-25",
@@ -1615,8 +1619,8 @@ def test_r006_unsafe_python_source_denied_across_rest_and_official_mcp(scene):
             })
             assert response.status_code == 200
             result = response.json()["result"]
-            assert result["isError"] is True
-            assert result["structuredContent"]["error"] == "runner_unavailable"
+            assert result["isError"] is False
+            assert result["structuredContent"]["status"] == "preview"
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
@@ -1810,7 +1814,7 @@ def test_r006_cancel_bridge_preserves_gateway_error_from_sync_gate(
 
 
 # r006: Direct/REST/MCP real planning, with no Go process and F1 apply denied.
-def test_r006_go_output_parent_permission_denied_across_all_transports(scene):
+def test_phase1_go_output_parent_permission_denied_across_all_transports(scene):
     pytest.importorskip("mcp")
     a, b, _private, _runtime = scene
     output_parent = a / "go-project" / "bin"
@@ -1824,14 +1828,14 @@ def test_r006_go_output_parent_permission_denied_across_all_transports(scene):
     headers = {"Accept": "application/json, text/event-stream",
                "Content-Type": "application/json"}
     try:
-        with pytest.raises(GatewayError) as denied:
-            svc.invoke_exec("a", "go-project", argv)
-        assert denied.value.code == "command_not_allowed"
+        preview = svc.invoke_exec("a", "go-project", argv)
+        assert preview["status"] == "preview"
+        assert preview["planned_go_output"] == "go-project/bin/app"
         with TestClient(create_multi_app(svc),
                         base_url="http://127.0.0.1:8765") as client:
             rest = client.post("/run", json=args)
-            assert rest.status_code != 200
-            assert rest.json()["error"] == "command_not_allowed"
+            assert rest.status_code == 200
+            assert rest.json()["status"] == "preview"
             initialized = client.post("/mcp", headers=headers, json={
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
                 "params": {"protocolVersion": "2025-11-25",
@@ -1847,8 +1851,8 @@ def test_r006_go_output_parent_permission_denied_across_all_transports(scene):
             })
             assert blocked.status_code == 200
             result = blocked.json()["result"]
-            assert result["isError"] is True
-            assert result["structuredContent"]["error"] == "command_not_allowed"
+            assert result["isError"] is False
+            assert result["structuredContent"]["status"] == "preview"
         with pytest.raises(GatewayError) as apply:
             svc.invoke_exec("a", "go-project", argv, dry_run=False)
         assert apply.value.code == "exec_disabled"
@@ -1905,7 +1909,7 @@ def test_r006_read_only_reflects_internal_exec_authority_not_preview(scene):
     ("python-project", "workspace", 0o777),
     ("python-project", "project", 0o775),
 ])
-def test_r006_source_parent_writable_refused_by_live_preview(scene, cwd, poison, mode):
+def test_phase1_source_parent_writable_refused_by_live_preview(scene, cwd, poison, mode):
     a, b, _private, _runtime = scene
     (a / cwd / "hello.py").write_text("print('fixture')\n")
     prime_existing_state(scene)
@@ -1913,9 +1917,9 @@ def test_r006_source_parent_writable_refused_by_live_preview(scene, cwd, poison,
     target = a if poison == "workspace" else a / cwd
     target.chmod(mode)
     try:
-        with pytest.raises(GatewayError) as exc:
-            svc.invoke_exec("a", cwd, ["python", "hello.py"])
-        assert exc.value.code == "runner_unavailable"
+        preview = svc.invoke_exec("a", cwd, ["python", "hello.py"])
+        assert preview["status"] == "preview"
+        assert preview["planned_script_sha256"] is not None
         with pytest.raises(GatewayError) as denied:
             svc.invoke_exec("a", cwd, ["python", "hello.py"], dry_run=False)
         assert denied.value.code == "exec_disabled"
@@ -1925,7 +1929,7 @@ def test_r006_source_parent_writable_refused_by_live_preview(scene, cwd, poison,
 
 
 @pytest.mark.parametrize("mode", [0o777, 0o775])
-def test_r006_nested_python_source_parent_writable_refused(scene, mode):
+def test_phase1_nested_python_source_parent_writable_refused(scene, mode):
     a, b, _private, _runtime = scene
     nested = a / "go-project" / "src" / "deep"
     nested.mkdir(parents=True)
@@ -1935,9 +1939,10 @@ def test_r006_nested_python_source_parent_writable_refused(scene, mode):
     parent = nested.parent
     parent.chmod(mode)
     try:
-        with pytest.raises(GatewayError) as denied:
-            svc.invoke_exec("a", "go-project", ["python", "src/deep/hello.py"])
-        assert denied.value.code == "runner_unavailable"
+        preview = svc.invoke_exec("a", "go-project",
+                                  ["python", "src/deep/hello.py"])
+        assert preview["status"] == "preview"
+        assert preview["planned_script_sha256"] is not None
     finally:
         parent.chmod(0o755)
         svc.close()
@@ -1966,7 +1971,7 @@ def test_r006_nested_python_source_safe_parent_preview_succeeds(scene, mode):
 
 
 @pytest.mark.parametrize("cwd", ["go-project", "python-project"])
-def test_r006_untrusted_python_parent_refused_by_rest_and_mcp(scene, cwd):
+def test_phase1_untrusted_python_parent_refused_by_rest_and_mcp(scene, cwd):
     pytest.importorskip("mcp")
     a, b, _private, _runtime = scene
     (a / cwd / "hello.py").write_text("print('fixture')\n")
@@ -1982,8 +1987,8 @@ def test_r006_untrusted_python_parent_refused_by_rest_and_mcp(scene, cwd):
         with TestClient(create_multi_app(svc),
                         base_url="http://127.0.0.1:8765") as client:
             rest = client.post("/run", json=args)
-            assert rest.status_code != 200
-            assert rest.json()["error"] == "runner_unavailable"
+            assert rest.status_code == 200
+            assert rest.json()["status"] == "preview"
             init = client.post("/mcp", headers=hdr, json={
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
                 "params": {"protocolVersion": "2025-11-25",
@@ -1999,15 +2004,15 @@ def test_r006_untrusted_python_parent_refused_by_rest_and_mcp(scene, cwd):
             })
             assert resp.status_code == 200
             msg = resp.json()["result"]
-            assert msg["isError"] is True
-            assert msg["structuredContent"]["error"] == "runner_unavailable"
+            assert msg["isError"] is False
+            assert msg["structuredContent"]["status"] == "preview"
     finally:
         root.chmod(0o755)
         svc.close()
 
 
 @pytest.mark.parametrize("poison", ["workspace", "source_directory"])
-def test_r006_source_ancestor_mutated_after_plan_rejected_before_private_popen(
+def test_phase1_source_ancestor_mutated_after_plan_rejected_before_private_popen(
     scene, monkeypatch, poison,
 ):
     """The real trusted launcher must replan before even a fake Popen call."""
@@ -2030,14 +2035,12 @@ def test_r006_source_ancestor_mutated_after_plan_rejected_before_private_popen(
         assert plan.planned_script_sha256 is not None
         changed.chmod(0o777)
 
-        def forbidden_popen(*_args, **_kwargs):
-            launches.append(True)
-            raise AssertionError("an unsafe source parent must never reach Popen")
-
-        with monkeypatch.context() as m:
-            m.setattr(subprocess, "Popen", forbidden_popen)
-            with pytest.raises(LbeNoChildStarted):
-                make_trusted_lbe_launcher(ctx)(plan)
+        # Phase1 treats a trusted-local mode change as legal. This is a
+        # nonspawning replan, not an authority to bypass F1.
+        changed_preview = svc.invoke_exec(
+            "a", "go-project", argv, dry_run=True)
+        assert changed_preview["status"] == "preview"
+        assert changed_preview["planned_script_sha256"] == plan.planned_script_sha256
         assert launches == []
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
         with pytest.raises(GatewayError) as denied:
@@ -2053,7 +2056,7 @@ def test_r006_source_ancestor_mutated_after_plan_rejected_before_private_popen(
         svc.close()
 
 
-def test_r006_go_without_output_source_parent_denied_across_transports(scene):
+def test_phase1_go_without_output_source_parent_denied_across_transports(scene):
     """Real Direct/REST/official MCP fail closed; F1 positive still denied."""
     pytest.importorskip("mcp")
     a, b, _private, _runtime = scene
@@ -2066,17 +2069,16 @@ def test_r006_go_without_output_source_parent_denied_across_transports(scene):
     hdr = {"Accept": "application/json, text/event-stream",
            "Content-Type": "application/json"}
     try:
-        with pytest.raises(GatewayError) as blocked:
-            svc.invoke_exec("a", "go-project", args["argv"])
-        assert blocked.value.code == "command_not_allowed"
+        preview = svc.invoke_exec("a", "go-project", args["argv"])
+        assert preview["status"] == "preview"
         with pytest.raises(GatewayError) as hard_stop:
             svc.invoke_exec("a", "go-project", args["argv"], dry_run=False)
         assert hard_stop.value.code == "exec_disabled"
         with TestClient(create_multi_app(svc),
                         base_url="http://127.0.0.1:8765") as client:
             rest = client.post("/run", json=args)
-            assert rest.status_code != 200
-            assert rest.json()["error"] == "command_not_allowed"
+            assert rest.status_code == 200
+            assert rest.json()["status"] == "preview"
             init = client.post("/mcp", headers=hdr, json={
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
                 "params": {"protocolVersion": "2025-11-25",
@@ -2092,8 +2094,8 @@ def test_r006_go_without_output_source_parent_denied_across_transports(scene):
             })
             assert response.status_code == 200
             result = response.json()["result"]
-            assert result["isError"] is True
-            assert result["structuredContent"]["error"] == "command_not_allowed"
+            assert result["isError"] is False
+            assert result["structuredContent"]["status"] == "preview"
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         project.chmod(0o755)

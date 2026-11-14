@@ -508,3 +508,75 @@ def test_pipenv_python_env_ignores_ambient_override(mvp, monkeypatch):
             root / "py-pipenv" / "Pipfile")
     finally:
         s.close()
+
+
+def test_phase1_legal_operator_selected_0775_tools_remain_usable(mvp, monkeypatch):
+    """Legal 0775 Homebrew-style tools are selected by private operator input."""
+    make, _root, _private, _config, tools = mvp
+    (tools / "python").chmod(0o775)
+    (tools / "pipenv").chmod(0o775)
+    (tools / "go").chmod(0o775)
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("T0 must not spawn"))
+    service = make()
+    try:
+        assert service._mvp_tools is not None
+        assert service.info()["exec_policy"]["tool_selection_ready"] is True
+    finally:
+        service.close()
+
+
+def test_pipenv_project_venv_directory_symlink_cannot_escape(mvp, monkeypatch):
+    """The .venv directory is not allowed to alias an external interpreter."""
+    make, root, *_ = mvp
+    external = root.parent.parent / "outside-venv"
+    (external / "bin").mkdir(parents=True)
+    (external / "bin" / "python").write_bytes(b"fake external interpreter")
+    (external / "bin" / "python").chmod(0o700)
+    venv_dir = root / "py-pipenv" / ".venv"
+    (venv_dir / "bin" / "python").unlink()
+    (venv_dir / "bin").rmdir()
+    venv_dir.rmdir()
+    venv_dir.symlink_to(external, target_is_directory=True)
+    service = make()
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("escaped venv spawned"))
+    try:
+        result = service.invoke_exec(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"], dry_run=False)
+        assert result["status"] == "launch_failed"
+        assert result["executed"] is False
+        assert service._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        service.close()
+
+
+def test_native_t1_receipt_rejects_last_row_reader_fault_and_owner_latch():
+    """A native zero exit must not become a clean T1 PASS after reader failure."""
+    from tools.mvp_six_native_t1 import _check_result
+
+    healthy = {"unavailable": False, "closing": False}
+    clean = {
+        "status": "exited", "executed": True, "exit_code": 0,
+        "workspace": "a", "timed_out": False,
+        "stdout": "ok", "stderr": "",
+        "output_complete": True, "pipe_reader_failed": False,
+        "stdout_truncated": False, "stderr_truncated": False,
+        "cleanup_proven": False, "full_descendant_tree_clean": "not_proven",
+        "process_may_be_running": True,
+    }
+    assert _check_result(clean, command_id="last-row", mode="MCP",
+                         owner_health=healthy)["output_complete"] is True
+    for defect in (
+        {"pipe_reader_failed": True},
+        {"output_complete": False},
+        {"stdout_truncated": True},
+        {"stderr_truncated": True},
+        {"cleanup_proven": True},
+    ):
+        with pytest.raises(AssertionError):
+            _check_result({**clean, **defect}, command_id="last-row",
+                          mode="MCP", owner_health=healthy)
+    with pytest.raises(AssertionError):
+        _check_result(clean, command_id="last-row", mode="MCP",
+                      owner_health={"unavailable": True, "closing": False})

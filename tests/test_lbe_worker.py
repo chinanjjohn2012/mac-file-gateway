@@ -937,7 +937,7 @@ def test_r013_red_both_eof_then_selector_close_fault_cannot_advance_row(monkeypa
         assert result["executed"] is True
         assert result["timed_out"] is False
         assert result["exit_code"] == 0
-        assert result["output_complete"] is True
+        assert result["output_complete"] is False
         assert result["pipe_reader_failed"] is True
         assert record["direct_observation"].status == "exited"
         assert record["direct_observation"].exit_code == 0

@@ -17,6 +17,7 @@ from pathlib import Path
 import platform
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -272,8 +273,22 @@ def main() -> None:
             try:
                 _snapshot(selected)
             except ValueError as exc:
-                # Only fixed developer-authored error text, no path/secret.
-                probes[name] = "DENY:" + str(exc)
+                # Read-only identity reason for disposable test-selected tools.
+                # No path or file content leaves this bounded receipt.
+                try:
+                    st = os.stat(selected)
+                except OSError:
+                    probes[name] = {"reason": str(exc), "metadata": "UNAVAILABLE"}
+                else:
+                    probes[name] = {
+                        "reason": str(exc),
+                        "regular": stat.S_ISREG(st.st_mode),
+                        "executable": os.access(selected, os.X_OK),
+                        "owned_by_root_or_runner": st.st_uid in (0, os.geteuid()),
+                        "mode": oct(stat.S_IMODE(st.st_mode)),
+                        "group_writable": bool(st.st_mode & 0o020),
+                        "other_writable": bool(st.st_mode & 0o002),
+                    }
             except (OSError, UnicodeError, RuntimeError) as exc:
                 probes[name] = "DENY:" + type(exc).__name__
             else:

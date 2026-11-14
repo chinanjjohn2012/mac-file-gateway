@@ -60,7 +60,7 @@ def _assert_denied(svc: WorkspaceService) -> None:
     with pytest.raises(GatewayError) as err:
         svc.invoke_exec("a", "python-project", ["python", "ok.py"],
                         timeout_seconds=5, dry_run=False)
-    assert err.value.code == "exec_cleanup_proof_required"
+    assert err.value.code == "exec_disabled"
 
 
 def test_ordinary_v2_paths_not_operative_even_with_healthy_old_owner(
@@ -109,8 +109,8 @@ def test_rest_and_official_mcp_reject_unapproved_v2_apply(tmp_path, monkeypatch)
                 assert before == client.get("/info").json()["exec_policy"]
                 assert before["available"] is False
                 denied = client.post("/run", json=body)
-                assert denied.status_code == 503
-                assert denied.json()["error"] == "exec_cleanup_proof_required"
+                assert denied.status_code == 403
+                assert denied.json()["error"] == "exec_disabled"
 
                 init = client.post("/mcp", headers=headers, json={
                     "jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -131,7 +131,7 @@ def test_rest_and_official_mcp_reject_unapproved_v2_apply(tmp_path, monkeypatch)
                 result = tool.json()["result"]
                 assert result.get("isError") is True
                 assert result["structuredContent"]["error"] == (
-                    "exec_cleanup_proof_required")
+                    "exec_disabled")
                 assert client.get("/health").json()["exec_policy"] == before
             assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:

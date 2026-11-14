@@ -1,0 +1,107 @@
+name: six-command-mvp-native-t1-pr114
+
+on:
+  # PR paths filters match the cumulative Base..Head diff: using them here
+  # would schedule EXTRA native T1 on every unrelated PR synchronize.
+  # Only a deliberate owner label event may initiate one 18-row T1 attempt.
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  pr114-disposable-macos-15-arm64-six-native-commands:
+    if: >-
+      github.event.pull_request.number == 114 &&
+      github.event.pull_request.head.repo.full_name == 'chinanjjohn2012/mac-file-gateway' &&
+      github.event.pull_request.head.ref == 'feat/lbe-five-day-d2-nonoperative-prelaunch-20261106' &&
+      github.event.label.name == 'mvp-native-t1-approved' &&
+      github.actor == 'chinanjjohn2012'
+    # Repo PR114 source-only macos-15 job 132047463161 actually resolved
+    # GitHub image macos-15-arm64; DO NOT TRUST THE LABEL for CPU authority.
+    # The next step fails BEFORE any dependency setup on a non-ARM64 host.
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONNOUSERSITE: "1"
+      PYTHONPATH: ""
+      PIP_NO_INPUT: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - name: Checkout exact PR Head without persisted credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Prove exact source HEAD, Tree and Manifest before Python imports
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 -I -S tools/g05_ci_admission.py --expected-head "$G05_EXPECTED_HEAD"
+
+      - name: Fail closed on wrong host BEFORE Python Go or Pipenv setup
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -eu
+          test "$(uname -s)" = "Darwin"
+          test "$(uname -m)" = "arm64"
+          test "$RUNNER_OS" = "macOS"
+          test "$RUNNER_ARCH" = "ARM64"
+          test "$RUNNER_ENVIRONMENT" = "github-hosted"
+          test "${ImageOS:-}" = "macos15"
+          test -n "${ImageVersion:-}"
+          test -n "$RUNNER_TEMP"
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up disposable Go toolchain
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: false
+
+      - name: Install public test-only Python and Pipenv dependencies
+        run: |
+          set -eu
+          python -m pip install --no-cache-dir -r requirements-dev.txt 'pipenv>=2024,<2027'
+          python -m pip check
+
+      - name: Validate GitHub-hosted macOS ARM64 and native executables
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -eu
+          test "$(uname -s)" = "Darwin"
+          test "$(uname -m)" = "arm64"
+          test "$RUNNER_ENVIRONMENT" = "github-hosted"
+          test -n "$RUNNER_TEMP"
+          command -v go
+          command -v pipenv
+          python -I -S -c 'import sys,platform; print("MVP_T1_PLATFORM="+platform.platform()); print("MVP_T1_PYTHON="+sys.version.split()[0]); print("MVP_T1_EXECUTABLE="+sys.executable)'
+
+      - name: Run 18 real positive Direct REST official MCP executions, no kill
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MVP_T1_APPROVED_PR: "114"
+          GOPROXY: "off"
+          GOSUMDB: "off"
+        run: |
+          set -eu
+          python -m tools.mvp_six_native_t1
+
+      - name: Store T1 source and observation receipt even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr114-six-command-native-t1-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/mvp-six-native-t1-result.json
+          if-no-files-found: warn
+          retention-days: 7

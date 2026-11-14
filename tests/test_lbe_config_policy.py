@@ -89,8 +89,9 @@ def test_unsupported_or_wrong_type_version_refuses(version):
 
 
 @pytest.mark.parametrize("server", [
-    {"exec": {"enabled": False}},
-    {"exec": {"enabled": True}},
+    {"exec": {"enabled": 1}},
+    {"exec": {"enabled": "yes"}},
+    {"exec": {"unexpected": True}},
     {"exec": {"paths": ["project"]}},
     {"exec": True},
     {"exec": []},
@@ -102,8 +103,8 @@ def test_server_exec_never_mints_v2_grants(server):
 
 
 @pytest.mark.parametrize("raw", [
-    {"exec": {"enabled": False, "paths": ["project"]}},
-    {"exec": {"enabled": True, "paths": ["project"]}},
+    {"exec": {"enabled": 1, "paths": ["project"]}},
+    {"exec": {"enabled": "true", "paths": ["project"]}},
     {"exec": {"mode": "local_best_effort", "paths": ["project"]}},
     {"exec": {"path": ["project"]}},
     {"exec": None},
@@ -262,3 +263,71 @@ def test_no_file_operation_or_subprocess_required(monkeypatch):
     monkeypatch.setattr(os, "open", deny)
     g = parse(paths=["proj"], runners=["proj=pipenv"])
     assert g.runner_for("proj", "python") == "pipenv"
+
+
+def test_explicit_v2_apply_requires_both_flags_and_scope():
+    off = parse(paths=["project"])
+    assert off.enabled
+    assert not off.apply_configured
+    assert not off.server_apply_enabled
+    assert not off.workspace_apply_enabled
+    for server, workspace in ((False, False), (True, False), (False, True)):
+        g = parse(server={"exec": {"enabled": server}},
+                  raw={"exec": {"enabled": workspace,
+                                "paths": ["project"]}})
+        assert g.enabled
+        assert g.server_apply_enabled is server
+        assert g.workspace_apply_enabled is workspace
+        assert not g.apply_configured
+    g = parse(server={"exec": {"enabled": True}},
+              raw={"exec": {"enabled": True, "paths": ["project"]}})
+    assert g.apply_configured
+    assert g.paths == (("project",),)
+    no_paths = parse(server={"exec": {"enabled": True}},
+                     raw={"exec": {"enabled": True, "paths": []}})
+    assert not no_paths.apply_configured
+
+
+@pytest.mark.parametrize("bad", [1, "true", [], None, {}, 0])
+def test_v2_apply_enabled_must_be_strict_bool(bad):
+    with pytest.raises(LbeConfigError):
+        parse(server={"exec": {"enabled": bad}},
+              raw={"exec": {"enabled": True, "paths": ["project"]}})
+    with pytest.raises(LbeConfigError):
+        parse(server={"exec": {"enabled": True}},
+              raw={"exec": {"enabled": bad, "paths": ["project"]}})
+
+
+def test_v2_complete_settings_propagate_apply_separate_from_preview():
+    from gateway.workspaces_config import parse_workspace_config
+
+    def config(server=None, workspace=None):
+        return {
+            "schema_version": 2,
+            "server": {"transport": "http", "exec": server or {}},
+            "workspaces": {"a": {
+                "root": "/tmp/mvp-fixed-fixture",
+                "exec": workspace or {"paths": ["py-direct"]},
+            }},
+        }
+
+    legacy = parse_workspace_config(config())
+    assert legacy.exec_enabled and legacy.workspaces[0].exec_enabled
+    assert not legacy.exec_apply_enabled
+    assert not legacy.workspaces[0].exec_apply_enabled
+
+    enabled = parse_workspace_config(config(
+        {"enabled": True},
+        {"enabled": True, "paths": ["py-direct"]},
+    ))
+    assert enabled.exec_enabled and enabled.exec_apply_enabled
+    assert enabled.workspaces[0].exec_enabled
+    assert enabled.workspaces[0].exec_apply_enabled
+    for bad in ({"enabled": 1}, {"unknown": True}):
+        with pytest.raises(Exception):
+            parse_workspace_config(config(server=bad))
+    for bad in ({"enabled": 1, "paths": ["py-direct"]},
+                {"unknown": True, "paths": ["py-direct"]}):
+        with pytest.raises(Exception):
+            parse_workspace_config(config(
+                {"enabled": True}, bad))

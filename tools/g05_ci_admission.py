@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import importlib.machinery
 import os
 from pathlib import Path
@@ -23,6 +24,8 @@ import sys
 
 HEX_SHA = re.compile(r"[0-9a-f]{40}\Z")
 HEX256 = re.compile(r"[0-9a-f]{64}\Z")
+RUN_ID = re.compile(r"[1-9][0-9]{0,18}\Z")
+JOB_NAME = re.compile(r"[A-Za-z0-9_.-]{1,120}\Z")
 BLOCKED_ENV = (
     "PYTHONPATH",
     "PYTHONHOME",
@@ -57,6 +60,81 @@ def git(root: Path, *argv: str) -> bytes:
             + result.stderr.decode("utf-8", "replace")[:250]
         )
     return result.stdout
+
+
+def git_optional(root: Path, *argv: str) -> tuple[int, bytes]:
+    result = subprocess.run(
+        ["git", *argv], cwd=root, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, check=False, timeout=30,
+    )
+    if result.returncode not in (0, 1):
+        raise AdmissionError(
+            f"git {' '.join(argv)} failed with exit {result.returncode}: "
+            + result.stderr.decode("utf-8", "replace")[:250]
+        )
+    return result.returncode, result.stdout
+
+
+def verify_r006_checkout_credentials(root: Path) -> None:
+    """Reject persisted checkout credentials without reading any secret value."""
+    _code, rows = git_optional(
+        root, "config", "--local", "--get-regexp",
+        r"^(credential\..*|http\..*\.extraheader)$",
+    )
+    if rows:
+        raise AdmissionError(
+            "R006 checkout contains persisted credential/helper configuration")
+    _code, remotes = git_optional(
+        root, "config", "--local", "--get-regexp", r"^remote\..*\.url$",
+    )
+    for row in remotes.decode("utf-8", "replace").splitlines():
+        _key, _sep, value = row.partition(" ")
+        lower = value.lower()
+        if ((lower.startswith("https://") or lower.startswith("http://"))
+                and "@" in value.split("/", 3)[2]):
+            raise AdmissionError("R006 checkout remote URL embeds credentials")
+
+
+def _r006_checkout_identity(root: Path) -> list[int]:
+    st = root.lstat()
+    if not stat.S_ISDIR(st.st_mode) or root.is_symlink():
+        raise AdmissionError("R006 checkout root is not an actual directory")
+    return [st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid, st.st_ctime_ns]
+
+
+def _required_positive_env_int(env: dict[str, str], name: str) -> int:
+    value = env.get(name, "")
+    if type(value) is not str or RUN_ID.fullmatch(value) is None:
+        raise AdmissionError("missing/malformed R006 " + name)
+    return int(value)
+
+
+def build_r006_receipt(
+    root: Path, evidence: dict[str, object], *, environ=None,
+) -> dict[str, object]:
+    """Bind G05 PASS to this exact Actions run/job and checkout inode."""
+    env = os.environ if environ is None else environ
+    expected = {
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_EVENT_NAME": "pull_request",
+        "GITHUB_REPOSITORY": "chinanjjohn2012/mac-file-gateway",
+        "G05_EXPECTED_HEAD": evidence.get("head_sha"),
+    }
+    if any(env.get(key) != value for key, value in expected.items()):
+        raise AdmissionError("R006 GitHub run context does not match G05 evidence")
+    job_name = env.get("GITHUB_JOB", "")
+    if type(job_name) is not str or JOB_NAME.fullmatch(job_name) is None:
+        raise AdmissionError("missing/malformed R006 GITHUB_JOB")
+    verify_r006_checkout_credentials(root)
+    return {
+        **evidence,
+        "run_id": _required_positive_env_int(env, "GITHUB_RUN_ID"),
+        "run_attempt": _required_positive_env_int(env, "GITHUB_RUN_ATTEMPT"),
+        "job_name": job_name,
+        "checkout_root": str(root.resolve()),
+        "checkout_identity": _r006_checkout_identity(root),
+        "checkout_credentials_clean": True,
+    }
 
 
 def paths_from_nul(data: bytes, label: str) -> set[str]:
@@ -226,7 +304,7 @@ def verify_project_import_root(root: Path, tracked: set[str]) -> str:
     return "gateway/__init__.py"
 
 
-def admit(root: Path, expected_head: str) -> None:
+def admit(root: Path, expected_head: str) -> dict[str, object]:
     head, tree, tracked = verify_checkout(root, expected_head)
     head_count = verify_head_tree(root, tracked)
     count = verify_manifest(root, tracked)
@@ -248,18 +326,72 @@ def admit(root: Path, expected_head: str) -> None:
     print("G05_TRACKED_SHA256_MANIFEST=PASS count=" + str(count))
     print("G05_EXECUTION_IMPORT_ROOT=" + entry)
     print("G05_UNTRACKED_IGNORED_RUNTIME_INPUTS=NONE")
-    print("G05_REPOSITORY_ADMISSION=PASS")
     print("G05_THIRD_PARTY_DEPENDENCY_PROVENANCE=NOT_ATTESTED")
     print("G05_DEVELOPER_LOCAL_WORKTREE=NOT_OBSERVED")
     print("G05_INTEGRATION_STATUS=NOT_TESTED")
+    return {
+        "marker": "MFG_G05_R006_RECEIPT_V1",
+        "repo": "chinanjjohn2012/mac-file-gateway",
+        "pr": 114,
+        "head_sha": head,
+        "head_tree": tree,
+        "manifest_sha256": hashlib.sha256(
+            (root / "MANIFEST.sha256").read_bytes()).hexdigest(),
+    }
+
+
+
+def write_receipt(root: Path, target: str, evidence: dict[str, object]) -> None:
+    """Persist one private receipt OUTSIDE checkout after complete G05 PASS."""
+    if type(target) is not str or not target.startswith("/") or len(target) > 1024:
+        raise AdmissionError("receipt path must be a bounded absolute path")
+    path = Path(target)
+    parent = path.parent
+    if path.name in {"", ".", ".."} or not parent.is_dir() or parent.is_symlink():
+        raise AdmissionError("receipt parent is unavailable or unsafe")
+    try:
+        if parent.resolve().is_relative_to(root.resolve()):
+            raise AdmissionError("receipt must stay outside the tracked checkout")
+    except RuntimeError:
+        raise AdmissionError("receipt parent cannot be resolved") from None
+    receipt = build_r006_receipt(root, evidence)
+    raw = (json.dumps(receipt, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True) + "\n").encode("ascii")
+    fd = parent_fd = -1
+    try:
+        parent_fd = os.open(
+            parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        fd = os.open(
+            path.name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600, dir_fd=parent_fd)
+        offset = 0
+        while offset < len(raw):
+            written = os.write(fd, raw[offset:])
+            if written <= 0:
+                raise AdmissionError("receipt write was incomplete")
+            offset += written
+        os.fsync(fd)
+        os.fsync(parent_fd)
+    except FileExistsError:
+        raise AdmissionError("receipt already exists") from None
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if parent_fd >= 0:
+            os.close(parent_fd)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expected-head", required=True)
+    parser.add_argument("--receipt")
     args = parser.parse_args(argv)
     try:
-        admit(Path.cwd(), args.expected_head)
+        evidence = admit(Path.cwd(), args.expected_head)
+        if args.receipt:
+            write_receipt(Path.cwd(), args.receipt, evidence)
+        print("G05_REPOSITORY_ADMISSION=PASS")
     except (AdmissionError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
         print("G05_REPOSITORY_ADMISSION=FAIL", file=sys.stderr)
         print("G05_R01_GATE=INCOMPLETE", file=sys.stderr)

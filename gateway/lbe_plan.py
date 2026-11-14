@@ -7,16 +7,53 @@ No plan, path or runner validation is a host sandbox or descendant proof.
 """
 from __future__ import annotations
 
+import os
 import stat
 from typing import TYPE_CHECKING
 
 from .core import GatewayError, _parts
-from .executor import _canonical, _clean_argv
+from .executor import _canonical, _clean_argv, _validate_command
 from .lbe_go_policy import GoPolicyError, validate_go_command
 from .lbe_worker import LbeWorkPlan
 
 if TYPE_CHECKING:
     from .workspaces import WorkspaceContext
+
+
+
+def _check_owner_controlled_source_parents(
+    root_fd: int, source_parts: tuple[str, ...],
+) -> None:
+    """Check real no-follow ancestor FDs, never foreign symlink aliases.
+
+    Phase1 local OS trust explicitly admits 0777 Workspace directories and
+    0775 project roots; do not transplant R006 owner/mode restrictions into
+    Design-002's six-command plan. A later source mutation by a trusted OS
+    user is accepted risk, not an OS sandbox or loaded-source attestation.
+    """
+    if not source_parts:
+        raise GatewayError("runner_unavailable", "Unqualified source path.")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    held: list[int] = []
+    try:
+        fd = os.dup(root_fd)
+        held.append(fd)
+        for name in (None, *source_parts[:-1]):
+            if name is not None:
+                fd = os.open(name, flags, dir_fd=fd)
+                held.append(fd)
+            metadata = os.fstat(fd)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise GatewayError(
+                    "runner_unavailable", "Selected source parent is not a directory."
+                )
+    except OSError:
+        raise GatewayError(
+            "runner_unavailable", "Selected source parent cannot be safely opened.",
+        ) from None
+    finally:
+        for fd in reversed(held):
+            os.close(fd)
 
 
 def prepare_lbe_work_plan(
@@ -41,6 +78,9 @@ def prepare_lbe_work_plan(
     cwd_parts, _cwd_path = runner._cwd(cwd)
     canonical_cwd = _canonical(cwd_parts)
 
+    planned_go_output = None
+    planned_script_sha256 = None
+    planned_pipfile_sha256 = None
     if requested[0] == "go":
         try:
             validated = validate_go_command(
@@ -53,6 +93,10 @@ def prepare_lbe_work_plan(
             raise GatewayError("command_not_allowed",
                                "Go command or output is not allowed.") from None
         effective = validated.argv
+        # The Go policy has already checked Workspace scopes, exclusions
+        # and a nofollow output parent. Preserve its canonical output path
+        # as preview information, never as proof that a file was written.
+        planned_go_output = validated.output_relative_to_workspace
         selected_runner = "direct"
         runner_project = canonical_cwd
     else:
@@ -63,6 +107,22 @@ def prepare_lbe_work_plan(
         effective = tuple(preview["effective_argv"])
         selected_runner = preview["runner"]
         runner_project = preview["runner_project"]
+        # Record only a bounded, permission-checked FIRST-PARTY script's
+        # bytes from a pinned nofollow FD. This is not a claim about the
+        # interpreter, imports, runtime loader or later path identity.
+        script = _validate_command(requested)
+        if script is not None:
+            source_parts = (*_parts(canonical_cwd), *_parts(script))
+            if not ctx.gateway._allowed(source_parts, is_file=True):
+                raise GatewayError("blocked_path",
+                                   "Python source path is not allowed.")
+            _check_owner_controlled_source_parents(
+                ctx.gateway._root_fd, source_parts)
+            script_snapshot = ctx.gateway._snapshot(source_parts)
+            # Digest records the pinned regular no-follow source bytes;
+            # UID and 0666 mode are trusted-local inputs under Phase1.
+            # The digest is NOT a POSIX isolation or positive Exec grant.
+            planned_script_sha256 = script_snapshot.sha256
         if selected_runner == "pipenv":
             # The private launcher requires a single-link regular Pipfile
             # immediately before Popen. Make the public preview reject the
@@ -77,19 +137,29 @@ def prepare_lbe_work_plan(
                     "runner_unavailable",
                     "Configured Pipenv runner requires an allowed Pipfile.",
                 )
-            pipfile = ctx.gateway._root_path.joinpath(*pipfile_parts)
+            _check_owner_controlled_source_parents(
+                ctx.gateway._root_fd, pipfile_parts)
             try:
-                metadata = pipfile.stat(follow_symlinks=False)
-            except OSError:
+                # Re-open the entire runner project using Gateway's pinned
+                # no-follow directory traversal. A path swap between the
+                # CommandRunner preview and this check must not make a
+                # linked/foreign Pipfile look like the trusted source.
+                with ctx.gateway._directory(_parts(runner_project)) as parent:
+                    pipfile_snapshot = ctx.gateway._snapshot_at(parent, "Pipfile")
+                    metadata = pipfile_snapshot.metadata
+            except (OSError, GatewayError):
                 raise GatewayError(
                     "runner_unavailable",
                     "Configured Pipenv runner requires a safe Pipfile.",
                 ) from None
+            # Keep nofollow regular/single-link Pipfile and explicit
+            # Workspace path policy, without an unapproved UID/mode gate.
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
                 raise GatewayError(
                     "runner_unavailable",
                     "Configured Pipenv runner requires a safe Pipfile.",
                 )
+            planned_pipfile_sha256 = pipfile_snapshot.sha256
 
     plan = LbeWorkPlan(
         workspace=ctx.name,
@@ -99,6 +169,9 @@ def prepare_lbe_work_plan(
         runner=selected_runner,
         runner_project=runner_project,
         timeout_seconds=timeout_seconds,
+        planned_go_output=planned_go_output,
+        planned_script_sha256=planned_script_sha256,
+        planned_pipfile_sha256=planned_pipfile_sha256,
     )
     # Both caller- and worker-side shape checks stay active. Neither check
     # grants Exec or bypasses the existing private state/admission gates.

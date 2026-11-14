@@ -6,6 +6,7 @@ actual user Tunnel, or a real remote Git operation.
 from __future__ import annotations
 
 import hashlib
+import json
 import importlib.machinery
 import importlib.util
 import os
@@ -59,7 +60,9 @@ def checkout(tmp_path: Path) -> Path:
     return root
 
 
-def run_gate(root: Path, expected_head: str | None = None, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def run_gate(root: Path, expected_head: str | None = None,
+             extra_env: dict[str, str] | None = None,
+             receipt: Path | None = None) -> subprocess.CompletedProcess[str]:
     sha = run_git(root, "rev-parse", "HEAD").stdout.strip()
     env = os.environ.copy()
     for name in (
@@ -70,11 +73,25 @@ def run_gate(root: Path, expected_head: str | None = None, extra_env: dict[str, 
         "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
     ):
         env.pop(name, None)
+    if receipt is not None:
+        env.update({
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "pull_request",
+            "GITHUB_REPOSITORY": "chinanjjohn2012/mac-file-gateway",
+            "GITHUB_RUN_ID": "42460000001",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_JOB": "g05-test-job",
+            "G05_EXPECTED_HEAD": sha,
+        })
     env.update(extra_env or {})
+    argv = [
+        sys.executable, "-I", "-S", str(root / "tools" / "g05_ci_admission.py"),
+        "--expected-head", expected_head or sha,
+    ]
+    if receipt is not None:
+        argv.extend(["--receipt", str(receipt)])
     return subprocess.run(
-        [sys.executable, "-I", "-S", str(root / "tools" / "g05_ci_admission.py"),
-         "--expected-head", expected_head or sha],
-        cwd=root, text=True, capture_output=True, env=env, check=False,
+        argv, cwd=root, text=True, capture_output=True, env=env, check=False,
     )
 
 
@@ -265,3 +282,45 @@ def test_legitimate_committed_executable_mode_still_passes(checkout: Path) -> No
     result = run_gate(checkout)
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert "G05_HEAD_BLOB_AND_EXEC_MODE=PASS" in result.stdout
+
+
+def test_r006_receipt_is_private_outside_checkout_and_exact(
+        checkout: Path, tmp_path: Path) -> None:
+    receipt = tmp_path / "g05-receipt.json"
+    out = run_gate(checkout, receipt=receipt)
+    assert out.returncode == 0, (out.stdout, out.stderr)
+    data = json.loads(receipt.read_text(encoding="ascii"))
+    assert data["marker"] == "MFG_G05_R006_RECEIPT_V1"
+    assert data["repo"] == "chinanjjohn2012/mac-file-gateway"
+    assert data["pr"] == 114
+    assert data["head_sha"] == run_git(checkout, "rev-parse", "HEAD").stdout.strip()
+    assert data["head_tree"] == run_git(
+        checkout, "rev-parse", "HEAD^{tree}").stdout.strip()
+    assert data["manifest_sha256"] == hashlib.sha256(
+        (checkout / "MANIFEST.sha256").read_bytes()).hexdigest()
+    assert data["run_id"] == 42460000001
+    assert data["run_attempt"] == 1
+    assert data["job_name"] == "g05-test-job"
+    assert data["checkout_root"] == str(checkout.resolve())
+    assert data["checkout_credentials_clean"] is True
+    assert len(data["checkout_identity"]) == 6
+    assert receipt.stat().st_mode & 0o777 == 0o600
+
+
+def test_r006_receipt_rejects_persisted_checkout_credentials(
+        checkout: Path, tmp_path: Path) -> None:
+    run_git(
+        checkout, "config",
+        "http.https://github.com/.extraheader", "AUTHORIZATION: basic REDACTED")
+    receipt = tmp_path / "g05-receipt.json"
+    out = run_gate(checkout, receipt=receipt)
+    assert_denied(out, "persisted credential")
+    assert not receipt.exists()
+
+
+def test_r006_receipt_inside_checkout_is_refused(checkout: Path) -> None:
+    receipt = checkout / "receipt.json"
+    out = run_gate(checkout, receipt=receipt)
+    assert out.returncode == 2
+    assert "receipt must stay outside" in out.stderr
+    assert not receipt.exists()

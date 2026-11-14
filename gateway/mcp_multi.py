@@ -11,6 +11,7 @@ from pydantic import Field, StrictBool
 from starlette.concurrency import run_in_threadpool
 
 from .core import GatewayError
+from .lbe_cancel_bridge import invoke_exec_with_cancel
 from .multi_fields import validate_tool_arguments
 from .workspaces import WorkspaceService
 
@@ -81,14 +82,18 @@ def build_multi_mcp(service: WorkspaceService, *, port: int = 8765) -> MCPServer
         ) -> dict[str, Any]:
             """Run an allowlisted command only in an explicitly enabled Workspace.
 
-            F1 allows only validated preview. Apply without independently
-            approved whole-descendant cleanup proof is denied before any
-            Exec Runner or PREPARED intent. No automatic retries or local
-            privilege escalation. Git has separate admission.
+            Preview is default and never spawns. Schema-v2 positive apply
+            requires BOTH explicit server/workspace Exec switches, a healthy
+            existing owner.lock, operator-selected native tools, and EXACTLY
+            one of the six fixed Python/Pipenv/Go request vectors. A separate
+            historical private R006 one-shot, when present, is not a public
+            client grant. A timeout, cancellation or direct-child exit never
+            proves descendant cleanup. Never automatically retry after an
+            uncertain or lost response. Git/File authorization is separate.
             """
             try:
-                return await run_in_threadpool(
-                    service.invoke_exec, workspace, cwd, argv,
+                return await invoke_exec_with_cancel(
+                    service, workspace, cwd, argv,
                     timeout_seconds, dry_run,
                 )
             except GatewayError as exc:

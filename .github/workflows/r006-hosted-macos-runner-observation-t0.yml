@@ -1,0 +1,139 @@
+name: r006-hosted-macos-runner-observation-t0
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/r006-hosted-macos-runner-observation-t0.yml"
+      - "tools/d4_r006_host_observation_t0.py"
+      - "tools/d4_r006_host_source_collect_t0.py"
+      - "tests/test_d4_r006_host_source_collect_t0.py"
+      - "tests/test_d4_r006_host_observation_t0.py"
+      - "gateway/lbe_durable_attempt.py"
+      - "gateway/lbe_owner_grant.py"
+      - "gateway/lbe_r006_macos_allowlist.py"
+      - "gateway/lbe_r010_a1_host.py"
+      - "gateway/lbe_r010_a1_mount.py"
+      - "gateway/lbe_r010_preexec_env.py"
+      - "gateway/lbe_r010_preimport_gate.py"
+      - "gateway/r010_preexec_source_entry.py"
+      - "gateway/lbe_r010_product_pipeline.py"
+      - "tests/test_lbe_r010_preexec_source_entry.py"
+      - "tools/r010_a1_host_observation_t0.py"
+      - "tests/test_lbe_r010_a1_host.py"
+      - "gateway/lbe_owner_grant_bootstrap.py"
+      - "gateway/lbe_r006_review_gate.py"
+      - "gateway/lbe_r006_runtime_identity.py"
+      - "tests/test_lbe_r006_runtime_identity.py"
+      - "gateway/lbe_r006_trusted_bootstrap.py"
+      - "tests/test_lbe_r006_trusted_bootstrap.py"
+      - "tools/d4_r006_host_allowlist_verify_t0.py"
+      - "tests/test_lbe_r006_macos_allowlist.py"
+      - "gateway/workspaces.py"
+      - "docs/MULTI_WORKSPACE_EXEC_LBE_R006_DURABLE_ATTEMPT_CHECKPOINT.md"
+      - "MANIFEST.sha256"
+
+permissions:
+  contents: read
+
+jobs:
+  observe-macos-15-arm64-t0:
+    runs-on: macos-15
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONNOUSERSITE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Check HEAD Tree and Manifest before other imports
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 -I -S tools/g05_ci_admission.py --expected-head "$G05_EXPECTED_HEAD" --receipt "$RUNNER_TEMP/r006-g05-receipt.json"
+      - name: Record actual macOS runtime facts and bounded provider claims T0
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 -I -S tools/d4_r006_host_observation_t0.py
+      - name: Collect bounded macOS host-file candidates for later review only
+        run: python3 -I -S tools/d4_r006_host_source_collect_t0.py
+      # Synthetic exact-env process test only: no live OIDC request, no agent
+      # protocol, no product child and no PRODUCT_T1 authority.
+      - name: R010 tracked PREEXEC scrub then product-import SAFE T0 (PR114)
+        if: ${{ github.event.pull_request.number == 114 }}
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -eu
+          home="$RUNNER_TEMP/r010-preexec-source-home"
+          tmp="$RUNNER_TEMP/r010-preexec-source-tmp"
+          mkdir -m 700 "$home" "$tmp"
+          run_exact_env() {
+            /usr/bin/env -i \
+              "PATH=/usr/bin:/bin" \
+              "HOME=$home" \
+              "TMPDIR=$tmp" \
+              "LANG=C" \
+              "LC_ALL=C" \
+              "GITHUB_ACTIONS=true" \
+              "GITHUB_EVENT_NAME=pull_request" \
+              "GITHUB_REPOSITORY=chinanjjohn2012/mac-file-gateway" \
+              "GITHUB_RUN_ID=$GITHUB_RUN_ID" \
+              "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+              "GITHUB_JOB=$GITHUB_JOB" \
+              "G05_EXPECTED_HEAD=$G05_EXPECTED_HEAD" \
+              "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
+              "RUNNER_OS=macOS" \
+              "RUNNER_ARCH=ARM64" \
+              "ImageOS=macos15" \
+              "ImageVersion=$ImageVersion" \
+              "SSH_AUTH_SOCK=/private/tmp/r010-safe-t0-agent.sock" \
+              "ACTIONS_ID_TOKEN_REQUEST_URL=https://synthetic.actions.githubusercontent.com/_apis/oidc/token?api-version=2.0" \
+              "ACTIONS_ID_TOKEN_REQUEST_TOKEN=synthetic-safe-t0-bearer-1234567890" \
+              "$@"
+          }
+          probe='import os,sys; e={"PATH","HOME","TMPDIR","LANG","LC_ALL","GITHUB_ACTIONS","GITHUB_EVENT_NAME","GITHUB_REPOSITORY","GITHUB_RUN_ID","GITHUB_RUN_ATTEMPT","GITHUB_JOB","G05_EXPECTED_HEAD","RUNNER_ENVIRONMENT","RUNNER_OS","RUNNER_ARCH","ImageOS","ImageVersion","SSH_AUTH_SOCK","ACTIONS_ID_TOKEN_REQUEST_URL","ACTIONS_ID_TOKEN_REQUEST_TOKEN"}; k={"__CF_USER_TEXT_ENCODING","LC_CTYPE","CPATH","LIBRARY_PATH","MANPATH","SDKROOT"}; x=set(os.environ)-e; m=e-set(os.environ); print("R010_PREEXEC_PYTHON_ENV_EXACT="+("true" if not x and not m else "false")); print("R010_PREEXEC_PYTHON_KNOWN_EXTRA="+",".join(sorted(x&k))); print("R010_PREEXEC_PYTHON_OTHER_EXTRA_COUNT="+str(len(x-k))); print("R010_PREEXEC_PYTHON_MISSING="+",".join(sorted(m))); sys.exit(0 if not x and not m else 3)'
+          selected=""
+          seen=":"
+          for py in "$RUNNER_TOOL_CACHE"/Python/*/arm64/bin/python3 \
+                    "$RUNNER_TOOL_CACHE"/Python/*/arm64/bin/python \
+                    "$(command -v python3)"; do
+            [ -x "$py" ] || continue
+            case "$seen" in *":$py:"*) continue ;; esac
+            seen="$seen$py:"
+            if run_exact_env "$py" -B -c "$probe"; then
+              selected="$py"
+              break
+            fi
+          done
+          if [ -z "$selected" ]; then
+            echo "R010_PREEXEC_PYTHON_EXACT_ENV_UNAVAILABLE"
+            exit 3
+          fi
+          run_exact_env "$selected" -B gateway/r010_preexec_source_entry.py \
+            --expected-run-id "$GITHUB_RUN_ID" \
+            --expected-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --expected-head "$G05_EXPECTED_HEAD" \
+            --expected-job "$GITHUB_JOB" \
+            --expected-image-version "$ImageVersion" \
+            --expected-home "$home" \
+            --expected-tmp "$tmp"
+      # R006 A0 contract is UNCHANGED for every other PR.
+      - name: R006 A0 strict host allowlist (non-R010 review targets)
+        if: ${{ github.event.pull_request.number != 114 }}
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 -I -S tools/d4_r006_host_allowlist_verify_t0.py
+      # PR114 Owner explicitly chose A1+B1. The old A0 denial is an
+      # expected negative control, NEVER A1 qualification or T1 authority.
+      # This NEW source-only T0 checks exact pinned selected host files,
+      # the A1 autofs table and only the SSH selector's metadata shape.
+      - name: R010 A1 host source T0 plus unchanged R006 A0 expected DENY (PR114)
+        if: ${{ github.event.pull_request.number == 114 }}
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 -I -S tools/r010_a1_host_observation_t0.py

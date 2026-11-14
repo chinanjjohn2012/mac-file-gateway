@@ -1,0 +1,635 @@
+"""D4 R003 actual staged-source and closed-environment prelaunch observation.
+
+This is service-owned PRODUCT source, not the declaration-only D2 packet.
+It re-inspects real staged Go/Pipenv executable bytes and project fixtures
+using private nofollow FDs, derives a NEW exact child environment and records
+the real local kernel name/architecture. It never imports, spawns or signals
+foreign code. Selected hashes and clean env do NOT prove the full loaded
+source closure, GitHub runner image, mount/credential absence, OS resource
+domain or owner T1 execution authorization. No output from this module grants
+permission to Popen or to turn off F1/NativeLauncher refusal.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
+import os
+import re
+import stat
+from typing import TYPE_CHECKING
+
+from .lbe_product_fixture import (
+    D4FixtureCandidate, D4FixtureDenied, check_d4_r003_fixture,
+)
+from .lbe_go_fixture_t0 import (
+    inspect_staged_go_files_t0, LbeGoFixtureT0Denied,
+)
+from .lbe_pipenv_fixture_t0 import (
+    inspect_private_pipenv_fixture_t0, LbePipenvFixtureT0Denied,
+)
+from .lbe_prelaunch_t0 import (
+    check_go_environment_t0, check_pipenv_environment_t0,
+    LbePrelaunchT0Denied,
+)
+from .lbe_runtime_tree import (
+    D4RuntimeTreeDenied, inspect_d4_closed_staged_tree,
+)
+
+if TYPE_CHECKING:
+    from .workspaces import WorkspaceContext
+
+
+class D4RuntimeSourceDenied(ValueError):
+    """Actual selected staged-source or environment evidence is incomplete."""
+
+
+_SHA = re.compile(r"[0-9a-f]{64}\Z")
+_BAD_PARENT_PREFIXES = (
+    "GO", "CGO_", "PIPENV_", "PIP_", "PYTHON", "DYLD_", "LD_",
+    "PKG_CONFIG", "BASH_ENV", "SHELLOPTS", "SSH_", "GIT_",
+)
+_BAD_PARENT_EXACT = frozenset((
+    "CC", "CXX", "GCCGO", "VIRTUAL_ENV", "WORKON_HOME",
+    "ENV", "CDPATH", "IFS", "GITHUB_TOKEN", "GH_TOKEN",
+    "ACTIONS_RUNTIME_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+))
+_ENV_CONSTANT_GO = {
+    "LANG": "C", "LC_ALL": "C", "GOTOOLCHAIN": "local",
+    "GOENV": "off", "GOFLAGS": "", "GOPROXY": "off",
+    "GOSUMDB": "off", "GOWORK": "off", "GO111MODULE": "on",
+    "CGO_ENABLED": "0",
+}
+_ENV_CONSTANT_PYTHON_DIRECT = {
+    "LANG": "C", "LC_ALL": "C",
+    "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONUNBUFFERED": "1", "PYTHONSAFEPATH": "1",
+}
+_ENV_CONSTANT_PIPENV = {
+    "LANG": "C", "LC_ALL": "C", "PIPENV_VENV_IN_PROJECT": "1",
+    "PIPENV_DONT_LOAD_ENV": "1", "PIPENV_IGNORE_VIRTUALENVS": "1",
+    "PIP_NO_INDEX": "1", "PIPENV_SKIP_LOCK": "1",
+    "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
+}
+_BLOCKERS = (
+    "RUNNER_IMAGE_DIGEST_AND_PROVIDER_NOT_ATTESTED",
+    "TOKEN_MOUNT_PROXY_AND_G05_EXECUTION_IDENTITY_NOT_ATTESTED",
+    "FULL_GO_OR_PIPENV_LOADED_SOURCE_GRAPH_NOT_ATTESTED",
+    "PHYSICALLY_ATTACHED_WHOLE_CHILD_DOMAIN_CPU_RAM_NOT_PROVEN",
+    "EXACT_OWNER_NATIVE_T1_AND_REVIEWED_EXECUTION_GRANT_NOT_PRESENT",
+    "R003_NOT_AN_OPERATIVE_F1_GO_PIPENV_EXCEPTION",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class D4RuntimeSourceObservation:
+    workspace: str
+    kind: str
+    requested_argv: tuple[str, ...]
+    effective_argv: tuple[str, ...]
+    staged_executables: tuple[tuple[str, str], ...]
+    private_first_party_sources: tuple[tuple[str, str], ...]
+    closed_child_environment: tuple[tuple[str, str], ...]
+    observed_kernel: str
+    observed_machine: str
+    staged_source_trees: tuple[tuple[str, str, int, int], ...] = ()
+    selected_venv_home: str | None = None
+    status: str = "ACTUAL_STAGED_SOURCE_ONLY_NO_EXECUTION_AUTHORITY"
+    staged_file_bytes_checked: bool = True
+    child_environment_constructed: bool = True
+    bounded_staged_file_set_checked: bool = False
+    actual_import_graph_attested: bool = False
+    runner_image_attested: bool = False
+    credentials_and_mounts_attested: bool = False
+    physical_resource_domain_attached: bool = False
+    owner_native_t1_grant: bool = False
+    native_launch_allowed: bool = False
+    blockers: tuple[str, ...] = _BLOCKERS
+
+
+def _canonical(value: object, label: str) -> str:
+    if (type(value) is not str or not 2 <= len(value) <= 2048
+            or not value.startswith("/") or "\\" in value or ":" in value
+            or any(ord(ch) < 33 or ord(ch) >= 127 for ch in value)
+            or any(p in ("", ".", "..") for p in value[1:].split("/"))):
+        raise D4RuntimeSourceDenied("invalid private runtime path: " + label)
+    return value
+
+
+def _child(root: str, name: str) -> str:
+    if (type(name) is not str or not name
+            or any(x in ("", ".", "..") for x in name.split("/"))
+            or any(not re.fullmatch(r"[A-Za-z0-9_.-]+", part)
+                   for part in name.split("/"))):
+        raise D4RuntimeSourceDenied("invalid private runtime subpath")
+    return root + "/" + name
+
+
+def _below(root: str, path: str) -> None:
+    if path == root or not path.startswith(root + "/"):
+        raise D4RuntimeSourceDenied("selected source is outside private runner")
+
+
+def _open_private_directory(path: str, root: str) -> int:
+    """Walk each component by nofollow FD; caller owns the returned FD."""
+    path = _canonical(path, "directory")
+    _below(root, path)
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                 | os.O_CLOEXEC)
+    try:
+        components = path[1:].split("/")
+        root_components = root[1:].split("/")
+        for i, part in enumerate(components):
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY
+                            | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            if i + 1 >= len(root_components):
+                meta = os.fstat(fd)
+                if (not stat.S_ISDIR(meta.st_mode)
+                        or meta.st_uid != os.getuid()
+                        or meta.st_mode & 0o022):
+                    raise D4RuntimeSourceDenied(
+                        "private runtime directory not owner controlled")
+        return fd
+    except OSError:
+        os.close(fd)
+        raise D4RuntimeSourceDenied(
+            "private runtime directory cannot be inspected") from None
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _stat_private_directory(path: str, root: str) -> None:
+    fd = _open_private_directory(path, root)
+    os.close(fd)
+
+
+def _hash_expected(value: object, label: str) -> str:
+    if (type(value) is not str or _SHA.fullmatch(value) is None
+            or value == "0" * 64):
+        raise D4RuntimeSourceDenied("missing fixed staged SHA: " + label)
+    return value
+
+
+def _parent_selector_guard() -> None:
+    """Read ACTUAL parent env names without copying any value to child."""
+    for key, value in os.environ.items():
+        if not value:
+            continue
+        # Parent secret variables would still be in the same-UID host's
+        # memory even if not forwarded. Never log their values.
+        upper = key.upper()
+        if (key in _BAD_PARENT_EXACT
+                or key.startswith(_BAD_PARENT_PREFIXES)
+                or upper in {
+                    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                    "NO_PROXY", "FTP_PROXY",
+                }
+                or key.endswith(("_TOKEN", "_SECRET", "_PRIVATE_KEY",
+                                 "_ACCESS_KEY"))):
+            raise D4RuntimeSourceDenied(
+                "unqualified inherited selector or secret-bearing environment")
+
+
+def _private_file_hash(
+    path: str, root: str, *, exact_script_interpreter: str | None = None,
+) -> str:
+    """Read staged executable by pinned nofollow FD; optionally pin shebang.
+
+    The Pipenv entrypoint may itself be a script. Checking only that file's
+    SHA would still leave the kernel's #! interpreter pointing at a foreign
+    Python binary. Bind its exact absolute private .venv/bin/python here,
+    using the SAME FD/read as the digest; never execute the script.
+    """
+    expected_line: bytes | None = None
+    if exact_script_interpreter is not None:
+        selected = _canonical(exact_script_interpreter, "script interpreter")
+        _below(root, selected)
+        selected_parent, _leaf = selected.rsplit("/", 1)
+        _stat_private_directory(selected_parent, root)
+        expected_line = ("#!" + selected + "\n").encode("ascii")
+    directory, basename = path.rsplit("/", 1)
+    # Use the SAME pinned nofollow descriptor to open the leaf. Reopening
+    # an absolute path after validation would reintroduce a prefix race.
+    dir_fd = _open_private_directory(directory, root)
+    try:
+        fd = os.open(basename, os.O_RDONLY | os.O_NOFOLLOW
+                     | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=dir_fd)
+        try:
+            before = os.fstat(fd)
+            if (not stat.S_ISREG(before.st_mode)
+                    or before.st_uid != os.getuid()
+                    or before.st_mode & 0o022 or before.st_nlink != 1
+                    or not before.st_mode & stat.S_IXUSR
+                    or not 0 < before.st_size <= 128 * 1024 * 1024):
+                raise D4RuntimeSourceDenied("staged native entrypoint unsafe")
+            digest = hashlib.sha256()
+            remaining = before.st_size
+            script_prefix = bytearray()
+            while remaining:
+                data = os.read(fd, min(65536, remaining))
+                if not data:
+                    raise D4RuntimeSourceDenied("staged native entrypoint truncated")
+                remaining -= len(data)
+                digest.update(data)
+                if expected_line is not None and len(script_prefix) < len(expected_line):
+                    script_prefix.extend(
+                        data[:len(expected_line) - len(script_prefix)])
+            after = os.fstat(fd)
+            fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns",
+                      "st_ctime_ns", "st_mode", "st_uid", "st_nlink")
+            if any(getattr(before, x) != getattr(after, x) for x in fields):
+                raise D4RuntimeSourceDenied("staged entrypoint changed during read")
+            if expected_line is not None and script_prefix != expected_line:
+                raise D4RuntimeSourceDenied(
+                    "Pipenv script shebang does not select staged private Python")
+            return digest.hexdigest()
+        finally:
+            os.close(fd)
+    except OSError:
+        raise D4RuntimeSourceDenied("staged entrypoint not safely readable") from None
+    finally:
+        os.close(dir_fd)
+
+
+
+def _inspect_private_pyvenv_selectors(
+    *, private_root: str, project_root: str, expected_sha256: str,
+) -> str:
+    """Observe the REAL selected pyvenv.cfg without running Python.
+
+    The current R003 first-party Pipenv fixture supports only a base home
+    under the already pinned private bin tree and excludes system site
+    packages. Unknown venv selectors fail closed; broader upstream Python
+    setups need their own reviewed source-selection fixture. This proves
+    config BYTES/FD identity, not CPython's actual imported source graph.
+    """
+    parent_fd = _open_private_directory(project_root + "/.venv", private_root)
+    try:
+        fd = os.open("pyvenv.cfg", os.O_RDONLY | os.O_NOFOLLOW
+                     | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent_fd)
+        try:
+            before = os.fstat(fd)
+            if (not stat.S_ISREG(before.st_mode)
+                    or before.st_uid != os.getuid()
+                    or before.st_nlink != 1 or before.st_mode & 0o022
+                    or not 0 < before.st_size <= 4096):
+                raise D4RuntimeSourceDenied("private venv configuration not qualified")
+            raw = bytearray()
+            while len(raw) < before.st_size:
+                data = os.read(fd, min(4096, before.st_size - len(raw)))
+                if not data:
+                    raise D4RuntimeSourceDenied("private venv config truncated")
+                raw.extend(data)
+            after = os.fstat(fd)
+            fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns",
+                      "st_ctime_ns", "st_mode", "st_uid", "st_nlink")
+            if (any(getattr(before, key) != getattr(after, key)
+                    for key in fields)
+                    or hashlib.sha256(raw).hexdigest() != expected_sha256):
+                raise D4RuntimeSourceDenied("private venv config source drifted")
+        finally:
+            os.close(fd)
+    except OSError:
+        raise D4RuntimeSourceDenied("private venv config inaccessible") from None
+    finally:
+        os.close(parent_fd)
+    try:
+        contents = bytes(raw).decode("ascii")
+    except UnicodeDecodeError:
+        raise D4RuntimeSourceDenied("private venv config must be ASCII") from None
+    if any(c in contents for c in ("\\", "\r", "\x00", "\t")):
+        raise D4RuntimeSourceDenied("private venv config contains unsafe selector")
+    selectors: dict[str, str] = {}
+    for line in contents.split("\n"):
+        if not line:
+            continue
+        key, separator, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if (not separator or key not in (
+                "home", "include-system-site-packages", "version")
+                or not value or key in selectors):
+            raise D4RuntimeSourceDenied("unknown or duplicate venv selector")
+        selectors[key] = value
+    home = _child(private_root, "bin")
+    if (selectors.get("home") != home
+            or selectors.get("include-system-site-packages") != "false"
+            or ("version" in selectors and re.fullmatch(
+                r"[0-9]+(?:\.[0-9]+){1,2}", selectors["version"]) is None)):
+        raise D4RuntimeSourceDenied("venv loader home or host-site policy unqualified")
+    _stat_private_directory(home, private_root)
+    return home
+
+
+def inspect_d4_runtime_sources(
+    ctx: "WorkspaceContext", candidate: D4FixtureCandidate, *,
+    private_root: str, expected_hashes: dict[str, str],
+    expected_trees: dict[str, tuple[tuple[str, str | None], ...]] | None = None,
+) -> D4RuntimeSourceObservation:
+    """Real staged source inspection and closed-env selection, no execution.
+
+    expected_hashes MUST originate from a separately reviewed trusted
+    provisioning source. This function validates bytes against supplied
+    digests but does NOT attest who supplied the digests; a client-provided
+    dict, a forged dataclass or this return value is NEVER an Exec grant.
+    """
+    from .workspaces import WorkspaceContext
+
+    if (type(ctx) is not WorkspaceContext
+            or type(candidate) is not D4FixtureCandidate
+            or type(expected_hashes) is not dict):
+        raise D4RuntimeSourceDenied("trusted context and expected source required")
+    root = _canonical(private_root, "private_root")
+    project = _canonical(str(ctx.gateway._root_path), "Workspace root")
+    _below(root, project)
+    _stat_private_directory(project, root)
+    if candidate.plan.workspace != ctx.name:
+        raise D4RuntimeSourceDenied("Workspace identity mismatch")
+    if (candidate.native_launch_allowed is not False
+            or candidate.owner_approval_attested is not False):
+        raise D4RuntimeSourceDenied("source-only candidate cannot carry native grant")
+    if (not candidate.source_sha256 or not candidate.directory_identity):
+        raise D4RuntimeSourceDenied("first-party source snapshot missing")
+    try:
+        fresh = check_d4_r003_fixture(ctx, candidate.plan)
+    except (D4FixtureDenied, OSError):
+        raise D4RuntimeSourceDenied("first-party Workspace source changed") from None
+    if (fresh.source_sha256 != candidate.source_sha256
+            or fresh.source_identity != candidate.source_identity
+            or fresh.directory_identity != candidate.directory_identity):
+        raise D4RuntimeSourceDenied("first-party input changed during staging")
+
+    _parent_selector_guard()
+    selected_venv_home: str | None = None
+    for path in ("home", "tmp"):
+        _stat_private_directory(_child(root, path), root)
+    if candidate.plan.cwd == "go-project" and candidate.plan.runner == "direct":
+        if set(expected_hashes) != {"go", "compile", "link"}:
+            raise D4RuntimeSourceDenied("missing exact Go stage input set")
+        go_root = _child(root, "go")
+        hashes = {k: _hash_expected(v, k) for k,v in expected_hashes.items()}
+        try:
+            observed = inspect_staged_go_files_t0(
+                private_root=root, goroot=go_root,
+                expected_go_sha256=hashes["go"],
+                expected_compile_sha256=hashes["compile"],
+                expected_link_sha256=hashes["link"],
+            )
+        except (LbeGoFixtureT0Denied, OSError):
+            raise D4RuntimeSourceDenied("actual Go staged files are not qualified") from None
+        env = dict(_ENV_CONSTANT_GO)
+        env.update({
+            "GOROOT": go_root,
+            "PATH": go_root + "/bin:/usr/bin:/bin",
+            "HOME": _child(root, "home"),
+            "TMPDIR": _child(root, "tmp"),
+            "GOPATH": _child(root, "gopath"),
+            "GOMODCACHE": _child(root, "modcache"),
+            "GOCACHE": _child(root, "gocache"),
+            "GOTMPDIR": _child(root, "gotmp"),
+        })
+        for name in ("gopath", "modcache", "gocache", "gotmp"):
+            _stat_private_directory(_child(root, name), root)
+        try:
+            check_go_environment_t0(
+                private_root=root, goroot=go_root,
+                go_entrypoint=go_root + "/bin/go",
+                home=env["HOME"], temporary=env["TMPDIR"],
+                gopath=env["GOPATH"], gomodcache=env["GOMODCACHE"],
+                gocache=env["GOCACHE"], gotmpdir=env["GOTMPDIR"],
+                staged_go_sha256=observed.go_sha256,
+                staged_compiler_sha256=observed.compile_sha256,
+                parent_environment={}, effective_environment=env,
+            )
+        except LbePrelaunchT0Denied:
+            raise D4RuntimeSourceDenied("constructed Go env not closed") from None
+        staged = (("go/bin/go", observed.go_sha256),
+                  ("go/pkg/tool/darwin_arm64/compile", observed.compile_sha256),
+                  ("go/pkg/tool/darwin_arm64/link", observed.link_sha256))
+        kind = "go"
+    elif candidate.plan.cwd == "py-pipenv" and candidate.plan.runner == "pipenv":
+        if set(expected_hashes) != {
+            "Pipfile", "Pipfile.lock", "pyvenv.cfg", "python", "pipenv",
+        }:
+            raise D4RuntimeSourceDenied("missing exact Pipenv source input set")
+        hashes = {k: _hash_expected(v, k) for k,v in expected_hashes.items()}
+        # ctx.gateway._root_path is the Workspace root, NOT the selected
+        # project cwd. Public v2 pipenv selection is pinned to py-pipenv.
+        # Inspect precisely this project, never the enclosing Workspace.
+        pipenv_project = _child(project, candidate.plan.cwd)
+        _stat_private_directory(pipenv_project, root)
+        try:
+            observed = inspect_private_pipenv_fixture_t0(
+                project_root=pipenv_project,
+                expected_pipfile_sha256=hashes["Pipfile"],
+                expected_lock_sha256=hashes["Pipfile.lock"],
+                expected_pyvenv_cfg_sha256=hashes["pyvenv.cfg"],
+                expected_python_sha256=hashes["python"],
+            )
+        except (LbePipenvFixtureT0Denied, OSError):
+            raise D4RuntimeSourceDenied("actual Pipenv staged files are not qualified") from None
+        selected_venv_home = _inspect_private_pyvenv_selectors(
+            private_root=root, project_root=pipenv_project,
+            expected_sha256=hashes["pyvenv.cfg"])
+        pipenv_entry = _child(root, "bin/pipenv")
+        staged_pipenv_sha = _private_file_hash(
+            pipenv_entry, root,
+            exact_script_interpreter=pipenv_project + "/.venv/bin/python")
+        if staged_pipenv_sha != hashes["pipenv"]:
+            raise D4RuntimeSourceDenied("staged Pipenv entrypoint drifted")
+        env = dict(_ENV_CONSTANT_PIPENV)
+        env.update({
+            "PATH": root + "/bin:" + pipenv_project + "/.venv/bin:/usr/bin:/bin",
+            "PIPENV_PIPFILE": pipenv_project + "/Pipfile",
+            "HOME": _child(root, "home"),
+            "TMPDIR": _child(root, "tmp"),
+        })
+        try:
+            check_pipenv_environment_t0(
+                project_root=pipenv_project, private_root=root,
+                pipenv_bin=root + "/bin", pipenv_entrypoint=pipenv_entry,
+                pipfile=pipenv_project + "/Pipfile",
+                venv_root=pipenv_project + "/.venv",
+                selected_python=pipenv_project + "/.venv/bin/python",
+                home=env["HOME"], temporary=env["TMPDIR"],
+                pipfile_lock_sha256=observed.pipfile_lock_sha256,
+                pipenv_sha256=staged_pipenv_sha,
+                python_sha256=observed.python_file_sha256,
+                parent_environment={}, effective_environment=env,
+            )
+        except LbePrelaunchT0Denied:
+            raise D4RuntimeSourceDenied("constructed Pipenv env not closed") from None
+        staged = (("bin/pipenv", staged_pipenv_sha),
+                  (candidate.plan.cwd + "/.venv/bin/python",
+                   observed.python_file_sha256))
+        kind = "pipenv"
+    elif candidate.plan.cwd == "py-direct" and candidate.plan.runner == "direct":
+        if set(expected_hashes) != {"python"}:
+            raise D4RuntimeSourceDenied("missing exact direct Python interpreter input")
+        expected_python = _hash_expected(expected_hashes["python"], "python")
+        selected_python = _child(root, "bin/python")
+        observed_python = _private_file_hash(selected_python, root)
+        if observed_python != expected_python:
+            raise D4RuntimeSourceDenied("selected Python interpreter source changed")
+        env = dict(_ENV_CONSTANT_PYTHON_DIRECT)
+        env.update({
+            "PATH": root + "/bin:/usr/bin:/bin",
+            "HOME": _child(root, "home"),
+            "TMPDIR": _child(root, "tmp"),
+        })
+        staged = (("bin/python", observed_python),)
+        kind = "python_direct"
+    else:
+        raise D4RuntimeSourceDenied("unapproved native stage selection")
+
+    tree_receipts: list[tuple[str, str, int, int]] = []
+    if expected_trees is not None:
+        # A closed staged tree is only a selected FILE SET. It never proves
+        # the future compiler/interpreter's actual import or dynamic loader
+        # resolution and never authorizes a Popen.
+        if type(expected_trees) is not dict:
+            raise D4RuntimeSourceDenied("staged source manifest must be exact")
+        # Besides executable and site roots, Go and Pipenv can select
+        # first-party or foreign source from persistent caches, HOME or TMP.
+        # Require fresh, empty private scratch/input roots at this boundary,
+        # not a caller-approved hash of an arbitrary prepopulated cache.
+        scratch_roots = (
+            ("home", root + "/home"), ("tmp", root + "/tmp"),
+        )
+        if kind == "go":
+            scratch_roots += (
+                ("gopath", root + "/gopath"),
+                ("modcache", root + "/modcache"),
+                ("gocache", root + "/gocache"),
+                ("gotmp", root + "/gotmp"),
+            )
+            tree_roots = (("go", root + "/go"),) + scratch_roots
+        elif kind == "pipenv":
+            tree_roots = (
+                ("bin", root + "/bin"),
+                ("lib", root + "/lib"),
+                ("venv", pipenv_project + "/.venv"),
+            ) + scratch_roots
+        else:
+            tree_roots = (
+                ("bin", root + "/bin"),
+                ("lib", root + "/lib"),
+            ) + scratch_roots
+        if set(expected_trees) != {name for name, _path in tree_roots}:
+            raise D4RuntimeSourceDenied("missing staged runtime source roots")
+        for name, _location in scratch_roots:
+            if (type(expected_trees[name]) is not tuple
+                    or expected_trees[name] != (("", None),)):
+                raise D4RuntimeSourceDenied(
+                    "unqualified nonempty runner scratch or cache input")
+        for name, staged_root in tree_roots:
+            try:
+                snapshot = inspect_d4_closed_staged_tree(
+                    private_root=root, staged_root=staged_root,
+                    expected=expected_trees[name],
+                )
+            except (D4RuntimeTreeDenied, OSError):
+                raise D4RuntimeSourceDenied(
+                    "actual staged runtime tree is not closed") from None
+            tree_receipts.append((
+                name, snapshot.observed_identity_sha256,
+                snapshot.entry_count, snapshot.total_file_bytes,
+            ))
+    kernel = os.uname()
+    return D4RuntimeSourceObservation(
+        workspace=ctx.name, kind=kind,
+        requested_argv=candidate.plan.requested_argv,
+        effective_argv=candidate.plan.effective_argv,
+        staged_executables=staged,
+        private_first_party_sources=fresh.source_sha256,
+        closed_child_environment=tuple(sorted(env.items())),
+        observed_kernel=kernel.sysname,
+        observed_machine=kernel.machine,
+        staged_source_trees=tuple(tree_receipts),
+        selected_venv_home=selected_venv_home,
+        bounded_staged_file_set_checked=expected_trees is not None,
+    )
+
+
+
+class D4StagedSourceRecheck:
+    """Concrete source/closed-env recheck for one Worker attempt.
+
+    Only a trusted internal WorkspaceService may assemble this with its
+    previously checked live context and source candidate. This does NOT
+    carry any grant, even if an attacker were able to construct it locally.
+    It repeats the actual staged file, first-party and environment
+    inspection after the Worker burns the one-use attempt and before its
+    launcher. Full imported-source/OS isolation/approval remain absent.
+    """
+    __slots__ = ("_ctx", "_candidate", "_root", "_hashes",
+                 "_trees", "_observed")
+
+    def __init__(self, ctx: "WorkspaceContext",
+                 candidate: D4FixtureCandidate, *,
+                 private_root: str, expected_hashes: dict[str, str],
+                 observed: D4RuntimeSourceObservation,
+                 expected_trees: dict[str, tuple[tuple[str, str | None], ...]] | None = None,
+                 ) -> None:
+        from .workspaces import WorkspaceContext
+
+        if (type(ctx) is not WorkspaceContext
+                or type(candidate) is not D4FixtureCandidate
+                or type(observed) is not D4RuntimeSourceObservation
+                or observed.native_launch_allowed is not False
+                or observed.owner_native_t1_grant is not False
+                or observed.actual_import_graph_attested is not False
+                or observed.physical_resource_domain_attached is not False
+                or candidate.plan.workspace != ctx.name
+                or observed.workspace != ctx.name
+                or observed.requested_argv != candidate.plan.requested_argv
+                or observed.effective_argv != candidate.plan.effective_argv
+                or type(expected_hashes) is not dict):
+            raise D4RuntimeSourceDenied("invalid staged-source binding")
+        root = _canonical(private_root, "private_root")
+        pairs = tuple(sorted(expected_hashes.items()))
+        if any(type(k) is not str or type(v) is not str
+               or _SHA.fullmatch(v) is None for k,v in pairs):
+            raise D4RuntimeSourceDenied("invalid pinned staged-source digests")
+        if (expected_trees is not None
+                and (type(expected_trees) is not dict
+                     or any(type(k) is not str or type(v) is not tuple
+                            for k, v in expected_trees.items()))):
+            raise D4RuntimeSourceDenied("invalid staged tree binding")
+        if observed.bounded_staged_file_set_checked is not (expected_trees is not None):
+            raise D4RuntimeSourceDenied("staged tree inventory not bound")
+        self._ctx = ctx
+        self._candidate = candidate
+        self._root = root
+        self._hashes = pairs
+        self._trees = (None if expected_trees is None
+                       else tuple(sorted(expected_trees.items())))
+        self._observed = observed
+
+    def check_binding(self, ctx: "WorkspaceContext",
+                      candidate: D4FixtureCandidate) -> None:
+        if ctx is not self._ctx or candidate is not self._candidate:
+            raise D4RuntimeSourceDenied("staged-source context drifted")
+
+    def recheck_for(self, ctx: "WorkspaceContext",
+                    candidate: D4FixtureCandidate) -> None:
+        self.check_binding(ctx, candidate)
+        latest = inspect_d4_runtime_sources(
+            self._ctx, self._candidate,
+            private_root=self._root,
+            expected_hashes=dict(self._hashes),
+            expected_trees=(None if self._trees is None
+                            else dict(self._trees)),
+        )
+        if latest != self._observed:
+            raise D4RuntimeSourceDenied(
+                "staged-source or child-environment changed before Worker launch")
+
+
+
+def authorize_d4_native_from_observation(_evidence: object) -> None:
+    """Hard denial even for a forged/fully populated source-only observation."""
+    raise D4RuntimeSourceDenied(
+        "D4_NATIVE_T1=NOT_AUTHORIZED: qualified runner, full loader source, "
+        "whole-domain OS resource evidence and exact owner grant required")

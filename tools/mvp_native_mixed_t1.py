@@ -30,7 +30,6 @@ from gateway.workspaces_config import parse_workspace_config
 EXPECTED = {
     "GITHUB_ACTIONS": "true",
     "GITHUB_EVENT_NAME": "pull_request",
-    "GITHUB_EVENT_ACTION": "labeled",
     "GITHUB_REPOSITORY": "chinanjjohn2012/mac-file-gateway",
     "GITHUB_HEAD_REF": "feat/lbe-five-day-d2-nonoperative-prelaunch-20261106",
     "GITHUB_WORKFLOW": "six-command-mvp-mixed-native-t1-pr114",
@@ -42,8 +41,13 @@ S1 = ("python", "-m", "pytest", "-q")
 
 
 def require_approved_runner() -> tuple[Path, str, str]:
-    if any(os.environ.get(k) != v for k, v in EXPECTED.items()):
-        raise RuntimeError("Mixed T1 outside exact approved PR114 runner")
+    mismatch = sorted(k for k, v in EXPECTED.items()
+                      if os.environ.get(k) != v)
+    if mismatch:
+        # Report only NAMES of failed gates, never values/secrets.
+        raise RuntimeError(
+            "Mixed T1 outside exact approved PR114 runner: "
+            + ",".join(mismatch))
     if sys.platform != "darwin" or platform.machine().lower() != "arm64":
         raise RuntimeError("Mixed T1 requires hosted macOS ARM64")
     raw = os.environ.get("RUNNER_TEMP", "")
@@ -59,6 +63,24 @@ def require_approved_runner() -> tuple[Path, str, str]:
     if (head != os.environ.get("G05_EXPECTED_HEAD")
             or len(head) != 40 or len(tree) != 40):
         raise RuntimeError("G05 and native T1 source differ")
+    # GitHub exposes the actual labeled event in a signed-host-runner payload.
+    # GITHUB_EVENT_ACTION is not a reliable environment gate on all runners.
+    # Validate the triggering event content instead, BEFORE test fixtures.
+    event_file = os.environ.get("GITHUB_EVENT_PATH", "")
+    if not event_file.startswith("/"):
+        raise RuntimeError("Mixed T1 GitHub label-event file unavailable")
+    event = json.loads(Path(event_file).read_text())
+    pull = event.get("pull_request") or {}
+    pull_head = pull.get("head") or {}
+    if (event.get("action") != "labeled"
+            or (event.get("label") or {}).get("name")
+                != "mvp-mixed-native-t1-approved"
+            or pull.get("number") != 114
+            or pull_head.get("sha") != head
+            or pull_head.get("ref") != EXPECTED["GITHUB_HEAD_REF"]
+            or (pull_head.get("repo") or {}).get("full_name")
+                != EXPECTED["GITHUB_REPOSITORY"]):
+        raise RuntimeError("Mixed T1 GitHub label-event scope mismatch")
     return root, head, tree
 
 

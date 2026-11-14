@@ -71,7 +71,7 @@ def _package(value: str) -> bool:
 
 def _inspect_source_cwd(workspace_root: Path,
                         cwd_parts: tuple[str, ...]) -> None:
-    """No-output Go verbs still require an owner-controlled source cwd.
+    """No-output Go verbs still require a pinned, no-follow source cwd.
 
     Walk the actual Workspace-root and cwd directory descriptors without
     following symlinks; never rely on an unchecked resolved pathname.
@@ -88,10 +88,11 @@ def _inspect_source_cwd(workspace_root: Path,
                 fd = os.open(name, flags, dir_fd=fd)
                 held.append(fd)
             metadata = os.fstat(fd)
-            if (not stat.S_ISDIR(metadata.st_mode)
-                    or metadata.st_uid != os.getuid()
-                    or metadata.st_mode & 0o022):
-                raise GoPolicyError("Go source cwd is not owner-controlled")
+            # Phase1 explicitly accepts trusted-local Workspace/project
+            # modes including 0777/0775. The actual FD and no-follow path
+            # identity matter; UID or group/other mode is not an Exec grant.
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise GoPolicyError("Go source cwd is not a directory")
     except OSError:
         raise GoPolicyError(
             "Go source cwd cannot be opened without links") from None
@@ -114,15 +115,12 @@ def _inspect_output(workspace_root: Path, cwd_parts: tuple[str, ...],
         fd = os.open(workspace_root, flags)
         held.append(fd)
         def require_controlled_directory(directory_fd: int) -> None:
-            # Check the actual descriptor rather than a pathname. Source-
-            # only validation: after returning a trusted local operator can
-            # still change the directory, so this is NOT an OS sandbox.
+            # Phase1 trusted-local directories may be 0777/0775 or owned
+            # by another local account. Preserve FD/no-follow directory
+            # identity and Workspace scope, not an unapproved mode policy.
             metadata = os.fstat(directory_fd)
-            if (not stat.S_ISDIR(metadata.st_mode)
-                    or metadata.st_uid != os.getuid()
-                    or metadata.st_mode & 0o022):
-                raise GoPolicyError(
-                    "Go output parent is not owner-controlled")
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise GoPolicyError("Go output parent is not a directory")
 
         require_controlled_directory(fd)
         for name in (*cwd_parts, *output_parts[:-1]):
@@ -136,14 +134,10 @@ def _inspect_output(workspace_root: Path, cwd_parts: tuple[str, ...],
             return  # a new regular file may be created by future Go build
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise GoPolicyError("existing output must be one regular nonlinked file")
-        # An existing Go -o leaf must be owned by this Gateway user,
-        # writable by that owner, and not mutable by group/other users.
-        # This remains a PREVIEW/prelaunch input check, not confinement:
-        # future trusted Go code and post-check pathname races are excluded.
-        if (metadata.st_uid != os.getuid()
-                or not metadata.st_mode & stat.S_IWUSR
-                or metadata.st_mode & 0o022):
-            raise GoPolicyError("existing Go output is not owner-controlled")
+        # Existing output must remain regular, unlinked and non-symlink.
+        # Phase1 deliberately delegates writability to normal OS rights:
+        # do not reject trusted-local 0666/0660 leaves by UID/mode. Actual
+        # Go will report a real nonzero exit if the OS refuses its write.
     except OSError as exc:
         raise GoPolicyError("output parent cannot be opened without links") from exc
     finally:

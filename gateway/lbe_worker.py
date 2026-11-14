@@ -391,8 +391,16 @@ class LbeWorker:
                 if obs.status == "exited":
                     # The reader may still be draining after witnessed exit.
                     # EOF grace is already bounded independently in drain.
-                    drain.wait_finished(0.8)
+                    reader_finalized = drain.wait_finished(0.8)
                     output = drain.snapshot()
+                    # EOF is not terminal reader health: close/unregister
+                    # may still be pending, and a later cleanup failure may
+                    # latch Owner AFTER an otherwise false clean response.
+                    # Keep true original-child exit, but no clean receipt
+                    # without observed reader-finalization.
+                    if (not reader_finalized
+                            or output["pipe_reader_finished"] is not True):
+                        output["output_complete"] = False
                     if output["pipe_reader_failed"]:
                         self._owner.latch_unavailable(reservation)
                     response = self._base(

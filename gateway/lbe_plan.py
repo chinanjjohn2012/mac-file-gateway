@@ -24,13 +24,12 @@ if TYPE_CHECKING:
 def _check_owner_controlled_source_parents(
     root_fd: int, source_parts: tuple[str, ...],
 ) -> None:
-    """Check actual Workspace-relative ancestor FDs of a selected source.
+    """Check real no-follow ancestor FDs, never foreign symlink aliases.
 
-    Unlike a byte digest of the file itself, this rejects directories that
-    another same-host user could rewrite before a future pathname launch.
-    This is only a conservative preflight check, NOT an immutable source FD
-    to exec binding, sandbox or evidence that imports/toolchains are closed.
-    The native launcher repeats this same shared plan immediately pre-Popen.
+    Phase1 local OS trust explicitly admits 0777 Workspace directories and
+    0775 project roots; do not transplant R006 owner/mode restrictions into
+    Design-002's six-command plan. A later source mutation by a trusted OS
+    user is accepted risk, not an OS sandbox or loaded-source attestation.
     """
     if not source_parts:
         raise GatewayError("runner_unavailable", "Unqualified source path.")
@@ -44,12 +43,9 @@ def _check_owner_controlled_source_parents(
                 fd = os.open(name, flags, dir_fd=fd)
                 held.append(fd)
             metadata = os.fstat(fd)
-            if (not stat.S_ISDIR(metadata.st_mode)
-                    or metadata.st_uid != os.getuid()
-                    or metadata.st_mode & 0o022):
+            if not stat.S_ISDIR(metadata.st_mode):
                 raise GatewayError(
-                    "runner_unavailable",
-                    "Selected source parent must be owner-controlled.",
+                    "runner_unavailable", "Selected source parent is not a directory."
                 )
     except OSError:
         raise GatewayError(
@@ -123,17 +119,9 @@ def prepare_lbe_work_plan(
             _check_owner_controlled_source_parents(
                 ctx.gateway._root_fd, source_parts)
             script_snapshot = ctx.gateway._snapshot(source_parts)
-            # A digest of an unsafe, group/world-mutable or foreign-owned
-            # script is not a trusted prospective launch input. Reject it
-            # in the real shared preview and again in private launch replan.
-            # No source digest grants F1 positive execution.
-            script_meta = script_snapshot.metadata
-            if (script_meta.st_uid != os.getuid()
-                    or script_meta.st_mode & 0o022):
-                raise GatewayError(
-                    "runner_unavailable",
-                    "Python source requires owner-controlled permissions.",
-                )
+            # Digest records the pinned regular no-follow source bytes;
+            # UID and 0666 mode are trusted-local inputs under Phase1.
+            # The digest is NOT a POSIX isolation or positive Exec grant.
             planned_script_sha256 = script_snapshot.sha256
         if selected_runner == "pipenv":
             # The private launcher requires a single-link regular Pipfile
@@ -164,10 +152,9 @@ def prepare_lbe_work_plan(
                     "runner_unavailable",
                     "Configured Pipenv runner requires a safe Pipfile.",
                 ) from None
-            if (not stat.S_ISREG(metadata.st_mode)
-                    or metadata.st_nlink != 1
-                    or metadata.st_uid != os.getuid()
-                    or metadata.st_mode & 0o022):
+            # Keep nofollow regular/single-link Pipfile and explicit
+            # Workspace path policy, without an unapproved UID/mode gate.
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
                 raise GatewayError(
                     "runner_unavailable",
                     "Configured Pipenv runner requires a safe Pipfile.",

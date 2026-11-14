@@ -142,6 +142,7 @@ def _native_exit(result: dict, owner: dict) -> None:
             or result.get("exit_code") != 0
             or result.get("output_complete") is not True
             or result.get("pipe_reader_failed") is not False
+            or result.get("pipe_reader_finished") is not True
             or result.get("stdout_truncated") is not False
             or result.get("stderr_truncated") is not False
             or result.get("cleanup_proven") is not False

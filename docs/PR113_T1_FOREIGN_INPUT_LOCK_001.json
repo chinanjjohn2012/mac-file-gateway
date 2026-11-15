@@ -1,0 +1,110 @@
+{
+  "schema": 1,
+  "target": {
+    "repository": "chinanjjohn2012/mac-file-gateway",
+    "pr": 113,
+    "base_sha": "ec25c34492912f3a82175fa9c1060e0632814687",
+    "head_sha": "fc94cc36ce793e32a3fb97d5a500a47608be6781",
+    "head_tree": "fa51d2a7a881f8e4915badcfe0fb088f2fca0ee3",
+    "design_blob": "d90df6de3bdbd81a314109d5f73959799b5a10a6"
+  },
+  "status": "INCOMPLETE",
+  "network_profile": "UNDECIDED",
+  "owner_t1_authorized": false,
+  "control_commit": null,
+  "control_tree": null,
+  "owner_authorization_proof": null,
+  "inputs": [
+    {
+      "name": "macos15-arm64-runner-image",
+      "kind": "runner_image",
+      "source_uri": null,
+      "expected_size_bytes": null,
+      "expected_sha256": null,
+      "installed_record_sha256": null,
+      "historical_observed_sha256": null,
+      "status": "PENDING"
+    },
+    {
+      "name": "CPython-3.13.17-darwin-arm64",
+      "kind": "selected_tool_binary",
+      "source_uri": null,
+      "expected_size_bytes": null,
+      "expected_sha256": null,
+      "installed_record_sha256": null,
+      "historical_observed_sha256": "acae9af690ff37590ab8fb5e1142f254f1eaa5c462be1a225954c1cd37f2cbaa",
+      "status": "HISTORICAL_REFERENCE"
+    },
+    {
+      "name": "Go-1.25.14-darwin-arm64",
+      "kind": "selected_tool_binary",
+      "source_uri": null,
+      "expected_size_bytes": null,
+      "expected_sha256": null,
+      "installed_record_sha256": null,
+      "historical_observed_sha256": "55770db639faa42f3ebc998ac583b008f7ff2b4bbb9dbb8a76511a9a6ffa4a19",
+      "status": "HISTORICAL_REFERENCE"
+    },
+    {
+      "name": "Pipenv-2026.11.0-entrypoint",
+      "kind": "selected_tool_binary",
+      "source_uri": null,
+      "expected_size_bytes": null,
+      "expected_sha256": null,
+      "installed_record_sha256": null,
+      "historical_observed_sha256": "3829f17100ec9e231bd88799758f52ae52e19f08462321563aafe3a082dab15e",
+      "status": "HISTORICAL_REFERENCE"
+    },
+    {
+      "name": "MCP-2.3.0-and-Python-wheel-closure",
+      "kind": "python_wheelhouse_with_RECORDED_installs",
+      "source_uri": null,
+      "expected_size_bytes": null,
+      "expected_sha256": null,
+      "installed_record_sha256": null,
+      "historical_observed_sha256": null,
+      "status": "PENDING"
+    },
+    {
+      "name": "Go-stdlib-module-and-embedded-fixture",
+      "kind": "go_toolchain_and_fixture_sources",
+      "source_uri": null,
+      "expected_size_bytes": null,
+      "expected_sha256": null,
+      "installed_record_sha256": null,
+      "historical_observed_sha256": null,
+      "status": "PENDING"
+    },
+    {
+      "name": "Pipfile-Pipfile.lock-venv-selected-python",
+      "kind": "pipenv_fixture_source",
+      "source_uri": null,
+      "expected_size_bytes": null,
+      "expected_sha256": null,
+      "installed_record_sha256": null,
+      "historical_observed_sha256": null,
+      "status": "PENDING"
+    },
+    {
+      "name": "Github-actions-checkout-setup-python-setup-go-upload-artifact",
+      "kind": "workflow_actions_full_commit_lock",
+      "source_uri": null,
+      "expected_size_bytes": null,
+      "expected_sha256": null,
+      "installed_record_sha256": null,
+      "historical_observed_sha256": null,
+      "status": "PENDING"
+    },
+    {
+      "name": "T1-runner-control-workflow-and-generated-sources",
+      "kind": "separate_test_control_and_generator_outputs",
+      "source_uri": null,
+      "expected_size_bytes": null,
+      "expected_sha256": null,
+      "installed_record_sha256": null,
+      "historical_observed_sha256": null,
+      "status": "PENDING"
+    }
+  ],
+  "notes": "No new binary acquired or executed. Historic tool hashes are receipts, not an authenticated new install or future pin. network_profile is deliberately undecided and requires separate B/C review and Owner approval. THIS LOCK IS NONOPERATIVE."
+}

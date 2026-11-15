@@ -1,0 +1,31 @@
+{
+  "schema": 2,
+  "product": {
+    "repository": "chinanjjohn2012/mac-file-gateway",
+    "pr": 113,
+    "base_sha": "ec25c34492912f3a82175fa9c1060e0632814687",
+    "head_sha": "fc94cc36ce793e32a3fb97d5a500a47608be6781",
+    "head_tree": "fa51d2a7a881f8e4915badcfe0fb088f2fca0ee3",
+    "design_blob": "d90df6de3bdbd81a314109d5f73959799b5a10a6"
+  },
+  "network_design_blob": "89206350f8025425c74033780a3166df5d68b88c",
+  "network_profile": "NEW_EXCEPTION_TRUSTED_LOCAL_DISPOSABLE_NETWORK_RISK",
+  "owner_selection_evidence": "A_CHAT_OWNER_DIRECT_DEVELOPER_RELAY_NOT_INDEPENDENT_GITHUB_PROOF",
+  "owner_t1_authorized": false,
+  "credential_absence_proven": false,
+  "global_one_use_proven": false,
+  "executable_controller_reviewed": false,
+  "runner_context_qualified": false,
+  "inputs": [
+    {"class": "runner_image", "status": "PENDING", "source_git_blob": null, "selected_sha256": null, "selected_size_bytes": null, "historical_sha256": null, "evidence_uri": null},
+    {"class": "selected_python", "status": "HISTORICAL_REFERENCE", "source_git_blob": null, "selected_sha256": null, "selected_size_bytes": null, "historical_sha256": "acae9af690ff37590ab8fb5e1142f254f1eaa5c462be1a225954c1cd37f2cbaa", "evidence_uri": null},
+    {"class": "selected_go", "status": "HISTORICAL_REFERENCE", "source_git_blob": null, "selected_sha256": null, "selected_size_bytes": null, "historical_sha256": "55770db639faa42f3ebc998ac583b008f7ff2b4bbb9dbb8a76511a9a6ffa4a19", "evidence_uri": null},
+    {"class": "selected_pipenv", "status": "HISTORICAL_REFERENCE", "source_git_blob": null, "selected_sha256": null, "selected_size_bytes": null, "historical_sha256": "3829f17100ec9e231bd88799758f52ae52e19f08462321563aafe3a082dab15e", "evidence_uri": null},
+    {"class": "python_wheelhouse_record", "status": "PENDING", "source_git_blob": null, "selected_sha256": null, "selected_size_bytes": null, "historical_sha256": null, "evidence_uri": null},
+    {"class": "go_module_stdlib", "status": "PENDING", "source_git_blob": null, "selected_sha256": null, "selected_size_bytes": null, "historical_sha256": null, "evidence_uri": null},
+    {"class": "pipfile_venv", "status": "PENDING", "source_git_blob": null, "selected_sha256": null, "selected_size_bytes": null, "historical_sha256": null, "evidence_uri": null},
+    {"class": "github_actions", "status": "PENDING", "source_git_blob": null, "selected_sha256": null, "selected_size_bytes": null, "historical_sha256": null, "evidence_uri": null},
+    {"class": "test_control_and_fixture", "status": "PENDING", "source_git_blob": null, "selected_sha256": null, "selected_size_bytes": null, "historical_sha256": null, "evidence_uri": null}
+  ],
+  "notes": "Nonoperative. B/C network design TARGETED PASS; direct owner choice in A relayed to GitHub PR116 comment 6897512856, not independent owner-attested GH proof. No test-run consent. All future third-party selected bytes and earliest installer/import hooks unqualified. Network Profile B is not PR102 source-closed or bounded-egress."
+}

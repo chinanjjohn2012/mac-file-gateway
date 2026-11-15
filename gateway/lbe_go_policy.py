@@ -68,6 +68,39 @@ def _package(value: str) -> bool:
     return True
 
 
+
+def _inspect_source_cwd(workspace_root: Path,
+                        cwd_parts: tuple[str, ...]) -> None:
+    """No-output Go verbs still require a pinned, no-follow source cwd.
+
+    Walk the actual Workspace-root and cwd directory descriptors without
+    following symlinks; never rely on an unchecked resolved pathname.
+    This is a selected project-directory preflight, NOT a qualification of
+    every Go package, module, compiler, import, or same-UID later race.
+    """
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    held: list[int] = []
+    try:
+        fd = os.open(workspace_root, flags)
+        held.append(fd)
+        for name in (None, *cwd_parts):
+            if name is not None:
+                fd = os.open(name, flags, dir_fd=fd)
+                held.append(fd)
+            metadata = os.fstat(fd)
+            # Phase1 explicitly accepts trusted-local Workspace/project
+            # modes including 0777/0775. The actual FD and no-follow path
+            # identity matter; UID or group/other mode is not an Exec grant.
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise GoPolicyError("Go source cwd is not a directory")
+    except OSError:
+        raise GoPolicyError(
+            "Go source cwd cannot be opened without links") from None
+    finally:
+        for descriptor in reversed(held):
+            os.close(descriptor)
+
+
 def _inspect_output(workspace_root: Path, cwd_parts: tuple[str, ...],
                     output_parts: tuple[str, ...]) -> None:
     """Inspect existing dirs with no-follow FDs; never create/write an output.
@@ -81,11 +114,19 @@ def _inspect_output(workspace_root: Path, cwd_parts: tuple[str, ...],
     try:
         fd = os.open(workspace_root, flags)
         held.append(fd)
-        if not stat.S_ISDIR(os.fstat(fd).st_mode):
-            raise GoPolicyError("workspace root is not a directory")
+        def require_controlled_directory(directory_fd: int) -> None:
+            # Phase1 trusted-local directories may be 0777/0775 or owned
+            # by another local account. Preserve FD/no-follow directory
+            # identity and Workspace scope, not an unapproved mode policy.
+            metadata = os.fstat(directory_fd)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise GoPolicyError("Go output parent is not a directory")
+
+        require_controlled_directory(fd)
         for name in (*cwd_parts, *output_parts[:-1]):
             fd = os.open(name, flags, dir_fd=fd)
             held.append(fd)
+            require_controlled_directory(fd)
         leaf = output_parts[-1]
         try:
             metadata = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
@@ -93,6 +134,10 @@ def _inspect_output(workspace_root: Path, cwd_parts: tuple[str, ...],
             return  # a new regular file may be created by future Go build
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise GoPolicyError("existing output must be one regular nonlinked file")
+        # Existing output must remain regular, unlinked and non-symlink.
+        # Phase1 deliberately delegates writability to normal OS rights:
+        # do not reject trusted-local 0666/0660 leaves by UID/mode. Actual
+        # Go will report a real nonzero exit if the OS refuses its write.
     except OSError as exc:
         raise GoPolicyError("output parent cannot be opened without links") from exc
     finally:
@@ -184,4 +229,9 @@ def validate_go_command(argv: Sequence[str], *, workspace_root: Path,
             raise GoPolicyError("Go output path blocked by Workspace policy")
         _inspect_output(Path(workspace_root), cwd_parts, output)
         canonical_output = "/".join(combined)
+    # The -o path already inspected Workspace root and all cwd ancestors.
+    # Go test/vet/build without -o previously skipped that trust boundary.
+    # Revalidate the real selected cwd before returning a nonspawning plan.
+    if output is None:
+        _inspect_source_cwd(Path(workspace_root), cwd_parts)
     return GoCommandPlan(checked_argv, "direct", canonical_output)

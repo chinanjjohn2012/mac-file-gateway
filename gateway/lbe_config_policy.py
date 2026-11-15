@@ -1,4 +1,4 @@
-"""Live schema-v2 Exec fragment validator, without positive Exec authority.
+"""Strict schema-v2 Exec fragment validation with separate preview/apply flags.
 
 The complete Workspace config loader calls this parser for v2 paths/runners.
 It supplies scoped preview/status metadata; this pure validator never grants
@@ -74,6 +74,14 @@ class LbeExecGrant:
 
     paths: tuple[tuple[str, ...], ...]
     runners: tuple[tuple[tuple[str, ...], str], ...]
+    server_apply_enabled: bool = False
+    workspace_apply_enabled: bool = False
+
+    @property
+    def apply_configured(self) -> bool:
+        """Both exact v2 opt-ins and at least one path are necessary."""
+        return (self.server_apply_enabled and self.workspace_apply_enabled
+                and bool(self.paths))
 
     @property
     def enabled(self) -> bool:
@@ -115,13 +123,18 @@ def parse_lbe_exec_fragment(
     server_snapshot = _record(server, "server")
     workspace_snapshot = _record(workspace, "workspace")
     server_exec = _record(server_snapshot.get("exec", {}), "server.exec")
-    if server_exec:
-        # In v2 there is no server.exec.enabled, nor any other server Exec grant.
-        raise LbeConfigError("schema_version=2 does not accept server.exec switches")
+    if set(server_exec) - {"enabled"}:
+        raise LbeConfigError("unknown v2 server.exec fields")
+    server_apply_enabled = server_exec.get("enabled", False)
+    if type(server_apply_enabled) is not bool:
+        raise LbeConfigError("server.exec.enabled must be a JSON boolean")
 
     raw = _record(workspace_snapshot.get("exec", {}), "workspace.exec")
-    if set(raw) - {"paths", "runners"}:
+    if set(raw) - {"enabled", "paths", "runners"}:
         raise LbeConfigError("unknown v2 workspace.exec fields")
+    workspace_apply_enabled = raw.get("enabled", False)
+    if type(workspace_apply_enabled) is not bool:
+        raise LbeConfigError("workspace.exec.enabled must be a JSON boolean")
     paths = _unique_paths(raw.get("paths", []), "exec.paths")
 
     runners_value = raw.get("runners", [])
@@ -149,5 +162,7 @@ def parse_lbe_exec_fragment(
             raise LbeConfigError("duplicate or case-ambiguous runner path")
         seen.add(alias)
         runners.append((scope, runner))
-    return LbeExecGrant(paths=paths, runners=tuple(runners))
+    return LbeExecGrant(paths=paths, runners=tuple(runners),
+                        server_apply_enabled=server_apply_enabled,
+                        workspace_apply_enabled=workspace_apply_enabled)
 

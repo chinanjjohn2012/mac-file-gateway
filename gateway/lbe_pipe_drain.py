@@ -234,6 +234,11 @@ class BoundedPipeDrain:
         with self._mutex:
             return {
                 **output,
+                # Even two observed EOFs cannot make a failed selector/pipe
+                # cleanup a clean, fully admitted output result.
+                "output_complete": (output["output_complete"]
+                                    and self._done.is_set()
+                                    and not self._fault),
                 "pipe_reader_failed": self._fault,
                 "pipe_reader_finished": self._done.is_set(),
             }

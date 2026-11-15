@@ -6,7 +6,7 @@ separate synchronous Worker admission, never reflective file dispatch.
 from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import os
 import sys
@@ -174,6 +174,20 @@ class WorkspaceService:
         # Healthy no-proof admission is separately gated in B1/C.
         self._exec_state: ExecStateStore | None = None
         self._exec_state_issue: str | None = None
+        # The operator-owned startup tool file is not an Exec grant.  V2
+        # config booleans, exact plan, durable state and child capacity are
+        # checked independently.  Missing private tools disable apply only.
+        self._mvp_tools = None
+        self._mvp_tools_issue: str | None = None
+        # Optional, existing-only R006 durable consumed-nonce witness.
+        # No owner-signed grant, native T1 or public positive exception.
+        self._d4_attempt_journal = None
+        # One exact future R006 capability may be installed only by trusted
+        # in-process bootstrap code. No REST/MCP/config/env field can mint it.
+        self._r006_pending = None
+        # Not a grant: only prevents borrowing a source snapshot produced
+        # by another WorkspaceService instance with identical fixture bytes.
+        self._r010_source_identity = object()
         # V2-owned ledger, also used by approved hosted Python-only T1.
         # Its construction alone NEVER grants public Exec apply or spawns.
         self._lbe_owner = (DirectChildOwner()
@@ -216,6 +230,17 @@ class WorkspaceService:
                     gateway.close()
                     raise PrivateFileError("Workspace root changed before Gateway initialization.")
                 self._workspaces[item.name] = WorkspaceContext(item.name, item, pin, gateway)
+            if (settings.schema_version == 2
+                    and settings.exec_apply_enabled
+                    and any(w.exec_apply_enabled and w.exec_paths
+                            for w in settings.workspaces)):
+                from .lbe_mvp_tools import MvpTrustedTools
+                try:
+                    self._mvp_tools = MvpTrustedTools.load(
+                        config_dir,
+                        workspace_roots=tuple(w.root for w in settings.workspaces))
+                except (PrivateFileError, OSError, ValueError):
+                    self._mvp_tools_issue = "operator_tool_selection_unavailable"
             # Scan and acquire the private state before REST/MCP can accept
             # work. State IO/ownership failure must not disable File/Git.
             if settings.exec_enabled and any(w.exec_enabled for w in settings.workspaces):
@@ -226,6 +251,30 @@ class WorkspaceService:
                         workspace_roots=tuple(w.root for w in settings.workspaces),
                         existing_only=(settings.schema_version == 2),
                     )
+                    if (settings.schema_version == 2
+                            and self._exec_state.durability_state == "healthy"):
+                        # Never put these records in exec-state: its strict
+                        # boot scan would quarantine unknown filenames. Only
+                        # trust a separately provisioned private sibling.
+                        from .lbe_durable_attempt import (
+                            D4DurableAttemptDenied, D4DurableAttemptJournal,
+                        )
+                        d4_fd = -1
+                        try:
+                            d4_fd = os.open(
+                                "d4-journal", os.O_RDONLY | os.O_DIRECTORY
+                                | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                dir_fd=config_root.fd,
+                            )
+                            self._d4_attempt_journal = D4DurableAttemptJournal(
+                                d4_fd)
+                        except (OSError, D4DurableAttemptDenied):
+                            # Missing/precarious ledger never grants Exec;
+                            # File/Git and lawful v2 preview stay available.
+                            self._d4_attempt_journal = None
+                        finally:
+                            if d4_fd >= 0:
+                                os.close(d4_fd)
                 except (PrivateFileError, GatewayError, OSError, ValueError):
                     self._exec_state_issue = "state_io_unavailable"
             if settings.git_enabled:
@@ -264,6 +313,8 @@ class WorkspaceService:
         """
         with self._lifecycle:
             self._closing = True
+            # Never carry a one-shot capability across close/restart.
+            self._r006_pending = None
             if self._lbe_owner is not None:
                 # No signal/join: a separately authorized direct child may
                 # outlive a dropped waiter or Gateway shutdown.
@@ -280,6 +331,8 @@ class WorkspaceService:
                         cleanup.callback(self._git_state.close)
                     if self._exec_state is not None:
                         cleanup.callback(self._exec_state.close)
+                    if self._d4_attempt_journal is not None:
+                        cleanup.callback(self._d4_attempt_journal.close)
                     for ctx in self._workspaces.values():
                         cleanup.callback(ctx.pinned_root.close)
                         cleanup.callback(ctx.gateway.close)
@@ -354,6 +407,11 @@ class WorkspaceService:
             "effective_argv": list(plan.effective_argv),
             "runner": plan.runner,
             "runner_project": plan.runner_project,
+            # Informational normalized Go build output; never a write claim.
+            "planned_go_output": plan.planned_go_output,
+            # Content snapshots only; no loaded source or native authority.
+            "planned_script_sha256": plan.planned_script_sha256,
+            "planned_pipfile_sha256": plan.planned_pipfile_sha256,
             "dry_run": True,
             "executed": False,
             "exit_code": None,
@@ -375,11 +433,14 @@ class WorkspaceService:
     @staticmethod
     def _lbe_apply(ctx: WorkspaceContext, owner: DirectChildOwner,
                    cwd: str, argv: list[str],
-                   timeout_seconds: int) -> dict[str, Any]:
-        """Worker apply, reachable only from the approved hosted Python T1.
+                   timeout_seconds: int, *,
+                   cancelled: threading.Event | None = None,
+                   mvp_tools: object = None) -> dict[str, Any]:
+        """Worker apply for private legacy T1 or approved exact-six MVP.
 
-        Ordinary schema-v2 public requests are denied before this method.
-        This is not an operative production D0 exception or security signoff.
+        A public MVP request reaches this method only after its explicit
+        dual-config flags.  A second exact plan check precedes owner reserve,
+        and the launcher repeats it immediately before native Popen.
         """
         from .lbe_plan import prepare_lbe_work_plan
         from .lbe_native_launcher import make_trusted_lbe_launcher
@@ -387,74 +448,1843 @@ class WorkspaceService:
 
         plan = prepare_lbe_work_plan(
             ctx, cwd=cwd, argv=argv, timeout_seconds=timeout_seconds)
+        if mvp_tools is not None:
+            from .lbe_mvp_tools import MvpTrustedTools
+            from .lbe_six_fixed_commands import match_fixed_six_command
+            if (type(mvp_tools) is not MvpTrustedTools
+                    or match_fixed_six_command(**vars(plan)) is None):
+                raise GatewayError(
+                    "command_not_allowed",
+                    "Only the six fixed MVP commands may be executed.")
         worker = LbeWorker(
-            owner, launcher=make_trusted_lbe_launcher(ctx))
+            owner, launcher=make_trusted_lbe_launcher(
+                ctx, mvp_tools=mvp_tools))
         try:
-            return worker.run(plan)
+            return worker.run(plan, cancelled=cancelled)
         except LbeWorkerError as exc:
             raise GatewayError(
                 exc.code, "Local best-effort command could not complete safely.",
                 details={"process_may_be_running": exc.process_may_be_running},
             ) from None
 
-    def invoke_exec(self, name: str, cwd: str, argv: list[str],
-                    timeout_seconds: int = 60, dry_run: bool = True) -> dict[str, Any]:
-        """One synchronous v1 and draft v2 admission boundary.
+    def _install_d4_r006_one_shot(
+        self, prepared: object, bootstrap: object,
+    ) -> None:
+        """Install one exact internal capability for the shared invoke_exec gate.
 
-        Ordinary schema-v2 paths authorize preview only until the exact
-        D0 weaker-mode operative exception is approved. A separate hosted
-        Python-only, disposable CI fixture uses an explicit constructor
-        capability and fixed runner identity; no client/config may mint it.
-        Old private state/owner-lock/UNKNOWN and File/Git remain independent.
-        No cleanup proof, PID signals or rollback are claimed.
+        This method is deliberately private and has no REST/MCP/config adapter.
+        The supplied objects are verifier-produced, process-bound types. Their
+        authority is rechecked again after the public request atomically takes
+        the pending slot and before durable nonce consumption/Popen.
         """
+        from .lbe_owner_grant_bootstrap import _argv_fingerprint
+        from .lbe_r006_native_runner import D4R006PreparedAttempt
+        from .lbe_r006_trusted_bootstrap import (
+            D4TrustedBootstrapBundle, D4TrustedBootstrapDenied,
+        )
+        from .lbe_worker import LbeWorkPlan
+
+        with self._lifecycle:
+            if self._closing or self.settings.schema_version != 2:
+                raise GatewayError("runner_unavailable", "R006 service unavailable.")
+            if self._r006_pending is not None:
+                raise GatewayError(
+                    "busy", "An R006 one-shot capability is already pending.")
+            if self._exec_state is None or self._d4_attempt_journal is None:
+                raise GatewayError(
+                    "runner_unavailable", "R006 durable state unavailable.")
+            self._exec_state.require_healthy()
+            if (type(prepared) is not D4R006PreparedAttempt
+                    or type(bootstrap) is not D4TrustedBootstrapBundle):
+                raise GatewayError(
+                    "runner_unavailable", "Untrusted R006 one-shot inputs.")
+            plan = prepared.plan
+            if type(plan) is not LbeWorkPlan:
+                raise GatewayError("runner_unavailable", "Invalid R006 plan.")
+            try:
+                grant, _reviews, runtime = bootstrap.components()
+                attempt = grant.attempt
+                if (attempt.workspace != plan.workspace
+                        or attempt.cwd != plan.cwd
+                        or attempt.runner != plan.runner
+                        or attempt.timeout_seconds != plan.timeout_seconds
+                        or attempt.requested_argv_fingerprint
+                        != _argv_fingerprint(plan.requested_argv)
+                        or attempt.effective_argv_fingerprint
+                        != _argv_fingerprint(plan.effective_argv)
+                        or attempt.product_recipe_fingerprint
+                        != prepared.recipe_fingerprint
+                        or attempt.source_fingerprint
+                        != prepared.host_source_fingerprint
+                        or attempt.runner_fingerprint
+                        != prepared.runner_profile_fingerprint):
+                    raise D4TrustedBootstrapDenied(
+                        "owner grant does not match prepared command")
+                runtime.check_grant(grant)
+            except (AttributeError, D4TrustedBootstrapDenied):
+                raise GatewayError(
+                    "runner_unavailable",
+                    "R006 bootstrap/prepared binding is invalid.") from None
+            # Atomic publication under the same service lifecycle lock used by
+            # invoke_exec. Installation does not consume the durable nonce.
+            self._r006_pending = (prepared, bootstrap)
+
+    def invoke_exec(self, name: str, cwd: str, argv: list[str],
+                    timeout_seconds: int = 60, dry_run: bool = True, *,
+                    cancelled: threading.Event | None = None) -> dict[str, Any]:
+        """Single synchronous v1/v2 admission boundary for every adapter.
+
+        Schema-v2 positive execution requires BOTH explicit operator opt-ins,
+        healthy old state and exact six fixed commands, or a historical private
+        one-shot R006 grant.  Other requests remain F1-denied.  Clients cannot
+        mint a tool selection, owner grant or native launcher through RPC.
+        """
+        r006 = None
+        mvp = False
         with self._lifecycle:
             ctx = self.require_exec(name)
-            # B0 durable/ownership/UNKNOWN denial comes before proof status.
+            if type(dry_run) is not bool:
+                raise GatewayError("invalid_argument", "dry_run must be boolean.")
+            # Missing v2 public apply opt-ins must deny before scanning
+            # healthy/missing historical state, without expanding authority.
+            # Preserve visibly quarantined old state, the private R006
+            # one-shot boundary, and schema-v1 F1 proof requirements.
+            if (not dry_run and self.settings.schema_version == 2
+                    and not self._lbe_positive_authorized
+                    and self._r006_pending is None
+                    and (self._exec_state is None or
+                         self._exec_state.durability_state != "quarantined")
+                    and not (self.settings.exec_apply_enabled
+                             and ctx.settings.exec_apply_enabled)):
+                raise GatewayError(
+                    "exec_disabled", "Both v2 Exec apply opt-ins are required.")
             if self._exec_state is None:
                 raise GatewayError(
                     "exec_state_unavailable", "Exec durable state is unavailable.")
             self._exec_state.require_healthy()
-            if type(dry_run) is not bool:
-                raise GatewayError("invalid_argument", "dry_run must be boolean.")
-            # F1 has NO positive cleanup-proof path. Proof denial wins over
-            # an occupied Worker slot and happens before Runner/PREPARED.
-            # Never use an instance-global subprocess ban: Git may spawn
-            # only via its own separately authorized durable protocol.
+            if cancelled is not None and type(cancelled) is not threading.Event:
+                raise GatewayError(
+                    "invalid_argument", "Invalid internal cancellation token.")
             if not dry_run and self.settings.schema_version == 1:
                 raise GatewayError(
                     "exec_cleanup_proof_required",
-                    "Exec apply is unavailable without independently reviewed full-descendant cleanup proof.")
+                    "Exec apply is unavailable without independently reviewed "
+                    "full-descendant cleanup proof.")
             if (not dry_run and self.settings.schema_version == 2
                     and not self._lbe_positive_authorized):
-                # No exact operative D0 exception was approved. A public v2
-                # paths-only grant cannot activate _lbe_apply/Popen, regardless
-                # of REST/MCP/direct caller input, capacity or runner choice.
-                raise GatewayError(
-                    "exec_cleanup_proof_required",
-                    "Schema-v2 Exec apply needs separately approved operative "
-                    "authority; configured paths permit preview only.")
-            if name in self._exec_active or len(self._exec_active) >= 4:
-                raise GatewayError("busy", "A controlled command already occupies this execution slot.")
-            self._exec_active.add(name)
-            self._active_operations += 1
+                pending = self._r006_pending
+                matched = False
+                if pending is not None:
+                    prepared, bootstrap = pending
+                    plan = prepared.plan
+                    # Exact raw request matching is deliberately stricter than
+                    # canonical path equivalence: the owner approved this exact
+                    # vector, not a caller-selected alternate spelling.
+                    matched = bool(
+                        type(cwd) is str and type(argv) is list
+                        and all(type(item) is str for item in argv)
+                        and type(timeout_seconds) is int
+                        and name == plan.workspace and cwd == plan.cwd
+                        and tuple(argv) == plan.requested_argv
+                        and timeout_seconds == plan.timeout_seconds)
+                if matched:
+                    # Preserve the old private R006 one-shot mechanism and
+                    # its nonce semantics without converting it to MVP.
+                    if cancelled is not None and cancelled.is_set():
+                        raise GatewayError(
+                            "waiter_disconnected",
+                            "Request cancelled before R006 one-shot admission.")
+                    self._r006_pending = None
+                    r006 = pending
+                elif (self.settings.exec_apply_enabled
+                      and ctx.settings.exec_apply_enabled):
+                    # Only this exact v2 opt-in pair replaces ordinary F1 for
+                    # the six-command MVP, never for preview-only old configs.
+                    if self._mvp_tools is None:
+                        raise GatewayError(
+                            "runner_unavailable",
+                            "Trusted operator MVP executable configuration "
+                            "is unavailable.")
+                    mvp = True
+                else:
+                    raise GatewayError(
+                        "exec_cleanup_proof_required",
+                        "Schema-v2 Exec apply needs separately approved operative "
+                        "authority; configured paths permit preview only.")
+            if r006 is None:
+                if name in self._exec_active or len(self._exec_active) >= 4:
+                    raise GatewayError(
+                        "busy",
+                        "A controlled command already occupies this execution slot.")
+                self._exec_active.add(name)
+                self._active_operations += 1
+        if r006 is not None:
+            prepared, bootstrap = r006
+            return self._execute_d4_r006_private_attempt(
+                prepared, bootstrap, cancelled=cancelled)
         try:
             if self.settings.schema_version == 2:
                 if dry_run:
-                    result = self._lbe_preview(ctx, cwd, argv, timeout_seconds)
+                    result = self._lbe_preview(
+                        ctx, cwd, argv, timeout_seconds)
                 else:
                     assert self._lbe_owner is not None
                     result = self._lbe_apply(
-                        ctx, self._lbe_owner, cwd, argv, timeout_seconds)
+                        ctx, self._lbe_owner, cwd, argv, timeout_seconds,
+                        cancelled=cancelled,
+                        mvp_tools=(self._mvp_tools if mvp else None))
             else:
-                # Preserve the entire historic v1 preview and F1 deny-only path.
-                result = ctx.gateway.run_command(cwd, argv, timeout_seconds, dry_run)
+                result = ctx.gateway.run_command(
+                    cwd, argv, timeout_seconds, dry_run)
             return {**result, "workspace": name}
         finally:
             with self._lifecycle:
                 self._exec_active.remove(name)
                 self._active_operations -= 1
                 self._lifecycle.notify_all()
+
+    def _consume_d4_r006_attempt_source_only(
+        self, grant: object, reviews: object, host: object,
+        plan: object, recipe: object, *,
+        base_sha: str, head_sha: str, head_tree: str, manifest_sha256: str,
+        run_id: int, run_attempt: int,
+    ) -> object:
+        """Bind and burn an exact future R006 attempt before any reservation.
+
+        NONOPERATIVE source/T0 primitive. The exact plan must already come from
+        this service; it is recomputed and compared under the lifecycle lock.
+        Durable nonce consumption happens before any DirectChildOwner/Worker
+        reservation. Public invoke_exec never calls this method.
+        """
+        from .lbe_durable_attempt import D4DurableAttemptDenied
+        from .lbe_launch_recipe import D4NativeLaunchRecipe
+        from .lbe_owner_grant_bootstrap import (
+            D4OwnerBootstrapDenied, _new_consumed_owner_grant,
+            bind_verified_owner_grant_t0,
+        )
+        from .lbe_plan import prepare_lbe_work_plan
+        from .lbe_worker import LbeWorkPlan
+        with self._lifecycle:
+            if type(plan) is not LbeWorkPlan or type(recipe) is not D4NativeLaunchRecipe:
+                raise GatewayError("runner_unavailable", "Untrusted R006 plan/recipe.")
+            ctx = self.require_exec(plan.workspace)
+            if self._closing or self.settings.schema_version != 2:
+                raise GatewayError("runner_unavailable", "R006 service unavailable.")
+            if self._exec_state is None or self._d4_attempt_journal is None:
+                raise GatewayError("runner_unavailable", "Durable owner ledger unavailable.")
+            self._exec_state.require_healthy()
+            if plan.workspace in self._exec_active or len(self._exec_active) >= 4:
+                raise GatewayError("busy", "R006 executable slot is not eligible.")
+            try:
+                fresh = prepare_lbe_work_plan(
+                    ctx, cwd=plan.cwd, argv=list(plan.requested_argv),
+                    timeout_seconds=plan.timeout_seconds)
+                if fresh != plan:
+                    raise D4OwnerBootstrapDenied("R006 plan changed before grant consume")
+                bound = bind_verified_owner_grant_t0(
+                    grant, reviews, host, plan, recipe,
+                    base_sha=base_sha, head_sha=head_sha,
+                    head_tree=head_tree, manifest_sha256=manifest_sha256,
+                    run_id=run_id, run_attempt=run_attempt)
+                journal_digest = self._d4_attempt_journal.consume(bound.attempt)
+                return _new_consumed_owner_grant(
+                    bound, journal_digest, plan, recipe)
+            except (D4OwnerBootstrapDenied, D4DurableAttemptDenied, ValueError):
+                raise GatewayError(
+                    "runner_unavailable",
+                    "R006 owner/run binding is invalid or already consumed.") from None
+
+    def _prepare_d4_r006_private_attempt(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, provisioner_root: str,
+        staged_manifests: dict[str, tuple[tuple[str, str | None], ...]],
+        venv_manifest: tuple[tuple[str, str | None], ...] | None = None,
+        expected_source_identities: dict[str, str] | None = None,
+        expected_venv_identity_sha256: str | None = None,
+        require_go_p007_stage_source: bool = False,
+        expected_venv_record_distributions: tuple[tuple[str, str], ...] | None = None,
+        timeout_seconds: int = 60,
+        cancelled: threading.Event | None = None,
+    ) -> object:
+        """Stage one exact R006 candidate so an owner can approve its fingerprint.
+
+        This is preparation only: it holds a lifecycle lease, not an Exec
+        slot/DirectChildOwner reservation, and cannot launch. The returned
+        in-process object is one-use and tied to the exact staged recipe and
+        fixed macOS host-source observation.
+        """
+        from .lbe_r006_macos_allowlist import (
+            D4R006HostAllowlistDenied, verify_r006_fixed_host_allowlist_t0,
+        )
+        from .lbe_r006_native_runner import (
+            D4R006NativeRunnerDenied, _new_r006_prepared_attempt,
+        )
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if self.settings.schema_version != 2 or self._exec_state is None:
+                raise GatewayError("runner_unavailable", "R006 preparation unavailable.")
+            self._exec_state.require_healthy()
+            if cancelled is not None and type(cancelled) is not threading.Event:
+                raise GatewayError("invalid_argument", "Invalid internal cancellation token.")
+            if cancelled is not None and cancelled.is_set():
+                raise GatewayError("waiter_disconnected", "R006 preparation cancelled.")
+            if name in self._exec_active or len(self._exec_active) >= 4:
+                raise GatewayError("busy", "R006 Workspace is executing.")
+            self._active_operations += 1
+        try:
+            assembled = self._assemble_d4_r003_source_only_runner(
+                name, cwd, argv, private_root=private_root,
+                provisioner_root=provisioner_root,
+                staged_manifests=staged_manifests,
+                venv_manifest=venv_manifest,
+                expected_source_identities=expected_source_identities,
+                expected_venv_identity_sha256=expected_venv_identity_sha256,
+                require_go_p007_stage_source=require_go_p007_stage_source,
+                expected_venv_record_distributions=(
+                    expected_venv_record_distributions),
+                timeout_seconds=timeout_seconds,
+            )
+            host = verify_r006_fixed_host_allowlist_t0()
+            return _new_r006_prepared_attempt(
+                ctx, assembled[0], assembled[1], assembled[3], host)
+        except (D4R006HostAllowlistDenied, D4R006NativeRunnerDenied, OSError):
+            raise GatewayError(
+                "runner_unavailable", "R006 fixed host/source preparation failed."
+            ) from None
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
+    def _execute_d4_r006_private_attempt(
+        self, prepared: object, bootstrap: object, *,
+        cancelled: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        """Consume exact owner grant then run the same prepared private candidate.
+
+        PRIVATE SOURCE CANDIDATE ONLY: no REST/MCP/config/public invoke_exec
+        route calls this method. A separately authorized native T1 would be
+        required before invoking it outside fake-Popen T0.
+        """
+        from .lbe_r006_native_runner import (
+            D4R006NativeLaunchBoundary, D4R006NativeRunnerDenied,
+            D4R006PreparedAttempt,
+        )
+        from .lbe_r006_trusted_bootstrap import (
+            D4TrustedBootstrapBundle, D4TrustedBootstrapDenied,
+        )
+        from .lbe_worker import LbeWorker, LbeWorkerError
+        with self._lifecycle:
+            if type(prepared) is not D4R006PreparedAttempt:
+                raise GatewayError("runner_unavailable", "Untrusted R006 prepared attempt.")
+            plan = prepared.plan
+            ctx = self.require_exec(plan.workspace)
+            if self.settings.schema_version != 2:
+                raise GatewayError("runner_unavailable", "R006 execution unavailable.")
+            if self._exec_state is None or self._d4_attempt_journal is None:
+                raise GatewayError("runner_unavailable", "R006 durable state unavailable.")
+            self._exec_state.require_healthy()
+            if cancelled is not None and type(cancelled) is not threading.Event:
+                raise GatewayError("invalid_argument", "Invalid internal cancellation token.")
+            if plan.workspace in self._exec_active or len(self._exec_active) >= 4:
+                raise GatewayError("busy", "R006 executable slot is not eligible.")
+            owner = self._lbe_owner
+            if owner is None:
+                raise GatewayError("exec_state_unavailable", "R006 child owner unavailable.")
+            try:
+                if type(bootstrap) is not D4TrustedBootstrapBundle:
+                    raise D4TrustedBootstrapDenied(
+                        "R006 execution requires canonical trusted bootstrap")
+                grant, reviews, runtime = bootstrap.components()
+                candidate, marker, recipe, host = prepared.claim(ctx)
+                consumed = self._consume_d4_r006_attempt_source_only(
+                    grant, reviews, host, plan, recipe,
+                    base_sha=runtime.base_sha, head_sha=runtime.head_sha,
+                    head_tree=runtime.head_tree,
+                    manifest_sha256=runtime.manifest_sha256,
+                    run_id=runtime.run_id, run_attempt=runtime.run_attempt)
+            except (D4R006NativeRunnerDenied, D4TrustedBootstrapDenied):
+                raise GatewayError(
+                    "runner_unavailable",
+                    "R006 prepared/bootstrap attempt is invalid or replayed."
+                ) from None
+            self._exec_active.add(plan.workspace)
+            self._active_operations += 1
+        try:
+            try:
+                boundary = D4R006NativeLaunchBoundary(
+                    ctx, candidate.plan, recipe, host, consumed, marker)
+                result = LbeWorker(owner, launcher=boundary.launch).run(
+                    candidate.plan, cancelled=cancelled)
+            except D4R006NativeRunnerDenied:
+                raise GatewayError(
+                    "runner_unavailable", "R006 native boundary refused before Worker."
+                ) from None
+            except LbeWorkerError as exc:
+                raise GatewayError(
+                    exc.code, "R006 private command could not complete safely.",
+                    details={"process_may_be_running": exc.process_may_be_running},
+                ) from None
+            return {**result, "workspace": plan.workspace}
+        finally:
+            with self._lifecycle:
+                self._exec_active.remove(plan.workspace)
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
+
+
+
+
+    def _bind_r010_a1_source_job_only(
+        self, name: str, *, envelope: object, journal: object,
+        job_key: object, source: object, host: object, closed: object,
+    ):
+        """Internal R010 source -> OWN service/Owner/Journal entrypoint.
+
+        This is not reachable from REST/MCP/client configuration and does
+        not create a NativeLauncher grant. Its source receipts remain
+        untrusted for PRODUCT_T1 until a later independent qualification.
+        """
+        from .lbe_r010_source_service import (
+            bind_r010_authority_source_to_service_only,
+        )
+        return bind_r010_authority_source_to_service_only(
+            service=self, workspace=name,
+            envelope=envelope, journal=journal, job_key=job_key,
+            source=source, host=host, closed=closed)
+
+    def _bind_r010_a1_composed_preexec_job_source_only(
+        self, name: str, *, envelope: object, journal: object,
+        job_key: object, source: object, host: object, closed: object,
+        preexec_source: object, preexec_seal: object,
+        preimport_receipt: object = None,
+    ):
+        """Close PREEXEC original-JWT SOURCE -> own Owner/Worker/Journal.
+
+        The PREEXEC certificate is a model-only original-signature source:
+        issuer JWKS TLS/current Job/Owner T1 remain unverified. This method
+        never installs an Exec grant or exposes any positive REST/MCP path.
+        """
+        from .lbe_r010_source_service import (
+            bind_r010_authority_source_to_service_only,
+        )
+        return bind_r010_authority_source_to_service_only(
+            service=self, workspace=name,
+            envelope=envelope, journal=journal, job_key=job_key,
+            source=source, host=host, closed=closed,
+            preexec_source=preexec_source, preexec_seal=preexec_seal,
+            preimport_receipt=preimport_receipt)
+
+    def _prepare_r010_a1_product_source_pipeline_only(
+        self, name: str, *, envelope: object, job_key: object,
+        journal: object, preimport_receipt: object,
+        preexec_source: object, host: object,
+        closed: object, owner_source: object, current_job: object,
+        grant_source: object, expected: object,
+    ):
+        """Bind PREEXEC -> Provider/Owner -> SAME Service/Worker/Journal.
+
+        An internal nonoperative source-only model, never a positive Exec
+        route. The actual live OIDC/Owner T1/isolated Runner admission
+        remains unqualified and must not bypass F1 or NativeLauncher.
+        """
+        from .lbe_r010_product_pipeline import (
+            assemble_r010_a1_source_pipeline_only,
+        )
+        return assemble_r010_a1_source_pipeline_only(
+            service=self, workspace=name, envelope=envelope,
+            job_key=job_key, journal=journal,
+            preimport_receipt=preimport_receipt,
+            preexec_source=preexec_source, host=host, closed=closed,
+            owner_source=owner_source, current_job=current_job,
+            grant_source=grant_source, expected=expected)
+
+    def _finalize_r010_first_row_source_only(
+        self, name: str, *, journal: object, capture: object,
+        private_root_fd: int, private_before: object,
+    ) -> dict[str, Any]:
+        """Finalize actual Owner/Worker row 1 with SERVICE-pinned source FD.
+
+        Unlike the low-level Journal API, the source root and BEFORE data
+        come from this exact live WorkspaceService's six-source snapshot.
+        The private-cache BEFORE descriptor must still be supplied by
+        separately trusted private-runner setup; that binding is NOT yet
+        an authenticated runtime/Owner Grant. No native T1 or row2 allowed.
+        """
+        from .lbe_r010_serial_journal import R010SerialNonceJournal
+        from .lbe_r010_private_capture import R010PrivateWorkerCapture
+        from .lbe_r010_row_fs import R010PrivateTreeSnapshot
+        from .lbe_r010_six_service import R010SixSourcePlan
+
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if (self.settings.schema_version != 2
+                    or self._closing or self._closed
+                    or self._exec_state is None
+                    or self._lbe_owner is None):
+                raise GatewayError(
+                    "runner_unavailable", "R010 service not eligible.")
+            self._exec_state.require_healthy()
+            self._active_operations += 1
+        try:
+            try:
+                if (type(journal) is not R010SerialNonceJournal
+                        or type(capture) is not R010PrivateWorkerCapture
+                        or type(private_root_fd) is not int
+                        or type(private_before) is not R010PrivateTreeSnapshot
+                        or capture._journal is not journal
+                        or capture._owner is not self._lbe_owner):
+                    raise ValueError("wrong Job capture or private source")
+                binding = capture._source_binding
+                if (type(binding) is not tuple or len(binding) != 3
+                        or binding[0] is not self
+                        or binding[1] is not ctx
+                        or type(binding[2]) is not R010SixSourcePlan
+                        or journal._six_source_plan is not binding[2]):
+                    raise ValueError("no same-service six-source witness")
+                six = binding[2]
+                # The Worker already rechecked ALL SIX sources immediately
+                # before its launcher. At completion, let the actual
+                # owner/finite-FS classifier inspect row 1's selected source
+                # first, so a witnessed exit0 with a drifted row-1 source
+                # becomes ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS rather than
+                # a fabricated owner/reader ambiguity. Later rows remain
+                # disabled until new source verification and true T1 Grant.
+                before = six.rows[0].selected.selected_source
+                project_cwd = six.rows[0].candidate.plan.cwd
+                source_fd = os.open(
+                    project_cwd,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW |
+                    os.O_CLOEXEC,
+                    dir_fd=ctx.gateway._root_fd)
+                try:
+                    return journal.finalize_first_row_from_worker_capture_source_only(
+                        capture=capture, selected_root_fd=source_fd,
+                        selected_before=before,
+                        private_root_fd=private_root_fd,
+                        private_before=private_before)
+                finally:
+                    os.close(source_fd)
+            except Exception:
+                try:
+                    if type(journal) is R010SerialNonceJournal:
+                        journal.latch_failure("owner_reader_ambiguous")
+                except Exception:
+                    pass
+                raise GatewayError(
+                    "runner_unavailable",
+                    "R010 row1 source/Owner/finite verification failed closed."
+                ) from None
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
+    def _bind_r010_later_source_model_row(
+        self, name: str, *, source_plan: object, journal: object,
+        row: int, nonce: str, cancelled: threading.Event | None = None,
+    ):
+        """Bind the NEXT ROW of an already source-observed SAME Job/Owner.
+
+        This is a nonoperative product-source state transition. It never
+        returns a Popen/native capability and does not change F1/NativeLauncher
+        admission. Worker invocation remains a separately gated operation.
+        """
+        from .lbe_r010_six_service import (
+            R010SixSourcePlan, recheck_r010_service_six_source)
+        from .lbe_r010_serial_journal import R010SerialNonceJournal
+
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if (self.settings.schema_version != 2 or self._closing
+                    or self._closed or self._exec_state is None
+                    or self._lbe_owner is None or self._r006_pending is not None):
+                raise GatewayError(
+                    "runner_unavailable", "R010 source-model service unavailable.")
+            self._exec_state.require_healthy()
+            if self._exec_active:
+                raise GatewayError("busy", "Another Exec slot is active.")
+            self._active_operations += 1
+        try:
+            try:
+                if (type(journal) is not R010SerialNonceJournal
+                        or type(source_plan) is not R010SixSourcePlan
+                        or source_plan.workspace != ctx.name
+                        or type(row) is not int or not 2 <= row <= 6
+                        or cancelled is not None and (
+                            type(cancelled) is not threading.Event
+                            or cancelled.is_set())):
+                    raise ValueError("invalid source-only row or cancellation")
+                recheck_r010_service_six_source(
+                    service=self, ctx=ctx, snapshot=source_plan)
+                journal.burn_source_model_later_nonce(
+                    row=row, nonce=nonce, service=self,
+                    ctx=ctx, source_plan=source_plan)
+                capture = journal.make_source_model_later_capture(
+                    row=row, owner=self._lbe_owner,
+                    plan=source_plan.rows[row - 1].candidate.plan,
+                    source_plan=source_plan)
+                capture._bind_six_source(
+                    service=self, ctx=ctx, source_plan=source_plan)
+                return capture
+            except Exception:
+                try:
+                    if type(journal) is R010SerialNonceJournal:
+                        journal.latch_failure("source_preexec_denied")
+                except Exception:
+                    pass
+                raise GatewayError(
+                    "runner_unavailable",
+                    "R010 later same-service source-model row failed closed."
+                ) from None
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
+    def _finalize_r010_source_model_row(
+        self, name: str, *, row: int, journal: object, capture: object,
+        private_root_fd: int, private_before: object,
+        go_output_parent_fd: int | None = None, go_output_before: object = None,
+    ) -> dict[str, Any]:
+        """Finish one private real Owner/Worker reservation in SAME service.
+
+        This uses the Service-pinned source Before snapshot and pinned source
+        FD to record a durable SOURCE-MODEL result in its Job Journal. A model
+        next-row index grants no PRODUCT_T1 execution or launch privilege.
+        """
+        from .lbe_r010_serial_journal import R010SerialNonceJournal
+        from .lbe_r010_private_capture import R010PrivateWorkerCapture
+        from .lbe_r010_row_fs import R010PrivateTreeSnapshot
+        from .lbe_r010_six_service import (
+            R010SixSourcePlan, recheck_r010_service_six_source)
+
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if (self.settings.schema_version != 2 or self._closing
+                    or self._closed or self._exec_state is None
+                    or self._lbe_owner is None):
+                raise GatewayError(
+                    "runner_unavailable", "R010 source-model service unavailable.")
+            self._exec_state.require_healthy()
+            self._active_operations += 1
+        try:
+            try:
+                if (type(row) is not int or not 1 <= row <= 6
+                        or type(journal) is not R010SerialNonceJournal
+                        or type(capture) is not R010PrivateWorkerCapture
+                        or type(private_root_fd) is not int
+                        or type(private_before) is not R010PrivateTreeSnapshot
+                        or capture._row != row
+                        or capture._journal is not journal
+                        or capture._owner is not self._lbe_owner):
+                    raise ValueError("wrong Owner/Worker/Journal identity")
+                binding = capture._source_binding
+                if (type(binding) is not tuple or len(binding) != 3
+                        or binding[0] is not self or binding[1] is not ctx
+                        or type(binding[2]) is not R010SixSourcePlan
+                        or journal._six_source_plan is not binding[2]
+                        or capture._plan is not
+                           binding[2].rows[row - 1].candidate.plan):
+                    raise ValueError("not the current same-service source row")
+                # The Worker rechecked all SIX source snapshots immediately
+                # before launcher. At completion we must validate the
+                # selected row's ORIGINAL prelaunch source via its pinned FD.
+                # A valid Go build changes bin/app AFTER launch, so blindly
+                # refreshing all six fixture selections here would reject
+                # that permitted output before its finite artifact check.
+                six = binding[2]
+                record = six.rows[row - 1]
+                fd = os.open(
+                    record.candidate.plan.cwd,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                    | os.O_CLOEXEC,
+                    dir_fd=ctx.gateway._root_fd)
+                try:
+                    return journal.finalize_source_model_row_from_worker_capture(
+                        row=row, capture=capture, selected_root_fd=fd,
+                        selected_before=record.selected.selected_source,
+                        private_root_fd=private_root_fd,
+                        private_before=private_before,
+                        go_output_parent_fd=go_output_parent_fd,
+                        go_output_before=go_output_before)
+                finally:
+                    os.close(fd)
+            except Exception:
+                try:
+                    if type(journal) is R010SerialNonceJournal:
+                        journal.latch_failure("owner_reader_ambiguous")
+                except Exception:
+                    pass
+                raise GatewayError(
+                    "runner_unavailable",
+                    "R010 same-service Owner/Worker/Journal model denied."
+                ) from None
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
+    def _prepare_and_bind_r010_first_row_source_only(
+        self, name: str, *, journal: object, nonce: str,
+        timeout_seconds: int = 120,
+        cancelled: threading.Event | None = None,
+    ):
+        """Single private service operation for the full R010 first-row gate.
+
+        Keep the SAME WorkspaceService alive over source selection and the
+        create-once six-row source/nonce journal transaction. On any failed
+        selection permanently latch all six as VOID when persistence permits.
+        This never returns a launcher, executable approval or T1 authority.
+        """
+        from .lbe_r010_serial_journal import R010SerialNonceJournal
+        if type(journal) is not R010SerialNonceJournal:
+            raise GatewayError(
+                "runner_unavailable", "R010 Job journal identity absent.")
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if (self._closing or self._closed or
+                    self.settings.schema_version != 2):
+                raise GatewayError(
+                    "runner_unavailable", "R010 source service unavailable.")
+            self._active_operations += 1
+        try:
+            if (cancelled is not None and
+                    (type(cancelled) is not threading.Event
+                     or cancelled.is_set())):
+                raise GatewayError(
+                    "waiter_disconnected", "R010 waiter not active.")
+            six = self._prepare_r010_six_command_source_only(
+                name, timeout_seconds=timeout_seconds)
+            return self._bind_r010_first_row_source_only(
+                name, source_plan=six, journal=journal, nonce=nonce,
+                cancelled=cancelled)
+        except Exception:
+            # No alternative path may turn a failed source selection into
+            # a positive Job. If the journal is already failed, the second
+            # latch is rejected and its original durable result is retained.
+            try:
+                journal.latch_failure("source_preexec_denied")
+            except Exception:
+                pass
+            raise GatewayError(
+                "runner_unavailable",
+                "R010 all-six source and first-row admission failed closed."
+            ) from None
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
+    def _bind_r010_first_row_source_only(
+        self, name: str, *, source_plan: object, journal: object,
+        nonce: str, cancelled: threading.Event | None = None,
+    ):
+        """Bind SAME service's full six-row source to one durable row-1 capture.
+
+        This is the nonoperative half of R010 serial admission:
+        - all six original service-selected source snapshots rechecked;
+        - one Job nonce irrevocably burned in the global journal;
+        - Worker reservation captured only through the original Owner object.
+        The returned source-only capture is NOT an Exec Grant or launcher.
+        """
+        from .lbe_r010_six_service import (
+            R010SixSourcePlan, R010SixSourceDenied,
+            recheck_r010_service_six_source,
+        )
+        from .lbe_r010_serial_journal import R010SerialNonceJournal
+
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if (self.settings.schema_version != 2
+                    or self._closing or self._closed
+                    or self._exec_state is None or self._lbe_owner is None
+                    or self._r006_pending is not None):
+                raise GatewayError(
+                    "runner_unavailable", "R010 shared source slot unavailable.")
+            self._exec_state.require_healthy()
+            if self._exec_active:
+                raise GatewayError("busy", "Another Exec slot is active.")
+            if cancelled is not None and type(cancelled) is not threading.Event:
+                raise GatewayError(
+                    "invalid_argument", "R010 cancellation token invalid.")
+            self._active_operations += 1
+        try:
+            try:
+                if (type(source_plan) is not R010SixSourcePlan
+                        or type(journal) is not R010SerialNonceJournal
+                        or source_plan.workspace != ctx.name
+                        or (cancelled is not None and cancelled.is_set())):
+                    raise R010SixSourceDenied(
+                        "wrong source plan, Job or cancelled waiter")
+                recheck_r010_service_six_source(
+                    service=self, ctx=ctx, snapshot=source_plan)
+                journal.bind_six_source_before_first_burn(
+                    service=self, ctx=ctx, source_plan=source_plan)
+                journal.burn_first_nonce(nonce)
+                capture = journal.make_first_row_private_capture(
+                    owner=self._lbe_owner,
+                    plan=source_plan.rows[0].candidate.plan,
+                    source_plan=source_plan)
+                capture._bind_six_source(
+                    service=self, ctx=ctx, source_plan=source_plan)
+                return capture
+            except Exception:
+                # One invalid pre-Popen attempt permanently VOID-s the Job,
+                # even if the nonce wasn't burned yet. Reusing the same Job
+                # root after a failure or a crash never becomes allowed.
+                if type(journal) is R010SerialNonceJournal:
+                    try:
+                        journal.latch_failure("source_preexec_denied")
+                    except Exception:
+                        pass
+                raise GatewayError(
+                    "runner_unavailable",
+                    "R010 shared-service first-row source gate failed closed."
+                ) from None
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
+    def _prepare_r010_six_command_source_only(
+        self, name: str, *, timeout_seconds: int = 120,
+    ):
+        """Prepare and recheck all six R010 rows through ONE shared service.
+
+        SOURCE-ONLY; this is not a public Exec route, permission, T1 Grant,
+        runnable attempt, or authority to bypass current F1/NativeLauncher.
+        """
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if (self.settings.schema_version != 2
+                    or self._closing or self._closed
+                    or self._exec_state is None or self._lbe_owner is None):
+                raise GatewayError(
+                    "runner_unavailable", "R010 shared service not eligible.")
+            self._exec_state.require_healthy()
+            if name in self._exec_active:
+                raise GatewayError("busy", "R010 Workspace Exec slot is occupied.")
+            self._active_operations += 1
+        try:
+            from .lbe_r010_six_service import (
+                R010SixSourceDenied, prepare_r010_service_six_source,
+            )
+            try:
+                return prepare_r010_service_six_source(
+                    service=self, ctx=ctx, timeout_seconds=timeout_seconds)
+            except R010SixSourceDenied:
+                raise GatewayError(
+                    "command_not_allowed", "R010 six-row source admission denied."
+                ) from None
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
+    def _prepare_d4_r003_fixture_candidate(
+        self, name: str, cwd: str, argv: list[str],
+        timeout_seconds: int = 60,
+    ):
+        """Service-origin selected first-party D4 input inspection, NO grant.
+
+        This internal source-read function does not open positive Exec,
+        bypass native Go/Pipenv denial, attest third-party loaded source or
+        allow a REST/MCP caller to provide an authorization capability.
+        A future independently approved product launch must recheck the
+        *same* input, actual runner and all remaining guards pre-Popen.
+        """
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if self.settings.schema_version != 2:
+                raise GatewayError(
+                    "exec_disabled", "D4 input qualification requires schema v2.")
+            if self._exec_state is None:
+                raise GatewayError(
+                    "exec_state_unavailable", "Exec durable state is unavailable.")
+            self._exec_state.require_healthy()
+            # Keep pinned Workspace and old-state owner handles live while
+            # inspecting first-party source bytes outside the lifecycle lock.
+            self._active_operations += 1
+        try:
+            from .lbe_plan import prepare_lbe_work_plan
+            from .lbe_product_fixture import (
+                D4FixtureDenied, check_d4_r003_fixture,
+            )
+
+            plan = prepare_lbe_work_plan(
+                ctx, cwd=cwd, argv=argv, timeout_seconds=timeout_seconds)
+            from .lbe_python_import_sources import (
+                D4PythonImportDenied, inspect_d4_python_first_party_import_sources,
+            )
+            try:
+                candidate = check_d4_r003_fixture(ctx, plan)
+                if candidate.plan.cwd in ("py-direct", "py-pipenv"):
+                    # Actual pinned first-party import edges are a bounded,
+                    # nonexecuting source observation. Third-party/sys.path
+                    # and dynamic import identities remain unqualified.
+                    imports = inspect_d4_python_first_party_import_sources(
+                        ctx, candidate)
+                    candidate = replace(candidate, python_import_sources=imports)
+                return candidate
+            except (D4FixtureDenied, D4PythonImportDenied):
+                raise GatewayError(
+                    "command_not_allowed",
+                    "D4 first-party fixture is not qualified for this plan.",
+                ) from None
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
+    def _prepare_d4_r003_attempt(
+        self, name: str, cwd: str, argv: list[str],
+        timeout_seconds: int = 60,
+    ):
+        """Source-only, one-use internal attempt; never an Exec grant.
+
+        This returns the same live service's first-party candidate and a
+        context-bound, atomic marker. The Worker verifies the marker again
+        just before reservation/launch. Neither this private method nor a
+        token can change the operative F1 or NativeLauncher Go/Pipenv DENY.
+        """
+        candidate = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        from .lbe_product_fixture import D4OneUseAttemptMarker
+
+        # get() rechecks service-closing state after source inspection.
+        return candidate, D4OneUseAttemptMarker(candidate, self.get(name))
+
+    def _inspect_d4_r003_staged_runtime(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, expected_hashes: dict[str, str],
+        expected_trees: dict[str, tuple[tuple[str, str | None], ...]] | None = None,
+        timeout_seconds: int = 60,
+    ):
+        """Actual internal staged-source selection, NO Go/Pipenv execution.
+
+        Build a strict first-party service plan, verify the existing v1
+        ExecStateStore and Workspace gates, then read the staged native
+        executable files and build a fresh, closed proposed environment.
+        This is an internal *source* step for a future runner bootstrap,
+        not a public REST/MCP API, owner test consent, full loaded-source
+        attestation or a way to activate F1 or the NativeLauncher.
+        """
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if self.settings.schema_version != 2:
+                raise GatewayError(
+                    "exec_disabled", "D4 stage requires schema v2.")
+            if self._exec_state is None:
+                raise GatewayError(
+                    "exec_state_unavailable", "Exec durable state unavailable.")
+            self._exec_state.require_healthy()
+            self._active_operations += 1
+        try:
+            from .lbe_runtime_source import (
+                D4RuntimeSourceDenied, inspect_d4_runtime_sources,
+            )
+
+            candidate = self._prepare_d4_r003_fixture_candidate(
+                name, cwd, argv, timeout_seconds=timeout_seconds)
+            try:
+                return inspect_d4_runtime_sources(
+                    ctx, candidate, private_root=private_root,
+                    expected_hashes=expected_hashes,
+                    expected_trees=expected_trees,
+                )
+            except D4RuntimeSourceDenied:
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 staged runtime source or environment unavailable.",
+                ) from None
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
+    def _prepare_d4_r003_staged_attempt(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, expected_hashes: dict[str, str],
+        expected_trees: dict[str, tuple[tuple[str, str | None], ...]] | None = None,
+        timeout_seconds: int = 60,
+    ):
+        """Bind actual staged source/env observations to a one-use Worker.
+
+        The internal source-only attempt remains non-authorizing. It must
+        recheck first-party and staged binaries, parent execution selectors,
+        and the constructed closed child environment after atomic attempt
+        consumption and before any possible child launch. Missing Runner
+        image, loaded-source closure, resource witness, owner approval and
+        operative F1 exception always leave Go/Pipenv native execution DENIED.
+        """
+        observed = self._inspect_d4_r003_staged_runtime(
+            name, cwd, argv, private_root=private_root,
+            expected_hashes=expected_hashes,
+            expected_trees=expected_trees,
+            timeout_seconds=timeout_seconds,
+        )
+        candidate = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        ctx = self.get(name)
+        from .lbe_product_fixture import D4OneUseAttemptMarker
+        from .lbe_runtime_source import (
+            D4RuntimeSourceDenied, D4StagedSourceRecheck,
+        )
+
+        try:
+            binding = D4StagedSourceRecheck(
+                ctx, candidate, private_root=private_root,
+                expected_hashes=expected_hashes, observed=observed,
+                expected_trees=expected_trees)
+            marker = D4OneUseAttemptMarker(
+                candidate, ctx, staged_source=binding)
+        except D4RuntimeSourceDenied:
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 staged source recheck binding unavailable.",
+            ) from None
+        return candidate, marker, observed
+
+    def _prepare_d4_r003_native_recipe(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, expected_hashes: dict[str, str],
+        expected_trees: dict[str, tuple[tuple[str, str | None], ...]],
+        timeout_seconds: int = 60,
+    ):
+        """Real internal product command selection; no native execution.
+
+        Binds an exact six-command fixture to a source-only absolute
+        executable, working directory, canonical output and constructed
+        private child environment. The returned recipe cannot be passed to
+        a public API or be treated as a D0/F1/NativeLauncher grant.
+        """
+        candidate, marker, observed = self._prepare_d4_r003_staged_attempt(
+            name, cwd, argv, private_root=private_root,
+            expected_hashes=expected_hashes,
+            expected_trees=expected_trees,
+            timeout_seconds=timeout_seconds,
+        )
+        from .lbe_launch_recipe import (
+            D4NativeRecipeDenied, prepare_d4_native_launch_recipe,
+        )
+
+        try:
+            recipe = prepare_d4_native_launch_recipe(
+                self.get(name), candidate, observed, private_root=private_root)
+        except D4NativeRecipeDenied:
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 native source-only recipe is unavailable.",
+            ) from None
+        return candidate, marker, observed, recipe
+
+    def _prepare_d4_r003_runner_preflight(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, expected_hashes: dict[str, str],
+        expected_trees: dict[str, tuple[tuple[str, str | None], ...]],
+        timeout_seconds: int = 60,
+    ):
+        """Observe actual host source identity without native T1 qualification.
+
+        This continues the real v2 WorkspaceService product path after old
+        owner.lock/ExecStateStore checks, the six-command recipe and one-use
+        Worker source binding. Real kernel/UID/root inode and per-process
+        rlimits are inspected, but the *whole descendant* CPU/RAM domain,
+        immutable GitHub runner image, owner T1 consent and loaded source
+        are NOT proved; an ordinary public apply and NativeLauncher DENY.
+        """
+        candidate, marker, observed, recipe = (
+            self._prepare_d4_r003_native_recipe(
+                name, cwd, argv, private_root=private_root,
+                expected_hashes=expected_hashes,
+                expected_trees=expected_trees,
+                timeout_seconds=timeout_seconds,
+            ))
+        from .lbe_runner_preflight import (
+            D4RunnerProbeDenied, D4RunnerSourceRecheck,
+            observe_d4_runner_preflight,
+        )
+        from .lbe_product_fixture import D4FixtureDenied
+        from .lbe_macos_runner import (
+            D4MacOSRunnerDenied, D4MacOSRunnerLaunchBoundary,
+        )
+
+        try:
+            ctx = self.get(name)
+            runner = observe_d4_runner_preflight(
+                ctx, recipe, private_root=private_root)
+            bound = D4RunnerSourceRecheck(
+                ctx, candidate.plan, recipe, runner, private_root=private_root)
+            marker.attach_runner_source(bound)
+            # The real Worker-facing macOS Runner adapter is created from
+            # the same service-owned ctx/plan/recipe/live host observation.
+            # It remains a SOURCE/T0 launch-denial boundary until a separate
+            # physical CPU/RAM domain, exact owner T1 grant and operative
+            # F1/D0 exception are independently approved and implemented.
+            launch_boundary = D4MacOSRunnerLaunchBoundary(
+                ctx, candidate.plan, recipe, runner,
+                private_root=private_root)
+            marker.attach_macos_runner_boundary(launch_boundary)
+        except (D4RunnerProbeDenied, D4FixtureDenied,
+                D4MacOSRunnerDenied):
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 trusted host resource/source preflight unavailable.",
+            ) from None
+        return candidate, marker, observed, recipe, runner
+
+    @staticmethod
+    def _run_d4_r003_bound_source_only_worker(
+        ctx: WorkspaceContext, owner: DirectChildOwner, name: str,
+        candidate: Any, marker: Any, *,
+        cancelled: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        """Run a service-owned one-use Runner under an already-held lease.
+
+        This is shared by pre-staged and operator-assembled private sources.
+        No client/request token may choose its launcher. The existing
+        macOS Runner *always* denies native PRODUCT_T1 without a separately
+        qualified physical resource domain and operative authority.
+        """
+        from .lbe_product_fixture import D4OneUseAttemptMarker
+        from .lbe_macos_runner import (
+            D4MacOSRunnerDenied, D4MacOSRunnerLaunchBoundary,
+        )
+        from .lbe_worker import LbeWorker, LbeWorkerError
+
+        # Product code, not a caller, chooses the exact service-bound
+        # launch callback. No alternate launcher or temporary owner can
+        # borrow this source and native-denial witness.
+        if (type(marker) is not D4OneUseAttemptMarker
+                or marker._ctx is not ctx
+                or marker._candidate is not candidate):
+            raise GatewayError(
+                "runner_unavailable", "Service Runner marker missing.")
+        boundary = marker._macos_boundary
+        if type(boundary) is not D4MacOSRunnerLaunchBoundary:
+            raise GatewayError(
+                "runner_unavailable", "Service Runner binding missing.")
+        try:
+            boundary.check_binding(ctx, candidate.plan)
+        except D4MacOSRunnerDenied:
+            raise GatewayError(
+                "runner_unavailable", "Service Runner identity drift.") from None
+        try:
+            result = LbeWorker(
+                owner, launcher=boundary.launch,
+            ).run(candidate.plan, cancelled=cancelled,
+                  product_attempt=marker)
+        except LbeWorkerError as exc:
+            raise GatewayError(
+                exc.code, "D4 source-only Worker did not complete safely.",
+                details={
+                    "process_may_be_running": exc.process_may_be_running,
+                },
+            ) from None
+        return {**result, "workspace": name}
+
+    def _exercise_d4_r003_source_only_worker(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, expected_hashes: dict[str, str],
+        expected_trees: dict[str, tuple[tuple[str, str | None], ...]],
+        timeout_seconds: int = 60,
+        cancelled: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        """Service-owned source -> Worker -> macOS Runner, always NO CHILD.
+
+        This real internal product call chain is never registered as an
+        HTTP/MCP adapter. It shares the synchronous Workspace request lease,
+        historical owner.lock/ExecStateStore denial, one-use source marker and
+        the service's actual DirectChildOwner. Unlike a fake test launcher,
+        it invokes ONLY the already hard-denying bound macOS Runner method.
+        Neither this internal entrypoint nor supplied SHA bytes can authorize
+        PRODUCT_T1, lift public F1/D0 or prove a whole-descendant OS domain.
+        """
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if self.settings.schema_version != 2:
+                raise GatewayError(
+                    "exec_disabled", "D4 source-only Worker requires schema v2.")
+            if self._exec_state is None:
+                raise GatewayError(
+                    "exec_state_unavailable", "Exec durable state unavailable.")
+            self._exec_state.require_healthy()
+            if cancelled is not None and type(cancelled) is not threading.Event:
+                raise GatewayError(
+                    "invalid_argument", "Invalid internal cancellation token.")
+            if cancelled is not None and cancelled.is_set():
+                raise GatewayError(
+                    "waiter_disconnected", "Request was cancelled before source preparation.")
+            if name in self._exec_active or len(self._exec_active) >= 4:
+                raise GatewayError(
+                    "busy", "A controlled command already occupies this slot.")
+            owner = self._lbe_owner
+            if owner is None:
+                raise GatewayError(
+                    "exec_state_unavailable", "D4 original-child owner missing.")
+            self._exec_active.add(name)
+            self._active_operations += 1
+        try:
+            # The Worker-serving path must pass the existing strict selected
+            # ARM64 toolchain/interpreter loader-set check; the lower-level
+            # host preflight remains a nonauthorizing observation interface.
+            candidate, marker, _source, _recipe, _host, _loader_set = (
+                self._prepare_d4_r003_selected_loader_set(
+                    name, cwd, argv, private_root=private_root,
+                    expected_hashes=expected_hashes,
+                    expected_trees=expected_trees,
+                    timeout_seconds=timeout_seconds))
+            return self._run_d4_r003_bound_source_only_worker(
+                ctx, owner, name, candidate, marker, cancelled=cancelled)
+        finally:
+            with self._lifecycle:
+                self._exec_active.remove(name)
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
+    def _exercise_d4_r003_assembled_source_only_worker(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, provisioner_root: str,
+        staged_manifests: dict[str, tuple[tuple[str, str | None], ...]],
+        venv_manifest: tuple[tuple[str, str | None], ...] | None = None,
+        expected_source_identities: dict[str, str] | None = None,
+        expected_venv_identity_sha256: str | None = None,
+        require_go_p007_stage_source: bool = False,
+        expected_venv_record_distributions: tuple[tuple[str, str], ...] | None = None,
+        host_source_root: str | None = None,
+        host_source_expected: tuple[tuple[str, str], ...] | None = None,
+        timeout_seconds: int = 60,
+        cancelled: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        """Run the complete operator-provisioner -> private Runner -> Worker path.
+
+        This actual private WorkspaceService orchestration closes the gap
+        between source assembly and a service-owned original-child attempt.
+        It acquires the same old-state/Workspace/one-per-workspace request
+        lease as the pre-staged Worker, stages and rechecks selected source,
+        binds the full ARM64 loader set plus private dylib graph, then
+        invokes ONLY the Runner's hard-denying callback. No positive F1/D0
+        grant, child launch, T1, or client-visible execution interface.
+        Failed staging remains a nonreusable private source candidate.
+        """
+        with self._lifecycle:
+            ctx = self.require_exec(name)
+            if self.settings.schema_version != 2:
+                raise GatewayError(
+                    "exec_disabled", "D4 assembly requires schema v2.")
+            if self._exec_state is None:
+                raise GatewayError(
+                    "exec_state_unavailable", "Exec durable state unavailable.")
+            self._exec_state.require_healthy()
+            if cancelled is not None and type(cancelled) is not threading.Event:
+                raise GatewayError(
+                    "invalid_argument", "Invalid internal cancellation token.")
+            if cancelled is not None and cancelled.is_set():
+                raise GatewayError(
+                    "waiter_disconnected", "Request cancelled before source staging.")
+            if name in self._exec_active or len(self._exec_active) >= 4:
+                raise GatewayError(
+                    "busy", "A controlled command already occupies this slot.")
+            owner = self._lbe_owner
+            if owner is None:
+                raise GatewayError(
+                    "exec_state_unavailable", "D4 original-child owner missing.")
+            self._exec_active.add(name)
+            self._active_operations += 1
+        try:
+            # A selected-host source set may be requested ONLY as an exact
+            # pair, never pieced together from client data/default digests.
+            # These bytes do NOT attest the actual boot image or dynamic
+            # runtime loader closure and will not grant native execution.
+            if ((host_source_root is None) != (host_source_expected is None)):
+                raise GatewayError(
+                    "runner_unavailable", "D4 host source binding incomplete.")
+            # An independently inspected operator source identity is
+            # required even for this NONOPERATIVE path. Matching bytes
+            # are not themselves an owner grant or loader trust evidence.
+            if expected_source_identities is None:
+                raise GatewayError(
+                    "runner_unavailable", "D4 operator source identity missing.")
+            if (venv_manifest is not None
+                    and expected_venv_identity_sha256 is None):
+                raise GatewayError(
+                    "runner_unavailable", "D4 virtualenv source identity missing.")
+            prepared = self._assemble_d4_r003_source_only_runner(
+                name, cwd, argv, private_root=private_root,
+                provisioner_root=provisioner_root,
+                staged_manifests=staged_manifests,
+                venv_manifest=venv_manifest,
+                expected_source_identities=expected_source_identities,
+                expected_venv_identity_sha256=expected_venv_identity_sha256,
+                require_go_p007_stage_source=require_go_p007_stage_source,
+                expected_venv_record_distributions=(
+                    expected_venv_record_distributions),
+                timeout_seconds=timeout_seconds,
+            )
+            candidate, marker = prepared[0], prepared[1]
+            # These TWO independent static source rechecks must belong to
+            # this exact Worker marker, never a bare host preflight.
+            if marker._macho_set is None or marker._dylib is None:
+                raise GatewayError(
+                    "runner_unavailable", "D4 assembled loader graph missing.")
+            if host_source_root is not None:
+                from .lbe_hosted_source_probe import (
+                    D4HostedSourceDenied, D4HostedSelectedSourceRecheck,
+                )
+                from .lbe_product_fixture import D4FixtureDenied
+                try:
+                    marker.attach_host_selected_source(
+                        D4HostedSelectedSourceRecheck(
+                            source_root=host_source_root,
+                            expected=host_source_expected))
+                except (D4HostedSourceDenied, D4FixtureDenied):
+                    raise GatewayError(
+                        "runner_unavailable",
+                        "D4 selected-host file source cannot be bound.") from None
+            return self._run_d4_r003_bound_source_only_worker(
+                ctx, owner, name, candidate, marker, cancelled=cancelled)
+        finally:
+            with self._lifecycle:
+                self._exec_active.remove(name)
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
+    def _stage_d4_r003_operator_source(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, provisioner_root: str, kind: str,
+        expected: tuple[tuple[str, str | None], ...],
+        expected_source_identity_sha256: str | None = None,
+        timeout_seconds: int = 60,
+    ):
+        """Materialize source from a separate owner-controlled provisioner.
+
+        This is internal PRODUCT source preparation: the reviewed provisioner
+        must supply exact staged source digests outside the private runner.
+        It requires the existing v2 Workspace scope/owner.lock/ExecStateStore
+        and canonical six-command fixture; it creates no native child and
+        grants no public Exec capability, no matter what digest is supplied.
+        """
+        candidate = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        allowed = (
+            {"go"} if candidate.plan.cwd == "go-project" else {"bin", "lib"}
+        )
+        if type(kind) is not str or kind not in allowed:
+            raise GatewayError(
+                "runner_unavailable", "Selected runtime staging kind denied.")
+        from .lbe_runtime_stage import (
+            D4RuntimeStageDenied, stage_d4_operator_runtime_tree,
+        )
+
+        try:
+            receipt = stage_d4_operator_runtime_tree(
+                private_root=private_root, provisioner_root=provisioner_root,
+                kind=kind, expected=expected,
+                expected_source_identity_sha256=expected_source_identity_sha256)
+        except D4RuntimeStageDenied:
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 private runtime staging unavailable.",
+            ) from None
+        # Staging has not promoted the original candidate to authority:
+        # re-read the real Workspace before returning selected bytes.
+        after = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        if (after.plan != candidate.plan
+                or after.source_sha256 != candidate.source_sha256
+                or after.source_identity != candidate.source_identity
+                or after.directory_identity != candidate.directory_identity):
+            raise GatewayError(
+                "runner_unavailable",
+                "First-party runtime changed during source staging.",
+            )
+        return receipt
+
+    def _observe_d4_r003_operator_provisioner(
+        self, name: str, cwd: str, argv: list[str], *,
+        provisioner_root: str,
+        expected_venv_record_distributions: tuple[tuple[str, str], ...] | None = None,
+        timeout_seconds: int = 60,
+    ):
+        """Observe complete operator source bytes for explicit later approval.
+
+        This is the real WorkspaceService six-command SOURCE-only workflow.
+        A generated manifest can be shown to an independent operator/reviewer,
+        but MUST NOT be automatically promoted into the separately reviewed
+        expected manifest accepted by _assemble_d4_r003_source_only_runner.
+        In particular, bytes cannot self-attest their trusted provisioner,
+        image, loaded-source closure, resources or owner T1 permission.
+        """
+        candidate = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        from .lbe_runtime_tree import (
+            D4RuntimeTreeDenied, observe_d4_operator_source_manifest,
+            observe_d4_pipenv_venv_manifest,
+        )
+        from .lbe_runtime_source import _canonical, D4RuntimeSourceDenied
+        from .lbe_pipenv_lock_sources import (
+            D4PipenvLockDenied, inspect_d4_pipenv_lock_sources,
+        )
+        from .lbe_go_import_sources import (
+            D4GoImportSourceDenied, inspect_d4_go_direct_import_sources,
+        )
+        from dataclasses import replace
+
+        kinds = (("go",) if candidate.plan.cwd == "go-project"
+                 else ("bin", "lib"))
+        if (expected_venv_record_distributions is not None
+                and candidate.plan.cwd != "py-pipenv"):
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 first-party Pipenv RECORD scope unavailable.")
+        try:
+            source = _canonical(provisioner_root, "operator provisioner")
+            workspace = _canonical(
+                str(self.get(name).gateway._root_path), "Workspace root")
+            if (source == workspace
+                    or source.startswith(workspace + "/")
+                    or workspace.startswith(source + "/")):
+                raise D4RuntimeSourceDenied(
+                    "operator provisioner overlaps Workspace")
+            observed = {
+                kind: observe_d4_operator_source_manifest(
+                    provisioner_root=source, kind=kind)
+                for kind in kinds
+            }
+            if candidate.plan.cwd == "py-pipenv":
+                # Unlike bin/lib, .venv belongs to the FIRST-PARTY
+                # Workspace, not the operator. A whole imported-source
+                # manifest is reviewable without import or execution.
+                observed["venv"] = observe_d4_pipenv_venv_manifest(
+                    project_root=workspace + "/py-pipenv",
+                    expected_record_distributions=(
+                        expected_venv_record_distributions))
+                if expected_venv_record_distributions is not None:
+                    # Lock default/develop requirements must agree with
+                    # the separately selected RECORD-installed site.
+                    lock_hash = dict(candidate.source_sha256)[
+                        "py-pipenv/Pipfile.lock"]
+                    matched_lock = inspect_d4_pipenv_lock_sources(
+                        project_root=workspace + "/py-pipenv",
+                        expected_lock_sha256=lock_hash,
+                        expected_pipfile_sha256=dict(candidate.source_sha256)[
+                            "py-pipenv/Pipfile"],
+                        expected_distributions=(
+                            expected_venv_record_distributions))
+                    observed["venv"] = replace(
+                        observed["venv"], pipenv_lock_sources=matched_lock)
+            if (candidate.plan.cwd == "go-project"
+                    and observed["go"].go_1_27_3_p007_stage_manifest_matched):
+                # Direct import selection supplements the full P007 stage.
+                # Neither source observation is a loaded/operating Go graph.
+                direct = inspect_d4_go_direct_import_sources(
+                    self.get(name), candidate,
+                    staged_go_manifest=observed["go"].proposed_manifest)
+                observed["go"] = replace(
+                    observed["go"], go_direct_import_sources=direct)
+        except (D4RuntimeTreeDenied, D4RuntimeSourceDenied,
+                D4PipenvLockDenied, D4GoImportSourceDenied, OSError):
+            raise GatewayError(
+                "runner_unavailable", "D4 operator source selection unavailable."
+            ) from None
+        # Source inspection must not retain a first-party Workspace snapshot
+        # across operator file reads without rechecking its live identity.
+        after = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        if (after.plan != candidate.plan
+                or after.source_sha256 != candidate.source_sha256
+                or after.source_identity != candidate.source_identity
+                or after.directory_identity != candidate.directory_identity):
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 Workspace source changed during operator observation.",
+            )
+        return observed
+
+    def _assemble_d4_r003_source_only_runner(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, provisioner_root: str,
+        staged_manifests: dict[str, tuple[tuple[str, str | None], ...]],
+        venv_manifest: tuple[tuple[str, str | None], ...] | None = None,
+        expected_source_identities: dict[str, str] | None = None,
+        expected_venv_identity_sha256: str | None = None,
+        require_go_p007_stage_source: bool = False,
+        expected_venv_record_distributions: tuple[tuple[str, str], ...] | None = None,
+        timeout_seconds: int = 60,
+    ):
+        """Assemble the real six-command private runtime, never launch it.
+
+        The separate owner-controlled provisioner supplies exactly the Go
+        toolchain or bin/lib source trees. This creates non-reusable private
+        staged directories and fresh HOME/TMP/caches, derives selected
+        executable hashes from the proven staged source set, then traverses
+        the same service-owned D4 recipe/one-use/Runner and selected native
+        Mach-O loader-set preflight. Non-Mach-O and wrong-architecture
+        toolchain binaries fail before any possible native execution.
+        Source manifests are NOT independent provider/image/owner attestation.
+        Any failure leaves partial bytes in the disposable private runner;
+        no rollback, unsafe path overwrite, native child or retry occurs.
+        """
+        candidate = self._prepare_d4_r003_fixture_candidate(
+            name, cwd, argv, timeout_seconds=timeout_seconds)
+        if candidate.plan.cwd == "go-project":
+            flavor, kinds = "go", ("go",)
+        elif candidate.plan.cwd == "py-pipenv":
+            flavor, kinds = "pipenv", ("bin", "lib")
+        else:
+            flavor, kinds = "python_direct", ("bin", "lib")
+        if (type(staged_manifests) is not dict
+                or any(type(k) is not str or type(v) is not tuple
+                       for k, v in staged_manifests.items())
+                or set(staged_manifests) != set(kinds)
+                or (flavor == "pipenv") != (type(venv_manifest) is tuple)
+                or (venv_manifest is not None
+                    and type(venv_manifest) is not tuple)):
+            raise GatewayError(
+                "runner_unavailable", "D4 source bundle selection is incomplete.")
+        # These IDs are expected from a separately inspected/reviewed
+        # operator-source snapshot. A caller-provided hash is NOT approval:
+        # it only prevents staging an unobserved inode tree with matching
+        # contents/modes. Validate complete kind set before creating files.
+        if (expected_source_identities is not None
+                and (type(expected_source_identities) is not dict
+                     or set(expected_source_identities) != set(kinds)
+                     or any(type(value) is not str or len(value) != 64
+                            or value == "0" * 64
+                            or any(ch not in "0123456789abcdef"
+                                   for ch in value)
+                            for value in expected_source_identities.values()))):
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 operator source identity selection is incomplete.")
+        # When an owner explicitly requires the PR101 P007 complete Go
+        # release SOURCE candidate, fail before copying anything unless the
+        # FULL 15657-file sorted SHA-prefixed manifest matches the immutable
+        # Go 1.27.3 stage pin. A hash of only go/compile/link is insufficient.
+        # The additional caller-provided source-tree identity catches
+        # subsequent drift but does NOT attest independent approval or origin.
+        # This is a SOURCE-only opt-in, not a NativeLauncher/F1 exception.
+        if type(require_go_p007_stage_source) is not bool:
+            raise GatewayError(
+                "runner_unavailable", "D4 Go source profile selection invalid.")
+        if require_go_p007_stage_source:
+            if flavor != "go" or expected_source_identities is None:
+                raise GatewayError(
+                    "runner_unavailable", "D4 complete Go source not selected.")
+            from .lbe_runtime_tree import (
+                _d4_p007_go_stage_matches, D4RuntimeTreeDenied,
+            )
+            try:
+                matched = _d4_p007_go_stage_matches(staged_manifests["go"])
+            except D4RuntimeTreeDenied:
+                matched = False
+            if not matched:
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 operator Go source does not match pinned full release.")
+            from .lbe_go_import_sources import (
+                D4GoImportSourceDenied, inspect_d4_go_direct_import_sources,
+            )
+            try:
+                selected_go_imports = inspect_d4_go_direct_import_sources(
+                    self.get(name), candidate,
+                    staged_go_manifest=staged_manifests["go"])
+            except (D4GoImportSourceDenied, OSError):
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 Go imported source set not qualified.") from None
+
+        # The reviewed first-party Pipenv .venv tree is distinct from
+        # operator-owned bin/lib. Its complete identity is checked before
+        # materializing any source and again after materialization. Even a
+        # matching identity is NOT imported-source attestation or T1 consent.
+        if (expected_venv_identity_sha256 is not None
+                and (flavor != "pipenv"
+                     or type(expected_venv_identity_sha256) is not str
+                     or len(expected_venv_identity_sha256) != 64
+                     or expected_venv_identity_sha256 == "0" * 64
+                     or any(ch not in "0123456789abcdef"
+                            for ch in expected_venv_identity_sha256))):
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 first-party virtualenv identity selection is incomplete.")
+
+        # RECORD checks are a SOURCE-only installed-file admission gate.
+        # An independently selected exact distribution list is mandatory;
+        # RECORD itself is not publisher/source authenticity or import closure.
+        # Validate all shape/role prerequisites BEFORE any staging directories.
+        if (expected_venv_record_distributions is not None
+                and (flavor != "pipenv"
+                     or expected_venv_identity_sha256 is None
+                     or venv_manifest is None)):
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 installed virtualenv record selection incomplete.")
+
+        def check_venv_identity() -> None:
+            if expected_venv_identity_sha256 is None:
+                return
+            from .lbe_runtime_tree import (
+                D4RuntimeTreeDenied, inspect_d4_closed_staged_tree,
+            )
+            try:
+                project = str(self.get(name).gateway._root_path) + "/py-pipenv"
+                seen = inspect_d4_closed_staged_tree(
+                    private_root=private_root,
+                    staged_root=project + "/.venv",
+                    expected=venv_manifest,
+                )
+            except (D4RuntimeTreeDenied, OSError):
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 private virtualenv source not qualified.") from None
+            if seen.observed_identity_sha256 != expected_venv_identity_sha256:
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 private virtualenv source identity changed.")
+
+        def check_venv_records() -> None:
+            if expected_venv_record_distributions is None:
+                return
+            from .lbe_runtime_tree import (
+                D4RuntimeTreeDenied, inspect_d4_pipenv_installed_record_sources,
+            )
+            from .lbe_pipenv_lock_sources import (
+                D4PipenvLockDenied, inspect_d4_pipenv_lock_sources,
+            )
+            try:
+                project = str(self.get(name).gateway._root_path) + "/py-pipenv"
+                observed = inspect_d4_pipenv_installed_record_sources(
+                    project_root=project,
+                    expected_venv_manifest=venv_manifest,
+                    expected_distributions=expected_venv_record_distributions,
+                )
+                lock_hash = dict(candidate.source_sha256)[
+                    "py-pipenv/Pipfile.lock"]
+                locked = inspect_d4_pipenv_lock_sources(
+                    project_root=project,
+                    expected_lock_sha256=lock_hash,
+                    expected_pipfile_sha256=dict(candidate.source_sha256)[
+                        "py-pipenv/Pipfile"],
+                    expected_distributions=expected_venv_record_distributions,
+                )
+                if locked.selected_installed_distributions != observed.distributions:
+                    raise D4PipenvLockDenied("Pipenv lock and site selection diverged")
+            except (D4RuntimeTreeDenied, D4PipenvLockDenied, OSError):
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 first-party Pipenv installed source RECORD incomplete."
+                ) from None
+            if (observed.venv_identity_sha256
+                    != expected_venv_identity_sha256):
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 first-party Pipenv installed source tree changed.")
+
+        check_venv_identity()
+        check_venv_records()
+        from .lbe_runtime_stage import (
+            D4RuntimeStageDenied, create_d4_fresh_runner_scratch,
+        )
+
+        stage_receipts = []
+        for kind in kinds:
+            stage_receipts.append(self._stage_d4_r003_operator_source(
+                name, cwd, argv,
+                private_root=private_root,
+                provisioner_root=provisioner_root,
+                kind=kind, expected=staged_manifests[kind],
+                expected_source_identity_sha256=(
+                    expected_source_identities[kind]
+                    if expected_source_identities is not None else None),
+                timeout_seconds=timeout_seconds))
+        # Bin/lib or Go staging may take time. The pinned first-party venv
+        # identity MUST still match before preparing any child environment.
+        check_venv_identity()
+        check_venv_records()
+        try:
+            scratch = create_d4_fresh_runner_scratch(
+                private_root=private_root, kind=flavor)
+        except D4RuntimeStageDenied:
+            raise GatewayError(
+                "runner_unavailable", "D4 fresh runtime scratch unavailable."
+            ) from None
+        chosen = {}
+        for kind in kinds:
+            # Stage has already validated the exact source manifest. A
+            # separate caller-provided digest cannot silently replace the
+            # source result or create a trusted execution grant.
+            chosen[kind] = dict(staged_manifests[kind])
+        selected = dict(candidate.source_sha256)
+        if flavor == "go":
+            expected_hashes = {
+                "go": chosen["go"].get("bin/go"),
+                "compile": chosen["go"].get("pkg/tool/darwin_arm64/compile"),
+                "link": chosen["go"].get("pkg/tool/darwin_arm64/link"),
+            }
+        elif flavor == "pipenv":
+            expected_hashes = {
+                "Pipfile": selected.get("py-pipenv/Pipfile"),
+                "Pipfile.lock": selected.get("py-pipenv/Pipfile.lock"),
+                "pyvenv.cfg": selected.get("py-pipenv/.venv/pyvenv.cfg"),
+                "python": selected.get("py-pipenv/.venv/bin/python"),
+                "pipenv": chosen["bin"].get("pipenv"),
+            }
+        else:
+            expected_hashes = {"python": chosen["bin"].get("python")}
+        if any(type(v) is not str or len(v) != 64
+               for v in expected_hashes.values()):
+            raise GatewayError(
+                "runner_unavailable", "D4 staged executable selection incomplete.")
+        expected_trees = dict(staged_manifests)
+        expected_trees.update({name: (("", None),) for name in scratch})
+        if flavor == "pipenv":
+            expected_trees["venv"] = venv_manifest
+        # The primary product source preparation NOW requires the same
+        # actual pinned ARM64 image/header and one-use loader-set recheck as
+        # the separate source inspector, for every selected Go compiler/linker
+        # and the exact selected Python interpreter. Static declarations do
+        # not establish dyld resolution or native execution authorization.
+        prepared = self._prepare_d4_r003_selected_loader_set(
+            name, cwd, argv, private_root=private_root,
+            expected_hashes=expected_hashes,
+            expected_trees=expected_trees,
+            timeout_seconds=timeout_seconds,
+        )
+        current = prepared[0]
+        if (current.plan != candidate.plan
+                or current.source_sha256 != candidate.source_sha256
+                or current.source_identity != candidate.source_identity
+                or current.directory_identity != candidate.directory_identity):
+            raise GatewayError(
+                "runner_unavailable", "D4 fixture drifted during assembly.")
+        # Runtime source trees are already closed against these exact bytes.
+        # Resolve only PRIVATE Mach-O library references actually present in
+        # the operator-staged Go/lib directories; a synthetic @rpath or
+        # unpinned host/system library is an explicit unqualified gap, NOT
+        # independent dyld loading proof or execution permission.
+        private_dylibs = tuple(sorted(
+            (kind + "/" + leaf, digest)
+            for kind, rows in staged_manifests.items()
+            for leaf, digest in rows
+            if type(leaf) is str and leaf.endswith(".dylib")
+            and type(digest) is str
+        ))
+        from .lbe_dylib_sources import (
+            D4PrivateDylibDenied, D4PrivateDylibSourceRecheck,
+            inspect_d4_private_dylib_candidates,
+        )
+        from .lbe_product_fixture import D4FixtureDenied
+
+        try:
+            graph = inspect_d4_private_dylib_candidates(
+                prepared[5], private_root=private_root,
+                expected_private_dylibs=private_dylibs)
+            ctx = self.get(name)
+            binding = D4PrivateDylibSourceRecheck(
+                ctx, current.plan, prepared[5], graph,
+                private_root=private_root,
+                expected_private_dylibs=private_dylibs)
+            prepared[1].attach_private_dylib_sources(binding)
+        except (D4PrivateDylibDenied, D4FixtureDenied):
+            raise GatewayError(
+                "runner_unavailable", "D4 private native dylib source unqualified."
+            ) from None
+        check_venv_identity()
+        check_venv_records()
+        if require_go_p007_stage_source:
+            try:
+                rechecked_go_imports = inspect_d4_go_direct_import_sources(
+                    self.get(name), candidate,
+                    staged_go_manifest=staged_manifests["go"])
+            except (D4GoImportSourceDenied, OSError):
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 Go imported source changed during assembly.") from None
+            if rechecked_go_imports != selected_go_imports:
+                raise GatewayError(
+                    "runner_unavailable",
+                    "D4 Go imported source selection drifted.")
+        return (*prepared, graph, tuple(stage_receipts))
+
+    def _prepare_d4_r003_selected_macho_source(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, expected_hashes: dict[str, str],
+        expected_trees: dict[str, tuple[tuple[str, str | None], ...]],
+        timeout_seconds: int = 60,
+    ):
+        """Inspect actual Darwin ARM64 selected loader, without native T1.
+
+        This extends the service-owned six-command source -> runner inspection
+        with bounded Mach-O LC_LOAD_DYLIB/LC_RPATH evidence, and chooses the
+        pinned Pipenv shebang interpreter rather than mistaking the script
+        for the loaded Python image. The physical OS child resource domain,
+        actual dyld closure, GitHub image and owner grant remain NOT PROVEN.
+        The ordinary public Exec apply gate is untouched and denies.
+        """
+        prepared = self._prepare_d4_r003_runner_preflight(
+            name, cwd, argv, private_root=private_root,
+            expected_hashes=expected_hashes,
+            expected_trees=expected_trees,
+            timeout_seconds=timeout_seconds,
+        )
+        from .lbe_macho_loader import (
+            D4MachOLoaderDenied, select_d4_macho_loader_source,
+        )
+
+        try:
+            loader = select_d4_macho_loader_source(
+                prepared[2], prepared[3], private_root=private_root)
+        except D4MachOLoaderDenied:
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 ARM64 native loader declarations are not qualified.",
+            ) from None
+        return (*prepared, loader)
+
+    def _prepare_d4_r003_selected_loader_set(
+        self, name: str, cwd: str, argv: list[str], *,
+        private_root: str, expected_hashes: dict[str, str],
+        expected_trees: dict[str, tuple[tuple[str, str | None], ...]],
+        timeout_seconds: int = 60,
+    ):
+        """Service-owned native binary set inspection and one-use recheck.
+
+        Go selects actual go + compile + link, Python Direct selects its
+        private interpreter, and Pipenv selects the private interpreter
+        targeted by the verified #! script. No imports/commands are run:
+        direct dyld declarations still cannot prove the real loaded graph.
+        The snapshot recheck is attached only to the internal one-use
+        Worker source marker and adds no positive Exec authority.
+        """
+        candidate, marker, observed, recipe, runner = (
+            self._prepare_d4_r003_runner_preflight(
+                name, cwd, argv, private_root=private_root,
+                expected_hashes=expected_hashes,
+                expected_trees=expected_trees,
+                timeout_seconds=timeout_seconds,
+            ))
+        from .lbe_native_loader_set import (
+            D4NativeLoaderSetDenied, D4NativeLoaderSetRecheck,
+            inspect_d4_native_loader_set,
+        )
+        from .lbe_product_fixture import D4FixtureDenied
+
+        try:
+            loader_set = inspect_d4_native_loader_set(
+                observed, recipe, private_root=private_root)
+            bound = D4NativeLoaderSetRecheck(
+                self.get(name), candidate.plan, observed, recipe,
+                loader_set, private_root=private_root)
+            marker.attach_macho_loader_set(bound)
+        except (D4NativeLoaderSetDenied, D4FixtureDenied):
+            raise GatewayError(
+                "runner_unavailable",
+                "D4 selected ARM64 native binary source set unavailable.",
+            ) from None
+        return candidate, marker, observed, recipe, runner, loader_set
 
     def require_git(self, name: str, command: str) -> WorkspaceContext:
         """Independent authorization, always repeated in sync Worker."""
@@ -513,17 +2343,60 @@ class WorkspaceService:
             return any(ctx.settings.allow_write for ctx in self._workspaces.values())
 
     def list_workspaces(self) -> dict[str, Any]:
+        """Configured grants and actual v2 preview/apply availability differ.
+
+        An exec.paths grant permits preview, not positive F1 launch. Keep
+        the old configured exec field but expose each v2 Workspace's
+        nonspawning preview and actual positive admission status separately.
+        The result is status, never an execution token or new authority.
+        """
         with self._lifecycle:
-            return {"workspaces": [
-                {"id": ctx.name, "read": True, "write": ctx.settings.allow_write,
-                 "exec": bool(self.settings.exec_enabled and ctx.settings.exec_enabled),
-                  "local_skills": False,
-                 "sensitive_content": ctx.gateway.sensitive_audit.status(),
-                 "git": {"enabled": bool(self.settings.git_enabled
-                                         and ctx.settings.git_allowed_commands),
-                         "allowed_commands": list(ctx.settings.git_allowed_commands)}}
-                for ctx in self._workspaces.values()
-            ]}
+            v2 = self.settings.schema_version == 2
+            old_state_healthy = bool(
+                v2 and self._exec_state is not None
+                and self._exec_state.durability_state == "healthy")
+            preview_capacity = bool(
+                old_state_healthy and not self._closing
+                and len(self._exec_active) < 4)
+            pending_plan = (
+                self._r006_pending[0].plan
+                if self._r006_pending is not None else None)
+            result = []
+            for ctx in self._workspaces.values():
+                granted = bool(self.settings.exec_enabled
+                               and ctx.settings.exec_enabled)
+                preview = bool(
+                    granted and preview_capacity
+                    and ctx.name not in self._exec_active)
+                mvp_configured = bool(
+                    v2 and self.settings.exec_apply_enabled
+                    and ctx.settings.exec_apply_enabled
+                    and ctx.settings.exec_paths)
+                apply = bool(
+                    preview
+                    and (self._lbe_positive_authorized
+                         or (pending_plan is not None
+                             and pending_plan.workspace == ctx.name)
+                         or (mvp_configured and self._mvp_tools is not None))
+                    and self._lbe_owner is not None
+                    and self._lbe_owner.can_admit_any((ctx.name,)))
+                result.append({
+                    "id": ctx.name, "read": True,
+                    "write": ctx.settings.allow_write,
+                    "exec": granted,
+                    # Never reinterpret existing v1 grants or response shape.
+                    **({"exec_preview_available": preview,
+                        "exec_apply_configured": mvp_configured,
+                        "exec_apply_available": apply} if v2 else {}),
+                    "local_skills": False,
+                    "sensitive_content": ctx.gateway.sensitive_audit.status(),
+                    "git": {
+                        "enabled": bool(self.settings.git_enabled
+                                        and ctx.settings.git_allowed_commands),
+                        "allowed_commands": list(ctx.settings.git_allowed_commands),
+                    },
+                })
+            return {"workspaces": result}
 
     def info(self) -> dict[str, Any]:
         with self._lifecycle:
@@ -552,14 +2425,61 @@ class WorkspaceService:
                 and not self._closing
                 and not lbe_state["unavailable"]
                 and not lbe_state["closing"])
+            pending_plan = (
+                self._r006_pending[0].plan
+                if self._r006_pending is not None else None)
+            r006_one_shot_ready = bool(
+                v2_state_healthy and pending_plan is not None
+                and pending_plan.workspace in eligible_names
+                and self._lbe_owner.can_admit_any(
+                    (pending_plan.workspace,)))
+            ordinary_positive_ready = bool(
+                v2_state_healthy and self._lbe_positive_authorized
+                and self._lbe_owner.can_admit_any(eligible_names))
+            mvp_configured = bool(
+                is_v2 and self.settings.exec_apply_enabled
+                and any(ctx.settings.exec_apply_enabled
+                        and ctx.settings.exec_paths
+                        for ctx in self._workspaces.values()))
+            mvp_names = tuple(
+                ctx.name for ctx in self._workspaces.values()
+                if (ctx.settings.exec_enabled
+                    and ctx.settings.exec_apply_enabled
+                    and ctx.name not in self._exec_active))
+            mvp_positive_ready = bool(
+                v2_state_healthy and mvp_configured
+                and self._mvp_tools is not None
+                and self._lbe_owner.can_admit_any(mvp_names))
             v2_available = bool(
-                v2_state_healthy and self._lbe_positive_authorized and
-                self._lbe_owner.can_admit_any(eligible_names))
+                ordinary_positive_ready or r006_one_shot_ready
+                or mvp_positive_ready)
+            # A healthy schema-v2 service may support an entirely
+            # nonspawning plan even though positive Exec remains F1-denied.
+            # Preview requests share the synchronous request slot gate, not
+            # the original-child lease; never imply native launch authority.
+            # Preview has no original-child lease and can remain usable
+            # after the native owner latches unavailable. Only healthy old
+            # durable state and free synchronous request slots are needed.
+            v2_preview_available = bool(
+                is_v2 and effective and durability == "healthy"
+                and not self._closing and eligible_names
+                and len(self._exec_active) < 4)
             return {"name": "Mac File Gateway", "version": "2.5.0", "mode": "multi",
                     "workspace_count": len(self._workspaces),
                     **({"config_schema_version": 2}
                        if self.settings.schema_version == 2 else {}),
-                    "read_only": not (self.any_write or self.any_git),
+                    # A paths-only v2 preview is read-only. A separately
+                    # qualified internal positive Exec capability is not:
+                    # its trusted child may mutate host state, even if its
+                    # capacity is temporarily occupied or its waiter lost.
+                    # This is STATUS reporting only, never an Exec grant.
+                    "read_only": not (
+                        self.any_write or self.any_git or
+                        (is_v2 and (
+                            self._lbe_positive_authorized
+                            or r006_one_shot_ready
+                            or (mvp_configured
+                                and self._mvp_tools is not None)))),
                     "file_read_only": not self.any_write, "path_base": ".",
                     "workspaces": self.list_workspaces()["workspaces"],
                     "exec_policy": {
@@ -572,10 +2492,19 @@ class WorkspaceService:
                            if self._lbe_owner is not None else {}),
                         "enabled": self.settings.exec_enabled,
                         "available": v2_available if is_v2 else False,
+                        **({"preview_available": v2_preview_available,
+                            "apply_configured": mvp_configured,
+                            "tool_selection_ready": (
+                                self._mvp_tools is not None),
+                            "supported_apply_commands": [
+                                "py-direct-pytest", "py-direct-compileall",
+                                "py-pipenv-pytest", "go-test", "go-vet",
+                                "go-build"],
+                           } if is_v2 else {}),
                         "completion_capability": (
-                            "best_effort" if (v2_state_healthy
-                                              and self._lbe_positive_authorized)
-                            else "none"),
+                            "best_effort" if v2_available else "none"),
+                        **({"r006_one_shot_ready": r006_one_shot_ready}
+                           if is_v2 else {}),
                         "adapter_exposed": self._exec_adapter_exposed,
                         "durability_state": durability,
                         "quarantined": durability == "quarantined",
@@ -583,6 +2512,19 @@ class WorkspaceService:
                         "max_concurrent_per_workspace": 1,
                         "max_concurrent_total": 4,
                         "dry_run_default": True,
+                        # Discovery is for NONSPAWNING validated commands only.
+                        # It is not an operative Exec grant and does not mean
+                        # the current owner/source/native gates have passed.
+                        **({"supported_preview_commands": [
+                            "pytest",
+                            "python -m pytest",
+                            "python -m compileall",
+                            "python <relative-script.py>",
+                            "go test ./...",
+                            "go vet ./...",
+                            "go build ./...",
+                            "go build -o <relative-output> ./package",
+                        ]} if is_v2 else {}),
                         "warning": (
                             "Best-effort Exec runs project code as the Gateway OS user; "
                             "direct-child exit, timeout or cancellation never proves "

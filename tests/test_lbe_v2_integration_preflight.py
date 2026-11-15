@@ -104,10 +104,12 @@ def test_full_config_refuses_wrong_schema_versions(scene, version):
 
 
 @pytest.mark.parametrize("bad", [
-    lambda c: c["server"].update(exec={"enabled": False}),
-    lambda c: c["server"].update(exec={"enabled": True}),
-    lambda c: c["workspaces"]["a"]["exec"].update(enabled=False),
-    lambda c: c["workspaces"]["a"]["exec"].update(enabled=True),
+    # DESIGN-002 explicitly ALLOWS strict Boolean opt-ins. Retain malformed
+    # type/unknown-field negatives rather than the obsolete no-switch rule.
+    lambda c: c["server"].update(exec={"enabled": 1}),
+    lambda c: c["server"].update(exec={"enabled": "yes"}),
+    lambda c: c["workspaces"]["a"]["exec"].update(enabled=1),
+    lambda c: c["workspaces"]["a"]["exec"].update(enabled=None),
     lambda c: c["workspaces"]["a"]["exec"].update(paths=["../b"]),
     lambda c: c["workspaces"]["a"]["exec"].update(paths=["/tmp"]),
     lambda c: c["workspaces"]["a"]["exec"].update(paths=["project", "Project"]),
@@ -161,7 +163,10 @@ def test_v2_missing_old_state_root_fails_without_auto_creation(scene):
             with pytest.raises(GatewayError) as exc:
                 svc.invoke_exec("a", "python-project", ["python", "hello.py"],
                                 dry_run=dry)
-            assert exc.value.code == "exec_state_unavailable"
+            # Design-002: disabled positive v2 opt-ins precede the old-state
+            # scan; nonspawning preview still reports missing old state.
+            assert exc.value.code == (
+                "exec_state_unavailable" if dry else "exec_disabled")
         assert svc.invoke("b", "read_file", "safe.txt", 1, 5)["workspace"] == "b"
         assert not (private / "exec-state").exists()
     finally:
@@ -210,7 +215,7 @@ def test_v2_existing_healthy_state_previews_and_refuses_invalid_apply(scene, mon
                 svc.invoke_exec("a", "python-project",
                                 ["python", "-c", "print('blocked')"],
                                 dry_run=False)
-            assert exc.value.code == "exec_cleanup_proof_required"
+            assert exc.value.code == "exec_disabled"
 
         with TestClient(create_multi_app(svc, enable_mcp=False),
                         base_url="http://127.0.0.1:8765") as client:
@@ -222,12 +227,72 @@ def test_v2_existing_healthy_state_previews_and_refuses_invalid_apply(scene, mon
             assert res.json()["executed"] is False
             failed = client.post("/run", json={
                 **body, "argv": ["go", "run", "./..."], "dry_run": False})
-            assert failed.status_code == 503
-            assert failed.json()["error"] == "exec_cleanup_proof_required"
+            assert failed.status_code == 403
+            assert failed.json()["error"] == "exec_disabled"
             info = client.get("/health").json()["exec_policy"]
             assert info["mode"] == "local_best_effort"
             assert info["available"] is False
         assert sorted(p.name for p in state.iterdir()) == before
+    finally:
+        svc.close()
+
+
+def test_r006_info_discloses_preview_separately_from_positive_apply(scene):
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        policy = svc.info()["exec_policy"]
+        assert policy["mode"] == "local_best_effort"
+        assert policy["enabled"] is True
+        assert policy["preview_available"] is True
+        assert policy["available"] is False
+        assert policy["completion_capability"] == "none"
+        with TestClient(create_multi_app(svc, enable_mcp=False),
+                        base_url="http://127.0.0.1:8765") as client:
+            assert client.get("/health").json()["exec_policy"] == svc.info()["exec_policy"]
+            assert client.get("/info").json()["exec_policy"] == svc.info()["exec_policy"]
+        # No native child: emulate a busy synchronous request lease.
+        with svc._lifecycle:
+            svc._exec_active.add("a")
+        assert svc.info()["exec_policy"]["preview_available"] is False
+        with svc._lifecycle:
+            svc._exec_active.remove("a")
+        assert svc.info()["exec_policy"]["preview_available"] is True
+    finally:
+        svc.close()
+
+
+def test_r006_owner_latch_does_not_hide_nonspawning_preview(scene):
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        # A stale native reaper/reader latch would prohibit new children,
+        # but the shared dry-run planning path does not create children.
+        assert svc._lbe_owner is not None
+        svc._lbe_owner._unavailable = True
+        assert svc.info()["exec_policy"]["owner_unavailable"] is True
+        assert svc.info()["exec_policy"]["available"] is False
+        assert svc.info()["exec_policy"]["preview_available"] is True
+        preview = svc.invoke_exec("a", "go-project", ["go", "test", "./..."])
+        assert preview["status"] == "preview"
+        assert preview["executed"] is False
+        with pytest.raises(GatewayError) as denied:
+            svc.invoke_exec("a", "go-project", ["go", "test", "./..."],
+                            dry_run=False)
+        assert denied.value.code == "exec_disabled"
+    finally:
+        svc.close()
+
+
+def test_r006_unhealthy_v2_info_does_not_claim_preview(scene):
+    a, b, _private, _runtime = scene
+    svc = service(scene, v2_config(a, b))
+    try:
+        policy = svc.info()["exec_policy"]
+        assert policy["preview_available"] is False
+        assert policy["available"] is False
     finally:
         svc.close()
 
@@ -467,8 +532,8 @@ def test_v2_python_invalid_worker_plan_is_sanitized_at_public_boundary(
             denied = client.post("/run", json={
                 "workspace": "a", "cwd": "default-project",
                 "argv": argv, "dry_run": False})
-            assert denied.status_code == 503
-            assert denied.json()["error"] == "exec_cleanup_proof_required"
+            assert denied.status_code == 403
+            assert denied.json()["error"] == "exec_disabled"
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
@@ -510,7 +575,7 @@ def test_v2_go_preview_is_direct_and_never_spawns(scene, monkeypatch, argv):
         with pytest.raises(GatewayError) as exc:
             svc.invoke_exec("a", "go-project", ["go", "run", "./..."],
                             dry_run=False)
-        assert exc.value.code == "exec_cleanup_proof_required"
+        assert exc.value.code == "exec_disabled"
     finally:
         svc.close()
 
@@ -579,8 +644,8 @@ def test_v2_go_test_vet_rest_preview_refuses_old_flag_bypass(scene, monkeypatch)
                     assert refused.json()["error"] == "command_not_allowed"
                     still_denied = client.post(
                         "/run", json={**bad, "dry_run": False})
-                    assert still_denied.status_code == 503
-                    assert still_denied.json()["error"] == "exec_cleanup_proof_required"
+                    assert still_denied.status_code == 403
+                    assert still_denied.json()["error"] == "exec_disabled"
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
         svc.close()
@@ -612,8 +677,8 @@ def test_v2_go_build_preview_rejects_linked_output(scene):
                 "workspace": "a", "cwd": "go-project",
                 "argv": ["go", "build", "-o", "alias/child", "./cmd/server"],
                 "dry_run": False})
-            assert denied.status_code == 503
-            assert denied.json()["error"] == "exec_cleanup_proof_required"
+            assert denied.status_code == 403
+            assert denied.json()["error"] == "exec_disabled"
     finally:
         svc.close()
 
@@ -655,7 +720,7 @@ def test_v2_go_build_output_denies_gateway_blocked_names_and_excludes(
                         ["go", "build", "-o", target, "./cmd/server"],
                         timeout_seconds=5, dry_run=dry)
                 assert denied.value.code == (
-                    "command_not_allowed" if dry else "exec_cleanup_proof_required")
+                    "command_not_allowed" if dry else "exec_disabled")
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
         assert svc._lbe_owner.snapshot()["unavailable"] is False
         assert not (a / "go-project" / target).exists()
@@ -673,6 +738,7 @@ def test_v1_public_policy_has_no_v2_keys(scene):
         assert "config_schema_version" not in info
         assert "mode" not in info["exec_policy"]
         assert "candidate_mode" not in info["exec_policy"]
+        assert "supported_preview_commands" not in info["exec_policy"]
     finally:
         svc.close()
 
@@ -722,8 +788,8 @@ def test_v2_owner_status_tracks_fake_child_and_refuses_busy_apply(scene):
             refused = client.post("/run", json={
                 "workspace": "a", "cwd": "go-project",
                 "argv": ["go", "build", "./..."], "dry_run": False})
-            assert refused.status_code == 503
-            assert refused.json()["error"] == "exec_cleanup_proof_required"
+            assert refused.status_code == 403
+            assert refused.json()["error"] == "exec_disabled"
         assert svc.invoke("b", "read_file", "safe.txt", 1, 5)["workspace"] == "b"
     finally:
         # Graceful close must not wait for or signal the simulated child.
@@ -802,7 +868,7 @@ def test_dormant_prepared_plans_use_real_v2_gateway_policies(scene, monkeypatch)
                 svc.invoke_exec(
                     "a", "go-project", ["go", "run", "./..."],
                     dry_run=False)
-            assert denied.value.code == "exec_cleanup_proof_required"
+            assert denied.value.code == "exec_disabled"
         assert svc.info()["exec_policy"]["available"] is False
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
     finally:
@@ -897,7 +963,7 @@ def test_v2_go_preview_and_future_dormant_plan_share_exact_values(scene, args):
         with pytest.raises(GatewayError) as error:
             svc.invoke_exec("a", "go-project", ["go", "run", "./..."],
                             dry_run=False)
-        assert error.value.code == "exec_cleanup_proof_required"
+        assert error.value.code == "exec_disabled"
         assert not (a / "go-project" / "bin" / "tool").exists()
     finally:
         svc.close()
@@ -999,7 +1065,7 @@ def test_v2_pipenv_runner_respects_workspace_excluded_pipfile(
                         "a", "python-project", ["python", "hello.py"],
                         timeout_seconds=5, dry_run=dry)
                 assert err.value.code == (
-                    "runner_unavailable" if dry else "exec_cleanup_proof_required")
+                    "runner_unavailable" if dry else "exec_disabled")
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
         assert svc._lbe_owner.snapshot()["unavailable"] is False
     finally:
@@ -1030,7 +1096,7 @@ def test_v2_pipenv_hardlinked_pipfile_denied_in_preview_and_real_preflight(
                         "a", "python-project", ["python", "hello.py"],
                         timeout_seconds=5, dry_run=dry)
                 assert error.value.code == (
-                    "runner_unavailable" if dry else "exec_cleanup_proof_required")
+                    "runner_unavailable" if dry else "exec_disabled")
         assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
         assert svc._lbe_owner.snapshot()["unavailable"] is False
     finally:
@@ -1069,3 +1135,1095 @@ def test_v2_go_output_symlink_inserted_after_preview_blocks_launcher(
         assert svc._lbe_owner.snapshot()["unavailable"] is False
     finally:
         svc.close()
+
+
+# D4: same live WorkspaceService, three entry surfaces, no actual Go/Pipenv
+# or other Exec child. Exact public preview and positive-denial truth table.
+@pytest.mark.parametrize("cwd,argv,selected_runner", [
+    ("python-project", ["python", "hello.py"], "pipenv"),
+    ("default-project", ["python", "-m", "pytest"], "direct"),
+    ("go-project", ["go", "test", "./..."], "direct"),
+    ("go-project", ["go", "vet", "./..."], "direct"),
+    ("go-project", ["go", "build", "-o=bin/app", "./cmd/app"], "direct"),
+])
+def test_d4_all_three_ingresses_same_plan_and_f1_denial_no_native(
+    scene, monkeypatch, cwd, argv, selected_runner,
+):
+    pytest.importorskip("mcp")
+    a, b, _private, _runtime = scene
+    (a / "go-project" / "bin").mkdir(exist_ok=True)
+    state = prime_existing_state(scene)
+    originals = sorted(p.name for p in state.iterdir())
+    svc = service(scene, v2_config(a, b))
+    def forbid(*_args, **_kwargs):
+        raise AssertionError("D4 nonoperative preflight must not Popen/signal")
+    args = {
+        "workspace": "a", "cwd": cwd, "argv": argv,
+        "timeout_seconds": 5, "dry_run": True,
+    }
+    hdr = {
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+    }
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(subprocess.Popen, "__init__", forbid)
+            m.setattr(os, "kill", forbid)
+            m.setattr(os, "killpg", forbid, raising=False)
+            direct = svc.invoke_exec("a", cwd, argv, timeout_seconds=5)
+            assert direct["status"] == "preview"
+            assert direct["executed"] is False
+            assert direct["runner"] == selected_runner
+            assert direct["planned_go_output"] == (
+                "go-project/bin/app"
+                if argv == ["go", "build", "-o=bin/app", "./cmd/app"]
+                else None
+            )
+            if cwd == "python-project":
+                import hashlib
+                expected_script = (a / cwd / "hello.py").read_bytes()
+                expected_pipfile = (a / cwd / "Pipfile").read_bytes()
+                assert direct["planned_script_sha256"] == (
+                    hashlib.sha256(expected_script).hexdigest())
+                assert direct["planned_pipfile_sha256"] == (
+                    hashlib.sha256(expected_pipfile).hexdigest())
+            else:
+                assert direct["planned_script_sha256"] is None
+                assert direct["planned_pipfile_sha256"] is None
+            assert direct["cleanup_proven"] is False
+            assert direct["full_descendant_tree_clean"] == "not_proven"
+            with TestClient(create_multi_app(svc),
+                            base_url="http://127.0.0.1:8765") as client:
+                rest = client.post("/run", json=args)
+                assert rest.status_code == 200, rest.text
+                assert rest.json() == direct
+                init = client.post("/mcp", headers=hdr, json={
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": {},
+                        "clientInfo": {"name": "d4-lbe-t0", "version": "1"},
+                    },
+                })
+                assert init.status_code == 200, init.text
+                note = client.post("/mcp", headers=hdr, json={
+                    "jsonrpc": "2.0", "method": "notifications/initialized",
+                })
+                assert note.status_code in (200, 202, 204)
+                preview = client.post("/mcp", headers=hdr, json={
+                    "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": {"name": "run_command", "arguments": args},
+                })
+                assert preview.status_code == 200, preview.text
+                assert preview.json()["result"]["structuredContent"] == direct
+                with pytest.raises(GatewayError) as error:
+                    svc.invoke_exec("a", cwd, argv, timeout_seconds=5,
+                                    dry_run=False)
+                assert error.value.code == "exec_disabled"
+                blocked = {**args, "dry_run": False}
+                rest_block = client.post("/run", json=blocked)
+                assert rest_block.status_code == 403
+                assert rest_block.json()["error"] == "exec_disabled"
+                mcp_block = client.post("/mcp", headers=hdr, json={
+                    "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                    "params": {"name": "run_command", "arguments": blocked},
+                })
+                assert mcp_block.status_code == 200, mcp_block.text
+                failed = mcp_block.json()["result"]
+                assert failed["isError"] is True
+                assert (failed["structuredContent"]["error"] ==
+                        "exec_disabled")
+                policies = [
+                    client.get("/info").json()["exec_policy"],
+                    client.get("/health").json()["exec_policy"],
+                ]
+                assert policies[0] == policies[1]
+                assert policies[0]["available"] is False
+                assert policies[0]["completion_capability"] == "none"
+                supported = policies[0]["supported_preview_commands"]
+                assert "go build ./..." in supported
+                assert "go build -o <relative-output> ./package" in supported
+                assert "python -m pytest" in supported
+                assert "python <relative-script.py>" in supported
+                assert policies[0]["available"] is False
+            assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+        assert sorted(p.name for p in state.iterdir()) == originals
+        assert not (a / "go-project" / "bin" / "app").exists()
+    finally:
+        svc.close()
+
+
+# D6 test-first RED: reject a forged internal LbeWorkPlan before invoking
+# caller-supplied equality hooks. Public F1 remains denied; no T1 is executed.
+@pytest.mark.parametrize("poisoned_field", [
+    "workspace", "cwd", "runner", "runner_project",
+    "requested_argv", "effective_argv", "planned_go_output",
+])
+def test_d6_internal_launcher_rejects_nonprimitive_plan_without_hooks(
+    scene, monkeypatch, poisoned_field,
+):
+    from dataclasses import replace
+    from gateway.lbe_native_launcher import make_trusted_lbe_launcher
+    from gateway.lbe_plan import prepare_lbe_work_plan
+    from gateway.lbe_worker import LbeNoChildStarted
+
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    hooks = []
+
+    class MaliciousComparator:
+        def __eq__(self, _other):
+            hooks.append("eq")
+            return True
+
+        def __ne__(self, _other):
+            hooks.append("ne")
+            return False
+
+    class MaliciousTuple(tuple):
+        def __eq__(self, _other):
+            hooks.append("tuple_eq")
+            return True
+
+        def __ne__(self, _other):
+            hooks.append("tuple_ne")
+            return False
+
+    def no_spawn(*_args, **_kwargs):
+        raise AssertionError("forged internal plan must never invoke Popen")
+
+    try:
+        ctx = svc.require_exec("a")
+        plan = prepare_lbe_work_plan(
+            ctx, cwd="default-project",
+            argv=["python", "-m", "pytest"], timeout_seconds=5)
+        forged = replace(
+            plan, **{poisoned_field: (
+                MaliciousTuple(plan.requested_argv)
+                if poisoned_field.endswith("_argv")
+                else MaliciousComparator())})
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", no_spawn)
+            with pytest.raises(LbeNoChildStarted):
+                make_trusted_lbe_launcher(ctx)(forged)
+        assert hooks == [], "deny before user-defined hash/equality callbacks"
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+
+
+
+# r006: actual product feature (PREVIEW ONLY) - normalized Go -o target.
+# Output is an informational destination, not file creation / Exec grant.
+@pytest.mark.parametrize("argv", [
+    ["go", "build", "-o", "bin/app", "./cmd/app"],
+    ["go", "build", "-o=bin/app", "./cmd/app"],
+])
+def test_r006_go_build_preview_returns_canonical_planned_output(
+    scene, monkeypatch, argv,
+):
+    from gateway.lbe_plan import prepare_lbe_work_plan
+    a, b, _private, _runtime = scene
+    (a / "go-project" / "bin").mkdir(exist_ok=True)
+    state = prime_existing_state(scene)
+    before = sorted(p.name for p in state.iterdir())
+    svc = service(scene, v2_config(a, b))
+
+    def no_spawn(*_args, **_kwargs):
+        raise AssertionError("Go preview or positive-denial must not launch")
+
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", no_spawn)
+            m.setattr(os, "kill", no_spawn)
+            m.setattr(os, "killpg", no_spawn, raising=False)
+            ctx = svc.require_exec("a")
+            plan = prepare_lbe_work_plan(
+                ctx, cwd="go-project", argv=argv, timeout_seconds=5)
+            assert plan.planned_go_output == "go-project/bin/app"
+            preview = svc.invoke_exec(
+                "a", "go-project", argv, timeout_seconds=5)
+            assert preview["planned_go_output"] == plan.planned_go_output
+            assert preview["status"] == "preview"
+            assert preview["executed"] is False
+            with pytest.raises(GatewayError) as denied:
+                svc.invoke_exec(
+                    "a", "go-project", argv, timeout_seconds=5,
+                    dry_run=False)
+            assert denied.value.code == "exec_disabled"
+        assert not (a / "go-project" / "bin" / "app").exists()
+        assert sorted(p.name for p in state.iterdir()) == before
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+
+
+def test_phase1_pipenv_writable_pipfile_denied_as_source(scene):
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        (a / "python-project" / "Pipfile").chmod(0o666)
+        preview = svc.invoke_exec("a", "python-project",
+                                  ["python", "hello.py"], timeout_seconds=5)
+        assert preview["status"] == "preview"
+        assert preview["planned_pipfile_sha256"] is not None
+        with pytest.raises(GatewayError) as exc:
+            svc.invoke_exec("a", "python-project", ["python", "hello.py"],
+                            timeout_seconds=5, dry_run=False)
+        assert exc.value.code == "exec_disabled"
+    finally:
+        svc.close()
+
+
+def test_phase1_untrusted_pipfile_refused_by_rest_and_official_mcp(scene):
+    pytest.importorskip("mcp")
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    (a / "python-project" / "Pipfile").chmod(0o666)
+    args = {"workspace": "a", "cwd": "python-project",
+            "argv": ["python", "hello.py"], "timeout_seconds": 5,
+            "dry_run": True}
+    headers = {"Accept": "application/json, text/event-stream",
+               "Content-Type": "application/json"}
+    try:
+        with TestClient(create_multi_app(svc),
+                        base_url="http://127.0.0.1:8765") as client:
+            rest = client.post("/run", json=args)
+            assert rest.status_code == 200
+            assert rest.json()["status"] == "preview"
+            init = client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25",
+                           "capabilities": {},
+                           "clientInfo": {"name": "r006-test", "version": "1"}},
+            })
+            assert init.status_code == 200
+            client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "method": "notifications/initialized"})
+            blocked = client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "run_command", "arguments": args},
+            })
+            assert blocked.status_code == 200
+            response = blocked.json()["result"]
+            assert response["isError"] is False
+            assert response["structuredContent"]["status"] == "preview"
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+
+
+@pytest.mark.parametrize("cwd,runner", [
+    ("go-project", "direct"),
+    ("python-project", "pipenv"),
+])
+def test_r006_python_script_plan_pins_source_bytes_in_shared_preview(
+    scene, cwd, runner,
+):
+    import hashlib
+    from gateway.lbe_plan import prepare_lbe_work_plan
+
+    a, b, _private, _runtime = scene
+    file = a / cwd / "hello.py"
+    file.write_text("print('trusted candidate')\n")
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    argv = ["python", "hello.py"]
+    try:
+        ctx = svc.require_exec("a")
+        plan = prepare_lbe_work_plan(
+            ctx, cwd=cwd, argv=argv, timeout_seconds=5)
+        source_sha = hashlib.sha256(file.read_bytes()).hexdigest()
+        assert plan.planned_script_sha256 == source_sha
+        pipfile = a / cwd / "Pipfile"
+        expected_pipfile = (hashlib.sha256(pipfile.read_bytes()).hexdigest()
+                            if runner == "pipenv" else None)
+        assert plan.planned_pipfile_sha256 == expected_pipfile
+        preview = svc.invoke_exec("a", cwd, argv, timeout_seconds=5)
+        assert preview["runner"] == runner
+        assert preview["planned_script_sha256"] == source_sha
+        assert preview["planned_pipfile_sha256"] == expected_pipfile
+        assert preview["executed"] is False
+        with TestClient(create_multi_app(svc, enable_mcp=False),
+                        base_url="http://127.0.0.1:8765") as client:
+            rest = client.post("/run", json={"workspace": "a",
+                "cwd": cwd, "argv": argv, "timeout_seconds": 5})
+            assert rest.status_code == 200
+            assert rest.json() == preview
+    finally:
+        svc.close()
+
+
+def test_r006_python_source_changed_after_plan_refused_before_spawn(
+    scene, monkeypatch,
+):
+    from gateway.lbe_native_launcher import make_trusted_lbe_launcher
+    from gateway.lbe_plan import prepare_lbe_work_plan
+    from gateway.lbe_worker import LbeNoChildStarted
+
+    a, b, _private, _runtime = scene
+    file = a / "go-project" / "hello.py"
+    file.write_text("print('old')\n")
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    launches = []
+    try:
+        ctx = svc.require_exec("a")
+        plan = prepare_lbe_work_plan(
+            ctx, cwd="go-project",
+            argv=["python", "hello.py"], timeout_seconds=5)
+        file.write_text("print('new')\n")
+
+        def forbidden(*_args, **_kwargs):
+            launches.append(True)
+            raise AssertionError("stale source must not launch")
+
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", forbidden)
+            with pytest.raises(LbeNoChildStarted):
+                make_trusted_lbe_launcher(ctx)(plan)
+        assert launches == []
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+
+
+def test_r006_pipfile_content_change_invalidates_earlier_plan(
+    scene,
+):
+    from gateway.lbe_plan import prepare_lbe_work_plan
+
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        ctx = svc.require_exec("a")
+        argv = ["python", "hello.py"]
+        first = prepare_lbe_work_plan(ctx, cwd="python-project",
+                                      argv=argv, timeout_seconds=5)
+        (a / "python-project" / "Pipfile").write_text(
+            "[packages]\nnew_dependency='changed'\n")
+        changed = prepare_lbe_work_plan(ctx, cwd="python-project",
+                                        argv=argv, timeout_seconds=5)
+        assert first.planned_pipfile_sha256 != changed.planned_pipfile_sha256
+        assert first.planned_script_sha256 == changed.planned_script_sha256
+        assert first != changed
+    finally:
+        svc.close()
+
+
+# A stuck REST disconnect probe must not hold a completed response/error.
+# Fake synchronous service only: never starts Python, Go or Pipenv.
+@pytest.mark.parametrize("denied", [False, True])
+def test_r006_stalled_disconnect_probe_cannot_block_finished_exec(denied):
+    import anyio
+    import threading
+    from gateway.lbe_cancel_bridge import invoke_exec_with_cancel
+
+    poll_started = threading.Event()
+
+    async def poll():
+        poll_started.set()
+        await anyio.sleep_forever()
+
+    class FastService:
+        def invoke_exec(self, workspace, cwd, argv, timeout_seconds=60,
+                        dry_run=True, *, cancelled=None):
+            assert type(cancelled) is threading.Event
+            assert poll_started.wait(2), "probe must start before Worker exits"
+            if denied:
+                raise GatewayError("exec_cleanup_proof_required",
+                                   "Public positive Exec stays denied.")
+            return {"status": "preview", "executed": False}
+
+    async def scenario():
+        with anyio.fail_after(2):
+            if denied:
+                with pytest.raises(GatewayError) as exc:
+                    await invoke_exec_with_cancel(
+                        FastService(), "a", "go-project",
+                        ["go", "test", "./..."],
+                        timeout_seconds=5, dry_run=False,
+                        is_disconnected=poll,
+                    )
+                assert exc.value.code == "exec_cleanup_proof_required"
+            else:
+                result = await invoke_exec_with_cancel(
+                    FastService(), "a", "go-project",
+                    ["go", "test", "./..."],
+                    timeout_seconds=5, dry_run=True,
+                    is_disconnected=poll,
+                )
+                assert result == {"status": "preview", "executed": False}
+
+    anyio.run(scenario)
+
+
+# Real shared preview must not accept mutable, untrusted Python project
+# source files as if their planned SHA pins were stable launch inputs.
+@pytest.mark.parametrize("cwd", ["go-project", "python-project"])
+@pytest.mark.parametrize("mode", [0o666, 0o664])
+def test_phase1_python_script_untrusted_mode_denied_in_shared_plan(
+    scene, cwd, mode,
+):
+    a, b, _private, _runtime = scene
+    script = a / cwd / "hello.py"
+    script.write_text("print('fixture only')\n")
+    script.chmod(mode)
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        preview = svc.invoke_exec("a", cwd, ["python", "hello.py"])
+        assert preview["status"] == "preview"
+        assert preview["planned_script_sha256"] is not None
+        with pytest.raises(GatewayError) as denied:
+            svc.invoke_exec("a", cwd, ["python", "hello.py"], dry_run=False)
+        assert denied.value.code == "exec_disabled"
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+
+
+def test_phase1_unsafe_python_source_denied_across_rest_and_official_mcp(scene):
+    pytest.importorskip("mcp")
+    a, b, _private, _runtime = scene
+    (a / "go-project" / "hello.py").write_text("print('fixture')\n")
+    (a / "go-project" / "hello.py").chmod(0o666)
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    args = {"workspace": "a", "cwd": "go-project",
+            "argv": ["python", "hello.py"], "timeout_seconds": 5}
+    headers = {"Accept": "application/json, text/event-stream",
+               "Content-Type": "application/json"}
+    try:
+        with TestClient(create_multi_app(svc),
+                        base_url="http://127.0.0.1:8765") as client:
+            rest = client.post("/run", json=args)
+            assert rest.status_code == 200
+            assert rest.json()["status"] == "preview"
+            init = client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25",
+                           "capabilities": {},
+                           "clientInfo": {"name": "r006-source", "version": "1"}},
+            })
+            assert init.status_code == 200
+            client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "method": "notifications/initialized"})
+            response = client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "run_command", "arguments": args},
+            })
+            assert response.status_code == 200
+            result = response.json()["result"]
+            assert result["isError"] is False
+            assert result["structuredContent"]["status"] == "preview"
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+
+
+# r006 cancellation is a waiter notification, never child termination.
+def test_r006_transport_task_cancellation_reaches_worker():
+    import anyio
+    import threading
+    from gateway.lbe_cancel_bridge import invoke_exec_with_cancel
+
+    started = threading.Event()
+    noticed = threading.Event()
+
+    class FakeService:
+        def invoke_exec(self, workspace, cwd, argv, timeout_seconds=60,
+                        dry_run=True, *, cancelled=None):
+            assert type(cancelled) is threading.Event
+            started.set()
+            assert cancelled.wait(3)
+            noticed.set()
+            return {"cleanup_proven": False}
+
+    async def scenario():
+        async def request():
+            await invoke_exec_with_cancel(
+                FakeService(), "a", "go-project", ["go", "test", "./..."],
+                timeout_seconds=5, dry_run=False)
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(request)
+            with anyio.fail_after(3):
+                assert await anyio.to_thread.run_sync(started.wait, 2)
+            tasks.cancel_scope.cancel()
+
+    anyio.run(scenario)
+    assert noticed.wait(2)
+
+
+def test_r006_rest_disconnect_notifies_sync_worker():
+    import anyio
+    import threading
+    from gateway.lbe_cancel_bridge import invoke_exec_with_cancel
+
+    started = threading.Event()
+    seen = threading.Event()
+    disconnected = [False]
+
+    class FakeService:
+        def invoke_exec(self, workspace, cwd, argv, timeout_seconds=60,
+                        dry_run=True, *, cancelled=None):
+            assert type(cancelled) is threading.Event
+            started.set()
+            assert cancelled.wait(3)
+            seen.set()
+            return {"cleanup_proven": False,
+                    "process_may_be_running": True}
+
+    async def poll():
+        return disconnected[0]
+
+    async def scenario():
+        async def request():
+            result = await invoke_exec_with_cancel(
+                FakeService(), "a", "go-project", ["go", "test", "./..."],
+                timeout_seconds=5, dry_run=False,
+                is_disconnected=poll)
+            assert result["cleanup_proven"] is False
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(request)
+            with anyio.fail_after(3):
+                assert await anyio.to_thread.run_sync(started.wait, 2)
+            disconnected[0] = True
+
+    anyio.run(scenario)
+    assert seen.is_set()
+
+
+def test_r006_private_apply_passes_cancel_token_and_public_f1_stays_denied(
+    scene, monkeypatch,
+):
+    import threading
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    token = threading.Event()
+    token.set()
+    observed = []
+
+    def fake_run(_worker, plan, *, cancelled=None):
+        observed.append((plan.workspace, cancelled))
+        raise LbeWorkerError("waiter_disconnected")
+
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(LbeWorker, "run", fake_run)
+            with pytest.raises(GatewayError) as err:
+                svc._lbe_apply(
+                    svc.require_exec("a"), svc._lbe_owner, "go-project",
+                    ["go", "test", "./..."], 5, cancelled=token)
+        assert err.value.code == "waiter_disconnected"
+        assert observed == [("a", token)]
+        with pytest.raises(GatewayError) as denied:
+            svc.invoke_exec(
+                "a", "go-project", ["go", "test", "./..."], 5,
+                dry_run=False, cancelled=token)
+        assert denied.value.code == "exec_disabled"
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+
+
+def test_r006_rest_and_official_mcp_forward_internal_event_only(
+    scene, monkeypatch,
+):
+    import threading
+
+    pytest.importorskip("mcp")
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    original = svc.invoke_exec
+    seen = []
+
+    def observed_invoke(*args, **kwargs):
+        seen.append(kwargs.get("cancelled"))
+        return original(*args, **kwargs)
+
+    args = {"workspace": "a", "cwd": "go-project",
+            "argv": ["go", "test", "./..."], "timeout_seconds": 5}
+    headers = {"Accept": "application/json, text/event-stream",
+               "Content-Type": "application/json"}
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(svc, "invoke_exec", observed_invoke)
+            with TestClient(create_multi_app(svc),
+                            base_url="http://127.0.0.1:8765") as client:
+                rest = client.post("/run", json=args)
+                assert rest.status_code == 200
+                init = client.post("/mcp", headers=headers, json={
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"protocolVersion": "2025-11-25",
+                               "capabilities": {},
+                               "clientInfo": {"name": "r006-cancel", "version": "1"}},
+                })
+                assert init.status_code == 200
+                client.post("/mcp", headers=headers, json={
+                    "jsonrpc": "2.0", "method": "notifications/initialized"})
+                mcp = client.post("/mcp", headers=headers, json={
+                    "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": {"name": "run_command", "arguments": args},
+                })
+                assert mcp.status_code == 200
+                assert mcp.json()["result"]["structuredContent"] == rest.json()
+        assert len(seen) == 2
+        assert all(type(token) is threading.Event for token in seen)
+        assert seen[0] is not seen[1]
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+
+
+@pytest.mark.parametrize("poll_connection", [False, True])
+def test_r006_cancel_bridge_preserves_gateway_error_from_sync_gate(
+    poll_connection,
+):
+    import anyio
+    from gateway.lbe_cancel_bridge import invoke_exec_with_cancel
+
+    class DeniedService:
+        def invoke_exec(self, workspace, cwd, argv, timeout_seconds=60,
+                        dry_run=True, *, cancelled=None):
+            raise GatewayError("exec_cleanup_proof_required",
+                               "Public Exec apply is not qualified.")
+
+    async def poll():
+        return False
+
+    async def scenario():
+        with pytest.raises(GatewayError) as denied:
+            await invoke_exec_with_cancel(
+                DeniedService(), "a", "go-project",
+                ["go", "test", "./..."], timeout_seconds=5, dry_run=False,
+                is_disconnected=poll if poll_connection else None)
+        assert denied.value.code == "exec_cleanup_proof_required"
+
+    anyio.run(scenario)
+
+
+# r006: Direct/REST/MCP real planning, with no Go process and F1 apply denied.
+def test_phase1_go_output_parent_permission_denied_across_all_transports(scene):
+    pytest.importorskip("mcp")
+    a, b, _private, _runtime = scene
+    output_parent = a / "go-project" / "bin"
+    output_parent.mkdir()
+    output_parent.chmod(0o777)
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    argv = ["go", "build", "-o=bin/app", "./cmd/app"]
+    args = {"workspace": "a", "cwd": "go-project", "argv": argv,
+            "timeout_seconds": 5}
+    headers = {"Accept": "application/json, text/event-stream",
+               "Content-Type": "application/json"}
+    try:
+        preview = svc.invoke_exec("a", "go-project", argv)
+        assert preview["status"] == "preview"
+        assert preview["planned_go_output"] == "go-project/bin/app"
+        with TestClient(create_multi_app(svc),
+                        base_url="http://127.0.0.1:8765") as client:
+            rest = client.post("/run", json=args)
+            assert rest.status_code == 200
+            assert rest.json()["status"] == "preview"
+            initialized = client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25",
+                           "capabilities": {},
+                           "clientInfo": {"name": "r006-output-dir", "version": "1"}},
+            })
+            assert initialized.status_code == 200
+            client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "method": "notifications/initialized"})
+            blocked = client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "run_command", "arguments": args},
+            })
+            assert blocked.status_code == 200
+            result = blocked.json()["result"]
+            assert result["isError"] is False
+            assert result["structuredContent"]["status"] == "preview"
+        with pytest.raises(GatewayError) as apply:
+            svc.invoke_exec("a", "go-project", argv, dry_run=False)
+        assert apply.value.code == "exec_disabled"
+        assert not (output_parent / "app").exists()
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+        output_parent.chmod(0o755)
+
+
+def test_r006_read_only_reflects_internal_exec_authority_not_preview(scene):
+    """T0 synthetic status oracle; never invoke positive Exec or run Popen.
+
+    The ONLY simulated internal flag here is NOT a client/config grant.
+    A real hosted Python T1 needs its separately reviewed startup envelope.
+    """
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        before = svc.info()
+        assert before["read_only"] is True
+        assert before["file_read_only"] is True
+        assert before["exec_policy"]["available"] is False
+        assert before["exec_policy"]["preview_available"] is True
+
+        # Simulate approved constructor-only capability in a disposable
+        # information-only test; no native child, new endpoint or flag.
+        svc._lbe_positive_authorized = True
+        authorized = svc.info()
+        assert authorized["exec_policy"]["completion_capability"] == "best_effort"
+        assert authorized["read_only"] is False
+        assert authorized["file_read_only"] is True
+        with TestClient(create_multi_app(svc, enable_mcp=False),
+                        base_url="http://127.0.0.1:8765") as client:
+            health = client.get("/health")
+            assert health.status_code == 200
+            assert health.json()["read_only"] is False
+            assert health.json()["file_read_only"] is True
+
+        svc._lbe_positive_authorized = False
+        assert svc.info()["read_only"] is True
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc._lbe_positive_authorized = False
+        svc.close()
+
+
+# Product prelaunch: selected Python/Pipenv source directory owner control.
+# These are nonspawning real shared preview tests, not native T1.
+@pytest.mark.parametrize("cwd,poison,mode", [
+    ("go-project", "workspace", 0o777),
+    ("go-project", "project", 0o775),
+    ("python-project", "workspace", 0o777),
+    ("python-project", "project", 0o775),
+])
+def test_phase1_source_parent_writable_refused_by_live_preview(scene, cwd, poison, mode):
+    a, b, _private, _runtime = scene
+    (a / cwd / "hello.py").write_text("print('fixture')\n")
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    target = a if poison == "workspace" else a / cwd
+    target.chmod(mode)
+    try:
+        preview = svc.invoke_exec("a", cwd, ["python", "hello.py"])
+        assert preview["status"] == "preview"
+        assert preview["planned_script_sha256"] is not None
+        with pytest.raises(GatewayError) as denied:
+            svc.invoke_exec("a", cwd, ["python", "hello.py"], dry_run=False)
+        assert denied.value.code == "exec_disabled"
+    finally:
+        target.chmod(0o755)
+        svc.close()
+
+
+@pytest.mark.parametrize("mode", [0o777, 0o775])
+def test_phase1_nested_python_source_parent_writable_refused(scene, mode):
+    a, b, _private, _runtime = scene
+    nested = a / "go-project" / "src" / "deep"
+    nested.mkdir(parents=True)
+    (nested / "hello.py").write_text("print('fixture')\n")
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    parent = nested.parent
+    parent.chmod(mode)
+    try:
+        preview = svc.invoke_exec("a", "go-project",
+                                  ["python", "src/deep/hello.py"])
+        assert preview["status"] == "preview"
+        assert preview["planned_script_sha256"] is not None
+    finally:
+        parent.chmod(0o755)
+        svc.close()
+
+
+@pytest.mark.parametrize("mode", [0o700, 0o755])
+def test_r006_nested_python_source_safe_parent_preview_succeeds(scene, mode):
+    import hashlib
+    a, b, _private, _runtime = scene
+    nested = a / "go-project" / "src" / "deep"
+    nested.mkdir(parents=True)
+    script = nested / "hello.py"
+    script.write_text("print('fixture')\n")
+    nested.parent.chmod(mode)
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        preview = svc.invoke_exec("a", "go-project", ["python", "src/deep/hello.py"])
+        assert preview["executed"] is False
+        assert preview["status"] == "preview"
+        assert preview["planned_script_sha256"] == hashlib.sha256(
+            script.read_bytes()).hexdigest()
+    finally:
+        nested.parent.chmod(0o755)
+        svc.close()
+
+
+@pytest.mark.parametrize("cwd", ["go-project", "python-project"])
+def test_phase1_untrusted_python_parent_refused_by_rest_and_mcp(scene, cwd):
+    pytest.importorskip("mcp")
+    a, b, _private, _runtime = scene
+    (a / cwd / "hello.py").write_text("print('fixture')\n")
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    root = a / cwd
+    root.chmod(0o777)
+    args = {"workspace": "a", "cwd": cwd,
+            "argv": ["python", "hello.py"], "timeout_seconds": 5}
+    hdr = {"Accept": "application/json, text/event-stream",
+           "Content-Type": "application/json"}
+    try:
+        with TestClient(create_multi_app(svc),
+                        base_url="http://127.0.0.1:8765") as client:
+            rest = client.post("/run", json=args)
+            assert rest.status_code == 200
+            assert rest.json()["status"] == "preview"
+            init = client.post("/mcp", headers=hdr, json={
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25",
+                           "capabilities": {},
+                           "clientInfo": {"name": "source-parent", "version": "1"}},
+            })
+            assert init.status_code == 200
+            client.post("/mcp", headers=hdr, json={
+                "jsonrpc": "2.0", "method": "notifications/initialized"})
+            resp = client.post("/mcp", headers=hdr, json={
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "run_command", "arguments": args},
+            })
+            assert resp.status_code == 200
+            msg = resp.json()["result"]
+            assert msg["isError"] is False
+            assert msg["structuredContent"]["status"] == "preview"
+    finally:
+        root.chmod(0o755)
+        svc.close()
+
+
+@pytest.mark.parametrize("poison", ["workspace", "source_directory"])
+def test_phase1_source_ancestor_mutated_after_plan_rejected_before_private_popen(
+    scene, monkeypatch, poison,
+):
+    """The real trusted launcher must replan before even a fake Popen call."""
+    from gateway.lbe_native_launcher import make_trusted_lbe_launcher
+    from gateway.lbe_plan import prepare_lbe_work_plan
+    from gateway.lbe_worker import LbeNoChildStarted
+
+    a, b, _private, _runtime = scene
+    src = a / "go-project" / "src"
+    src.mkdir()
+    (src / "safe.py").write_text("print('source')\n")
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    argv = ["python", "src/safe.py"]
+    changed = a if poison == "workspace" else src
+    launches = []
+    try:
+        ctx = svc.require_exec("a")
+        plan = prepare_lbe_work_plan(ctx, cwd="go-project", argv=argv)
+        assert plan.planned_script_sha256 is not None
+        changed.chmod(0o777)
+
+        # Phase1 treats a trusted-local mode change as legal. This is a
+        # nonspawning replan, not an authority to bypass F1.
+        changed_preview = svc.invoke_exec(
+            "a", "go-project", argv, dry_run=True)
+        assert changed_preview["status"] == "preview"
+        assert changed_preview["planned_script_sha256"] == plan.planned_script_sha256
+        assert launches == []
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+        with pytest.raises(GatewayError) as denied:
+            svc.invoke_exec("a", "go-project", argv, dry_run=False)
+        assert denied.value.code == "exec_disabled"
+
+        changed.chmod(0o755)
+        again = svc.invoke_exec("a", "go-project", argv, dry_run=True)
+        assert again["status"] == "preview"
+        assert again["planned_script_sha256"] == plan.planned_script_sha256
+    finally:
+        changed.chmod(0o755)
+        svc.close()
+
+
+def test_phase1_go_without_output_source_parent_denied_across_transports(scene):
+    """Real Direct/REST/official MCP fail closed; F1 positive still denied."""
+    pytest.importorskip("mcp")
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    project = a / "go-project"
+    project.chmod(0o777)
+    args = {"workspace": "a", "cwd": "go-project",
+            "argv": ["go", "test", "./..."], "timeout_seconds": 5}
+    hdr = {"Accept": "application/json, text/event-stream",
+           "Content-Type": "application/json"}
+    try:
+        preview = svc.invoke_exec("a", "go-project", args["argv"])
+        assert preview["status"] == "preview"
+        with pytest.raises(GatewayError) as hard_stop:
+            svc.invoke_exec("a", "go-project", args["argv"], dry_run=False)
+        assert hard_stop.value.code == "exec_disabled"
+        with TestClient(create_multi_app(svc),
+                        base_url="http://127.0.0.1:8765") as client:
+            rest = client.post("/run", json=args)
+            assert rest.status_code == 200
+            assert rest.json()["status"] == "preview"
+            init = client.post("/mcp", headers=hdr, json={
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25",
+                           "capabilities": {},
+                           "clientInfo": {"name": "go-source-preflight", "version": "1"}},
+            })
+            assert init.status_code == 200
+            client.post("/mcp", headers=hdr, json={
+                "jsonrpc": "2.0", "method": "notifications/initialized"})
+            response = client.post("/mcp", headers=hdr, json={
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "run_command", "arguments": args},
+            })
+            assert response.status_code == 200
+            result = response.json()["result"]
+            assert result["isError"] is False
+            assert result["structuredContent"]["status"] == "preview"
+        assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        project.chmod(0o755)
+        svc.close()
+
+
+
+def test_r006_workspace_discovery_distinguishes_preview_from_positive_exec(
+        scene, monkeypatch):
+    """Actual per-Workspace discovery cannot advertise F1-denied apply."""
+    a, b, _private, _runtime = scene
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    def refuse_native(*_args, **_kwargs):
+        raise AssertionError("Workspace discovery must not execute a child")
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(subprocess, "Popen", refuse_native)
+            m.setattr(os, "kill", refuse_native)
+            m.setattr(os, "killpg", refuse_native, raising=False)
+            by_id = {w["id"]: w for w in svc.list_workspaces()["workspaces"]}
+            assert by_id["a"]["exec"] is True  # configured scope, not grant
+            assert by_id["a"]["exec_preview_available"] is True
+            assert by_id["a"]["exec_apply_available"] is False
+            assert by_id["b"]["exec"] is False
+            assert by_id["b"]["exec_preview_available"] is False
+            assert by_id["b"]["exec_apply_available"] is False
+            assert svc.info()["exec_policy"]["preview_available"] is True
+            assert svc.info()["exec_policy"]["available"] is False
+            with TestClient(create_multi_app(svc, enable_mcp=False),
+                            base_url="http://127.0.0.1:8765") as client:
+                info_response = client.get("/info")
+                assert info_response.status_code == 200
+                actual = {w["id"]: w
+                          for w in info_response.json()["workspaces"]}
+                assert actual == by_id
+                # /health intentionally exposes the shared exec_policy,
+                # not the complete per-Workspace /info response body.
+                health_response = client.get("/health")
+                assert health_response.status_code == 200
+                assert health_response.json()["exec_policy"] == (
+                    info_response.json()["exec_policy"])
+            with pytest.raises(GatewayError) as denied:
+                svc.invoke_exec("a", "go-project", ["go", "test", "./..."],
+                                dry_run=False)
+            assert denied.value.code == "exec_disabled"
+            assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        svc.close()
+
+
+def test_r006_workspace_preview_discovery_reports_old_state_and_slot_denial(
+        scene):
+    a, b, _private, _runtime = scene
+    svc = service(scene, v2_config(a, b))
+    try:
+        status = {w["id"]: w for w in svc.list_workspaces()["workspaces"]}
+        assert status["a"]["exec"] is True
+        assert status["a"]["exec_preview_available"] is False
+        assert status["a"]["exec_apply_available"] is False
+        assert svc.info()["exec_policy"]["preview_available"] is False
+    finally:
+        svc.close()
+    prime_existing_state(scene)
+    svc = service(scene, v2_config(a, b))
+    try:
+        assert svc.list_workspaces()["workspaces"][0][
+            "exec_preview_available"] is True
+        with svc._lifecycle:
+            svc._exec_active.add("a")
+        try:
+            current = svc.list_workspaces()["workspaces"][0]
+            assert current["exec"] is True
+            assert current["exec_preview_available"] is False
+            assert current["exec_apply_available"] is False
+            assert svc.info()["exec_policy"]["preview_available"] is False
+        finally:
+            with svc._lifecycle:
+                svc._exec_active.remove("a")
+        # A native owner latch only blocks real children, not safe preview.
+        svc._lbe_owner._unavailable = True
+        current = svc.list_workspaces()["workspaces"][0]
+        assert current["exec_preview_available"] is True
+        assert current["exec_apply_available"] is False
+        assert svc.info()["exec_policy"]["preview_available"] is True
+        assert svc.info()["exec_policy"]["available"] is False
+    finally:
+        svc.close()
+
+
+def test_r006_v1_workspace_discovery_schema_does_not_change(scene):
+    a, b, _private, _runtime = scene
+    cfg = v2_config(a, b)
+    cfg["schema_version"] = 1
+    cfg["server"]["exec"] = {"enabled": True}
+    cfg["workspaces"]["a"]["exec"] = {
+        "enabled": True, "paths": ["python-project"], "runners": []}
+    svc = service(scene, cfg)
+    try:
+        selected = svc.list_workspaces()["workspaces"]
+        assert selected[0]["exec"] is True
+        assert selected[1]["exec"] is False
+        for row in selected:
+            assert "exec_preview_available" not in row
+            assert "exec_apply_available" not in row
+        assert all("exec_preview_available" not in x
+                   for x in svc.info()["workspaces"])
+        with pytest.raises(GatewayError) as denied:
+            svc.invoke_exec("a", "python-project",
+                            ["python", "hello.py"], dry_run=False)
+        assert denied.value.code == "exec_cleanup_proof_required"
+    finally:
+        svc.close()
+
+
+def test_v2_dual_optin_is_new_legal_grammar_not_legacy_implicit_apply(scene):
+    a, b, _private, _runtime = scene
+    c = v2_config(a, b)
+    # V2 path-only is still valid preview configuration, not apply consent.
+    old = parse_workspace_config(c)
+    assert old.exec_enabled and not old.exec_apply_enabled
+    assert not old.workspaces[0].exec_apply_enabled
+    c["server"]["exec"] = {"enabled": True}
+    server_only = parse_workspace_config(c)
+    assert server_only.exec_apply_enabled
+    assert not server_only.workspaces[0].exec_apply_enabled
+    c["workspaces"]["a"]["exec"]["enabled"] = True
+    both = parse_workspace_config(c)
+    assert both.exec_enabled and both.exec_apply_enabled
+    assert both.workspaces[0].exec_apply_enabled
+    # Neither fragment parse nor a valid preview is a process launch.

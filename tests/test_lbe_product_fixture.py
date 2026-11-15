@@ -1,0 +1,7178 @@
+"""Safe T0 of actual private WorkspaceService D4 R003 fixture preflight.
+
+The tests never start Go/Pipenv/Python children or create a new public
+authorization. A source-only candidate cannot create either v2 positive apply opt-in.
+"""
+from __future__ import annotations
+
+from dataclasses import replace
+import os
+from pathlib import Path
+import subprocess
+import struct
+import threading
+
+import pytest
+
+from gateway.core import GatewayError
+from gateway.exec_state import ExecStateStore
+from gateway.lbe_product_fixture import D4FixtureDenied, check_d4_r003_fixture
+from gateway.lbe_r010_preexec_journal import seal_r010_preexec_source_in_job
+from gateway.workspaces import ActiveRuntimeInventory, WorkspaceService
+from gateway.workspaces_config import parse_workspace_config
+
+
+_ROWS = (
+    ("py-direct", ["python", "-m", "pytest", "-q"]),
+    ("py-direct", ["python", "-m", "compileall", "-q", "./src"]),
+    ("py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go-project", ["go", "test", "./..."]),
+    ("go-project", ["go", "vet", "./..."]),
+    ("go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+)
+
+
+@pytest.fixture
+def product_service(tmp_path: Path):
+    workspace = tmp_path / "projects" / "a"
+    workspace.mkdir(parents=True)
+    (workspace / "py-direct" / "src").mkdir(parents=True)
+    (workspace / "py-direct" / "src" / "main.py").write_bytes(b"x = 123\n")
+    pipenv = workspace / "py-pipenv"
+    (pipenv / ".venv" / "bin").mkdir(parents=True)
+    (pipenv / "Pipfile").write_bytes(b"[packages]\n")
+    (pipenv / "Pipfile.lock").write_bytes(
+        b'{"_meta":{"hash":{"sha256":"' + b"a" * 64 + b'"}}}\n')
+    # The future Pipenv source-only profile selects ONLY the privately staged
+    # bin home; never a host base interpreter or system site-packages.
+    (pipenv / ".venv" / "pyvenv.cfg").write_bytes(
+        ("home = " + str(tmp_path / "bin")
+         + "\ninclude-system-site-packages = false\n").encode("ascii"))
+    (pipenv / ".venv" / "bin" / "python").write_bytes(b"fixed test-only bytes\n")
+    (pipenv / ".venv" / "bin" / "python").chmod(0o700)
+    go = workspace / "go-project"
+    (go / "cmd" / "app").mkdir(parents=True)
+    (go / "cmd" / "app" / "main.go").write_bytes(b"package main\nfunc main() {}\n")
+    (go / "go.mod").write_bytes(b"module firstparty.test/app\ngo 1.27\n")
+    (go / "bin").mkdir()
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    private.chmod(0o700)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    store = ExecStateStore(private / "exec-state",
+                           workspace_roots=(str(workspace),))
+    store.close()
+    config = {
+        "schema_version": 2,
+        "server": {"port": 8765, "transport": "http"},
+        "workspaces": {
+            "a": {
+                "root": str(workspace),
+                "exec": {
+                    "paths": ["py-direct", "py-pipenv", "go-project"],
+                    "runners": ["py-pipenv=pipenv"],
+                },
+            },
+        },
+    }
+    service = WorkspaceService(
+        parse_workspace_config(config), config_dir=private,
+        inventory=ActiveRuntimeInventory(paths=(runtime,)))
+    try:
+        yield service, workspace
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("cwd,argv", _ROWS)
+def test_d4_actual_service_preflight_checks_six_exact_inputs(
+        product_service, monkeypatch, cwd, argv):
+    service, root = product_service
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("D4 SAFE T0 may not spawn or signal")
+
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", forbidden)
+        m.setattr(os, "kill", forbidden)
+        m.setattr(os, "killpg", forbidden, raising=False)
+        candidate = service._prepare_d4_r003_fixture_candidate(
+            "a", cwd, argv, timeout_seconds=120)
+        assert candidate.native_launch_allowed is False
+        assert candidate.actual_loaded_sources_proven is False
+        assert candidate.runner_qualified is False
+        assert candidate.resource_enforcement_proven is False
+        assert candidate.owner_approval_attested is False
+        assert candidate.status == (
+            "SELECTED_FIRST_PARTY_SOURCE_ONLY_NO_NATIVE_AUTHORITY")
+        assert candidate.plan.workspace == "a"
+        assert candidate.plan.cwd == cwd
+        assert candidate.source_sha256
+        assert all(len(digest) == 64
+                   for _, digest in candidate.source_sha256)
+        if cwd == "py-pipenv":
+            assert candidate.plan.runner == "pipenv"
+            assert candidate.plan.requested_argv[0] == "python"
+            assert candidate.plan.effective_argv[:2] == ("pipenv", "run")
+        else:
+            assert candidate.plan.runner == "direct"
+        if argv[:3] == ["python", "-m", "compileall"]:
+            assert candidate.plan.effective_argv[-1] == "./src"
+            assert candidate.source_sha256[0][0] == "py-direct/src/main.py"
+        if argv[:2] == ["go", "build"]:
+            assert candidate.plan.planned_go_output == "go-project/bin/app"
+
+        # Shared source preview is nonspawning, but no positive product grant.
+        preview = service.invoke_exec("a", cwd, argv, dry_run=True)
+        assert preview["status"] == "preview"
+        assert preview["executed"] is False
+        assert tuple(preview["effective_argv"]) == candidate.plan.effective_argv
+        with pytest.raises(GatewayError) as denied:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert denied.value.code == "exec_disabled"
+    assert not (root / "go-project" / "bin" / "app").exists()
+
+
+@pytest.mark.parametrize("bad", [
+    ["python", "-m", "compileall"],
+    ["python", "-m", "compileall", "-q"],
+    ["python", "-m", "compileall", "-q", "../outside"],
+    ["python", "-m", "compileall", "-q", "/tmp/outside"],
+    ["python", "-m", "compileall", "-q", "./src", "../outside"],
+    ["python", "-m", "compileall", "-b", "-q", "./src"],
+    ["python", "-c", "x=1"],
+    ["pipenv", "run", "python", "-m", "pytest", "-q"],
+])
+def test_d4_service_candidate_rejects_outside_or_client_pipenv(
+        product_service, bad):
+    service, _root = product_service
+    with pytest.raises((D4FixtureDenied, GatewayError)):
+        service._prepare_d4_r003_fixture_candidate("a", "py-direct", bad)
+
+
+@pytest.mark.parametrize("argv", [
+    ["go", "run", "./cmd/app"],
+    ["go", "build", "-toolexec=/outside/tool", "./cmd/app"],
+    ["go", "build", "-o", "../outside", "./cmd/app"],
+    ["go", "build", "-o=bin/app", "./cmd/app"],
+    ["go", "test", "-v", "./..."],
+])
+def test_d4_go_command_matrix_cannot_be_extended_by_public_argv(
+        product_service, argv):
+    service, _root = product_service
+    with pytest.raises((D4FixtureDenied, GatewayError)):
+        service._prepare_d4_r003_fixture_candidate("a", "go-project", argv)
+
+
+@pytest.mark.parametrize("mutation", ["src_symlink", "file_symlink",
+                                      "extra_subdir", "world_writable",
+                                      "hardlink", "unqualified_cache"])
+def test_d4_compileall_rejects_unsafe_selected_first_party_sources(
+        product_service, mutation):
+    service, root = product_service
+    src = root / "py-direct" / "src"
+    if mutation == "src_symlink":
+        (src / "main.py").unlink()
+        src.rmdir()
+        (root / "py-direct" / "outside").mkdir()
+        src.symlink_to("outside", target_is_directory=True)
+    elif mutation == "file_symlink":
+        (src / "linked.py").symlink_to("main.py")
+    elif mutation == "extra_subdir":
+        (src / "unknown").mkdir()
+    elif mutation == "world_writable":
+        (src / "main.py").chmod(0o666)
+    elif mutation == "hardlink":
+        os.link(src / "main.py", src / "second.py")
+    else:
+        cache = src / "__pycache__"
+        cache.mkdir()
+        (cache / "main.cpython-313.pyc").write_bytes(b"unknown bytecode")
+    with pytest.raises((D4FixtureDenied, GatewayError)):
+        service._prepare_d4_r003_fixture_candidate(
+            "a", "py-direct",
+            ["python", "-m", "compileall", "-q", "./src"])
+
+
+@pytest.mark.parametrize("mutation", ["venv_pointer", "venv_symlink",
+                                      "missing_lock", "linked_python"])
+def test_d4_pipenv_source_selection_rejects_indirection(
+        product_service, mutation):
+    service, root = product_service
+    project = root / "py-pipenv"
+    if mutation == "venv_pointer":
+        import shutil
+        shutil.rmtree(project / ".venv")
+        (project / ".venv").write_text("../other-env\n")
+    elif mutation == "venv_symlink":
+        import shutil
+        shutil.rmtree(project / ".venv")
+        (project / ".venv").symlink_to(root / "py-direct", target_is_directory=True)
+    elif mutation == "missing_lock":
+        (project / "Pipfile.lock").unlink()
+    else:
+        python = project / ".venv" / "bin" / "python"
+        python.unlink()
+        python.symlink_to("/bin/true")
+    with pytest.raises((D4FixtureDenied, GatewayError)):
+        service._prepare_d4_r003_fixture_candidate(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"])
+
+
+@pytest.mark.parametrize("mutation", ["missing_module", "linked_go_source",
+                                      "linked_bin"])
+def test_d4_go_source_selection_rejects_unowned_or_missing_paths(
+        product_service, mutation):
+    service, root = product_service
+    project = root / "go-project"
+    if mutation == "missing_module":
+        (project / "go.mod").unlink()
+    elif mutation == "linked_go_source":
+        os.link(project / "cmd" / "app" / "main.go",
+                project / "cmd" / "app" / "duplicate.go")
+    else:
+        (project / "bin").rmdir()
+        (project / "bin").symlink_to(root / "py-direct", target_is_directory=True)
+    with pytest.raises((D4FixtureDenied, GatewayError)):
+        service._prepare_d4_r003_fixture_candidate(
+            "a", "go-project", ["go", "test", "./..."])
+
+
+def test_d4_preflight_refuses_wrong_service_scope_and_forged_plan(
+        product_service):
+    service, _root = product_service
+    with pytest.raises(GatewayError) as wrong_workspace:
+        service._prepare_d4_r003_fixture_candidate(
+            "absent", "py-direct", ["python", "-m", "pytest", "-q"])
+    assert wrong_workspace.value.code == "workspace_not_found"
+    c = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    ctx = service.get("a")
+    with pytest.raises(D4FixtureDenied):
+        check_d4_r003_fixture(ctx, replace(c.plan, workspace="other"))
+    with pytest.raises(D4FixtureDenied):
+        check_d4_r003_fixture(ctx, replace(c.plan, timeout_seconds=121))
+    with pytest.raises(D4FixtureDenied):
+        check_d4_r003_fixture(ctx, replace(c.plan, runner_project="go-project"))
+
+
+def test_d4_no_private_exec_state_disallows_candidate_even_if_fixture_exists(
+        product_service):
+    service, _root = product_service
+    service._exec_state.close()
+    service._exec_state = None
+    with pytest.raises(GatewayError) as exc:
+        service._prepare_d4_r003_fixture_candidate(
+            "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    assert exc.value.code == "exec_state_unavailable"
+
+def _no_child_launcher(_plan):
+    from gateway.lbe_worker import LbeNoChildStarted
+    raise LbeNoChildStarted("safe test-only negative launcher")
+
+
+def test_d4_one_use_marker_consumed_before_any_possible_child(product_service):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_product_fixture import D4OneUseAttemptMarker
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, _root = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    marker = D4OneUseAttemptMarker(candidate, service.get("a"))
+    worker = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher)
+    first = worker.run(candidate.plan, product_attempt=marker)
+    assert first["status"] == "launch_failed"
+    assert first["executed"] is False
+    with pytest.raises(LbeWorkerError) as duplicate:
+        worker.run(candidate.plan, product_attempt=marker)
+    assert duplicate.value.code == "attempt_replay_denied"
+
+
+def test_d4_one_use_marker_denies_concurrent_same_attempt(product_service):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_product_fixture import D4OneUseAttemptMarker
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, _root = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    marker = D4OneUseAttemptMarker(candidate, service.get("a"))
+    worker = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher)
+    gate = threading.Barrier(2)
+    outcomes = []
+
+    def compete():
+        gate.wait()
+        try:
+            outcomes.append(worker.run(
+                candidate.plan, product_attempt=marker)["status"])
+        except LbeWorkerError as exc:
+            outcomes.append(exc.code)
+
+    left = threading.Thread(target=compete)
+    right = threading.Thread(target=compete)
+    left.start()
+    right.start()
+    left.join(timeout=3)
+    right.join(timeout=3)
+    assert not left.is_alive() and not right.is_alive()
+    assert sorted(outcomes) == ["attempt_replay_denied", "launch_failed"]
+
+
+def test_d4_one_use_marker_burns_on_mismatch_or_cancel(product_service):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_product_fixture import D4OneUseAttemptMarker
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, _root = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    worker = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher)
+    marker = D4OneUseAttemptMarker(candidate, service.get("a"))
+    with pytest.raises(LbeWorkerError) as mismatch:
+        worker.run(replace(candidate.plan, timeout_seconds=119),
+                   product_attempt=marker)
+    assert mismatch.value.code == "attempt_replay_denied"
+    with pytest.raises(LbeWorkerError) as replay:
+        worker.run(candidate.plan, product_attempt=marker)
+    assert replay.value.code == "attempt_replay_denied"
+
+    separate = D4OneUseAttemptMarker(candidate, service.get("a"))
+    cancelled = threading.Event()
+    cancelled.set()
+    with pytest.raises(LbeWorkerError) as stopped:
+        worker.run(candidate.plan, product_attempt=separate,
+                   cancelled=cancelled)
+    assert stopped.value.code == "waiter_disconnected"
+    with pytest.raises(LbeWorkerError) as replay_after_cancel:
+        worker.run(candidate.plan, product_attempt=separate)
+    assert replay_after_cancel.value.code == "attempt_replay_denied"
+
+
+def test_d4_attempt_marker_not_a_client_or_native_authority(product_service):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_product_fixture import D4OneUseAttemptMarker
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, _root = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    with pytest.raises(D4FixtureDenied):
+        D4OneUseAttemptMarker(object(), service.get("a"))
+    worker = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher)
+    with pytest.raises(LbeWorkerError) as bad_input:
+        worker.run(candidate.plan, product_attempt=object())
+    assert bad_input.value.code == "invalid_argument"
+    with pytest.raises(GatewayError) as public:
+        service.invoke_exec("a", "go-project", ["go", "test", "./..."],
+                            dry_run=False)
+    assert public.value.code == "exec_disabled"
+
+@pytest.mark.parametrize("cwd,argv,excluded", [
+    ("py-direct", ["python", "-m", "compileall", "-q", "./src"],
+     ("py-direct", "src", "main.py")),
+    ("py-pipenv", ["python", "-m", "pytest", "-q"],
+     ("py-pipenv", "Pipfile.lock")),
+    ("go-project", ["go", "test", "./..."],
+     ("go-project", "go.mod")),
+])
+@pytest.mark.parametrize("blocked_answer", [False, 1, "yes"])
+def test_d4_first_party_candidate_respects_workspace_source_excludes(
+        product_service, monkeypatch, cwd, argv, excluded, blocked_answer):
+    service, _root = product_service
+    ctx = service.get("a")
+    previous = ctx.gateway._allowed
+    called = []
+
+    def selective_policy(parts, *, is_file):
+        if tuple(parts) == excluded:
+            called.append((tuple(parts), is_file))
+            return blocked_answer
+        return previous(parts, is_file=is_file)
+
+    with monkeypatch.context() as m:
+        m.setattr(ctx.gateway, "_allowed", selective_policy)
+        with pytest.raises(GatewayError) as exc:
+            service._prepare_d4_r003_fixture_candidate("a", cwd, argv)
+        assert exc.value.code == "command_not_allowed"
+    assert called == [(excluded, False)]
+    assert service.info()["exec_policy"]["available"] is False
+
+
+@pytest.mark.parametrize("cwd,argv", _ROWS)
+def test_d4_service_bound_attempt_rechecks_all_six_without_native(
+        product_service, monkeypatch, cwd, argv):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker
+
+    service, _root = product_service
+    candidate, marker = service._prepare_d4_r003_attempt(
+        "a", cwd, argv, timeout_seconds=120)
+    assert len(candidate.source_sha256) == len(candidate.source_identity)
+    assert all(len(identity) == 8 for _, identity in candidate.source_identity)
+
+    def never_popen(*args, **kwargs):
+        raise AssertionError("D4 SAFE T0 cannot launch any native child")
+
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", never_popen)
+        worker = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher)
+        result = worker.run(candidate.plan, product_attempt=marker)
+    assert result["status"] == "launch_failed"
+    assert result["executed"] is False
+    assert result["cleanup_proven"] is False
+
+
+@pytest.mark.parametrize("cwd,argv,relative", [
+    ("py-direct", ["python", "-m", "compileall", "-q", "./src"], "src/main.py"),
+    ("py-pipenv", ["python", "-m", "pytest", "-q"], "Pipfile.lock"),
+    ("go-project", ["go", "test", "./..."], "go.mod"),
+    ("go-project", ["go", "build", "-o", "bin/app", "./cmd/app"], "cmd/app/main.go"),
+])
+def test_d4_bound_attempt_rejects_modified_source_before_launcher(
+        product_service, cwd, argv, relative):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    candidate, marker = service._prepare_d4_r003_attempt("a", cwd, argv)
+    target = root / cwd / relative
+    old_bytes = target.read_bytes()
+    target.write_bytes(old_bytes + b"# stale source\n")
+    launched = []
+    def forbidden(_plan):
+        launched.append(True)
+        raise AssertionError("stale source must not reach launcher")
+
+    worker = LbeWorker(DirectChildOwner(), launcher=forbidden)
+    with pytest.raises(LbeWorkerError) as exc:
+        worker.run(candidate.plan, product_attempt=marker)
+    assert exc.value.code == "attempt_replay_denied"
+    assert launched == []
+    # Source drift burns the exact attempt once; restoring bytes cannot
+    # reuse its previous authorization candidate or child reservation.
+    target.write_bytes(old_bytes)
+    with pytest.raises(LbeWorkerError) as replay:
+        worker.run(candidate.plan, product_attempt=marker)
+    assert replay.value.code == "attempt_replay_denied"
+
+
+def test_d4_source_identity_rejects_in_place_same_byte_inode_replacement(
+        product_service):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    candidate, marker = service._prepare_d4_r003_attempt(
+        "a", "py-direct",
+        ["python", "-m", "compileall", "-q", "./src"])
+    selected = root / "py-direct" / "src" / "main.py"
+    before = selected.read_bytes()
+    selected.unlink()
+    selected.write_bytes(before)
+    launched = []
+    def forbidden(_plan):
+        launched.append(True)
+        raise AssertionError("source inode replacement must not launch")
+    with pytest.raises(LbeWorkerError) as exc:
+        LbeWorker(DirectChildOwner(), launcher=forbidden).run(
+            candidate.plan, product_attempt=marker)
+    assert exc.value.code == "attempt_replay_denied"
+    assert launched == []
+
+
+def test_d4_marker_fails_closed_on_wrong_workspace_and_wrong_context(
+        product_service):
+    from gateway.lbe_product_fixture import D4OneUseAttemptMarker
+    service, _root = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    with pytest.raises(D4FixtureDenied):
+        D4OneUseAttemptMarker(candidate, object())
+    with pytest.raises(D4FixtureDenied):
+        D4OneUseAttemptMarker(replace(candidate, source_identity=()),
+                             service.get("a"))
+    with pytest.raises(D4FixtureDenied):
+        D4OneUseAttemptMarker(replace(candidate, status="NATIVE_AUTHORIZED"),
+                             service.get("a"))
+
+
+def test_d4_marker_recomputes_plan_selection_and_burns_on_policy_drift(
+        product_service, monkeypatch):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, _root = product_service
+    candidate, marker = service._prepare_d4_r003_attempt(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    ctx = service.get("a")
+    original = ctx.gateway._allowed
+    def changed(parts, *, is_file):
+        if tuple(parts) == ("py-direct", "src", "main.py"):
+            return False
+        return original(parts, is_file=is_file)
+    launched = []
+    def forbidden(_plan):
+        launched.append(True)
+        raise AssertionError("policy drift cannot reach launcher")
+    with monkeypatch.context() as m:
+        m.setattr(ctx.gateway, "_allowed", changed)
+        with pytest.raises(LbeWorkerError) as exc:
+            LbeWorker(DirectChildOwner(), launcher=forbidden).run(
+                candidate.plan, product_attempt=marker)
+    assert exc.value.code == "attempt_replay_denied"
+    assert launched == []
+
+
+def test_d4_python_pytest_inventory_covers_nested_first_party_test_inputs(
+        product_service):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    py = root / "py-direct"
+    (py / "src" / "pkg").mkdir()
+    (py / "src" / "pkg" / "__init__.py").write_bytes(b"value=7\n")
+    (py / "tests").mkdir()
+    (py / "tests" / "test_runtime.py").write_bytes(b"def test_x(): assert True\n")
+    (py / "conftest.py").write_bytes(b"from pathlib import Path\n")
+    c, attempt = service._prepare_d4_r003_attempt(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    names = {name for name, _digest in c.source_sha256}
+    assert names == {
+        "py-direct/src/main.py",
+        "py-direct/src/pkg/__init__.py",
+        "py-direct/tests/test_runtime.py",
+        "py-direct/conftest.py",
+    }
+    assert len(c.source_identity) == 4
+    (py / "tests" / "test_runtime.py").write_bytes(b"def test_x(): assert False\n")
+    spawned = []
+    def must_not_run(_plan):
+        spawned.append(True)
+        raise AssertionError("new test input must block original child")
+    with pytest.raises(LbeWorkerError) as denied:
+        LbeWorker(DirectChildOwner(), launcher=must_not_run).run(
+            c.plan, product_attempt=attempt)
+    assert denied.value.code == "attempt_replay_denied"
+    assert spawned == []
+
+
+def test_d4_go_recursive_package_inventory_covers_go_test_and_build(
+        product_service):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    project = root / "go-project"
+    (project / "pkg" / "math").mkdir(parents=True)
+    (project / "pkg" / "math" / "value.go").write_bytes(
+        b"package math\nfunc Value() int { return 2 }\n")
+    (project / "cmd" / "app" / "main_test.go").write_bytes(
+        b"package main\n")
+    (project / "go.sum").write_bytes(b"firstparty.test/lib v1.0 h1:a\n")
+    for argv in (["go", "test", "./..."],
+                 ["go", "build", "-o", "bin/app", "./cmd/app"]):
+        c, attempt = service._prepare_d4_r003_attempt("a", "go-project", argv)
+        names = {name for name, _digest in c.source_sha256}
+        assert names == {
+            "go-project/go.mod",
+            "go-project/go.sum",
+            "go-project/cmd/app/main.go",
+            "go-project/cmd/app/main_test.go",
+            "go-project/pkg/math/value.go",
+        }
+        (project / "pkg" / "math" / "value.go").write_bytes(
+            b"package math\nfunc Value() int { return 3 }\n")
+        was_called = []
+        def no_launcher(_plan):
+            was_called.append(True)
+            raise AssertionError("undetected package drift")
+        with pytest.raises(LbeWorkerError) as denied:
+            LbeWorker(DirectChildOwner(), launcher=no_launcher).run(
+                c.plan, product_attempt=attempt)
+        assert denied.value.code == "attempt_replay_denied"
+        assert was_called == []
+        (project / "pkg" / "math" / "value.go").write_bytes(
+            b"package math\nfunc Value() int { return 2 }\n")
+
+
+@pytest.mark.parametrize("mutation", [
+    "sitecustomize", "untracked_config", "hidden_hook",
+    "symlink_nested", "unrecognized_file", "empty_nested",
+])
+def test_d4_python_rejects_unlisted_or_linked_import_source(
+        product_service, mutation):
+    service, root = product_service
+    py = root / "py-direct"
+    if mutation == "sitecustomize":
+        (py / "sitecustomize.py").write_bytes(b"danger=True\n")
+    elif mutation == "untracked_config":
+        (py / "tox.ini").write_bytes(b"[testenv]\n")
+    elif mutation == "hidden_hook":
+        (py / ".pth").write_bytes(b"/other\n")
+    elif mutation == "symlink_nested":
+        (py / "src" / "indirect").symlink_to(
+            root / "go-project", target_is_directory=True)
+    elif mutation == "unrecognized_file":
+        (py / "src" / "module.so").write_bytes(b"unqualified native module\n")
+    else:
+        (py / "src" / "empty").mkdir()
+    with pytest.raises(GatewayError) as denied:
+        service._prepare_d4_r003_fixture_candidate(
+            "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    assert denied.value.code == "command_not_allowed"
+
+
+@pytest.mark.parametrize("mutation", [
+    "go_work", "unlisted_pkg", "native_asm", "embed_asset",
+    "output_preexisting", "symlink_module", "empty_pkg",
+])
+def test_d4_go_fails_closed_on_untracked_module_or_build_inputs(
+        product_service, mutation):
+    service, root = product_service
+    go = root / "go-project"
+    if mutation == "go_work":
+        (go / "go.work").write_bytes(b"go 1.27\n")
+    elif mutation == "unlisted_pkg":
+        (go / "shadowpkg").mkdir()
+        (go / "shadowpkg" / "main.go").write_bytes(b"package shadowpkg\n")
+    elif mutation == "native_asm":
+        (go / "cmd" / "app" / "arm64.s").write_bytes(b"TEXT begin(SB),0,$0\n")
+    elif mutation == "embed_asset":
+        (go / "cmd" / "app" / "secret.bin").write_bytes(b"unqualified\n")
+    elif mutation == "output_preexisting":
+        (go / "bin" / "app").write_bytes(b"stale binary\n")
+    elif mutation == "symlink_module":
+        (go / "pkg").symlink_to(go / "cmd", target_is_directory=True)
+    else:
+        (go / "internal" / "empty").mkdir(parents=True)
+    with pytest.raises(GatewayError) as denied:
+        service._prepare_d4_r003_fixture_candidate(
+            "a", "go-project", ["go", "test", "./..."])
+    assert denied.value.code == "command_not_allowed"
+
+
+def test_d4_pipenv_selected_python_streams_large_dummy_bytes_no_spawn(
+        product_service, monkeypatch):
+    import hashlib
+
+    service, root = product_service
+    location = root / "py-pipenv" / ".venv" / "bin" / "python"
+    data = b"test-only, never executable!\n" * 100000
+    assert len(data) > 1024 * 1024
+    location.write_bytes(data)
+    location.chmod(0o700)
+    with monkeypatch.context() as m:
+        def no_spawn(*_args, **_kwargs):
+            raise AssertionError("No fake interpreter must be launched")
+        m.setattr(subprocess, "Popen", no_spawn)
+        candidate = service._prepare_d4_r003_fixture_candidate(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"])
+    assert dict(candidate.source_sha256)[
+        "py-pipenv/.venv/bin/python"] == hashlib.sha256(data).hexdigest()
+    assert candidate.native_launch_allowed is False
+    assert candidate.actual_loaded_sources_proven is False
+
+
+@pytest.mark.parametrize("mutation", ["non_executable", "empty", "too_large"])
+def test_d4_pipenv_selected_interpreter_requires_bounded_owner_executable(
+        product_service, mutation):
+    service, root = product_service
+    python = root / "py-pipenv" / ".venv" / "bin" / "python"
+    if mutation == "non_executable":
+        python.chmod(0o600)
+    elif mutation == "empty":
+        python.write_bytes(b"")
+    else:
+        # Sparse fixture, no need to allocate a 128 MiB string or run Python.
+        with python.open("r+b") as f:
+            f.truncate(128 * 1024 * 1024 + 1)
+    with pytest.raises(GatewayError) as denied:
+        service._prepare_d4_r003_fixture_candidate(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"])
+    assert denied.value.code == "command_not_allowed"
+
+
+def test_d4_directory_changes_during_snapshot_are_rejected(
+        product_service, monkeypatch):
+    import gateway.lbe_product_fixture as selected
+
+    service, root = product_service
+    src = root / "py-direct" / "src"
+    real_digest = selected._file_digest
+    mutated = []
+    def mutate_after_original_read(parent_fd, name, **kwargs):
+        row = real_digest(parent_fd, name, **kwargs)
+        if name == "main.py" and not mutated:
+            (src / "other.py").write_bytes(b"shadow=1\n")
+            mutated.append(True)
+        return row
+    with monkeypatch.context() as m:
+        m.setattr(selected, "_file_digest", mutate_after_original_read)
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_fixture_candidate(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    assert denied.value.code == "command_not_allowed"
+    assert mutated == [True]
+
+
+def test_d4_pipenv_tests_directory_is_included_before_one_use_marker(
+        product_service):
+    service, root = product_service
+    tests = root / "py-pipenv" / "tests"
+    tests.mkdir()
+    (tests / "test_x.py").write_bytes(b"def test_x(): assert True\n")
+    c, marker = service._prepare_d4_r003_attempt(
+        "a", "py-pipenv", ["python", "-m", "pytest", "-q"])
+    assert "py-pipenv/tests/test_x.py" in dict(c.source_sha256)
+    (tests / "test_x.py").write_bytes(b"def test_x(): assert False\n")
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    with pytest.raises(LbeWorkerError) as denied:
+        LbeWorker(DirectChildOwner(), launcher=lambda plan: (_ for _ in ()).throw(
+            AssertionError("Stale Pipenv test cannot run"))).run(
+            c.plan, product_attempt=marker)
+    assert denied.value.code == "attempt_replay_denied"
+
+
+@pytest.mark.parametrize("additional", [
+    b"require example.com/other v1.2.3\n",
+    b"replace example.com/other => ../outside\n",
+    b"toolchain go1.99.0\n",
+    b"exclude example.com/old v1.1.0\n",
+    b"retract v0.1.0\n",
+    b"replace (\n  example.com/a => ../../a\n)\n",
+    b"go 1.28\n",
+    b"module another.test/example\n",
+    b"// go:generate untrusted\n",
+    b"\x00unsafe\n",
+])
+def test_d4_go_minimal_module_rejects_unqualified_graph_directives(
+        product_service, additional):
+    service, root = product_service
+    (root / "go-project" / "go.mod").write_bytes(
+        b"module firstparty.test/app\ngo 1.27\n" + additional)
+    with pytest.raises(GatewayError) as denied:
+        service._prepare_d4_r003_fixture_candidate(
+            "a", "go-project", ["go", "test", "./..."])
+    assert denied.value.code == "command_not_allowed"
+
+
+@pytest.mark.parametrize("module", [
+    b"module ../outside\ngo 1.27\n",
+    b"module example.com/../outside\ngo 1.27\n",
+    b"module \n go 1.27\n",
+    b"module firstparty.test/app\n",
+    b"go 1.27\n",
+    b"module firstparty.test/app\ngo 1.invalid\n",
+    b"module firstparty.test/app\r\ngo 1.27\n",
+    b"module firstparty.test/app\t\ngo 1.27\n",
+    b"module firstparty.test/app\ngo 1.27\n" + b"A" * 65536,
+])
+def test_d4_go_minimal_module_rejects_malformed_or_oversized_source(
+        product_service, module):
+    service, root = product_service
+    (root / "go-project" / "go.mod").write_bytes(module)
+    with pytest.raises(GatewayError) as denied:
+        service._prepare_d4_r003_fixture_candidate(
+            "a", "go-project", ["go", "vet", "./..."])
+    assert denied.value.code == "command_not_allowed"
+
+
+def test_d4_go_module_changes_between_inventory_and_validation_rejected(
+        product_service, monkeypatch):
+    import gateway.lbe_product_fixture as guarded
+
+    service, root = product_service
+    module = root / "go-project" / "go.mod"
+    real_file_digest = guarded._file_digest
+    modified = []
+
+    def after_initial_hash(parent_fd, name, **kwargs):
+        result = real_file_digest(parent_fd, name, **kwargs)
+        if name == "go.mod" and not modified:
+            # The other files still exist, but the actual module data is now
+            # different from the pinned first-party bytes.
+            module.write_bytes(
+                b"module firstparty.test/app\ngo 1.27\n"
+                b"replace fake.dev/x => ../outside\n")
+            modified.append(True)
+        return result
+
+    with monkeypatch.context() as m:
+        m.setattr(guarded, "_file_digest", after_initial_hash)
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_fixture_candidate(
+                "a", "go-project", ["go", "test", "./..."])
+    assert denied.value.code == "command_not_allowed"
+    assert modified == [True]
+
+
+def test_d4_go_qualified_simple_module_has_no_native_authority(
+        product_service, monkeypatch):
+    service, _root = product_service
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_k: (
+            _ for _ in ()).throw(AssertionError("no Go execution allowed")))
+        c = service._prepare_d4_r003_fixture_candidate(
+            "a", "go-project", ["go", "test", "./..."])
+        assert c.native_launch_allowed is False
+        assert c.actual_loaded_sources_proven is False
+        assert c.owner_approval_attested is False
+        with pytest.raises(GatewayError) as denied:
+            service.invoke_exec(
+                "a", "go-project", ["go", "test", "./..."],
+                dry_run=False)
+    assert denied.value.code == "exec_disabled"
+
+
+@pytest.mark.parametrize("cwd,argv", _ROWS)
+def test_d4_first_party_inventory_includes_checked_directory_identity(
+        product_service, cwd, argv):
+    service, root = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", cwd, argv)
+    directories = dict(candidate.directory_identity)
+    assert cwd in directories
+    assert all(len(identity) == 8 and all(type(x) is int for x in identity)
+               for identity in directories.values())
+    if cwd == "py-direct":
+        assert cwd + "/src" in directories
+    elif cwd == "py-pipenv":
+        assert cwd + "/.venv" in directories
+        assert cwd + "/.venv/bin" in directories
+    else:
+        assert cwd + "/cmd" in directories
+        assert cwd + "/cmd/app" in directories
+        assert cwd + "/bin" in directories
+    assert candidate.native_launch_allowed is False
+
+
+@pytest.mark.parametrize("cwd,argv,relative", [
+    ("go-project", ["go", "test", "./..."], "bin"),
+    ("go-project", ["go", "build", "-o", "bin/app", "./cmd/app"], "cmd"),
+    ("py-direct", ["python", "-m", "compileall", "-q", "./src"], "src"),
+    ("py-pipenv", ["python", "-m", "pytest", "-q"], ".venv"),
+    ("py-pipenv", ["python", "-m", "pytest", "-q"], ".venv/bin"),
+])
+def test_d4_directory_mode_drift_denies_one_use_attempt_without_child(
+        product_service, cwd, argv, relative):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    candidate, marker = service._prepare_d4_r003_attempt("a", cwd, argv)
+    chosen = root / cwd / relative
+    chosen.chmod(0o700)
+    invoked = []
+    def cannot_launch(_plan):
+        invoked.append(True)
+        raise AssertionError("directory metadata drift must deny before Popen")
+    with pytest.raises(LbeWorkerError) as denied:
+        LbeWorker(DirectChildOwner(), launcher=cannot_launch).run(
+            candidate.plan, product_attempt=marker)
+    assert denied.value.code == "attempt_replay_denied"
+    assert invoked == []
+
+
+def test_d4_added_empty_cache_directory_is_detected_before_worker_launch(
+        product_service):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    candidate, marker = service._prepare_d4_r003_attempt(
+        "a", "py-direct",
+        ["python", "-m", "compileall", "-q", "./src"])
+    (root / "py-direct" / "src" / "__pycache__").mkdir()
+    invoked = []
+    def cannot_launch(_plan):
+        invoked.append(True)
+        raise AssertionError("new input directory must be bound into snapshot")
+    with pytest.raises(LbeWorkerError) as denied:
+        LbeWorker(DirectChildOwner(), launcher=cannot_launch).run(
+            candidate.plan, product_attempt=marker)
+    assert denied.value.code == "attempt_replay_denied"
+    assert invoked == []
+
+
+def test_d4_forged_directory_identity_is_not_a_product_authorization(
+        product_service):
+    from gateway.lbe_product_fixture import D4OneUseAttemptMarker
+
+    service, _root = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    with pytest.raises(D4FixtureDenied):
+        D4OneUseAttemptMarker(
+            replace(candidate, directory_identity=()), service.get("a"))
+    with pytest.raises(D4FixtureDenied):
+        D4OneUseAttemptMarker(
+            replace(candidate, directory_identity=(("other", (0,) * 8),)),
+            service.get("a"))
+    assert candidate.native_launch_allowed is False
+
+
+def _d4_inert_arm64_tool(label: str) -> bytes:
+    """Source-only MH_EXECUTE header with ARM64 identity; NEVER runnable code."""
+    return (struct.pack("<IIIIIIII",
+                        0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0)
+            + label.encode("ascii"))
+
+
+def _stage_d4_native_bytes_in_private_runner(root, *, kind):
+    import hashlib
+
+    private = root.parent.parent
+    def stage(relative, data):
+        location = private / relative
+        location.parent.mkdir(parents=True, exist_ok=True)
+        location.write_bytes(data)
+        location.chmod(0o700)
+        return hashlib.sha256(data).hexdigest()
+
+    for name in ("home", "tmp"):
+        (private / name).mkdir(exist_ok=True)
+    if kind == "go":
+        for name in ("gopath", "modcache", "gocache", "gotmp"):
+            (private / name).mkdir(exist_ok=True)
+        return str(private), {
+            "go": stage("go/bin/go", _d4_inert_arm64_tool("go_primary")),
+            "compile": stage(
+                "go/pkg/tool/darwin_arm64/compile",
+                _d4_inert_arm64_tool("go_compile")),
+            "link": stage(
+                "go/pkg/tool/darwin_arm64/link",
+                _d4_inert_arm64_tool("go_link")),
+        }
+    if kind == "python_direct":
+        return str(private), {
+            "python": stage("bin/python", _d4_inert_arm64_tool("python_direct")),
+        }
+    if kind != "pipenv":
+        raise AssertionError("unsupported test fixture")
+    py_project = root / "py-pipenv"
+    selected_python = py_project / ".venv" / "bin" / "python"
+    selected_python.write_bytes(_d4_inert_arm64_tool("pipenv_python"))
+    selected_python.chmod(0o700)
+    return str(private), {
+        "Pipfile": hashlib.sha256(
+            (py_project / "Pipfile").read_bytes()).hexdigest(),
+        "Pipfile.lock": hashlib.sha256(
+            (py_project / "Pipfile.lock").read_bytes()).hexdigest(),
+        "pyvenv.cfg": hashlib.sha256(
+            (py_project / ".venv" / "pyvenv.cfg").read_bytes()).hexdigest(),
+        "python": hashlib.sha256(
+            (py_project / ".venv" / "bin" / "python").read_bytes()).hexdigest(),
+        "pipenv": stage(
+            "bin/pipenv",
+            ("#!" + str(py_project / ".venv" / "bin" / "python") +
+             "\n# controlled Pipenv test-only script bytes\n").encode("ascii")),
+    }
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+])
+def test_d4_service_observes_real_staged_sources_and_closed_child_environment(
+        product_service, monkeypatch, kind, cwd, argv):
+    from gateway.lbe_runtime_source import (
+        D4RuntimeSourceDenied, authorize_d4_native_from_observation,
+    )
+
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind=kind)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_k: (
+            _ for _ in ()).throw(AssertionError("T0 cannot spawn native Go/Pipenv")))
+        actual = service._inspect_d4_r003_staged_runtime(
+            "a", cwd, argv, private_root=private, expected_hashes=hashes,
+            timeout_seconds=120)
+    assert actual.kind == kind
+    assert actual.workspace == "a"
+    assert actual.staged_file_bytes_checked is True
+    assert actual.child_environment_constructed is True
+    assert actual.actual_import_graph_attested is False
+    assert actual.runner_image_attested is False
+    assert actual.credentials_and_mounts_attested is False
+    assert actual.physical_resource_domain_attached is False
+    assert actual.owner_native_t1_grant is False
+    assert actual.native_launch_allowed is False
+    assert actual.blockers
+    assert actual.observed_kernel == os.uname().sysname
+    assert actual.observed_machine == os.uname().machine
+    env = dict(actual.closed_child_environment)
+    assert env["HOME"] == private + "/home"
+    assert env["TMPDIR"] == private + "/tmp"
+    assert "GITHUB_TOKEN" not in env and "PYTHONPATH" not in env
+    if kind == "go":
+        assert env["GOFLAGS"] == ""
+        assert env["GOTOOLCHAIN"] == "local"
+        assert env["GOPROXY"] == "off"
+        assert len(actual.staged_executables) == 3
+    else:
+        assert env["PIP_NO_INDEX"] == "1"
+        assert env["PIPENV_PIPFILE"] == str(root / "py-pipenv" / "Pipfile")
+        assert len(actual.staged_executables) == 2
+    with pytest.raises(D4RuntimeSourceDenied, match="NOT_AUTHORIZED"):
+        authorize_d4_native_from_observation(actual)
+    with pytest.raises(GatewayError) as refused:
+        service.invoke_exec("a", cwd, argv, dry_run=False)
+    assert refused.value.code == "exec_disabled"
+
+
+@pytest.mark.parametrize("kind,cwd,argv,changed_key,changed_relative", [
+    ("go", "go-project", ["go", "test", "./..."],
+     "compile", "go/pkg/tool/darwin_arm64/compile"),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"],
+     "link", "go/pkg/tool/darwin_arm64/link"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"],
+     "pipenv", "bin/pipenv"),
+])
+def test_d4_service_source_bytes_changed_after_pinning_deny_before_launch(
+        product_service, monkeypatch, kind, cwd, argv, changed_key,
+        changed_relative):
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind=kind)
+    (root.parent.parent / changed_relative).write_bytes(b"unqualified replacement")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_k: (
+            _ for _ in ()).throw(AssertionError("No native child allowed")))
+        with pytest.raises(GatewayError) as denied:
+            service._inspect_d4_r003_staged_runtime(
+                "a", cwd, argv, private_root=private, expected_hashes=hashes)
+    assert denied.value.code == "runner_unavailable"
+    assert hashes[changed_key] != ""
+
+
+@pytest.mark.parametrize("key,value", [
+    ("GOFLAGS", "-toolexec=/outside/untrusted"),
+    ("GOCACHEPROG", "/outside/loader"),
+    ("PIPENV_PYTHON", "/outside/python"),
+    ("PYTHONPATH", "/outside/site"),
+    ("DYLD_INSERT_LIBRARIES", "/outside/lib.dylib"),
+    ("GITHUB_TOKEN", "fake-token-not-logged"),
+    ("GH_TOKEN", "fake-token-not-logged"),
+    ("AWS_SECRET_ACCESS_KEY", "fake-secret-not-logged"),
+    ("GIT_ASKPASS", "/outside/credential"),
+])
+def test_d4_live_parent_selector_or_credentials_refuse_staged_observation(
+        product_service, monkeypatch, key, value):
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind="go")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin", key: value})
+        with pytest.raises(GatewayError) as denied:
+            service._inspect_d4_r003_staged_runtime(
+                "a", "go-project", ["go", "test", "./..."],
+                private_root=private, expected_hashes=hashes)
+    assert denied.value.code == "runner_unavailable"
+
+
+@pytest.mark.parametrize("violation", [
+    "wrong_root", "incomplete_hashes", "false_hash", "symlink_tool",
+    "outside_workspace", "private_root_is_workspace",
+])
+def test_d4_staged_runtime_fails_closed_on_unqualified_runner_sources(
+        product_service, monkeypatch, violation):
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind="go")
+    if violation == "wrong_root":
+        private = str(root.parent)
+    elif violation == "incomplete_hashes":
+        del hashes["link"]
+    elif violation == "false_hash":
+        hashes["go"] = "f" * 64
+    elif violation == "symlink_tool":
+        target = root.parent.parent / "go" / "bin" / "go"
+        target.unlink()
+        target.symlink_to("/bin/sh")
+    elif violation == "outside_workspace":
+        private = "/outside/runner"
+    else:
+        private = str(root)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        with pytest.raises(GatewayError) as denied:
+            service._inspect_d4_r003_staged_runtime(
+                "a", "go-project", ["go", "test", "./..."],
+                private_root=private, expected_hashes=hashes)
+    assert denied.value.code == "runner_unavailable"
+
+
+def test_d4_staged_runtime_not_client_mintable_or_executable_on_python_direct(
+        product_service, monkeypatch):
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind="go")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        with pytest.raises(GatewayError) as denied:
+            service._inspect_d4_r003_staged_runtime(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes)
+    assert denied.value.code == "runner_unavailable"
+    assert service.info()["exec_policy"]["available"] is False
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+])
+def test_d4_staged_source_binding_rechecks_real_selected_files_before_worker(
+        product_service, monkeypatch, kind, cwd, argv):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind=kind)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_k: (
+            _ for _ in ()).throw(AssertionError("No actual T1 child allowed")))
+        candidate, marker, observed = service._prepare_d4_r003_staged_attempt(
+            "a", cwd, argv, private_root=private, expected_hashes=hashes)
+        assert observed.native_launch_allowed is False
+        worker = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher)
+        first = worker.run(candidate.plan, product_attempt=marker)
+        assert first["status"] == "launch_failed"
+        assert first["executed"] is False
+        with pytest.raises(LbeWorkerError) as denied:
+            worker.run(candidate.plan, product_attempt=marker)
+        assert denied.value.code == "attempt_replay_denied"
+
+
+@pytest.mark.parametrize("kind,argv,changed", [
+    ("go", ["go", "test", "./..."], "go/bin/go"),
+    ("go", ["go", "vet", "./..."], "go/pkg/tool/darwin_arm64/link"),
+    ("pipenv", ["python", "-m", "pytest", "-q"], "bin/pipenv"),
+])
+def test_d4_staged_source_drift_burns_original_attempt_without_any_launch(
+        product_service, monkeypatch, kind, argv, changed):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind=kind)
+    cwd = "go-project" if kind == "go" else "py-pipenv"
+    launcher_calls = []
+    def forbidden(_plan):
+        launcher_calls.append(True)
+        raise AssertionError("Staged-source drift must not reach launcher")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, marker, observation = service._prepare_d4_r003_staged_attempt(
+            "a", cwd, argv, private_root=private, expected_hashes=hashes)
+        assert observation.native_launch_allowed is False
+        (root.parent.parent / changed).write_bytes(
+            b"replaced staged bytes without any native execution")
+        worker = LbeWorker(DirectChildOwner(), launcher=forbidden)
+        with pytest.raises(LbeWorkerError) as denied:
+            worker.run(candidate.plan, product_attempt=marker)
+        assert denied.value.code == "attempt_replay_denied"
+        with pytest.raises(LbeWorkerError) as replay:
+            worker.run(candidate.plan, product_attempt=marker)
+        assert replay.value.code == "attempt_replay_denied"
+    assert launcher_calls == []
+
+
+def test_d4_live_parent_go_selector_after_staging_denies_before_launcher(
+        product_service, monkeypatch):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind="go")
+    seen = []
+    def forbidden(_plan):
+        seen.append(True)
+        raise AssertionError("Changed parent environment may not launch")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, marker, _observed = service._prepare_d4_r003_staged_attempt(
+            "a", "go-project", ["go", "test", "./..."],
+            private_root=private, expected_hashes=hashes)
+        os.environ["GOFLAGS"] = "-toolexec=/outside/host"
+        with pytest.raises(LbeWorkerError) as denied:
+            LbeWorker(DirectChildOwner(), launcher=forbidden).run(
+                candidate.plan, product_attempt=marker)
+        assert denied.value.code == "attempt_replay_denied"
+    assert seen == []
+
+
+def test_d4_user_supplied_staged_callback_cannot_replace_internal_recheck(
+        product_service):
+    from gateway.lbe_product_fixture import D4OneUseAttemptMarker
+    service, _root = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    with pytest.raises(D4FixtureDenied):
+        D4OneUseAttemptMarker(
+            candidate, service.get("a"), staged_source=lambda *_: None)
+    assert service.info()["exec_policy"]["available"] is False
+
+
+def _d4_tree_expected(path):
+    import hashlib
+
+    entries = [("", None)]
+    for leaf in sorted(path.rglob("*")):
+        name = leaf.relative_to(path).as_posix()
+        if leaf.is_dir() and not leaf.is_symlink():
+            entries.append((name, None))
+        else:
+            entries.append((name, hashlib.sha256(leaf.read_bytes()).hexdigest()))
+    return tuple(sorted(entries))
+
+
+def _d4_staged_trees(root, kind):
+    private = root.parent.parent
+    scratch = {
+        name: _d4_tree_expected(private / name)
+        for name in ("home", "tmp")
+    }
+    if kind == "go":
+        scratch.update({
+            name: _d4_tree_expected(private / name)
+            for name in ("gopath", "modcache", "gocache", "gotmp")
+        })
+        return {"go": _d4_tree_expected(private / "go"), **scratch}
+    if kind == "python_direct":
+        (private / "lib").mkdir(exist_ok=True)
+        return {
+            "bin": _d4_tree_expected(private / "bin"),
+            "lib": _d4_tree_expected(private / "lib"),
+            **scratch,
+        }
+    if kind != "pipenv":
+        raise AssertionError("invalid private source kind")
+    (private / "lib").mkdir(exist_ok=True)
+    return {
+        "venv": _d4_tree_expected(root / "py-pipenv" / ".venv"),
+        "bin": _d4_tree_expected(private / "bin"),
+        "lib": _d4_tree_expected(private / "lib"),
+        **scratch,
+    }
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+])
+def test_d4_product_stage_binds_entire_staged_source_tree_to_worker(
+        product_service, monkeypatch, kind, cwd, argv):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind=kind)
+    trees = _d4_staged_trees(root, kind)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_k: (
+            _ for _ in ()).throw(AssertionError("no real T1 child")))
+        candidate, marker, observation = service._prepare_d4_r003_staged_attempt(
+            "a", cwd, argv, private_root=private, expected_hashes=hashes,
+            expected_trees=trees)
+        assert observation.bounded_staged_file_set_checked is True
+        assert len(observation.staged_source_trees) == (7 if kind == "go" else 5)
+        assert all(entry_count > 0 and len(digest) == 64
+                   for _label, digest, entry_count, _total in
+                   observation.staged_source_trees)
+        assert observation.actual_import_graph_attested is False
+        assert observation.physical_resource_domain_attached is False
+        assert observation.owner_native_t1_grant is False
+        assert observation.native_launch_allowed is False
+        result = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher).run(
+            candidate.plan, product_attempt=marker)
+        assert result["status"] == "launch_failed"
+        assert result["executed"] is False
+        with pytest.raises(LbeWorkerError) as replay:
+            LbeWorker(DirectChildOwner(), launcher=_no_child_launcher).run(
+                candidate.plan, product_attempt=marker)
+        assert replay.value.code == "attempt_replay_denied"
+
+
+@pytest.mark.parametrize("kind,added_path", [
+    ("go", "go/src/new-package/extra.go"),
+    ("go", "go/pkg/tool/darwin_arm64/new_tool"),
+    ("pipenv", "lib/shadow.py"),
+    ("pipenv", "projects/a/py-pipenv/.venv/lib/site.py"),
+    ("go", "gocache/unknown-built-package.a"),
+    ("go", "modcache/unlisted-module.go"),
+    ("pipenv", "home/.pipenv_unapproved"),
+    ("pipenv", "tmp/unqualified-site.py"),
+])
+def test_d4_product_staged_tree_extra_source_denied_before_launcher(
+        product_service, monkeypatch, kind, added_path):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind=kind)
+    trees = _d4_staged_trees(root, kind)
+    cwd = "go-project" if kind == "go" else "py-pipenv"
+    argv = (["go", "test", "./..."] if kind == "go"
+            else ["python", "-m", "pytest", "-q"])
+    launcher_count = []
+    def blocked(_plan):
+        launcher_count.append(True)
+        raise AssertionError("never launch after source tree drift")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, marker, observation = service._prepare_d4_r003_staged_attempt(
+            "a", cwd, argv, private_root=private,
+            expected_hashes=hashes, expected_trees=trees)
+        assert observation.bounded_staged_file_set_checked
+        extra = root.parent.parent / added_path
+        extra.parent.mkdir(parents=True, exist_ok=True)
+        extra.write_bytes(b"unqualified staged extra input")
+        with pytest.raises(LbeWorkerError) as denied:
+            LbeWorker(DirectChildOwner(), launcher=blocked).run(
+                candidate.plan, product_attempt=marker)
+        assert denied.value.code == "attempt_replay_denied"
+    assert launcher_count == []
+
+
+@pytest.mark.parametrize("kind", ["go", "pipenv"])
+def test_d4_product_stage_rejects_missing_tree_even_when_binaries_hash_match(
+        product_service, monkeypatch, kind):
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind=kind)
+    cwd = "go-project" if kind == "go" else "py-pipenv"
+    argv = (["go", "test", "./..."] if kind == "go"
+            else ["python", "-m", "pytest", "-q"])
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        with pytest.raises(GatewayError) as denied:
+            service._inspect_d4_r003_staged_runtime(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees={})
+    assert denied.value.code == "runner_unavailable"
+
+
+def test_d4_product_stage_rejects_trusted_manifest_with_pth_startup_code(
+        product_service, monkeypatch):
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind="pipenv")
+    (root.parent.parent / "lib").mkdir(exist_ok=True)
+    (root.parent.parent / "lib" / "custom.pth").write_bytes(
+        b"import unexpected_site_startup\n")
+    trees = _d4_staged_trees(root, "pipenv")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        with pytest.raises(GatewayError) as denied:
+            service._inspect_d4_r003_staged_runtime(
+                "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees)
+    assert denied.value.code == "runner_unavailable"
+
+
+@pytest.mark.parametrize("kind,name", [
+    ("go", "gopath"),
+    ("go", "modcache"),
+    ("go", "gocache"),
+    ("go", "gotmp"),
+    ("go", "home"),
+    ("go", "tmp"),
+    ("pipenv", "home"),
+    ("pipenv", "tmp"),
+])
+def test_d4_product_denies_prepopulated_native_scratch_even_with_approved_digest(
+        product_service, monkeypatch, kind, name):
+    # Hashing a cache can never establish that foreign generated modules or
+    # startup files are allowed. Preexisting scratch inputs must be absent.
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(root, kind=kind)
+    extra = root.parent.parent / name / "preexisting.txt"
+    extra.write_bytes(b"prepopulated scratch is not an approved source")
+    trees = _d4_staged_trees(root, kind)
+    assert any(row[0] == "preexisting.txt" for row in trees[name])
+    cwd = "go-project" if kind == "go" else "py-pipenv"
+    argv = (["go", "test", "./..."] if kind == "go"
+            else ["python", "-m", "pytest", "-q"])
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        with pytest.raises(GatewayError) as denied:
+            service._inspect_d4_r003_staged_runtime(
+                "a", cwd, argv, private_root=private, expected_hashes=hashes,
+                expected_trees=trees)
+    assert denied.value.code == "runner_unavailable"
+
+
+@pytest.mark.parametrize("kind,cwd,argv,first", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"], "python"),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"], "python"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"], "pipenv"),
+    ("go", "go-project", ["go", "test", "./..."], "go"),
+    ("go", "go-project", ["go", "vet", "./..."], "go"),
+    ("go", "go-project",
+     ["go", "build", "-o", "bin/app", "./cmd/app"], "go"),
+])
+def test_d4_all_six_commands_produce_private_source_only_native_recipe(
+        product_service, monkeypatch, kind, cwd, argv, first):
+    from gateway.lbe_launch_recipe import (
+        D4NativeRecipeDenied, launch_d4_native_from_recipe,
+    )
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    trees = _d4_staged_trees(workspace, kind)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("native T1 forbidden")))
+        candidate, marker, observation, recipe = (
+            service._prepare_d4_r003_native_recipe(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees=trees,
+                timeout_seconds=120))
+        assert recipe.workspace == "a"
+        assert recipe.profile_git_blob == candidate.profile_git_blob
+        assert recipe.runner == candidate.plan.runner
+        assert recipe.requested_argv == tuple(argv)
+        assert recipe.service_effective_argv == candidate.plan.effective_argv
+        assert recipe.working_directory == str(workspace / cwd)
+        assert recipe.resolved_spawn_argv[0] == recipe.resolved_executable
+        assert recipe.resolved_executable.startswith(private + "/")
+        assert recipe.resolved_executable.endswith("/" + first)
+        assert recipe.resolved_spawn_argv[1:] == candidate.plan.effective_argv[1:]
+        assert recipe.original_timeout_seconds == 120
+        assert len(recipe.selected_source_fingerprint) == 64
+        assert recipe.selected_image_sha256 == tuple(
+            sorted(observation.staged_executables))
+        assert recipe.selected_venv_home == (
+            private + "/bin" if kind == "pipenv" else None)
+        assert recipe.native_launch_allowed is False
+        assert recipe.real_runner_qualified is False
+        assert recipe.actual_loaded_source_graph_proven is False
+        assert recipe.physical_cpu_memory_enforcement_proven is False
+        assert recipe.owner_t1_grant_present is False
+        assert observation.native_launch_allowed is False
+        assert dict(recipe.required_limits)["cpu_millicores_max"] == 2000
+        assert dict(recipe.required_limits)["memory_mib_max"] == 4096
+        assert dict(recipe.closed_child_environment)["HOME"] == private + "/home"
+        assert "GITHUB_TOKEN" not in dict(recipe.closed_child_environment)
+        if kind == "go":
+            assert dict(recipe.closed_child_environment)["GOFLAGS"] == ""
+        if kind == "go" and argv[1] == "build":
+            assert recipe.canonical_output_path == str(
+                workspace / "go-project" / "bin" / "app")
+        else:
+            assert recipe.canonical_output_path is None
+        if kind == "python_direct":
+            assert observation.kind == "python_direct"
+            assert dict(recipe.closed_child_environment)["PYTHONSAFEPATH"] == "1"
+            assert len(observation.staged_executables) == 1
+        if kind == "pipenv":
+            assert recipe.resolved_executable == private + "/bin/pipenv"
+            assert recipe.resolved_spawn_argv[:3] == (
+                private + "/bin/pipenv", "run", "python")
+        with pytest.raises(D4NativeRecipeDenied, match="cannot launch"):
+            launch_d4_native_from_recipe(recipe)
+        with pytest.raises(GatewayError) as denied:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert denied.value.code == "exec_disabled"
+        result = LbeWorker(DirectChildOwner(), launcher=_no_child_launcher).run(
+            candidate.plan, product_attempt=marker)
+        assert result["status"] == "launch_failed"
+        assert result["executed"] is False
+        with pytest.raises(LbeWorkerError) as replay:
+            LbeWorker(DirectChildOwner(), launcher=_no_child_launcher).run(
+                candidate.plan, product_attempt=marker)
+        assert replay.value.code == "attempt_replay_denied"
+
+
+@pytest.mark.parametrize("mutation", [
+    "wrong_python_hash", "extra_site", "bad_pth", "source_replacement",
+    "foreign_parent_selector",
+])
+def test_d4_python_direct_recipe_rejects_changed_real_inputs_before_launch(
+        product_service, monkeypatch, mutation):
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="python_direct")
+    trees = _d4_staged_trees(workspace, "python_direct")
+    if mutation == "wrong_python_hash":
+        hashes["python"] = "b" * 64
+    elif mutation == "extra_site":
+        (workspace.parent.parent / "lib" / "shadow.py").write_bytes(
+            b"unqualified module import input\n")
+    elif mutation == "bad_pth":
+        (workspace.parent.parent / "lib" / "x.pth").write_bytes(
+            b"import os; os.system('not allowed')\n")
+    elif mutation == "source_replacement":
+        (workspace.parent.parent / "bin" / "python").write_bytes(
+            b"unqualified changed source\n")
+    with monkeypatch.context() as m:
+        env = {"PATH": "/usr/bin:/bin"}
+        if mutation == "foreign_parent_selector":
+            env["PYTHONPATH"] = "/tmp/unqualified"
+        m.setattr(os, "environ", env)
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no native child")))
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_native_recipe(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees)
+    assert denied.value.code == "runner_unavailable"
+
+
+@pytest.mark.parametrize("timeout", [0, 121, 300, True, "120"])
+def test_d4_recipe_rejects_timeout_outside_original_child_budget(
+        product_service, monkeypatch, timeout):
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="python_direct")
+    trees = _d4_staged_trees(workspace, "python_direct")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("native T1 forbidden")))
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_native_recipe(
+                "a", "py-direct",
+                ["python", "-m", "compileall", "-q", "./src"],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees, timeout_seconds=timeout)
+    assert denied.value.code in {
+        "runner_unavailable", "invalid_argument", "command_not_allowed"}
+
+
+def test_d4_native_recipe_rejects_forged_observation_and_cannot_mint_grant(
+        product_service, monkeypatch):
+    from gateway.lbe_launch_recipe import (
+        D4NativeRecipeDenied, launch_d4_native_from_recipe,
+        prepare_d4_native_launch_recipe,
+    )
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="python_direct")
+    trees = _d4_staged_trees(workspace, "python_direct")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, _marker, observed, recipe = (
+            service._prepare_d4_r003_native_recipe(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees))
+        for field, val in (
+            ("native_launch_allowed", True),
+            ("actual_import_graph_attested", True),
+            ("bounded_staged_file_set_checked", False),
+            ("staged_source_trees", ()),
+        ):
+            with pytest.raises(D4NativeRecipeDenied):
+                prepare_d4_native_launch_recipe(
+                    service.get("a"), candidate,
+                    replace(observed, **{field: val}),
+                    private_root=private)
+        with pytest.raises(D4NativeRecipeDenied):
+            launch_d4_native_from_recipe(replace(recipe, native_launch_allowed=True))
+    assert recipe.native_launch_allowed is False
+
+
+def test_d4_python_direct_worker_prelaunch_rechecks_real_private_python(
+        product_service, monkeypatch):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="python_direct")
+    trees = _d4_staged_trees(workspace, "python_direct")
+    called = []
+    def should_not_launch(_plan):
+        called.append(True)
+        raise AssertionError("source changed before Worker launch")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, marker, _obs, recipe = service._prepare_d4_r003_native_recipe(
+            "a", "py-direct", ["python", "-m", "pytest", "-q"],
+            private_root=private, expected_hashes=hashes,
+            expected_trees=trees)
+        assert recipe.native_launch_allowed is False
+        (workspace.parent.parent / "bin" / "python").write_bytes(
+            b"replaced right before source recheck\n")
+        with pytest.raises(LbeWorkerError) as denied:
+            LbeWorker(DirectChildOwner(), launcher=should_not_launch).run(
+                candidate.plan, product_attempt=marker)
+        assert denied.value.code == "attempt_replay_denied"
+    assert called == []
+
+
+def test_d4_go_recipe_rejects_untrusted_nonempty_goflags_even_if_observation_forged(
+        product_service, monkeypatch):
+    from gateway.lbe_launch_recipe import (
+        D4NativeRecipeDenied, prepare_d4_native_launch_recipe,
+    )
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(workspace, kind="go")
+    trees = _d4_staged_trees(workspace, "go")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, _marker, observed = service._prepare_d4_r003_staged_attempt(
+            "a", "go-project", ["go", "test", "./..."],
+            private_root=private, expected_hashes=hashes,
+            expected_trees=trees,
+        )
+        env = dict(observed.closed_child_environment)
+        assert env["GOFLAGS"] == ""
+        env["GOFLAGS"] = "-toolexec=/outside/forbidden"
+        forged = replace(observed, closed_child_environment=tuple(sorted(env.items())))
+        with pytest.raises(D4NativeRecipeDenied, match="Go environment"):
+            prepare_d4_native_launch_recipe(
+                service.get("a"), candidate, forged, private_root=private)
+    assert service.info()["exec_policy"]["available"] is False
+
+
+@pytest.mark.parametrize("kind,cwd,argv,bad_key,bad_value", [
+    ("go", "go-project", ["go", "test", "./..."],
+     "LD_PRELOAD", "/outside/host_inject"),
+    ("go", "go-project", ["go", "vet", "./..."],
+     "PATH", "/outside/untrusted:/usr/bin:/bin"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"],
+     "PIPENV_PYTHON", "/outside/interpreter"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"],
+     "PATH", "/outside/host/untrusted"),
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"],
+     "LD_LIBRARY_PATH", "/outside/library"),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"],
+     "PYTHONINSPECT", "1"),
+])
+def test_d4_native_recipe_rejects_any_unapproved_child_environment_key_or_path(
+        product_service, monkeypatch, kind, cwd, argv, bad_key, bad_value):
+    from gateway.lbe_launch_recipe import (
+        D4NativeRecipeDenied, prepare_d4_native_launch_recipe,
+    )
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    trees = _d4_staged_trees(workspace, kind)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, _marker, observed = service._prepare_d4_r003_staged_attempt(
+            "a", cwd, argv, private_root=private,
+            expected_hashes=hashes, expected_trees=trees)
+        env = dict(observed.closed_child_environment)
+        env[bad_key] = bad_value
+        forged = replace(observed, closed_child_environment=tuple(sorted(env.items())))
+        with pytest.raises(D4NativeRecipeDenied):
+            prepare_d4_native_launch_recipe(
+                service.get("a"), candidate, forged, private_root=private)
+    assert service.info()["exec_policy"]["available"] is False
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+])
+def test_d4_host_preflight_observes_actual_kernel_and_private_root_not_t1(
+        product_service, monkeypatch, kind, cwd, argv):
+    from gateway.lbe_runner_preflight import (
+        D4RunnerProbeDenied, require_d4_native_runner_admission,
+    )
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    trees = _d4_staged_trees(workspace, kind)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("No native T1 authorized")))
+        candidate, marker, observed, recipe, host = (
+            service._prepare_d4_r003_runner_preflight(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees=trees,
+                timeout_seconds=120))
+        assert host.workspace == "a"
+        assert host.source_fingerprint == recipe.selected_source_fingerprint
+        assert host.kernel_sysname == os.uname().sysname
+        assert host.machine == os.uname().machine
+        assert host.uid == os.getuid()
+        assert host.effective_uid == os.geteuid()
+        assert host.pid == os.getpid()
+        assert host.kernel_and_private_paths_observed is True
+        assert len(host.private_root_inode) == 6
+        assert len(host.workspace_inode) == 6
+        assert host.proposed_limits == recipe.required_limits
+        assert dict(host.proposed_limits)["cpu_millicores_max"] == 2000
+        assert dict(host.proposed_limits)["memory_mib_max"] == 4096
+        assert host.immutable_github_image_observed is False
+        assert host.github_provider_attested is False
+        assert host.no_shared_mounts_proven is False
+        assert host.no_host_credentials_proven is False
+        assert host.loaded_source_graph_proven is False
+        assert host.physical_whole_child_cpu_memory_attached is False
+        assert host.exact_owner_native_t1_authorized is False
+        assert host.native_launch_allowed is False
+        assert not recipe.native_launch_allowed
+        with pytest.raises(D4RunnerProbeDenied, match="NOT_AUTHORIZED"):
+            require_d4_native_runner_admission(host, recipe)
+        with pytest.raises(GatewayError) as denial:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert denial.value.code == "exec_disabled"
+
+
+def test_d4_host_probe_real_rlimits_and_ci_labels_never_equal_domain_proof(
+        product_service, monkeypatch):
+    from gateway import lbe_runner_preflight as source
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="python_direct")
+    trees = _d4_staged_trees(workspace, "python_direct")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, marker, _obs, recipe = service._prepare_d4_r003_native_recipe(
+            "a", "py-direct", ["python", "-m", "pytest", "-q"],
+            private_root=private, expected_hashes=hashes, expected_trees=trees)
+        m.setattr(source.resource, "getrlimit", lambda _resource: (10, 10))
+        os.environ.update({
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_TOKEN": "fake-test-value-never-serialized",
+            "HTTPS_PROXY": "http://fake.test.invalid:1234",
+        })
+        host = source.observe_d4_runner_preflight(
+            service.get("a"), recipe, private_root=private)
+    assert host.claimed_ci_label_present is True
+    assert host.ambient_sensitive_credentials_present is True
+    assert host.ambient_proxy_settings_present is True
+    assert host.rlimit_cpu_seconds_soft == 10
+    assert host.rlimit_as_bytes_soft == 10
+    assert host.physical_whole_child_cpu_memory_attached is False
+    assert host.github_provider_attested is False
+    assert host.native_launch_allowed is False
+    assert "fake-test-value" not in repr(host)
+
+
+def test_d4_host_preflight_rejects_insecure_workspace_after_native_recipe(
+        product_service, monkeypatch):
+    from gateway.lbe_runner_preflight import (
+        D4RunnerProbeDenied, observe_d4_runner_preflight,
+    )
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="python_direct")
+    trees = _d4_staged_trees(workspace, "python_direct")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        _candidate, _marker, _obs, recipe = (
+            service._prepare_d4_r003_native_recipe(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes, expected_trees=trees))
+        workspace.chmod(0o777)
+        with pytest.raises(D4RunnerProbeDenied, match="owner controlled"):
+            observe_d4_runner_preflight(
+                service.get("a"), recipe, private_root=private)
+
+
+def test_d4_host_probe_forged_resource_and_image_claim_is_still_hard_denied(
+        product_service, monkeypatch):
+    from gateway.lbe_runner_preflight import (
+        D4RunnerProbeDenied, observe_d4_runner_preflight,
+        require_d4_native_runner_admission,
+    )
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="go")
+    trees = _d4_staged_trees(workspace, "go")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        _candidate, _marker, _obs, recipe = (
+            service._prepare_d4_r003_native_recipe(
+                "a", "go-project", ["go", "vet", "./..."],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees))
+        host = observe_d4_runner_preflight(
+            service.get("a"), recipe, private_root=private)
+        forged = replace(host,
+            github_provider_attested=True,
+            immutable_github_image_observed=True,
+            physical_whole_child_cpu_memory_attached=True,
+            exact_owner_native_t1_authorized=True,
+            native_launch_allowed=True,
+            blockers=())
+        with pytest.raises(D4RunnerProbeDenied, match="NOT_AUTHORIZED"):
+            require_d4_native_runner_admission(forged, recipe)
+        with pytest.raises(D4RunnerProbeDenied, match="promoted"):
+            observe_d4_runner_preflight(
+                service.get("a"), replace(recipe, native_launch_allowed=True),
+                private_root=private)
+    assert service.info()["exec_policy"]["available"] is False
+
+
+@pytest.mark.parametrize("mutation", [
+    "outside_python", "env_python", "wrong_private_python",
+    "interpreter_flags", "crlf_shebang", "no_shebang",
+])
+def test_d4_pipenv_script_interpreter_must_be_exact_staged_private_python(
+        product_service, monkeypatch, mutation):
+    import hashlib
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="pipenv")
+    pinned_python = str(workspace / "py-pipenv" / ".venv" / "bin" / "python")
+    if mutation == "outside_python":
+        data = b"#!/usr/bin/python3\n#not trusted\n"
+    elif mutation == "env_python":
+        data = b"#!/usr/bin/env python3\n#not trusted\n"
+    elif mutation == "wrong_private_python":
+        data = ("#!" + private + "/bin/python\n#wrong private interpreter\n"
+                ).encode("ascii")
+    elif mutation == "interpreter_flags":
+        data = ("#!" + pinned_python + " -I\n#extra argument\n").encode("ascii")
+    elif mutation == "crlf_shebang":
+        data = ("#!" + pinned_python + "\r\n#wrong line ending\n").encode("ascii")
+    else:
+        data = b"no-shebang-even-if-content-hash-is-pinned\n"
+    entrypoint = workspace.parent.parent / "bin" / "pipenv"
+    entrypoint.write_bytes(data)
+    hashes["pipenv"] = hashlib.sha256(data).hexdigest()
+    # The EXACT bad bytes are included in the supplied manifest: digest
+    # matching is not enough to qualify the kernel-selected interpreter.
+    trees = _d4_staged_trees(workspace, "pipenv")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("foreign script must not spawn")))
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_native_recipe(
+                "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees)
+    assert denied.value.code == "runner_unavailable"
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+])
+def test_d4_product_stages_real_runtime_bytes_then_prepares_six_recipes(
+        product_service, monkeypatch, kind, cwd, argv):
+    import hashlib
+
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker
+    from gateway.lbe_runner_preflight import require_d4_native_runner_admission
+    from gateway.lbe_runtime_stage import D4RuntimeStageReceipt
+
+    service, workspace = product_service
+    private = workspace.parent.parent
+    provisioner_root = private.parent / (private.name + "-provisioner")
+    for folder in ("home", "tmp"):
+        (private / folder).mkdir(exist_ok=True)
+    if kind == "go":
+        for folder in ("gopath", "modcache", "gocache", "gotmp"):
+            (private / folder).mkdir(exist_ok=True)
+        selections = {
+            "go": {
+                "bin/go": b"inert primary Go bytes",
+                "pkg/tool/darwin_arm64/compile": b"inert Go compiler bytes",
+                "pkg/tool/darwin_arm64/link": b"inert Go linker bytes",
+                "src/runtime/runtime.go": b"package runtime\n",
+            }
+        }
+    elif kind == "pipenv":
+        firstparty = workspace / "py-pipenv"
+        selections = {
+            "bin": {
+                "pipenv": (
+                    "#!" + str(firstparty / ".venv" / "bin" / "python") +
+                    "\n# trusted test-only Pipenv script bytes\n").encode("ascii"),
+            },
+            "lib": {"python/stdlib.py": b"x = 1\n"},
+        }
+    else:
+        selections = {
+            "bin": {"python": b"inert direct Python bytecode executable"},
+            "lib": {"python/stdlib.py": b"x = 1\n"},
+        }
+    expected_hashes = {}
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("native PRODUCT_T1 must not execute")))
+        for stage_kind, files in selections.items():
+            provisioned = provisioner_root / stage_kind
+            provisioned.mkdir(parents=True)
+            for relative, content in files.items():
+                source = provisioned / relative
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_bytes(content)
+                source.chmod(0o700 if not relative.endswith((".go", ".py")) else 0o600)
+            receipt = service._stage_d4_r003_operator_source(
+                "a", cwd, argv, private_root=str(private),
+                provisioner_root=str(provisioner_root),
+                kind=stage_kind, expected=_d4_tree_expected(provisioned))
+            assert type(receipt) is D4RuntimeStageReceipt
+            assert receipt.staged_files_verified is True
+            assert receipt.native_launch_allowed is False
+            assert receipt.loaded_runtime_sources_proven is False
+        if kind == "go":
+            expected_hashes = {
+                key: hashlib.sha256((private / relative).read_bytes()).hexdigest()
+                for key, relative in (
+                    ("go", "go/bin/go"),
+                    ("compile", "go/pkg/tool/darwin_arm64/compile"),
+                    ("link", "go/pkg/tool/darwin_arm64/link"),
+                )
+            }
+        elif kind == "pipenv":
+            firstparty = workspace / "py-pipenv"
+            expected_hashes = {
+                "Pipfile": hashlib.sha256((firstparty / "Pipfile").read_bytes()).hexdigest(),
+                "Pipfile.lock": hashlib.sha256((firstparty / "Pipfile.lock").read_bytes()).hexdigest(),
+                "pyvenv.cfg": hashlib.sha256((firstparty / ".venv/pyvenv.cfg").read_bytes()).hexdigest(),
+                "python": hashlib.sha256((firstparty / ".venv/bin/python").read_bytes()).hexdigest(),
+                "pipenv": hashlib.sha256((private / "bin/pipenv").read_bytes()).hexdigest(),
+            }
+        else:
+            expected_hashes = {
+                "python": hashlib.sha256((private / "bin/python").read_bytes()).hexdigest()
+            }
+        trees = _d4_staged_trees(workspace, kind)
+        candidate, marker, observation, recipe, runner = (
+            service._prepare_d4_r003_runner_preflight(
+                "a", cwd, argv, private_root=str(private),
+                expected_hashes=expected_hashes, expected_trees=trees))
+        assert candidate.plan.requested_argv == tuple(argv)
+        assert recipe.resolved_executable.startswith(str(private) + "/")
+        assert recipe.native_launch_allowed is False
+        assert observation.native_launch_allowed is False
+        assert runner.physical_whole_child_cpu_memory_attached is False
+        assert runner.native_launch_allowed is False
+        with pytest.raises(Exception, match="NOT_AUTHORIZED"):
+            require_d4_native_runner_admission(runner, recipe)
+        result = LbeWorker(
+            DirectChildOwner(), launcher=marker._macos_boundary.launch).run(
+                candidate.plan, product_attempt=marker)
+        assert result["status"] == "launch_failed"
+        assert result["executed"] is False
+        with pytest.raises(GatewayError) as denied:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert denied.value.code == "exec_disabled"
+
+
+def test_d4_service_staging_cannot_select_foreign_source_kind(
+        product_service):
+    service, workspace = product_service
+    private = workspace.parent.parent
+    provisioner_root = private.parent / (private.name + "-provisioner")
+    with pytest.raises(GatewayError) as denied:
+        service._stage_d4_r003_operator_source(
+            "a", "go-project", ["go", "test", "./..."],
+            private_root=str(private), provisioner_root=str(provisioner_root),
+            kind="bin",
+            expected=(("", None),))
+    assert denied.value.code == "runner_unavailable"
+    assert not (private / "bin").exists()
+
+
+@pytest.mark.parametrize("kind,cwd,argv,strict_p007,strict_record,record_drift", [
+    ("go", "go-project", ["go", "test", "./..."], False, False, None),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"], False, False, None),
+    ("go", "go-project", ["go", "test", "./..."], True, False, None),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"], True, False, None),
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"], False, False, None),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"], False, False, None),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"], False, False, None),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"], False, True, None),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"], False, True, "source_bytes"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"], False, True, "record_hash"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"], False, True, "same_bytes_new_inode"),
+])
+def test_d4_product_assembles_full_source_only_runner_from_separate_provisioner(
+        product_service, monkeypatch, kind, cwd, argv, strict_p007,
+        strict_record, record_drift):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    import struct
+
+    def private_macho(label, *, install_name=None, file_type=2):
+        install = (install_name or ("/usr/lib/" + label + ".dylib")).encode(
+            "ascii") + b"\x00"
+        size = (24 + len(install) + 3) & ~3
+        cmd = (struct.pack("<III", 0x0C, size, 24) + b"\x00" * 12
+               + install + b"\x00" * (size - 24 - len(install)))
+        return struct.pack(
+            "<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, file_type,
+            1, len(cmd), 0, 0) + cmd
+
+    service, workspace = product_service
+    private = workspace.parent.parent
+    provisioner = private.parent / (private.name + "-operator")
+    if kind == "go":
+        trees_data = {"go": {
+            "bin/go": private_macho("Go"),
+            "pkg/tool/darwin_arm64/compile": private_macho("Compile"),
+            "pkg/tool/darwin_arm64/link": private_macho("Link"),
+            "src/runtime/runtime.go": b"package runtime\n",
+        }}
+        needed_scratch = {"home", "tmp", "gopath", "modcache", "gocache", "gotmp"}
+    elif kind == "python_direct":
+        trees_data = {
+            "bin": {"python": private_macho(
+                "Python", install_name="@loader_path/../lib/libPrivate.dylib")},
+            "lib": {
+                "python/stdlib.py": b"x=1\n",
+                "libPrivate.dylib": private_macho("PrivateLib", file_type=6),
+            },
+        }
+        needed_scratch = {"home", "tmp"}
+    else:
+        interpreter = str(workspace / "py-pipenv" / ".venv/bin/python")
+        trees_data = {
+            "bin": {
+                "pipenv": ("#!" + interpreter +
+                           "\n# preselected inert Pipenv source bytes\n").encode("ascii"),
+            },
+            "lib": {"python/stdlib.py": b"x=1\n"},
+        }
+        needed_scratch = {"home", "tmp"}
+
+    manifests = {}
+    for source_kind, files in trees_data.items():
+        root = provisioner / source_kind
+        root.mkdir(parents=True, exist_ok=True)
+        for name, data in files.items():
+            f = root / name
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(data)
+            f.chmod(0o600 if name.endswith((".py", ".go", ".dylib"))
+                    else 0o700)
+        manifests[source_kind] = _d4_tree_expected(root)
+    if kind == "pipenv":
+        # The Pipenv executable is an inspected #! script; the kernel's
+        # selected private Python interpreter must ALSO be Mach-O ARM64.
+        private_python = workspace / "py-pipenv" / ".venv/bin/python"
+        private_python.write_bytes(private_macho("PipenvPython"))
+        if strict_record:
+            _d4_record_site_fixture(workspace)
+    venv_manifest = (
+        _d4_tree_expected(workspace / "py-pipenv" / ".venv")
+        if kind == "pipenv" else None)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no native child in T0")))
+        # The separately known fixture manifest is the test's reviewed
+        # expected input; actual operator-observed inode identities must ALSO
+        # match across observation and source materialization.
+        offered = service._observe_d4_r003_operator_provisioner(
+            "a", cwd, argv, provisioner_root=str(provisioner))
+        assert set(offered) == (set(manifests) | (
+            {"venv"} if kind == "pipenv" else set()))
+        assert all(offered[kind_name].proposed_manifest == tuple(
+            sorted(manifests[kind_name])) for kind_name in manifests)
+        if kind == "pipenv":
+            assert offered["venv"].proposed_manifest == tuple(sorted(venv_manifest))
+        identity_pins = {
+            name: view.observed_source_identity_sha256
+            for name, view in offered.items() if name in manifests
+        }
+        if strict_p007:
+            # A positive T0 check of the ACTUAL service staging path only.
+            # The synthetic pin override is scoped to this disposable test;
+            # it is NOT the real 15657-member Go release or owner signature.
+            import gateway.lbe_runtime_tree as source_tree
+            m.setattr(source_tree, "_P007_GO_STAGE_FILE_COUNT",
+                      offered["go"].file_count)
+            m.setattr(source_tree, "_P007_GO_STAGE_SHA256",
+                      offered["go"].go_p007_stage_manifest_sha256)
+            m.setattr(source_tree, "_P007_GO_CRITICAL_FILES",
+                      frozenset({
+                          "bin/go", "pkg/tool/darwin_arm64/compile",
+                          "pkg/tool/darwin_arm64/link",
+                          "src/runtime/runtime.go",
+                      }))
+            assert source_tree._d4_p007_go_stage_matches(manifests["go"])
+        candidate, marker, observed, recipe, runner, native, graph, receipts = (
+            service._assemble_d4_r003_source_only_runner(
+                "a", cwd, argv, private_root=str(private),
+                provisioner_root=str(provisioner),
+                staged_manifests=manifests, venv_manifest=venv_manifest,
+                expected_source_identities=identity_pins,
+                expected_venv_identity_sha256=(
+                    offered["venv"].observed_source_identity_sha256
+                    if kind == "pipenv" else None),
+                require_go_p007_stage_source=strict_p007,
+                expected_venv_record_distributions=(
+                    (("example-pkg", "1.0"),) if strict_record else None)))
+        assert candidate.plan.requested_argv == tuple(argv)
+        assert len(receipts) == len(manifests)
+        assert all(x.staged_files_verified and not x.native_launch_allowed
+                   and x.review_source_identity_bound for x in receipts)
+        for name in needed_scratch:
+            assert (private / name).is_dir()
+            assert not list((private / name).iterdir())
+        assert not (private / "provisioned").exists()
+        assert observed.bounded_staged_file_set_checked is True
+        assert observed.native_launch_allowed is False
+        assert recipe.native_launch_allowed is False
+        assert runner.native_launch_allowed is False
+        assert runner.physical_whole_child_cpu_memory_attached is False
+        assert native.native_launch_allowed is False
+        assert native.actual_loaded_source_graph_proven is False
+        assert len(native.static_selected_executables) == (
+            3 if kind == "go" else 1)
+        assert all(item.selected_cpu == "arm64"
+                   and item.native_launch_allowed is False
+                   for _, item in native.static_selected_executables)
+        assert graph.native_launch_allowed is False
+        assert graph.dynamically_loaded_all_sources_proven is False
+        if kind == "python_direct":
+            assert tuple(path for path, _ in graph.private_native_images) == (
+                "lib/libPrivate.dylib",)
+        else:
+            assert graph.private_native_images == ()
+        if record_drift is None:
+            result = LbeWorker(
+                DirectChildOwner(), launcher=marker._macos_boundary.launch).run(
+                    candidate.plan, product_attempt=marker)
+            assert result["status"] == "launch_failed"
+            assert result["executed"] is False
+        else:
+            assert kind == "pipenv" and strict_record
+            site = workspace / "py-pipenv/.venv/lib/python3.13/site-packages"
+            entry = site / "example_pkg/entry.py"
+            if record_drift == "source_bytes":
+                entry.write_bytes(b"answer = 43\n")
+            elif record_drift == "record_hash":
+                record = site / "example_pkg-1.0.dist-info/RECORD"
+                record.write_text(
+                    record.read_text("utf-8").replace("sha256=", "sha256=AAAA", 1),
+                    encoding="utf-8")
+            else:
+                assert record_drift == "same_bytes_new_inode"
+                original_inode = entry.stat().st_ino
+                replacement = entry.with_name("new-entry.py")
+                replacement.write_bytes(entry.read_bytes())
+                os.chmod(replacement, entry.stat().st_mode & 0o777)
+                os.replace(replacement, entry)
+                assert entry.stat().st_ino != original_inode
+            attempted = []
+            def forbidden(_plan):
+                attempted.append(True)
+                raise AssertionError("Pipenv RECORD drift must deny before launcher")
+            with pytest.raises(LbeWorkerError) as denial:
+                LbeWorker(DirectChildOwner(), launcher=forbidden).run(
+                    candidate.plan, product_attempt=marker)
+            assert denial.value.code == "attempt_replay_denied"
+            with pytest.raises(LbeWorkerError) as replay:
+                LbeWorker(DirectChildOwner(), launcher=forbidden).run(
+                    candidate.plan, product_attempt=marker)
+            assert replay.value.code == "attempt_replay_denied"
+            assert attempted == []
+        with pytest.raises(GatewayError) as refused:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert refused.value.code == "exec_disabled"
+
+
+def test_d4_bundle_invalid_manifest_selection_denied_before_any_staging(
+        product_service):
+    service, workspace = product_service
+    private = workspace.parent.parent
+    provisioner = private.parent / (private.name + "-operator")
+    with pytest.raises(GatewayError) as denied:
+        service._assemble_d4_r003_source_only_runner(
+            "a", "go-project", ["go", "vet", "./..."],
+            private_root=str(private), provisioner_root=str(provisioner),
+            staged_manifests={"bin": (("", None),)})
+    assert denied.value.code == "runner_unavailable"
+    assert not (private / "go").exists()
+    assert not (private / "home").exists()
+
+
+def test_d4_pipenv_bundle_without_venv_sources_denied_before_staging(
+        product_service):
+    service, workspace = product_service
+    private = workspace.parent.parent
+    provisioner = private.parent / (private.name + "-operator")
+    with pytest.raises(GatewayError) as denied:
+        service._assemble_d4_r003_source_only_runner(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+            private_root=str(private), provisioner_root=str(provisioner),
+            staged_manifests={"bin": (("", None),), "lib": (("", None),)})
+    assert denied.value.code == "runner_unavailable"
+    assert not (private / "bin").exists()
+
+
+@pytest.mark.parametrize("kind,cwd,argv,drift", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"],
+     "ambient_proxy"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"],
+     "soft_cpu_limit"),
+    ("go", "go-project", ["go", "test", "./..."],
+     "ambient_proxy"),
+])
+def test_d4_real_runner_observation_rechecked_once_after_marker_burn(
+        product_service, monkeypatch, kind, cwd, argv, drift):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+    from gateway import lbe_runner_preflight
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    trees = _d4_staged_trees(workspace, kind)
+    launched = []
+    def forbidden(_plan):
+        launched.append(True)
+        raise AssertionError("Changed real Runner state must never launch")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, marker, _observed, recipe, runner = (
+            service._prepare_d4_r003_runner_preflight(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees=trees))
+        assert runner.native_launch_allowed is False
+        assert recipe.native_launch_allowed is False
+        if drift == "ambient_proxy":
+            os.environ["HTTPS_PROXY"] = "http://untrusted-proxy.invalid"
+        else:
+            m.setattr(lbe_runner_preflight.resource, "getrlimit",
+                      lambda _kind: (10, 10))
+        with pytest.raises(LbeWorkerError) as denied:
+            LbeWorker(DirectChildOwner(), launcher=forbidden).run(
+                candidate.plan, product_attempt=marker)
+        assert denied.value.code == "attempt_replay_denied"
+        with pytest.raises(LbeWorkerError) as replay:
+            LbeWorker(DirectChildOwner(), launcher=forbidden).run(
+                candidate.plan, product_attempt=marker)
+        assert replay.value.code == "attempt_replay_denied"
+    assert launched == []
+
+
+def test_d4_runner_source_recheck_cannot_be_attached_from_generic_callback(
+        product_service):
+    from gateway.lbe_product_fixture import D4OneUseAttemptMarker
+
+    service, _workspace = product_service
+    candidate, marker = service._prepare_d4_r003_attempt(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    assert type(marker) is D4OneUseAttemptMarker
+    with pytest.raises(D4FixtureDenied):
+        marker.attach_runner_source(lambda *_args: None)
+    assert candidate.native_launch_allowed is False
+    assert service.info()["exec_policy"]["available"] is False
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+])
+def test_d4_service_selects_real_static_arm64_loader_in_six_source_recipes(
+        product_service, monkeypatch, kind, cwd, argv):
+    import hashlib
+    import struct
+    from gateway.lbe_macho_loader import (
+        D4MachOLoaderDenied, authorize_d4_native_from_static_macho,
+    )
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    if kind == "go":
+        selected = Path(private) / "go/bin/go"
+    elif kind == "pipenv":
+        selected = workspace / "py-pipenv/.venv/bin/python"
+    else:
+        selected = Path(private) / "bin/python"
+    lib = b"/usr/lib/libSystem.B.dylib\x00"
+    cmdsize = (24 + len(lib) + 3) & ~3
+    cmd = (struct.pack("<III", 0x0C, cmdsize, 24)
+           + b"\x00" * 12 + lib
+           + b"\x00" * (cmdsize - 24 - len(lib)))
+    native_data = struct.pack(
+        "<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 1, len(cmd), 0, 0) + cmd
+    selected.write_bytes(native_data)
+    hashes["go" if kind == "go" else "python"] = (
+        hashlib.sha256(native_data).hexdigest())
+    trees = _d4_staged_trees(workspace, kind)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no T1 for Mach-O source T0")))
+        candidate, marker, observation, recipe, host, macho = (
+            service._prepare_d4_r003_selected_macho_source(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees=trees))
+        assert macho.selected_cpu == "arm64"
+        assert macho.selected_sha256 == hashlib.sha256(native_data).hexdigest()
+        assert macho.selected_relative_executable == str(selected)[len(private) + 1:]
+        assert macho.declared_direct_libraries == ("/usr/lib/libSystem.B.dylib",)
+        assert macho.full_loaded_source_graph_attested is False
+        assert macho.actual_dyld_resolution_attested is False
+        assert macho.native_launch_allowed is False
+        assert observation.native_launch_allowed is False
+        assert recipe.native_launch_allowed is False
+        assert host.native_launch_allowed is False
+        with pytest.raises(D4MachOLoaderDenied, match="NOT_AUTHORIZED"):
+            authorize_d4_native_from_static_macho(macho)
+        with pytest.raises(GatewayError) as denied:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert denied.value.code == "exec_disabled"
+
+
+def test_d4_service_macho_loader_rejects_non_macho_even_with_exact_source_hash(
+        product_service, monkeypatch):
+    import hashlib
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="python_direct")
+    interpreter = Path(private) / "bin/python"
+    data = b"not a Darwin ARM64 executable" + b"x" * 80
+    interpreter.write_bytes(data)
+    hashes["python"] = hashlib.sha256(data).hexdigest()
+    trees = _d4_staged_trees(workspace, "python_direct")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_selected_macho_source(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                private_root=private,
+                expected_hashes=hashes, expected_trees=trees)
+    assert denied.value.code == "runner_unavailable"
+    assert service.info()["exec_policy"]["available"] is False
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+])
+def test_d4_actual_static_selected_native_set_and_one_use_worker(
+        product_service, monkeypatch, kind, cwd, argv):
+    import hashlib
+    import struct
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker
+    from gateway.lbe_native_loader_set import (
+        D4NativeLoaderSetDenied, authorize_d4_native_from_loader_set,
+    )
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+
+    def mach_o(data_name):
+        name = ("/usr/lib/" + data_name + ".dylib").encode("ascii") + b"\x00"
+        command_size = (24 + len(name) + 3) & ~3
+        load = (struct.pack("<III", 0x0C, command_size, 24)
+                + b"\x00" * 12 + name
+                + b"\x00" * (command_size - 24 - len(name)))
+        return (struct.pack("<IIIIIIII",
+                            0xFEEDFACF, 0x0100000C, 0, 2,
+                            1, len(load), 0, 0) + load)
+
+    if kind == "go":
+        selected = (
+            ("go", Path(private) / "go/bin/go"),
+            ("compile", Path(private) / "go/pkg/tool/darwin_arm64/compile"),
+            ("link", Path(private) / "go/pkg/tool/darwin_arm64/link"),
+        )
+    elif kind == "pipenv":
+        selected = (("python", workspace / "py-pipenv/.venv/bin/python"),)
+    else:
+        selected = (("python", Path(private) / "bin/python"),)
+
+    for key, file_path in selected:
+        file_bytes = mach_o(key)
+        file_path.write_bytes(file_bytes)
+        hashes[key] = hashlib.sha256(file_bytes).hexdigest()
+    trees = _d4_staged_trees(workspace, kind)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no Mach-O executed")))
+        candidate, marker, _observed, recipe, host, native = (
+            service._prepare_d4_r003_selected_loader_set(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees=trees))
+        assert native.runtime_kind == kind
+        assert len(native.static_selected_executables) == (
+            3 if kind == "go" else 1)
+        assert all(item.selected_cpu == "arm64"
+                   and item.native_launch_allowed is False
+                   for _label, item in native.static_selected_executables)
+        assert native.actual_loaded_source_graph_proven is False
+        assert native.native_launch_allowed is False
+        assert host.native_launch_allowed is False
+        assert recipe.native_launch_allowed is False
+        with pytest.raises(D4NativeLoaderSetDenied, match="NOT_AUTHORIZED"):
+            authorize_d4_native_from_loader_set(native)
+        no_child = LbeWorker(
+            DirectChildOwner(), launcher=marker._macos_boundary.launch).run(
+                candidate.plan, product_attempt=marker)
+        assert no_child["status"] == "launch_failed"
+        assert no_child["executed"] is False
+        with pytest.raises(GatewayError) as refused:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert refused.value.code == "exec_disabled"
+
+
+def test_d4_go_compiler_invalid_macho_blocks_full_selected_loader_set(
+        product_service, monkeypatch):
+    import hashlib
+    import struct
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="go")
+    tool_paths = {
+        "go": Path(private) / "go/bin/go",
+        "compile": Path(private) / "go/pkg/tool/darwin_arm64/compile",
+        "link": Path(private) / "go/pkg/tool/darwin_arm64/link",
+    }
+    header = struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C,
+                         0, 2, 0, 0, 0, 0)
+    for key, file_path in tool_paths.items():
+        value = (b"bad compiler binary but SHA matches"
+                 if key == "compile" else header)
+        file_path.write_bytes(value)
+        hashes[key] = hashlib.sha256(value).hexdigest()
+    trees = _d4_staged_trees(workspace, "go")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_selected_loader_set(
+                "a", "go-project", ["go", "test", "./..."],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees)
+    assert denied.value.code == "runner_unavailable"
+    assert service.info()["exec_policy"]["available"] is False
+
+
+def test_d4_selected_loader_set_changes_after_marker_burn_denied_before_child(
+        product_service, monkeypatch):
+    import hashlib
+    import struct
+    from gateway import lbe_native_loader_set
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="python_direct")
+    interpreter = Path(private) / "bin/python"
+    value = struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C,
+                        0, 2, 0, 0, 0, 0)
+    interpreter.write_bytes(value)
+    hashes["python"] = hashlib.sha256(value).hexdigest()
+    trees = _d4_staged_trees(workspace, "python_direct")
+    called = []
+    def impossible(_plan):
+        called.append(True)
+        raise AssertionError("untrusted loader recheck never launches")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, marker, _observed, _recipe, _host, loader_set = (
+            service._prepare_d4_r003_selected_loader_set(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees))
+        # The independently pinned selected-Mach-O observation, not just
+        # first-party and host snapshots, must be consumed once before Worker.
+        m.setattr(lbe_native_loader_set, "inspect_d4_native_loader_set",
+                  lambda *_a, **_kw: replace(
+                      loader_set, unresolved_declared_install_names=("changed",)))
+        with pytest.raises(LbeWorkerError) as denied:
+            LbeWorker(DirectChildOwner(), launcher=impossible).run(
+                candidate.plan, product_attempt=marker)
+        assert denied.value.code == "attempt_replay_denied"
+        with pytest.raises(LbeWorkerError) as replay:
+            LbeWorker(DirectChildOwner(), launcher=impossible).run(
+                candidate.plan, product_attempt=marker)
+        assert replay.value.code == "attempt_replay_denied"
+    assert called == []
+
+
+def test_d4_generic_callback_cannot_claim_selected_loader_set(
+        product_service):
+    service, _workspace = product_service
+    _candidate, marker = service._prepare_d4_r003_attempt(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    with pytest.raises(D4FixtureDenied):
+        marker.attach_macho_loader_set(lambda *_: None)
+
+
+def test_d4_product_bundle_rejects_hash_matched_non_macho_go_compiler(
+        product_service, monkeypatch):
+    import struct
+    from gateway.core import GatewayError
+
+    service, workspace = product_service
+    private = workspace.parent.parent
+    source = private.parent / (private.name + "-operator")
+    go_root = source / "go"
+    fields = {
+        "bin/go": struct.pack(
+            "<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0),
+        "pkg/tool/darwin_arm64/compile": b"bad compiler, exact hash still selected",
+        "pkg/tool/darwin_arm64/link": struct.pack(
+            "<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0),
+        "src/runtime/runtime.go": b"package runtime\n",
+    }
+    go_root.mkdir(parents=True)
+    for name, data in fields.items():
+        file = go_root / name
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_bytes(data)
+        file.chmod(0o600 if name.endswith(".go") else 0o700)
+    manifests = {"go": _d4_tree_expected(go_root)}
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("bad toolchain cannot spawn")))
+        with pytest.raises(GatewayError) as denied:
+            service._assemble_d4_r003_source_only_runner(
+                "a", "go-project", ["go", "test", "./..."],
+                private_root=str(private), provisioner_root=str(source),
+                staged_manifests=manifests)
+        assert denied.value.code == "runner_unavailable"
+        assert service.info()["exec_policy"]["available"] is False
+        with pytest.raises(GatewayError) as public:
+            service.invoke_exec("a", "go-project", ["go", "test", "./..."],
+                                dry_run=False)
+        assert public.value.code == "exec_disabled"
+
+
+def test_d4_private_dylib_recheck_burns_one_use_attempt_before_launcher(
+        product_service, monkeypatch):
+    import hashlib
+    import struct
+    from gateway import lbe_dylib_sources
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, workspace = product_service
+    private = workspace.parent.parent
+    provisioner = private.parent / (private.name + "-operator")
+    (provisioner / "bin").mkdir(parents=True)
+    (provisioner / "lib").mkdir()
+
+    def macho(name, *, file_type=2):
+        path = name.encode("ascii") + b"\x00"
+        size = (24 + len(path) + 3) & ~3
+        command = (struct.pack("<III", 0x0C, size, 24)
+                   + b"\x00" * 12 + path
+                   + b"\x00" * (size - 24 - len(path)))
+        return (struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C,
+                            0, file_type, 1, len(command), 0, 0) + command)
+
+    (provisioner / "bin/python").write_bytes(
+        macho("@loader_path/../lib/libPrivate.dylib"))
+    (provisioner / "bin/python").chmod(0o700)
+    (provisioner / "lib/libPrivate.dylib").write_bytes(
+        macho("/usr/lib/libSystem.B.dylib", file_type=6))
+    (provisioner / "lib/libPrivate.dylib").chmod(0o600)
+    manifests = {
+        "bin": _d4_tree_expected(provisioner / "bin"),
+        "lib": _d4_tree_expected(provisioner / "lib"),
+    }
+    launched = []
+    def impossible(_plan):
+        launched.append(True)
+        raise AssertionError("private dylib graph drift cannot spawn")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, marker, _source, _recipe, _runner, _macho, graph, _receipts = (
+            service._assemble_d4_r003_source_only_runner(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                private_root=str(private),
+                provisioner_root=str(provisioner),
+                staged_manifests=manifests))
+        assert len(graph.private_native_images) == 1
+        m.setattr(lbe_dylib_sources, "inspect_d4_private_dylib_candidates",
+                  lambda *_a, **_kw: replace(
+                      graph, unresolved_dynamic_loader_names=("changed",)))
+        with pytest.raises(LbeWorkerError) as denied:
+            LbeWorker(DirectChildOwner(), launcher=impossible).run(
+                candidate.plan, product_attempt=marker)
+        assert denied.value.code == "attempt_replay_denied"
+    assert launched == []
+
+
+@pytest.mark.parametrize("bad_config", [
+    "outside_home", "relative_home", "system_site_true", "missing_system_site",
+    "duplicate_home", "executable_selector", "command_selector",
+    "invalid_version", "unrecognized_selector",
+])
+def test_d4_pipenv_source_rejects_unqualified_pyvenv_loader_selectors(
+        product_service, monkeypatch, bad_config):
+    """A pinned hash of an unsafe pyvenv.cfg is NOT imported-source authority."""
+    import hashlib
+
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        root, kind="pipenv")
+    cfg = root / "py-pipenv" / ".venv" / "pyvenv.cfg"
+    valid_home = private + "/bin"
+    safe = ("home = " + valid_home
+            + "\ninclude-system-site-packages = false\n")
+    variants = {
+        "outside_home": "home = /usr/local/bin\ninclude-system-site-packages = false\n",
+        "relative_home": "home = ../bin\ninclude-system-site-packages = false\n",
+        "system_site_true": "home = " + valid_home
+                            + "\ninclude-system-site-packages = true\n",
+        "missing_system_site": "home = " + valid_home + "\n",
+        "duplicate_home": safe + "home = /usr/local/bin\n",
+        "executable_selector": safe + "executable = /usr/local/bin/python\n",
+        "command_selector": safe + "command = /usr/local/bin/python -m venv\n",
+        "invalid_version": safe + "version = surprise\n",
+        "unrecognized_selector": safe + "anything = host\n",
+    }
+    data = variants[bad_config].encode("ascii")
+    cfg.write_bytes(data)
+    hashes["pyvenv.cfg"] = hashlib.sha256(data).hexdigest()
+    def no_spawn(*_args, **_kwargs):
+        raise AssertionError("unqualified venv source may never spawn")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", no_spawn)
+        m.setattr(os, "kill", no_spawn)
+        with pytest.raises(GatewayError) as denied:
+            service._inspect_d4_r003_staged_runtime(
+                "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes)
+    assert denied.value.code == "runner_unavailable"
+    with pytest.raises(GatewayError) as public:
+        service.invoke_exec(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+            dry_run=False)
+    assert public.value.code == "exec_disabled"
+
+
+def test_d4_pipenv_source_pins_private_home_without_claiming_import_attestation(
+        product_service, monkeypatch):
+    service, root = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        root, kind="pipenv")
+    def no_spawn(*_args, **_kwargs):
+        raise AssertionError("private config snapshot cannot grant T1")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", no_spawn)
+        observed = service._inspect_d4_r003_staged_runtime(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+            private_root=private, expected_hashes=hashes)
+    assert observed.selected_venv_home == private + "/bin"
+    assert observed.actual_import_graph_attested is False
+    assert observed.owner_native_t1_grant is False
+    assert observed.native_launch_allowed is False
+
+
+@pytest.mark.parametrize("kind,cwd,argv,mutation", [
+    ("go", "go-project", ["go", "test", "./..."], "missing_compile"),
+    ("go", "go-project", ["go", "vet", "./..."], "renamed_link"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"],
+     "missing_interpreter"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"],
+     "wrong_interpreter"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"],
+     "host_venv_home"),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"],
+     "missing_venv_home"),
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"],
+     "unlisted_binary"),
+])
+def test_d4_native_recipe_pins_all_selected_toolchain_and_interpreter_entries(
+        product_service, monkeypatch, kind, cwd, argv, mutation):
+    """A real nonexecuting launch recipe must not lose secondary image identity.
+
+    The validated live D4 source observation contains Go's compile/link tools
+    or Pipenv's selected Python interpreter and private venv base home. No
+    caller-mutable source-only dataclass may silently drop these requirements.
+    """
+    from gateway.lbe_launch_recipe import (
+        D4NativeRecipeDenied, prepare_d4_native_launch_recipe,
+    )
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    expected_trees = _d4_staged_trees(workspace, kind)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("SOURCE/T0 must not start a native child")
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", forbidden)
+        candidate, _marker, observed, _recipe = (
+            service._prepare_d4_r003_native_recipe(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees=expected_trees))
+        chosen = list(observed.staged_executables)
+        if mutation == "missing_compile":
+            chosen = [row for row in chosen if not row[0].endswith("/compile")]
+            altered = replace(observed, staged_executables=tuple(chosen))
+        elif mutation == "renamed_link":
+            chosen = [(("go/pkg/tool/darwin_arm64/surprise" if
+                        label.endswith("/link") else label), digest)
+                      for label, digest in chosen]
+            altered = replace(observed, staged_executables=tuple(chosen))
+        elif mutation == "missing_interpreter":
+            chosen = [row for row in chosen if not row[0].endswith(
+                "/.venv/bin/python")]
+            altered = replace(observed, staged_executables=tuple(chosen))
+        elif mutation == "wrong_interpreter":
+            chosen = [(label, "e" * 64 if label.endswith(
+                "/.venv/bin/python") else digest)
+                      for label, digest in chosen]
+            altered = replace(observed, staged_executables=tuple(chosen))
+        elif mutation == "host_venv_home":
+            altered = replace(observed, selected_venv_home="/usr/local/bin")
+        elif mutation == "missing_venv_home":
+            altered = replace(observed, selected_venv_home=None)
+        else:
+            chosen.append(("lib/foreign-interpreter", "f" * 64))
+            altered = replace(observed, staged_executables=tuple(chosen))
+        with pytest.raises(D4NativeRecipeDenied):
+            prepare_d4_native_launch_recipe(
+                service.get("a"), candidate, altered, private_root=private)
+
+
+def test_d4_native_recipe_retains_exact_private_pipenv_base_home(
+        product_service, monkeypatch):
+    """The selected real pyvenv.cfg home must survive into the bound recipe."""
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="pipenv")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no T1 launch")))
+        _candidate, _marker, observed, recipe = (
+            service._prepare_d4_r003_native_recipe(
+                "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=_d4_staged_trees(workspace, "pipenv")))
+    assert observed.selected_venv_home == private + "/bin"
+    assert recipe.selected_venv_home == observed.selected_venv_home
+    assert recipe.native_launch_allowed is False
+
+
+def test_d4_fixture_inventory_bounds_entries_before_bulk_materialization(
+        product_service, monkeypatch):
+    """A hostile source directory must not force an unlimited listdir result."""
+    import gateway.lbe_product_fixture as product
+
+    service, workspace = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    for index in range(12):
+        (workspace / "py-direct/src" / ("extra_%02d.py" % index)).write_bytes(
+            b"source = 1\\n")
+
+    with monkeypatch.context() as m:
+        m.setattr(product, "_MAX_SRC_ENTRIES", 8)
+        m.setattr(os, "listdir", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("bulk listdir forbidden")))
+        with pytest.raises(D4FixtureDenied, match="first-party D4 source identity unavailable"):
+            product.check_d4_r003_fixture(
+                service.get("a"), candidate.plan)
+
+
+@pytest.mark.parametrize("cwd,argv,kinds", [
+    ("go-project", ["go", "test", "./..."], ("go",)),
+    ("go-project", ["go", "vet", "./..."], ("go",)),
+    ("go-project", ["go", "build", "-o", "bin/app", "./cmd/app"],
+     ("go",)),
+    ("py-direct", ["python", "-m", "pytest", "-q"], ("bin", "lib")),
+    ("py-direct", ["python", "-m", "compileall", "-q", "./src"],
+     ("bin", "lib")),
+    ("py-pipenv", ["python", "-m", "pytest", "-q"], ("bin", "lib", "venv")),
+])
+def test_d4_service_observes_operator_sources_for_six_reviewable_recipes(
+        product_service, monkeypatch, cwd, argv, kinds):
+    """The actual WorkspaceService can prepare reviewable source manifests.
+
+    No operator, image, manifest signature or native permission is claimed.
+    The caller must separately review any manifest before staging.
+    """
+    import hashlib
+
+    service, workspace = product_service
+    operator = workspace.parent.parent / "operator-source"
+    for kind in kinds:
+        if kind == "venv":
+            continue  # Real source is the first-party project .venv, not operator.
+        folder = operator / kind
+        folder.mkdir(parents=True, exist_ok=True)
+        if kind == "go":
+            selected = folder / "bin/go"
+            selected.parent.mkdir()
+        elif kind == "bin":
+            selected = folder / ("pipenv" if cwd == "py-pipenv" else "python")
+        else:
+            selected = folder / "python/stdlib.py"
+            selected.parent.mkdir()
+        selected.write_bytes(("inert-" + kind).encode("ascii"))
+        selected.chmod(0o700 if kind != "lib" else 0o600)
+    def no_spawn(*_args, **_kwargs):
+        raise AssertionError("operator source observation cannot execute")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", no_spawn)
+        observed = service._observe_d4_r003_operator_provisioner(
+            "a", cwd, argv, provisioner_root=str(operator))
+    assert set(observed) == set(kinds)
+    for kind in kinds:
+        item = observed[kind]
+        selected = "bin/go" if kind == "go" else (
+            "pipenv" if kind == "bin" and cwd == "py-pipenv" else
+            "python" if kind == "bin" else
+            "pyvenv.cfg" if kind == "venv" else "python/stdlib.py")
+        expected = ((workspace / "py-pipenv/.venv/pyvenv.cfg").read_bytes()
+                    if kind == "venv" else ("inert-" + kind).encode("ascii"))
+        assert (selected, hashlib.sha256(expected).hexdigest()) in item.proposed_manifest
+        if kind == "venv":
+            assert item.status == "OBSERVED_FIRST_PARTY_VENV_ONLY_NOT_ATTESTED"
+        assert item.manifest_independently_approved is False
+        assert item.trusted_operator_attested is False
+        assert item.native_launch_allowed is False
+        if kind == "go":
+            assert len(item.go_p007_stage_manifest_sha256) == 64
+            assert item.go_1_27_3_p007_stage_manifest_matched is False
+        else:
+            assert item.go_p007_stage_manifest_sha256 is None
+            assert item.go_1_27_3_p007_stage_manifest_matched is False
+    with pytest.raises(GatewayError) as denied:
+        service.invoke_exec("a", cwd, argv, dry_run=False)
+    assert denied.value.code == "exec_disabled"
+
+
+def test_d4_service_operator_source_selection_does_not_self_approve_workspace(
+        product_service):
+    service, workspace = product_service
+    with pytest.raises(GatewayError) as denied:
+        service._observe_d4_r003_operator_provisioner(
+            "a", "py-direct", ["python", "-m", "pytest", "-q"],
+            provisioner_root=str(workspace / "py-direct"))
+    assert denied.value.code == "runner_unavailable"
+
+
+
+@pytest.mark.parametrize("identity_pins", [
+    {"bin": "f" * 64}, {"go": "f" * 64},
+    {"go": "0" * 64}, {"go": 12}, [], None,
+])
+def test_d4_assembled_operator_identity_shape_denies_before_staging(
+        product_service, identity_pins):
+    """Wrong review identity keys/values cannot trigger partial materialization."""
+    service, workspace = product_service
+    private = workspace.parent.parent
+    provisioner = private.parent / (private.name + "-operator")
+    with pytest.raises(GatewayError) as denied:
+        service._assemble_d4_r003_source_only_runner(
+            "a", "go-project", ["go", "test", "./..."],
+            private_root=str(private), provisioner_root=str(provisioner),
+            staged_manifests={"go": (("", None),)},
+            expected_source_identities=identity_pins)
+    assert denied.value.code == "runner_unavailable"
+    assert not (private / "go").exists()
+    assert not (private / "home").exists()
+
+
+
+def test_d4_pipenv_first_party_venv_source_manifest_includes_real_site_files(
+        product_service, monkeypatch):
+    """Product prepares an inspectable .venv manifest, not import authority."""
+    import hashlib
+    from gateway.lbe_runtime_tree import observe_d4_pipenv_venv_manifest
+
+    service, workspace = product_service
+    project = workspace / "py-pipenv"
+    site = project / ".venv/lib/python3.13/site-packages/example_pkg"
+    site.mkdir(parents=True)
+    (site / "__init__.py").write_bytes(b"x = 'inert'\n")
+    (site / "entry.py").write_bytes(b"answer = 42\n")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("venv manifest must not import or spawn")))
+        observed = observe_d4_pipenv_venv_manifest(project_root=str(project))
+    assert observed.kind == "venv"
+    assert ("lib/python3.13/site-packages/example_pkg/entry.py",
+            hashlib.sha256(b"answer = 42\n").hexdigest()
+            ) in observed.proposed_manifest
+    assert ("", None) in observed.proposed_manifest
+    assert observed.file_count >= 4
+    assert observed.entry_count == len(observed.proposed_manifest)
+    assert observed.status == "OBSERVED_FIRST_PARTY_VENV_ONLY_NOT_ATTESTED"
+    assert observed.manifest_independently_approved is False
+    assert observed.actual_loaded_source_graph_proven is False
+    assert observed.native_launch_allowed is False
+    with pytest.raises(GatewayError) as refused:
+        service.invoke_exec("a", "py-pipenv",
+                            ["python", "-m", "pytest", "-q"], dry_run=False)
+    assert refused.value.code == "exec_disabled"
+
+
+@pytest.mark.parametrize("mutation", ["pth", "symlink_interpreter",
+                                    "hardlinked_interpreter", "unsafe_site_dir"])
+def test_d4_pipenv_venv_source_manifest_denies_unqualified_inputs(
+        product_service, mutation):
+    from gateway.lbe_runtime_tree import (
+        D4RuntimeTreeDenied, observe_d4_pipenv_venv_manifest,
+    )
+
+    _service, workspace = product_service
+    project = workspace / "py-pipenv"
+    venv = project / ".venv"
+    if mutation == "pth":
+        site = venv / "lib/python3.13/site-packages"
+        site.mkdir(parents=True)
+        (site / "evil.pth").write_bytes(b"import os\n")
+    elif mutation == "symlink_interpreter":
+        (venv / "bin/python").unlink()
+        (venv / "bin/python").symlink_to("/bin/sh")
+    elif mutation == "hardlinked_interpreter":
+        os.link(venv / "bin/python", venv / "bin/copy")
+    else:
+        site = venv / "lib"
+        site.mkdir()
+        site.chmod(0o777)
+    with pytest.raises(D4RuntimeTreeDenied):
+        observe_d4_pipenv_venv_manifest(project_root=str(project))
+
+
+@pytest.mark.parametrize("bad_identity", ["f" * 64, "0" * 64,
+                                          "not-a-sha", 17, [], True])
+def test_d4_assembled_pipenv_source_rejects_wrong_venv_identity_before_copy(
+        product_service, bad_identity):
+    from gateway.lbe_runtime_tree import observe_d4_pipenv_venv_manifest
+
+    service, workspace = product_service
+    private = workspace.parent.parent
+    project = workspace / "py-pipenv"
+    observed = observe_d4_pipenv_venv_manifest(project_root=str(project))
+    source = private.parent / (private.name + "-operator")
+    with pytest.raises(GatewayError) as err:
+        service._assemble_d4_r003_source_only_runner(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+            private_root=str(private), provisioner_root=str(source),
+            staged_manifests={"bin": (("", None),), "lib": (("", None),)},
+            venv_manifest=observed.proposed_manifest,
+            expected_venv_identity_sha256=bad_identity)
+    assert err.value.code == "runner_unavailable"
+    assert not (private / "bin").exists()
+    assert not (private / "home").exists()
+
+
+def test_d4_assembled_pipenv_source_rejects_same_bytes_new_inode_of_venv(
+        product_service):
+    """A hash-matched first-party .venv replacement must not transfer approval."""
+    import hashlib
+    from gateway.lbe_runtime_tree import observe_d4_pipenv_venv_manifest
+
+    service, workspace = product_service
+    private = workspace.parent.parent
+    project = workspace / "py-pipenv"
+    observed = observe_d4_pipenv_venv_manifest(project_root=str(project))
+    interpreter = project / ".venv/bin/python"
+    old_stat = interpreter.stat()
+    replacement = project / ".venv/bin/new-python"
+    replacement.write_bytes(interpreter.read_bytes())
+    replacement.chmod(0o700)
+    os.replace(replacement, interpreter)
+    assert interpreter.stat().st_ino != old_stat.st_ino
+    assert hashlib.sha256(interpreter.read_bytes()).hexdigest() == (
+        dict(observed.proposed_manifest)["bin/python"])
+    source = private.parent / (private.name + "-operator")
+    with pytest.raises(GatewayError) as err:
+        service._assemble_d4_r003_source_only_runner(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+            private_root=str(private), provisioner_root=str(source),
+            staged_manifests={"bin": (("", None),), "lib": (("", None),)},
+            venv_manifest=observed.proposed_manifest,
+            expected_venv_identity_sha256=(
+                observed.observed_source_identity_sha256))
+    assert err.value.code == "runner_unavailable"
+    assert not (private / "bin").exists()
+
+
+
+@pytest.mark.parametrize("cwd,argv", [
+    ("go-project", ["go", "test", "./..."]),
+    ("go-project", ["go", "vet", "./..."]),
+    ("go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+])
+def test_d4_go_strict_p007_source_bundle_rejects_incomplete_toolchain_before_copy(
+        product_service, cwd, argv):
+    """A real operator manifest must match ALL 15657 Go source bytes.
+
+    Three selected executable hashes are not the complete compiler/stdlib
+    source inventory. This opt-in SOURCE-only gate never enables native Go.
+    """
+    service, workspace = product_service
+    private = workspace.parent.parent
+    provisioner = private.parent / (private.name + "-operator")
+    go = provisioner / "go"
+    (go / "bin").mkdir(parents=True)
+    (go / "bin/go").write_bytes(b"inert Go binary")
+    (go / "bin/go").chmod(0o700)
+    (go / "pkg/tool/darwin_arm64").mkdir(parents=True)
+    for name in ("compile", "link"):
+        tool = go / "pkg/tool/darwin_arm64" / name
+        tool.write_bytes(("inert " + name).encode("ascii"))
+        tool.chmod(0o700)
+    (go / "src/runtime").mkdir(parents=True)
+    (go / "src/runtime/proc.go").write_bytes(b"package runtime\n")
+    manifest = _d4_tree_expected(go)
+    observed = service._observe_d4_r003_operator_provisioner(
+        "a", cwd, argv, provisioner_root=str(provisioner))
+    assert observed["go"].go_1_27_3_p007_stage_manifest_matched is False
+    with pytest.raises(GatewayError) as stopped:
+        service._assemble_d4_r003_source_only_runner(
+            "a", cwd, argv, private_root=str(private),
+            provisioner_root=str(provisioner),
+            staged_manifests={"go": manifest},
+            expected_source_identities={
+                "go": observed["go"].observed_source_identity_sha256},
+            require_go_p007_stage_source=True)
+    assert stopped.value.code == "runner_unavailable"
+    assert not (private / "go").exists()
+    assert not (private / "home").exists()
+    with pytest.raises(GatewayError) as public:
+        service.invoke_exec("a", cwd, argv, dry_run=False)
+    assert public.value.code == "exec_disabled"
+
+
+@pytest.mark.parametrize("cwd,argv,required,expected_error", [
+    ("go-project", ["go", "test", "./..."], "yes",
+     "D4 Go source profile selection invalid"),
+    ("py-direct", ["python", "-m", "pytest", "-q"], True,
+     "D4 complete Go source not selected"),
+    ("py-pipenv", ["python", "-m", "pytest", "-q"], True,
+     "D4 complete Go source not selected"),
+])
+def test_d4_p007_strict_profile_cannot_select_other_runner_or_truthy_flag(
+        product_service, cwd, argv, required, expected_error):
+    """Strict P007 Go SOURCE selection never becomes a public Exec grant."""
+    service, workspace = product_service
+    private = workspace.parent.parent
+    provisioner = private.parent / (private.name + "-operator")
+    manifests = ({"go": (("", None),)} if cwd == "go-project"
+                 else {"bin": (("", None),), "lib": (("", None),)})
+    with pytest.raises(GatewayError) as denied:
+        service._assemble_d4_r003_source_only_runner(
+            "a", cwd, argv, private_root=str(private),
+            provisioner_root=str(provisioner), staged_manifests=manifests,
+            venv_manifest=((("", None),) if cwd == "py-pipenv" else None),
+            require_go_p007_stage_source=required)
+    assert denied.value.code == "runner_unavailable"
+    assert expected_error in str(denied.value)
+    assert not (private / "go").exists()
+    assert not (private / "bin").exists()
+
+
+
+def _d4_record_site_fixture(workspace):
+    """Inert first-party test distribution with a complete real RECORD."""
+    import base64
+    import csv
+    import io
+    import hashlib
+
+    site = workspace / "py-pipenv/.venv/lib/python3.13/site-packages"
+    pkg = site / "example_pkg"
+    dist = site / "example_pkg-1.0.dist-info"
+    pkg.mkdir(parents=True, exist_ok=True)
+    dist.mkdir()
+    (pkg / "__init__.py").write_bytes(b"from .entry import answer\n")
+    (pkg / "entry.py").write_bytes(b"answer = 42\n")
+    (dist / "METADATA").write_bytes(b"Name: example-pkg\nVersion: 1.0\n")
+    record = dist / "RECORD"
+    rows = []
+    for member in (pkg / "__init__.py", pkg / "entry.py", dist / "METADATA"):
+        data = member.read_bytes()
+        sha = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(
+            b"=").decode("ascii")
+        rows.append((member.relative_to(site).as_posix(), "sha256=" + sha,
+                     str(len(data))))
+    rows.append(("example_pkg-1.0.dist-info/RECORD", "", ""))
+    text = io.StringIO()
+    writer = csv.writer(text, lineterminator="\n")
+    writer.writerows(rows)
+    record.write_bytes(text.getvalue().encode("utf-8"))
+    # RECORD-selected Pipenv source must be traceable to the exact pinned
+    # first-party lock default/develop entries, not only a self-made RECORD.
+    (workspace / "py-pipenv/Pipfile.lock").write_bytes(
+        b'{"_meta":{"hash":{"sha256":"' + b"a" * 64
+        + b'"}},"default":{"example-pkg":{"version":"==1.0"}},"develop":{}}\n')
+    (workspace / "py-pipenv/Pipfile").write_bytes(
+        b'[packages]\nexample-pkg = "==1.0"\n')
+    return site, pkg, dist, record
+
+
+def test_d4_product_pipenv_record_source_observer_prepares_closed_site(
+        product_service, monkeypatch):
+    from gateway.lbe_runtime_tree import (
+        observe_d4_pipenv_venv_manifest,
+        inspect_d4_pipenv_installed_record_sources,
+    )
+
+    service, workspace = product_service
+    site, _pkg, _dist, _record = _d4_record_site_fixture(workspace)
+    project = workspace / "py-pipenv"
+    assert site.is_dir()
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("source-only cannot spawn")))
+        observed = observe_d4_pipenv_venv_manifest(project_root=str(project))
+        record_view = inspect_d4_pipenv_installed_record_sources(
+            project_root=str(project), expected_venv_manifest=observed.proposed_manifest,
+            expected_distributions=(("example-pkg", "1.0"),))
+    assert record_view.distributions == (("example-pkg", "1.0"),)
+    assert record_view.record_members_checked == 4
+    assert record_view.importable_members_checked == 2
+    assert record_view.venv_identity_sha256 == (
+        observed.observed_source_identity_sha256)
+    assert len(record_view.record_manifest_sha256) == 64
+    assert record_view.status == "RECORD_LISTED_SITE_BYTES_NOT_IMPORT_CLOSURE"
+    assert record_view.actual_loaded_source_graph_proven is False
+    assert record_view.external_source_provenance_attested is False
+    assert record_view.native_launch_allowed is False
+    with pytest.raises(GatewayError) as denied:
+        service.invoke_exec(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+            dry_run=False)
+    assert denied.value.code == "exec_disabled"
+
+
+@pytest.mark.parametrize("mutation", [
+    "missing_record", "unlisted_py", "unlisted_resource",
+    "record_bad_hash", "record_bad_size", "record_traversal",
+    "record_absolute", "record_duplicate", "metadata_version",
+    "unlisted_zip", "unlisted_other_dist", "record_missing_member",
+])
+def test_d4_pipenv_record_source_rejects_unlisted_or_forged_site(
+        product_service, mutation):
+    from gateway.lbe_runtime_tree import (
+        D4RuntimeTreeDenied, observe_d4_pipenv_venv_manifest,
+        inspect_d4_pipenv_installed_record_sources,
+    )
+
+    _service, workspace = product_service
+    _site, pkg, dist, record = _d4_record_site_fixture(workspace)
+    body = record.read_text("utf-8")
+    if mutation == "missing_record":
+        record.unlink()
+    elif mutation == "unlisted_py":
+        (pkg / "injected.py").write_text("import os\n", "utf-8")
+    elif mutation == "unlisted_resource":
+        (pkg / "payload.json").write_text("{}", "utf-8")
+    elif mutation == "record_bad_hash":
+        record.write_text(body.replace("sha256=", "sha256=AAAA", 1), "utf-8")
+    elif mutation == "record_bad_size":
+        line = next(line for line in body.splitlines() if "entry.py" in line)
+        record.write_text(body.replace(line, line.rsplit(",", 1)[0] + ",999"),
+                          "utf-8")
+    elif mutation == "record_traversal":
+        record.write_text(body.replace("example_pkg/entry.py",
+                                       "../example_pkg/entry.py"), "utf-8")
+    elif mutation == "record_absolute":
+        record.write_text(body.replace("example_pkg/entry.py",
+                                       "/etc/passwd"), "utf-8")
+    elif mutation == "record_duplicate":
+        record.write_text(body + body.splitlines()[0] + "\n", "utf-8")
+    elif mutation == "metadata_version":
+        (dist / "METADATA").write_bytes(b"Name: example-pkg\nVersion: 2.0\n")
+    elif mutation == "unlisted_zip":
+        (pkg / "other.zip").write_bytes(b"PK\x03\x04")
+    elif mutation == "unlisted_other_dist":
+        foreign = _site / "extra-1.0.dist-info"
+        foreign.mkdir()
+        (foreign / "METADATA").write_bytes(b"Name: extra\nVersion: 1.0\n")
+    elif mutation == "record_missing_member":
+        record.write_text(body.replace(
+            next(x for x in body.splitlines() if "entry.py" in x) + "\n", ""),
+            "utf-8")
+    observed = observe_d4_pipenv_venv_manifest(
+        project_root=str(workspace / "py-pipenv"))
+    with pytest.raises(D4RuntimeTreeDenied):
+        inspect_d4_pipenv_installed_record_sources(
+            project_root=str(workspace / "py-pipenv"),
+            expected_venv_manifest=observed.proposed_manifest,
+            expected_distributions=(("example-pkg", "1.0"),))
+
+
+@pytest.mark.parametrize("wrong", [
+    None, [], {}, True, "example-pkg==1.0", (), (("example-pkg", "2.0"),),
+    (("example-pkg", "1.0"), ("other", "1.0")),
+])
+def test_d4_pipenv_record_sources_require_explicit_distribution_identity(
+        product_service, wrong):
+    from gateway.lbe_runtime_tree import (
+        D4RuntimeTreeDenied, observe_d4_pipenv_venv_manifest,
+        inspect_d4_pipenv_installed_record_sources,
+    )
+
+    _service, workspace = product_service
+    _d4_record_site_fixture(workspace)
+    project = str(workspace / "py-pipenv")
+    source = observe_d4_pipenv_venv_manifest(project_root=project)
+    with pytest.raises(D4RuntimeTreeDenied):
+        inspect_d4_pipenv_installed_record_sources(
+            project_root=project,
+            expected_venv_manifest=source.proposed_manifest,
+            expected_distributions=wrong)
+
+
+def test_d4_strict_pipenv_record_selection_denies_before_operator_copy(
+        product_service):
+    from gateway.lbe_runtime_tree import (
+        observe_d4_pipenv_venv_manifest,
+    )
+
+    service, workspace = product_service
+    private = workspace.parent.parent
+    provisioner = private.parent / (private.name + "-operator")
+    project = workspace / "py-pipenv"
+    site, pkg, _dist, _record = _d4_record_site_fixture(workspace)
+    source = observe_d4_pipenv_venv_manifest(project_root=str(project))
+    (pkg / "unrecorded.py").write_text("import os\n", "utf-8")
+    with pytest.raises(GatewayError) as denied:
+        service._assemble_d4_r003_source_only_runner(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+            private_root=str(private), provisioner_root=str(provisioner),
+            staged_manifests={"bin": (("", None),), "lib": (("", None),)},
+            venv_manifest=source.proposed_manifest,
+            expected_venv_identity_sha256=source.observed_source_identity_sha256,
+            expected_venv_record_distributions=(("example-pkg", "1.0"),))
+    assert denied.value.code == "runner_unavailable"
+    assert not (private / "bin").exists()
+    assert not (private / "home").exists()
+
+
+
+def test_d4_service_observes_pipenv_records_in_real_source_bundle(
+        product_service, monkeypatch):
+    """The actual operator preparation surface includes its RECORD receipt."""
+    service, workspace = product_service
+    _d4_record_site_fixture(workspace)
+    operator = workspace.parent.parent / "operator-record-bundle"
+    binroot = operator / "bin"
+    binroot.mkdir(parents=True)
+    (binroot / "pipenv").write_bytes(b"inert signed-looking script data")
+    (binroot / "pipenv").chmod(0o700)
+    stdlib = operator / "lib/python"
+    stdlib.mkdir(parents=True)
+    (stdlib / "stdlib.py").write_bytes(b"x = 1\n")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("observation cannot spawn")))
+        result = service._observe_d4_r003_operator_provisioner(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+            provisioner_root=str(operator),
+            expected_venv_record_distributions=(("example-pkg", "1.0"),))
+    assert set(result) == {"bin", "lib", "venv"}
+    venv = result["venv"]
+    receipt = venv.pipenv_record_sources
+    assert receipt is not None
+    assert receipt.distributions == (("example-pkg", "1.0"),)
+    assert receipt.record_members_checked == 4
+    assert receipt.importable_members_checked == 2
+    assert receipt.venv_identity_sha256 == (
+        venv.observed_source_identity_sha256)
+    assert receipt.actual_loaded_source_graph_proven is False
+    assert receipt.native_launch_allowed is False
+    locked = venv.pipenv_lock_sources
+    assert locked is not None
+    assert locked.locked_distributions == (("example-pkg", "1.0"),)
+    assert locked.selected_installed_distributions == (("example-pkg", "1.0"),)
+    assert locked.direct_pipfile_requirements_checked is True
+    assert locked.pipfile_sha256 == dict(
+        service._prepare_d4_r003_fixture_candidate(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"]).source_sha256)[
+                "py-pipenv/Pipfile"]
+    assert locked.actual_loaded_source_graph_proven is False
+    assert locked.native_launch_allowed is False
+    assert venv.manifest_independently_approved is False
+    assert venv.native_launch_allowed is False
+    with pytest.raises(GatewayError) as denied:
+        service.invoke_exec(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+            dry_run=False)
+    assert denied.value.code == "exec_disabled"
+
+
+def test_d4_service_record_selection_denies_wrong_command_without_source_access(
+        product_service):
+    """Pipenv installation metadata cannot be selected for Go or Direct."""
+    service, workspace = product_service
+    operator = workspace.parent.parent / "operator-record-wrong-flavor"
+    for cwd, argv in (
+        ("go-project", ["go", "test", "./..."]),
+        ("py-direct", ["python", "-m", "pytest", "-q"]),
+    ):
+        with pytest.raises(GatewayError) as denied:
+            service._observe_d4_r003_operator_provisioner(
+                "a", cwd, argv, provisioner_root=str(operator),
+                expected_venv_record_distributions=(("example-pkg", "1.0"),))
+        assert denied.value.code == "runner_unavailable"
+    assert not operator.exists()
+
+
+
+
+@pytest.mark.parametrize("argv", [
+    ["go", "test", "./..."],
+    ["go", "vet", "./..."],
+    ["go", "build", "-o", "bin/app", "./cmd/app"],
+])
+@pytest.mark.parametrize("location", ["main", "nested", "module_root"])
+def test_d4_go_embed_directive_rejects_uninventoried_compiler_input(
+        product_service, monkeypatch, argv, location):
+    """Go embed directives can read additional files absent from the fixture.
+
+    A selected .go byte can request a resource at compile-time. Merely
+    rejecting extra directory entries without inspecting the directives
+    creates a falsely complete source candidate for ALL fixed Go verbs.
+    """
+    service, workspace = product_service
+    go = workspace / "go-project"
+    if location == "main":
+        selected = go / "cmd/app/main.go"
+    elif location == "nested":
+        selected = go / "pkg/snapshot/resource.go"
+        selected.parent.mkdir(parents=True)
+    else:
+        selected = go / "entry.go"
+    selected.write_bytes(
+        b"package main\nimport _ \"embed\"\n"
+        b"//go:embed hidden.txt\nvar hidden string\n"
+        b"func main() {}\n")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("source inspection cannot spawn")))
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_fixture_candidate(
+                "a", "go-project", argv)
+        assert denied.value.code == "command_not_allowed"
+        with pytest.raises(GatewayError) as apply:
+            service.invoke_exec("a", "go-project", argv, dry_run=False)
+        assert apply.value.code == "exec_disabled"
+
+
+def test_d4_go_source_regular_comment_and_string_are_not_embed_directives(
+        product_service):
+    """Ordinary source remains a supported first-party Go candidate."""
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/main.go").write_bytes(
+        b"package main\n// go:embed in an ordinary comment is not a directive\n"
+        b"func main() { _ = \"//go:embed literal\" }\n")
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    assert candidate.native_launch_allowed is False
+    assert candidate.actual_loaded_sources_proven is False
+
+
+
+def test_d4_go_embed_input_crlf_and_tab_indented_directive_denied(product_service):
+    """Compiler may process tab-indented directives with CRLF line endings."""
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/main.go").write_bytes(
+        b"package main\r\nimport _ \"embed\"\r\n"
+        b"\t//go:embed missing.txt\r\nvar data string\r\n"
+        b"func main() {}\r\n")
+    with pytest.raises(GatewayError) as denied:
+        service._prepare_d4_r003_fixture_candidate(
+            "a", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"])
+    assert denied.value.code == "command_not_allowed"
+
+
+@pytest.mark.parametrize("argv", [
+    ["go", "test", "./..."],
+    ["go", "vet", "./..."],
+    ["go", "build", "-o", "bin/app", "./cmd/app"],
+])
+@pytest.mark.parametrize("cgo_syntax", [
+    b'import "C"\n',
+    b'import (\n "fmt"\n "C"\n)\n',
+    b'import ("C")\n',
+    b'import _ "C"\n',
+])
+def test_d4_go_cgo_pseudo_import_requires_unqualified_compiler(
+        product_service, monkeypatch, argv, cgo_syntax):
+    """cgo may invoke a separate C toolchain or consume headers outside .go.
+
+    Reject that source at the real service admission boundary before any
+    source-only recipe or future launcher; CGO_ENABLED=0 is not a proof.
+    """
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/main.go").write_bytes(
+        b"package main\n" + cgo_syntax + b"func main() {}\n")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("No Go/C compiler can run")))
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_fixture_candidate(
+                "a", "go-project", argv)
+    assert denied.value.code == "command_not_allowed"
+    with pytest.raises(GatewayError) as apply:
+        service.invoke_exec("a", "go-project", argv, dry_run=False)
+    assert apply.value.code == "exec_disabled"
+
+
+def test_d4_go_non_cgo_imports_and_C_text_remain_legal_source(
+        product_service):
+    """Ordinary Go imports and literals should not be rejected as cgo."""
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/main.go").write_bytes(
+        b'package main\nimport "fmt"\n'
+        b'func main() { fmt.Println("C and import C are only strings") }\n')
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    assert candidate.native_launch_allowed is False
+    assert candidate.actual_loaded_sources_proven is False
+
+
+@pytest.mark.parametrize("decl,accepted", [
+    (b"go 1.26\n", True),
+    (b"go 1.27\n", True),
+    (b"go 1.27.3\n", True),
+    (b"go 1.27.4\n", False),
+    (b"go 1.28\n", False),
+    (b"go 1.999\n", False),
+])
+def test_d4_go_module_version_cannot_exceed_pinned_P007_toolchain(
+        product_service, decl, accepted):
+    """A future Go language version is not satisfied by pinned Go 1.27.3."""
+    service, workspace = product_service
+    (workspace / "go-project/go.mod").write_bytes(
+        b"module firstparty.test/app\n" + decl)
+    if accepted:
+        candidate = service._prepare_d4_r003_fixture_candidate(
+            "a", "go-project", ["go", "vet", "./..."])
+        assert candidate.native_launch_allowed is False
+    else:
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_fixture_candidate(
+                "a", "go-project", ["go", "vet", "./..."])
+        assert denied.value.code == "command_not_allowed"
+
+
+
+@pytest.mark.parametrize("invalid", [
+    b'"version":"==2.0"', b'"version":">=1.0"',
+    b'"version":"==1.0","path":"../outside"',
+])
+def test_d4_service_pipenv_record_mismatched_pinned_lock_refused_no_spawn(
+        product_service, monkeypatch, invalid):
+    """Real service must not call a lock/RECORD mismatch an approved source."""
+    service, workspace = product_service
+    _d4_record_site_fixture(workspace)
+    lock = workspace / "py-pipenv/Pipfile.lock"
+    lock.write_bytes(lock.read_bytes().replace(b'"version":"==1.0"', invalid))
+    operator = workspace.parent.parent / "operator-lock-mismatch"
+    (operator / "bin").mkdir(parents=True)
+    (operator / "lib/python").mkdir(parents=True)
+    (operator / "bin/pipenv").write_bytes(b"inert script")
+    (operator / "lib/python/stdlib.py").write_bytes(b"x = 1\n")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no native child permitted")))
+        with pytest.raises(GatewayError) as denied:
+            service._observe_d4_r003_operator_provisioner(
+                "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+                provisioner_root=str(operator),
+                expected_venv_record_distributions=(("example-pkg", "1.0"),))
+    assert denied.value.code == "runner_unavailable"
+    with pytest.raises(GatewayError) as apply:
+        service.invoke_exec(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"], dry_run=False)
+    assert apply.value.code == "exec_disabled"
+
+
+def test_d4_service_pipenv_lock_denied_before_staging_private_runner(
+        product_service):
+    """No stage files should appear for a mismatched locked package."""
+    from gateway.lbe_runtime_tree import observe_d4_pipenv_venv_manifest
+
+    service, workspace = product_service
+    _d4_record_site_fixture(workspace)
+    project = workspace / "py-pipenv"
+    lock = project / "Pipfile.lock"
+    lock.write_bytes(lock.read_bytes().replace(b"==1.0", b"==2.0"))
+    source = observe_d4_pipenv_venv_manifest(project_root=str(project))
+    private = workspace.parent.parent
+    provisioner = private.parent / (private.name + "-uncreated-lock-operator")
+    with pytest.raises(GatewayError) as denied:
+        service._assemble_d4_r003_source_only_runner(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+            private_root=str(private), provisioner_root=str(provisioner),
+            staged_manifests={"bin": (("", None),), "lib": (("", None),)},
+            venv_manifest=source.proposed_manifest,
+            expected_venv_identity_sha256=source.observed_source_identity_sha256,
+            expected_venv_record_distributions=(("example-pkg", "1.0"),))
+    assert denied.value.code == "runner_unavailable"
+    assert not (private / "bin").exists()
+    assert not (private / "home").exists()
+
+
+
+@pytest.mark.parametrize("argv", [
+    ["go", "test", "./..."],
+    ["go", "vet", "./..."],
+    ["go", "build", "-o", "bin/app", "./cmd/app"],
+])
+def test_d4_go_direct_import_source_maps_pinned_stdlib_without_native(
+        product_service, monkeypatch, argv):
+    from gateway.lbe_go_import_sources import inspect_d4_go_direct_import_sources
+
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/main.go").write_bytes(
+        b'package main\nimport "fmt"\nfunc main() {fmt.Println("safe")}\n')
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no native Go subprocess allowed")))
+        candidate = service._prepare_d4_r003_fixture_candidate(
+            "a", "go-project", argv)
+        record = inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate,
+            staged_go_manifest=(("src/fmt/print.go", "a" * 64),))
+    assert record.module_path == "firstparty.test/app"
+    assert record.selected_imports == ("fmt",)
+    assert record.stdlib_stage_members == (("fmt", ("src/fmt/print.go",)),)
+    assert record.transitive_import_closure_proven is False
+    assert record.actual_loaded_source_graph_proven is False
+    assert record.native_launch_allowed is False
+    with pytest.raises(GatewayError) as denied:
+        service.invoke_exec("a", "go-project", argv, dry_run=False)
+    assert denied.value.code == "exec_disabled"
+
+
+def test_d4_go_direct_import_local_package_mapping_from_selected_tree(
+        product_service):
+    from gateway.lbe_go_import_sources import inspect_d4_go_direct_import_sources
+
+    service, workspace = product_service
+    go = workspace / "go-project"
+    (go / "pkg/util").mkdir(parents=True)
+    (go / "pkg/util/value.go").write_bytes(b"package util\nconst Value = 9\n")
+    (go / "cmd/app/main.go").write_bytes(
+        b'package main\nimport "firstparty.test/app/pkg/util"\n'
+        b'func main() { _ = util.Value }\n')
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    selected = inspect_d4_go_direct_import_sources(
+        service.get("a"), candidate, staged_go_manifest=())
+    assert selected.first_party_members == (
+        ("firstparty.test/app/pkg/util", ("go-project/pkg/util/value.go",)),)
+    assert selected.stdlib_stage_members == ()
+
+
+@pytest.mark.parametrize("import_path,missing_stdlib", [
+    ("external.example/malicious", False),
+    ("firstparty.test/app/pkg/not-here", False),
+    ("fmt", True),
+])
+def test_d4_go_direct_import_source_deny_external_or_missing_source(
+        product_service, import_path, missing_stdlib):
+    from gateway.lbe_go_import_sources import (
+        D4GoImportSourceDenied, inspect_d4_go_direct_import_sources,
+    )
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/main.go").write_bytes(
+        ('package main\nimport "' + import_path + '"\n').encode("ascii"))
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "vet", "./..."])
+    with pytest.raises(D4GoImportSourceDenied):
+        inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate, staged_go_manifest=()
+            if missing_stdlib else (("src/fmt/print.go", "a" * 64),))
+
+
+def test_d4_go_source_import_recheck_denies_inode_replacement(
+        product_service):
+    from gateway.lbe_go_import_sources import (
+        D4GoImportSourceDenied, inspect_d4_go_direct_import_sources,
+    )
+    service, workspace = product_service
+    go = workspace / "go-project"
+    original = go / "cmd/app/main.go"
+    original.write_bytes(b'package main\nimport "fmt"\n')
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    replacement = original.with_name("replacement.go")
+    replacement.write_bytes(original.read_bytes())
+    os.replace(replacement, original)
+    with pytest.raises(D4GoImportSourceDenied):
+        inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate,
+            staged_go_manifest=(("src/fmt/print.go", "a" * 64),))
+
+
+def test_d4_service_strict_p007_direct_import_failure_before_operator_copy(
+        product_service, monkeypatch):
+    """A simulated P007 match must not bypass missing direct stdlib source."""
+    import gateway.lbe_runtime_tree as stage_tree
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/main.go").write_bytes(
+        b'package main\nimport "fmt"\n')
+    private = workspace.parent.parent
+    source = private.parent / (private.name + "-go-import-operator")
+    with monkeypatch.context() as m:
+        m.setattr(stage_tree, "_d4_p007_go_stage_matches", lambda _rows: True)
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no native Go permitted")))
+        with pytest.raises(GatewayError) as denied:
+            service._assemble_d4_r003_source_only_runner(
+                "a", "go-project", ["go", "test", "./..."],
+                private_root=str(private), provisioner_root=str(source),
+                staged_manifests={"go": (("", None),)},
+                expected_source_identities={"go": "a" * 64},
+                require_go_p007_stage_source=True)
+    assert denied.value.code == "runner_unavailable"
+    assert not (private / "go").exists()
+    assert not (private / "home").exists()
+
+
+
+@pytest.mark.parametrize("content", [
+    b'[packages]\nexample-pkg = "==2.0"\n',
+    b'[packages]\nexample-pkg = {path="../outside"}\n',
+    b'[dev-packages]\nexample-pkg = "==1.0"\n',
+])
+def test_d4_service_pipfile_to_lock_to_record_mismatch_denied(
+        product_service, monkeypatch, content):
+    service, workspace = product_service
+    _d4_record_site_fixture(workspace)
+    (workspace / "py-pipenv/Pipfile").write_bytes(content)
+    operator = workspace.parent.parent / "operator-pipfile-intent-mismatch"
+    (operator / "bin").mkdir(parents=True)
+    (operator / "bin/pipenv").write_bytes(b"inert")
+    (operator / "lib/python").mkdir(parents=True)
+    (operator / "lib/python/stdlib.py").write_bytes(b"source = 1\n")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no Pipenv execution allowed")))
+        with pytest.raises(GatewayError) as rejected:
+            service._observe_d4_r003_operator_provisioner(
+                "a", "py-pipenv", ["python", "-m", "pytest", "-q"],
+                provisioner_root=str(operator),
+                expected_venv_record_distributions=(("example-pkg", "1.0"),))
+    assert rejected.value.code == "runner_unavailable"
+    with pytest.raises(GatewayError) as public:
+        service.invoke_exec(
+            "a", "py-pipenv", ["python", "-m", "pytest", "-q"], dry_run=False)
+    assert public.value.code == "exec_disabled"
+
+
+
+def test_d4_actual_service_selects_python_first_party_import_edges_without_spawn(
+        product_service, monkeypatch):
+    """Real candidate binds import AST to the already hashed first-party files."""
+    service, workspace = product_service
+    package = workspace / "py-direct/src/pkg"
+    package.mkdir()
+    (package / "__init__.py").write_bytes(b"# selected package\n")
+    (package / "util.py").write_bytes(b"value = 42\n")
+    (package / "entry.py").write_bytes(
+        b"from .util import value\nimport os\n")
+    argv = ["python", "-m", "compileall", "-q", "./src"]
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("T0 cannot run Python")))
+        candidate = service._prepare_d4_r003_fixture_candidate(
+            "a", "py-direct", argv)
+        receipt = candidate.python_import_sources
+        assert receipt is not None
+        assert receipt.first_party_import_edges == (
+            ("src/pkg/entry.py", "src/pkg/__init__.py"),
+            ("src/pkg/entry.py", "src/pkg/util.py"),
+        )
+        assert "os" in receipt.unresolved_external_imports
+        assert receipt.actual_sys_path_proven is False
+        assert receipt.actual_loaded_source_graph_proven is False
+        assert receipt.native_launch_allowed is False
+        with pytest.raises(GatewayError) as denied:
+            service.invoke_exec("a", "py-direct", argv, dry_run=False)
+        assert denied.value.code == "exec_disabled"
+
+
+def test_d4_actual_pipenv_without_tests_has_empty_truthful_python_import_receipt(
+        product_service):
+    service, _workspace = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-pipenv", ["python", "-m", "pytest", "-q"])
+    receipt = candidate.python_import_sources
+    assert receipt is not None
+    assert receipt.selected_source_files == ()
+    assert receipt.imported_external_sources_proven is False
+    assert receipt.native_launch_allowed is False
+
+
+@pytest.mark.parametrize("source", [
+    b"from ..escape import secret\n",
+    b"import src.missing\n",
+    b"from .missing import value\n",
+    b"def broken(:\n",
+])
+def test_d4_actual_service_refuses_unsafe_python_selected_imports(
+        product_service, monkeypatch, source):
+    service, workspace = product_service
+    (workspace / "py-direct/src/main.py").write_bytes(source)
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("T0 no Python subprocess")))
+        with pytest.raises(GatewayError) as denied:
+            service._prepare_d4_r003_fixture_candidate(
+                "a", "py-direct",
+                ["python", "-m", "compileall", "-q", "./src"])
+        assert denied.value.code == "command_not_allowed"
+        with pytest.raises(GatewayError) as public:
+            service.invoke_exec(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                dry_run=False)
+        assert public.value.code == "exec_disabled"
+
+
+def test_d4_python_source_recheck_catches_same_bytes_new_inode(
+        product_service):
+    from gateway.lbe_python_import_sources import (
+        D4PythonImportDenied, inspect_d4_python_first_party_import_sources,
+    )
+
+    service, workspace = product_service
+    source = workspace / "py-direct/src/main.py"
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct",
+        ["python", "-m", "compileall", "-q", "./src"])
+    replacement = source.with_name("replacement.py")
+    replacement.write_bytes(source.read_bytes())
+    os.replace(replacement, source)
+    with pytest.raises(D4PythonImportDenied):
+        inspect_d4_python_first_party_import_sources(
+            service.get("a"), candidate)
+
+
+def test_d4_python_source_recheck_catches_replaced_package_directory(
+        product_service):
+    from gateway.lbe_python_import_sources import (
+        D4PythonImportDenied, inspect_d4_python_first_party_import_sources,
+    )
+
+    service, workspace = product_service
+    src_dir = workspace / "py-direct/src"
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    old = src_dir.with_name("renamed")
+    os.rename(src_dir, old)
+    src_dir.mkdir()
+    (src_dir / "main.py").write_bytes((old / "main.py").read_bytes())
+    with pytest.raises(D4PythonImportDenied):
+        inspect_d4_python_first_party_import_sources(service.get("a"), candidate)
+
+
+def test_d4_python_dynamic_import_recorded_as_unqualified_source(
+        product_service):
+    service, workspace = product_service
+    (workspace / "py-direct/src/main.py").write_bytes(
+        b"import importlib\nimportlib.import_module('external')\n")
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    receipt = candidate.python_import_sources
+    assert receipt.dynamic_import_sites == ("src/main.py",)
+    assert receipt.unresolved_external_imports == ("importlib",)
+    assert receipt.dynamic_import_closure_proven is False
+    assert receipt.native_launch_allowed is False
+
+
+
+def test_d4_real_service_first_party_from_import_submodule_is_selected(
+        product_service, monkeypatch):
+    service, workspace = product_service
+    package = workspace / "py-direct/src/pkg"
+    package.mkdir()
+    (package / "__init__.py").write_bytes(b"# package initializer\n")
+    (package / "util.py").write_bytes(b"value = 42\n")
+    (workspace / "py-direct/src/main.py").write_bytes(
+        b"from src.pkg import util\nvalue = util.value\n")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no native Python allowed")))
+        candidate, marker = service._prepare_d4_r003_attempt(
+            "a", "py-direct", ["python", "-m", "pytest", "-q"])
+        receipt = candidate.python_import_sources
+        assert receipt is not None
+        assert ("src/main.py", "src/pkg/__init__.py") in receipt.first_party_import_edges
+        assert ("src/main.py", "src/pkg/util.py") in receipt.first_party_import_edges
+        assert receipt.actual_loaded_source_graph_proven is False
+        marker.consume_for(candidate.plan)
+        with pytest.raises(GatewayError) as blocked:
+            service.invoke_exec(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"], dry_run=False)
+        assert blocked.value.code == "exec_disabled"
+
+
+@pytest.mark.parametrize("forge", ["unselected", "native", "missing"])
+def test_d4_python_one_use_marker_rejects_forged_import_receipt(
+        product_service, forge):
+    from gateway.lbe_product_fixture import D4OneUseAttemptMarker
+
+    service, _workspace = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    receipt = candidate.python_import_sources
+    assert receipt is not None
+    if forge == "unselected":
+        changed = replace(
+            receipt, first_party_import_edges=(("src/main.py", "src/outside.py"),))
+    elif forge == "native":
+        changed = replace(receipt, native_launch_allowed=True)
+    else:
+        changed = None
+    with pytest.raises(D4FixtureDenied):
+        D4OneUseAttemptMarker(
+            replace(candidate, python_import_sources=changed),
+            service.get("a"))
+
+
+def test_d4_python_one_use_burns_before_launcher_on_import_receipt_drift(
+        product_service, monkeypatch):
+    from gateway.lbe_direct_owner import DirectChildOwner
+    import gateway.lbe_python_import_sources as first_party
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, _workspace = product_service
+    candidate, marker = service._prepare_d4_r003_attempt(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    receipt = candidate.python_import_sources
+    assert receipt is not None
+    calls = []
+    def never_launch(_plan):
+        calls.append("launched")
+        raise AssertionError("stale import receipt cannot reach child launcher")
+    with monkeypatch.context() as m:
+        m.setattr(first_party, "inspect_d4_python_first_party_import_sources",
+                  lambda *_a: replace(
+                      receipt, unresolved_external_imports=("outside",)))
+        worker = LbeWorker(DirectChildOwner(), launcher=never_launch)
+        with pytest.raises(LbeWorkerError) as denied:
+            worker.run(candidate.plan, product_attempt=marker)
+        assert denied.value.code == "attempt_replay_denied"
+        with pytest.raises(LbeWorkerError) as replay:
+            worker.run(candidate.plan, product_attempt=marker)
+        assert replay.value.code == "attempt_replay_denied"
+    assert calls == []
+
+
+def test_d4_go_plan_rejects_forged_python_import_binding(product_service):
+    from gateway.lbe_product_fixture import D4OneUseAttemptMarker
+    service, _workspace = product_service
+    python = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    go = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    assert python.python_import_sources is not None
+    with pytest.raises(D4FixtureDenied):
+        D4OneUseAttemptMarker(
+            replace(go, python_import_sources=python.python_import_sources),
+            service.get("a"))
+
+
+
+def test_d4_go_darwin_arm64_source_selection_ignores_unbuilt_platform_imports(
+        product_service, monkeypatch):
+    """Actual source candidate includes all bytes, but imports only target files."""
+    from gateway.lbe_go_import_sources import inspect_d4_go_direct_import_sources
+
+    service, workspace = product_service
+    go = workspace / "go-project/cmd/app"
+    (go / "platform_linux.go").write_bytes(
+        b'package main\nimport "unapproved.example/foreign"\n')
+    (go / "platform_windows_amd64.go").write_bytes(
+        b'package main\nimport "unapproved.example/win"\n')
+    (go / "platform_darwin_arm64.go").write_bytes(
+        b'package main\nimport "fmt"\n')
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no Go child permitted")))
+        candidate, attempt = service._prepare_d4_r003_attempt(
+            "a", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"])
+        all_sources = {name for name, _ in candidate.source_sha256}
+        assert "go-project/cmd/app/platform_linux.go" in all_sources
+        assert "go-project/cmd/app/platform_windows_amd64.go" in all_sources
+        selected = inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate,
+            staged_go_manifest=(("src/fmt/print.go", "a" * 64),))
+        assert selected.selected_imports == ("fmt",)
+        assert selected.stdlib_stage_members == (
+            ("fmt", ("src/fmt/print.go",)),)
+        assert selected.inactive_first_party_sources == (
+            "go-project/cmd/app/platform_linux.go",
+            "go-project/cmd/app/platform_windows_amd64.go",
+        )
+        assert selected.target_goos == "darwin"
+        assert selected.target_goarch == "arm64"
+        assert selected.build_constraint_closure_proven is False
+        assert selected.native_launch_allowed is False
+        attempt.consume_for(candidate.plan)
+        with pytest.raises(GatewayError) as denied:
+            service.invoke_exec(
+                "a", "go-project",
+                ["go", "build", "-o", "bin/app", "./cmd/app"],
+                dry_run=False)
+        assert denied.value.code == "exec_disabled"
+    assert not (workspace / "go-project/bin/app").exists()
+
+
+@pytest.mark.parametrize("filename,source,active", [
+    ("platform.go", b'//go:build darwin && arm64\n\npackage main\n'
+     b'import "fmt"\n', True),
+    ("platform_darwin.go", b'// +build darwin,arm64\n\npackage main\n'
+     b'import "fmt"\n', True),
+    ("platform.go", b'//go:build linux\n\npackage main\n'
+     b'import "unreviewed.example/linux"\n', False),
+    ("platform.go", b'//go:build windows || amd64\n\npackage main\n'
+     b'import "unreviewed.example/win"\n', False),
+])
+def test_d4_go_real_service_explicit_build_tags_select_only_target_sources(
+        product_service, filename, source, active):
+    from gateway.lbe_go_import_sources import inspect_d4_go_direct_import_sources
+
+    service, workspace = product_service
+    selected_path = workspace / "go-project/cmd/app" / filename
+    selected_path.write_bytes(source)
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "vet", "./..."])
+    snapshot = {name for name, _ in candidate.source_sha256}
+    assert "go-project/cmd/app/" + filename in snapshot
+    receipt = inspect_d4_go_direct_import_sources(
+        service.get("a"), candidate,
+        staged_go_manifest=(("src/fmt/print.go", "a" * 64),))
+    if active:
+        assert receipt.selected_imports == ("fmt",)
+        assert receipt.inactive_first_party_sources == ()
+    else:
+        assert receipt.selected_imports == ()
+        assert receipt.inactive_first_party_sources == (
+            "go-project/cmd/app/" + filename,)
+    assert receipt.build_constraint_closure_proven is False
+    assert receipt.actual_loaded_source_graph_proven is False
+    assert receipt.native_launch_allowed is False
+
+
+@pytest.mark.parametrize("source", [
+    b'//go:build darwin && unreviewed_tool_tag\n\npackage main\n',
+    b'//go:build (darwin\n\npackage main\n',
+    b'//go:build darwin\n// +build linux\n\npackage main\n',
+])
+def test_d4_go_real_service_refuses_unqualified_build_tag_sources(
+        product_service, source):
+    from gateway.lbe_go_import_sources import (
+        inspect_d4_go_direct_import_sources, D4GoImportSourceDenied,
+    )
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/platform.go").write_bytes(source)
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "vet", "./..."])
+    with pytest.raises(D4GoImportSourceDenied):
+        inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate, staged_go_manifest=())
+
+
+def test_d4_go_only_non_target_local_package_is_not_falsely_qualified(
+        product_service):
+    from gateway.lbe_go_import_sources import (
+        inspect_d4_go_direct_import_sources, D4GoImportSourceDenied,
+    )
+    service, workspace = product_service
+    go = workspace / "go-project"
+    (go / "pkg/onlylinux").mkdir(parents=True)
+    (go / "pkg/onlylinux/only_linux.go").write_bytes(
+        b"package onlylinux\nconst Value=1\n")
+    (go / "cmd/app/main.go").write_bytes(
+        b'package main\nimport "firstparty.test/app/pkg/onlylinux"\n')
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    with pytest.raises(D4GoImportSourceDenied):
+        inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate, staged_go_manifest=())
+
+
+def test_d4_go_inactive_platform_source_is_still_inode_and_hash_bound(
+        product_service):
+    from gateway.lbe_go_import_sources import (
+        inspect_d4_go_direct_import_sources, D4GoImportSourceDenied,
+    )
+    service, workspace = product_service
+    go = workspace / "go-project/cmd/app"
+    file = go / "platform_linux.go"
+    file.write_bytes(b'package main\nimport "external.example/ignore"\n')
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    replacement = go / "replacement.go"
+    replacement.write_bytes(file.read_bytes())
+    os.replace(replacement, file)
+    with pytest.raises(D4GoImportSourceDenied):
+        inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate, staged_go_manifest=())
+
+
+def test_d4_go_active_arch_and_unknown_suffix_imports_are_checked(
+        product_service):
+    from gateway.lbe_go_import_sources import (
+        inspect_d4_go_direct_import_sources, D4GoImportSourceDenied,
+    )
+    service, workspace = product_service
+    go = workspace / "go-project/cmd/app"
+    (go / "valid_arm64.go").write_bytes(
+        b'package main\nimport "fmt"\n')
+    (go / "unknown_future.go").write_bytes(
+        b'package main\nimport "external.example/ambiguous"\n')
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "vet", "./..."])
+    with pytest.raises(D4GoImportSourceDenied):
+        inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate,
+            staged_go_manifest=(("src/fmt/print.go", "a" * 64),))
+
+
+
+def test_d4_go_build_ignores_only_test_imports_and_selects_darwin_stdlib(
+        product_service, monkeypatch):
+    """Real WorkspaceService build source selection, never native go build."""
+    from gateway.lbe_go_import_sources import inspect_d4_go_direct_import_sources
+
+    service, workspace = product_service
+    project = workspace / "go-project"
+    (project / "cmd/app/main.go").write_bytes(
+        b'package main\nimport "fmt"\nfunc main() {fmt.Println("ok")}\n')
+    (project / "cmd/app/main_test.go").write_bytes(
+        b'package main\nimport "unapproved.example/test-only"\n')
+    stage = (
+        ("src/fmt/print.go", "a" * 64),
+        ("src/fmt/print_darwin_arm64.go", "b" * 64),
+        ("src/fmt/print_linux.go", "c" * 64),
+        ("src/fmt/print_windows_arm64.go", "d" * 64),
+        ("src/fmt/print_test.go", "e" * 64),
+    )
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_k: (
+            _ for _ in ()).throw(AssertionError("T0 cannot launch Go")))
+        candidate, marker = service._prepare_d4_r003_attempt(
+            "a", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"])
+        actual = inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate, staged_go_manifest=stage)
+        assert actual.selected_go_command == "build"
+        assert actual.selected_imports == ("fmt",)
+        assert actual.stdlib_stage_members == (
+            ("fmt", ("src/fmt/print.go",
+                     "src/fmt/print_darwin_arm64.go")),)
+        assert actual.inactive_first_party_sources == (
+            "go-project/cmd/app/main_test.go",)
+        assert actual.stdlib_build_constraints_proven is False
+        assert actual.transitive_import_closure_proven is False
+        assert actual.native_launch_allowed is False
+        assert "go-project/cmd/app/main_test.go" in dict(candidate.source_sha256)
+        marker.consume_for(candidate.plan)
+        with pytest.raises(GatewayError) as exc:
+            service.invoke_exec(
+                "a", "go-project",
+                ["go", "build", "-o", "bin/app", "./cmd/app"],
+                dry_run=False)
+        assert exc.value.code == "exec_disabled"
+    assert not (project / "bin/app").exists()
+
+
+@pytest.mark.parametrize("argv", [
+    ["go", "test", "./..."],
+    ["go", "vet", "./..."],
+])
+def test_d4_go_test_and_vet_include_test_only_imports(
+        product_service, argv):
+    from gateway.lbe_go_import_sources import (
+        D4GoImportSourceDenied, inspect_d4_go_direct_import_sources,
+    )
+
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/main_test.go").write_bytes(
+        b'package main\nimport "unapproved.example/test-only"\n')
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", argv)
+    with pytest.raises(D4GoImportSourceDenied):
+        inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate, staged_go_manifest=())
+
+
+def test_d4_go_build_first_party_package_excludes_test_files(
+        product_service):
+    from gateway.lbe_go_import_sources import inspect_d4_go_direct_import_sources
+
+    service, workspace = product_service
+    project = workspace / "go-project"
+    (project / "pkg/util").mkdir(parents=True)
+    (project / "pkg/util/value.go").write_bytes(
+        b"package util\nconst Value = 2\n")
+    (project / "pkg/util/value_test.go").write_bytes(
+        b'package util\nimport "unapproved.example/test-only"\n')
+    (project / "cmd/app/main.go").write_bytes(
+        b'package main\nimport "firstparty.test/app/pkg/util"\n')
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"])
+    record = inspect_d4_go_direct_import_sources(
+        service.get("a"), candidate, staged_go_manifest=())
+    assert record.selected_imports == ("firstparty.test/app/pkg/util",)
+    assert record.first_party_members == (
+        ("firstparty.test/app/pkg/util", ("go-project/pkg/util/value.go",)),)
+    assert record.inactive_first_party_sources == (
+        "go-project/pkg/util/value_test.go",)
+
+
+def test_d4_go_testdata_go_source_is_pinned_but_not_built(product_service):
+    from gateway.lbe_go_import_sources import inspect_d4_go_direct_import_sources
+
+    service, workspace = product_service
+    project = workspace / "go-project"
+    (project / "pkg/util/testdata").mkdir(parents=True)
+    (project / "pkg/util/testdata/shadow.go").write_bytes(
+        b'package fixture\nimport "unknown.example/unbuilt"\n')
+    (project / "pkg/util/value.go").write_bytes(
+        b"package util\nconst Value=7\n")
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    record = inspect_d4_go_direct_import_sources(
+        service.get("a"), candidate, staged_go_manifest=())
+    assert record.selected_imports == ()
+    assert record.inactive_first_party_sources == (
+        "go-project/pkg/util/testdata/shadow.go",)
+    assert "go-project/pkg/util/testdata/shadow.go" in dict(candidate.source_sha256)
+
+
+def test_d4_go_stdlib_manifest_cannot_claim_unpinned_candidate(
+        product_service):
+    from gateway.lbe_go_import_sources import (
+        D4GoImportSourceDenied, inspect_d4_go_direct_import_sources,
+    )
+
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/main.go").write_bytes(
+        b'package main\nimport "fmt"\n')
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"])
+    with pytest.raises(D4GoImportSourceDenied):
+        inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate,
+            staged_go_manifest=(("src/fmt/print.go", "invalid"),))
+
+
+
+def test_d4_go_actual_service_build_header_with_license_block_is_accepted(
+        product_service, monkeypatch):
+    from gateway.lbe_go_import_sources import inspect_d4_go_direct_import_sources
+
+    service, workspace = product_service
+    (workspace / "go-project/cmd/app/main.go").write_bytes(
+        b'/* Copyright approved fixture */\n'
+        b'//go:build darwin && arm64\n\n'
+        b'package main\nimport "fmt"\nfunc main(){fmt.Println("ok")}\n')
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_k: (
+            _ for _ in ()).throw(AssertionError("Go T1 is not authorized")))
+        candidate = service._prepare_d4_r003_fixture_candidate(
+            "a", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"])
+        record = inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate,
+            staged_go_manifest=(("src/fmt/print.go", "a" * 64),))
+        assert record.selected_imports == ("fmt",)
+        assert record.native_launch_allowed is False
+        with pytest.raises(GatewayError) as exc:
+            service.invoke_exec(
+                "a", "go-project",
+                ["go", "build", "-o", "bin/app", "./cmd/app"],
+                dry_run=False)
+        assert exc.value.code == "exec_disabled"
+
+
+def test_d4_go_actual_service_missing_legacy_blank_cannot_exclude_source(
+        product_service):
+    from gateway.lbe_go_import_sources import (
+        D4GoImportSourceDenied, inspect_d4_go_direct_import_sources,
+    )
+
+    service, workspace = product_service
+    # Go ignores a +build selector without its required separating blank.
+    # Do not claim this file is excluded from Darwin compile inputs.
+    (workspace / "go-project/cmd/app/other.go").write_bytes(
+        b'// +build linux\npackage main\n'
+        b'import "unqualified.example/foreign"\n')
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"])
+    with pytest.raises(D4GoImportSourceDenied):
+        inspect_d4_go_direct_import_sources(
+            service.get("a"), candidate, staged_go_manifest=())
+
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project",
+     ["go", "build", "-o", "bin/app", "./cmd/app"]),
+])
+def test_d4_service_macos_runner_launch_boundary_is_bound_but_native_denied(
+        product_service, monkeypatch, kind, cwd, argv):
+    """The actual service supplies the Worker launcher, never a client grant."""
+    from gateway.lbe_macos_runner import D4MacOSRunnerLaunchBoundary
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    trees = _d4_staged_trees(workspace, kind)
+    calls = []
+    def illegal_native(*_args, **_kwargs):
+        calls.append("native")
+        raise AssertionError("SOURCE/T0 may not spawn any process")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", illegal_native)
+        candidate, marker, _source, recipe, host = (
+            service._prepare_d4_r003_runner_preflight(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees=trees))
+        boundary = marker._macos_boundary
+        assert type(boundary) is D4MacOSRunnerLaunchBoundary
+        # The lower-level host probe is source-only; the service-owned
+        # Worker and the assembly path enforce the complete loader set.
+        assert marker._macho_set is None
+        intent = boundary.intent
+        assert intent.workspace == "a"
+        assert intent.runner == candidate.plan.runner
+        assert intent.resolved_executable == recipe.resolved_executable
+        assert intent.requested_argv == tuple(argv)
+        assert intent.resolved_spawn_argv == recipe.resolved_spawn_argv
+        assert intent.closed_child_environment == recipe.closed_child_environment
+        assert intent.original_timeout_seconds == candidate.plan.timeout_seconds
+        assert intent.selected_source_fingerprint == host.source_fingerprint
+        assert dict(intent.required_limits)["cpu_millicores_max"] == 2000
+        assert dict(intent.required_limits)["memory_mib_max"] == 4096
+        assert intent.real_macos_runner_attested is False
+        assert intent.original_and_descendant_domain_enforced is False
+        assert intent.owner_native_t1_approved is False
+        assert intent.operative_f1_d0_exception_effective is False
+        assert intent.native_launch_allowed is False
+        owner = DirectChildOwner()
+        status = LbeWorker(owner, launcher=boundary.launch).run(
+            candidate.plan, product_attempt=marker)
+        assert status["status"] == "launch_failed"
+        assert status["executed"] is False
+        assert status["process_may_be_running"] is False
+        assert owner.snapshot()["reserved_slots"] == 0
+        assert owner.snapshot()["unavailable"] is False
+        with pytest.raises(LbeWorkerError) as replay:
+            LbeWorker(owner, launcher=boundary.launch).run(
+                candidate.plan, product_attempt=marker)
+        assert replay.value.code == "attempt_replay_denied"
+        with pytest.raises(GatewayError) as public:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert public.value.code == "exec_disabled"
+    assert calls == []
+
+
+def test_d4_macos_runner_binding_rejects_forged_attestation_and_wrong_plan(
+        product_service, monkeypatch):
+    from gateway.lbe_macos_runner import (
+        D4MacOSRunnerDenied, D4MacOSRunnerLaunchBoundary,
+    )
+    from gateway.lbe_worker import LbeNoChildStarted
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="python_direct")
+    trees = _d4_staged_trees(workspace, "python_direct")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_k: (
+            _ for _ in ()).throw(AssertionError("no native Popen permitted")))
+        candidate, marker, _source, recipe, host = (
+            service._prepare_d4_r003_runner_preflight(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees))
+        boundary = marker._macos_boundary
+        assert boundary is not None
+        fake_host = replace(host,
+            github_provider_attested=True,
+            physical_whole_child_cpu_memory_attached=True,
+            exact_owner_native_t1_authorized=True,
+            native_launch_allowed=True, blockers=())
+        with pytest.raises(D4MacOSRunnerDenied):
+            D4MacOSRunnerLaunchBoundary(
+                service.get("a"), candidate.plan, recipe, fake_host,
+                private_root=private)
+        with pytest.raises(LbeNoChildStarted):
+            boundary.launch(replace(candidate.plan))
+        with pytest.raises(D4MacOSRunnerDenied):
+            boundary.check_binding(service.get("a"), replace(candidate.plan))
+        assert service.info()["exec_policy"]["available"] is False
+
+
+def test_d4_macos_runner_prelaunch_ambient_drift_refuses_before_worker_launch(
+        product_service, monkeypatch):
+    from gateway.lbe_macos_runner import D4MacOSRunnerDenied
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeNoChildStarted, LbeWorker, LbeWorkerError
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="go")
+    trees = _d4_staged_trees(workspace, "go")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", lambda *_a, **_k: (
+            _ for _ in ()).throw(AssertionError("no Go process permitted")))
+        candidate, marker, _source, _recipe, _host = (
+            service._prepare_d4_r003_runner_preflight(
+                "a", "go-project", ["go", "test", "./..."],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees))
+        boundary = marker._macos_boundary
+        m.setattr(os, "environ", {
+            "PATH": "/usr/bin:/bin",
+            "HTTPS_PROXY": "http://unqualified-proxy.invalid:8080",
+        })
+        with pytest.raises(D4MacOSRunnerDenied):
+            boundary.recheck_for(service.get("a"), candidate.plan)
+        with pytest.raises(LbeNoChildStarted):
+            boundary.launch(candidate.plan)
+        owner = DirectChildOwner()
+        with pytest.raises(LbeWorkerError) as failed:
+            LbeWorker(owner, launcher=boundary.launch).run(
+                candidate.plan, product_attempt=marker)
+        assert failed.value.code == "attempt_replay_denied"
+        assert owner.snapshot()["reserved_slots"] == 0
+        with pytest.raises(LbeWorkerError) as replay:
+            LbeWorker(owner, launcher=boundary.launch).run(
+                candidate.plan, product_attempt=marker)
+        assert replay.value.code == "attempt_replay_denied"
+
+
+def test_d4_macos_runner_rejects_generic_replacement_of_service_boundary(
+        product_service):
+    from gateway.lbe_product_fixture import D4FixtureDenied
+
+    service, _workspace = product_service
+    _candidate, marker = service._prepare_d4_r003_attempt(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    with pytest.raises(D4FixtureDenied):
+        marker.attach_macos_runner_boundary(lambda *_args: True)
+    assert service.info()["exec_policy"]["available"] is False
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go", "go-project", ["go", "test", "./..."]),
+])
+@pytest.mark.parametrize("replacement", ["callable", "other_method", "forged"])
+def test_d4_worker_rejects_unbound_macos_runner_callback_before_reservation(
+        product_service, monkeypatch, kind, cwd, argv, replacement):
+    """A service-bound one-use marker cannot approve a different launcher."""
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    trees = _d4_staged_trees(workspace, kind)
+    calls = []
+
+    def forbidden(*_args, **_kwargs):
+        calls.append("native_or_unbound")
+        raise AssertionError("unapproved launch callback was invoked")
+
+    class ForgedCallback:
+        def __getattribute__(self, name):
+            if name in ("__self__", "__func__"):
+                raise AssertionError("hostile callback descriptor observed")
+            return object.__getattribute__(self, name)
+
+        def __call__(self, _plan):
+            return forbidden()
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", forbidden)
+        candidate, marker, _source, _recipe, _host = (
+            service._prepare_d4_r003_runner_preflight(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees=trees))
+        boundary = marker._macos_boundary
+        assert boundary is not None
+        if replacement == "callable":
+            launcher = forbidden
+        elif replacement == "other_method":
+            launcher = boundary.recheck_for
+        else:
+            launcher = ForgedCallback()
+        owner = DirectChildOwner()
+        with pytest.raises(LbeWorkerError) as denied:
+            LbeWorker(owner, launcher=launcher).run(
+                candidate.plan, product_attempt=marker)
+        assert denied.value.code == "invalid_worker_dependency"
+        assert denied.value.process_may_be_running is False
+        assert owner.snapshot()["reserved_slots"] == 0
+        assert owner.snapshot()["unavailable"] is False
+        with pytest.raises(LbeWorkerError) as replay:
+            LbeWorker(owner, launcher=boundary.launch).run(
+                candidate.plan, product_attempt=marker)
+        assert replay.value.code == "attempt_replay_denied"
+        assert calls == []
+
+
+def test_d4_worker_keeps_exact_bound_launcher_if_drain_factory_changes_field(
+        product_service, monkeypatch):
+    """A changed Worker attribute during drain setup cannot switch a callback."""
+    from gateway.lbe_direct_owner import DirectChildOwner
+    from gateway.lbe_pipe_drain import BoundedPipeDrain
+    from gateway.lbe_worker import LbeWorker
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="python_direct")
+    trees = _d4_staged_trees(workspace, "python_direct")
+    calls = []
+
+    def forbidden(*_args, **_kwargs):
+        calls.append("unbound")
+        raise AssertionError("changed launcher attribute was executed")
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", forbidden)
+        candidate, marker, _source, _recipe, _host = (
+            service._prepare_d4_r003_runner_preflight(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                private_root=private, expected_hashes=hashes,
+                expected_trees=trees))
+        owner = DirectChildOwner()
+        worker = None
+
+        def replace_during_drain(capture):
+            worker._launcher = forbidden
+            return BoundedPipeDrain(capture)
+
+        worker = LbeWorker(
+            owner, launcher=marker._macos_boundary.launch,
+            drain_factory=replace_during_drain)
+        outcome = worker.run(candidate.plan, product_attempt=marker)
+        assert outcome["status"] == "launch_failed"
+        assert outcome["executed"] is False
+        assert outcome["process_may_be_running"] is False
+        assert owner.snapshot()["reserved_slots"] == 0
+        assert owner.snapshot()["unavailable"] is False
+        assert calls == []
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+])
+def test_d4_service_owns_nonoperative_worker_for_all_six_commands(
+        product_service, monkeypatch, kind, cwd, argv):
+    """The real service owns source, Worker, original slot and denial."""
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    trees = _d4_staged_trees(workspace, kind)
+    calls = []
+    def forbidden(*_args, **_kwargs):
+        calls.append("native_or_signal")
+        raise AssertionError("source-only Worker may not execute native code")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", forbidden)
+        m.setattr(os, "kill", forbidden)
+        m.setattr(os, "killpg", forbidden, raising=False)
+        result = service._exercise_d4_r003_source_only_worker(
+            "a", cwd, argv, private_root=private,
+            expected_hashes=hashes, expected_trees=trees)
+        assert result["workspace"] == "a"
+        assert result["mode"] == "local_best_effort"
+        assert result["status"] == "launch_failed"
+        assert result["executed"] is False
+        assert result["exit_code"] is None
+        assert result["timed_out"] is False
+        assert result["process_may_be_running"] is False
+        assert result["cleanup_proven"] is False
+        assert result["output_complete"] is False
+        assert service._lbe_owner.snapshot()["reserved_slots"] == 0
+        assert service._lbe_owner.snapshot()["unavailable"] is False
+        assert service._exec_active == set()
+        with pytest.raises(GatewayError) as public:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert public.value.code == "exec_disabled"
+    assert calls == []
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("wrong_workspace", "workspace_not_found"),
+    ("bad_cancelled_type", "invalid_argument"),
+    ("already_cancelled", "waiter_disconnected"),
+    ("occupied", "busy"),
+    ("preflight_failure", "runner_unavailable"),
+])
+def test_d4_service_nonoperative_worker_error_releases_request_lease(
+        product_service, monkeypatch, case, expected):
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind="go")
+    trees = _d4_staged_trees(workspace, "go")
+    calls = []
+    def forbidden(*_args, **_kwargs):
+        calls.append("native_or_signal")
+        raise AssertionError("no actual Go/native process is authorized")
+    kwargs = {}
+    name = "a"
+    if case == "wrong_workspace":
+        name = "unknown"
+    if case == "bad_cancelled_type":
+        kwargs["cancelled"] = object()
+    if case == "already_cancelled":
+        kwargs["cancelled"] = threading.Event()
+        kwargs["cancelled"].set()
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", forbidden)
+        m.setattr(os, "kill", forbidden)
+        m.setattr(os, "killpg", forbidden, raising=False)
+        if case == "preflight_failure":
+            def fail_source(*_args, **_kwargs):
+                raise GatewayError("runner_unavailable", "injected source drift")
+            m.setattr(service, "_prepare_d4_r003_runner_preflight",
+                      fail_source)
+        if case == "occupied":
+            with service._lifecycle:
+                service._exec_active.add("a")
+        try:
+            with pytest.raises(GatewayError) as denied:
+                service._exercise_d4_r003_source_only_worker(
+                    name, "go-project", ["go", "test", "./..."],
+                    private_root=private, expected_hashes=hashes,
+                    expected_trees=trees, **kwargs)
+            assert denied.value.code == expected
+            assert service._exec_active == (
+                {"a"} if case == "occupied" else set())
+            assert service._lbe_owner.snapshot()["reserved_slots"] == 0
+            assert service._lbe_owner.snapshot()["unavailable"] is False
+        finally:
+            if case == "occupied":
+                with service._lifecycle:
+                    service._exec_active.remove("a")
+    assert calls == []
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go", "go-project", ["go", "test", "./..."]),
+])
+def test_d4_service_owned_worker_requires_real_selected_arm64_loader_set(
+        product_service, monkeypatch, kind, cwd, argv):
+    """The service-owned source path must reject inert selected executables.
+
+    The low-level D4 host source probe alone is not sufficient. All selected
+    Go go/compile/link or the actual Python/Pipenv interpreter need the same
+    full ARM64 Mach-O loader-set preflight as the separate inspector, even
+    when the public product is still hard-denied and no native child runs.
+    """
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    # Corrupt precisely one selected tool AFTER staging but BEFORE taking
+    # the expected source receipt. The source hash/tree still match: it is
+    # the real Mach-O admission, not generic SHA staging, that must deny.
+    import hashlib
+    if kind == "go":
+        invalid = Path(private) / "go/pkg/tool/darwin_arm64/compile"
+        key = "compile"
+    elif kind == "pipenv":
+        invalid = workspace / "py-pipenv/.venv/bin/python"
+        key = "python"
+    else:
+        invalid = Path(private) / "bin/python"
+        key = "python"
+    invalid_bytes = b"selected file is not ARM64 Mach-O"
+    invalid.write_bytes(invalid_bytes)
+    hashes[key] = hashlib.sha256(invalid_bytes).hexdigest()
+    trees = _d4_staged_trees(workspace, kind)
+    observed = []
+
+    def forbidden(*_args, **_kwargs):
+        observed.append("spawn_or_signal")
+        raise AssertionError("No native Go, Python or Pipenv is authorized")
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", forbidden)
+        m.setattr(os, "kill", forbidden)
+        m.setattr(os, "killpg", forbidden, raising=False)
+        with pytest.raises(GatewayError) as rejected:
+            service._exercise_d4_r003_source_only_worker(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees=trees)
+        assert rejected.value.code == "runner_unavailable"
+        assert service._exec_active == set()
+        assert service._lbe_owner.snapshot()["reserved_slots"] == 0
+        assert service._lbe_owner.snapshot()["unavailable"] is False
+    assert observed == []
+
+
+def _d4_service_operator_bundle(service, workspace, *, kind):
+    """Fresh disposable operator inputs for the COMPLETE service path.
+
+    All native image data is a static ARM64 header, deliberately not an
+    executable program. Manifest and identity receipts remain T0 only.
+    """
+    private = workspace.parent.parent
+    provisioner = private.parent / (private.name + "-service-provisioner")
+    if kind == "go":
+        sources = {"go": {
+            "bin/go": _d4_inert_arm64_tool("go-service"),
+            "pkg/tool/darwin_arm64/compile": _d4_inert_arm64_tool("compile-service"),
+            "pkg/tool/darwin_arm64/link": _d4_inert_arm64_tool("link-service"),
+            "src/runtime/runtime.go": b"package runtime\n",
+        }}
+    elif kind == "python_direct":
+        sources = {
+            "bin": {"python": _d4_inert_arm64_tool("python-service")},
+            "lib": {"python/stdlib.py": b"constant = 1\n"},
+        }
+    elif kind == "pipenv":
+        selected = workspace / "py-pipenv/.venv/bin/python"
+        selected.write_bytes(_d4_inert_arm64_tool("pipenv-service"))
+        selected.chmod(0o700)
+        sources = {
+            "bin": {"pipenv": ("#!" + str(selected) +
+                             "\n# inert service Pipenv\n").encode("ascii")},
+            "lib": {"python/stdlib.py": b"constant = 1\n"},
+        }
+    else:
+        raise AssertionError("unknown disposable service fixture")
+
+    for source_kind, entries in sources.items():
+        for leaf, data in entries.items():
+            path = provisioner / source_kind / leaf
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            path.chmod(0o600 if leaf.endswith((".py", ".go", ".dylib"))
+                       else 0o700)
+    manifests = {
+        source_kind: _d4_tree_expected(provisioner / source_kind)
+        for source_kind in sources
+    }
+    return private, provisioner, manifests
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+])
+def test_d4_actual_service_assembles_operator_source_and_burns_real_worker(
+        product_service, monkeypatch, kind, cwd, argv):
+    service, workspace = product_service
+    private, provisioner, manifests = _d4_service_operator_bundle(
+        service, workspace, kind=kind)
+    forbidden_calls = []
+
+    def forbidden(*_args, **_kwargs):
+        forbidden_calls.append(True)
+        raise AssertionError("operator source T0 must not spawn or signal")
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", forbidden)
+        m.setattr(os, "kill", forbidden)
+        m.setattr(os, "killpg", forbidden, raising=False)
+        offered = service._observe_d4_r003_operator_provisioner(
+            "a", cwd, argv, provisioner_root=str(provisioner))
+        identities = {
+            label: view.observed_source_identity_sha256
+            for label, view in offered.items() if label in manifests
+        }
+        venv = (offered["venv"].proposed_manifest
+                if kind == "pipenv" else None)
+        venv_identity = (offered["venv"].observed_source_identity_sha256
+                         if kind == "pipenv" else None)
+        result = service._exercise_d4_r003_assembled_source_only_worker(
+            "a", cwd, argv,
+            private_root=str(private), provisioner_root=str(provisioner),
+            staged_manifests=manifests, venv_manifest=venv,
+            expected_source_identities=identities,
+            expected_venv_identity_sha256=venv_identity)
+        assert result["workspace"] == "a"
+        assert result["status"] == "launch_failed"
+        assert result["executed"] is False
+        assert result["exit_code"] is None
+        assert result["process_may_be_running"] is False
+        assert result["cleanup_proven"] is False
+        assert service._exec_active == set()
+        assert service._lbe_owner.snapshot()["reserved_slots"] == 0
+        assert service._lbe_owner.snapshot()["unavailable"] is False
+        with pytest.raises(GatewayError) as denied:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert denied.value.code == "exec_disabled"
+    assert forbidden_calls == []
+    assert not (workspace / "go-project/bin/app").exists()
+
+
+@pytest.mark.parametrize("failure,expected", [
+    ("missing_identity", "runner_unavailable"),
+    ("wrong_identity", "runner_unavailable"),
+    ("bad_manifest", "runner_unavailable"),
+    ("cancelled", "waiter_disconnected"),
+    ("occupied", "busy"),
+])
+def test_d4_assembled_service_fail_closed_without_reserved_child(
+        product_service, monkeypatch, failure, expected):
+    service, workspace = product_service
+    private, provisioner, manifests = _d4_service_operator_bundle(
+        service, workspace, kind="go")
+    calls = []
+
+    def forbidden(*_a, **_kw):
+        calls.append(True)
+        raise AssertionError("failed staged request cannot spawn or signal")
+
+    kwargs = {}
+    if failure == "missing_identity":
+        identity = None
+    else:
+        identity = {"go": "a" * 64}
+    if failure not in {"missing_identity", "wrong_identity"}:
+        with monkeypatch.context() as m:
+            m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+            offered = service._observe_d4_r003_operator_provisioner(
+                "a", "go-project", ["go", "test", "./..."],
+                provisioner_root=str(provisioner))
+        identity = {"go": offered["go"].observed_source_identity_sha256}
+    if failure == "bad_manifest":
+        manifests = {"bin": (("", None),)}
+    if failure == "cancelled":
+        token = threading.Event()
+        token.set()
+        kwargs["cancelled"] = token
+    if failure == "occupied":
+        with service._lifecycle:
+            service._exec_active.add("a")
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", forbidden)
+        m.setattr(os, "kill", forbidden)
+        m.setattr(os, "killpg", forbidden, raising=False)
+        try:
+            with pytest.raises(GatewayError) as denied:
+                service._exercise_d4_r003_assembled_source_only_worker(
+                    "a", "go-project", ["go", "test", "./..."],
+                    private_root=str(private),
+                    provisioner_root=str(provisioner),
+                    staged_manifests=manifests,
+                    expected_source_identities=identity, **kwargs)
+            assert denied.value.code == expected
+            assert service._exec_active == (
+                {"a"} if failure == "occupied" else set())
+            assert service._lbe_owner.snapshot()["reserved_slots"] == 0
+            assert service._lbe_owner.snapshot()["unavailable"] is False
+        finally:
+            if failure == "occupied":
+                with service._lifecycle:
+                    service._exec_active.remove("a")
+    assert calls == []
+
+
+@pytest.mark.parametrize("source_kind", ["python", "go"])
+def test_d4_pinned_import_reader_denies_parent_mode_drift_during_read(
+        product_service, monkeypatch, source_kind):
+    """Source parent becoming writable DURING FD read must never qualify.
+
+    This uses the real pinned source reader (not a fake return receipt).
+    Restoring the original directory mode is only test teardown; it does not
+    turn the already observed in-read anomaly into a valid source witness.
+    """
+    from gateway.lbe_python_import_sources import (
+        D4PythonImportDenied, inspect_d4_python_first_party_import_sources,
+    )
+    from gateway.lbe_go_import_sources import (
+        D4GoImportSourceDenied, inspect_d4_go_direct_import_sources,
+    )
+
+    service, workspace = product_service
+    if source_kind == "python":
+        target = workspace / "py-direct/src/main.py"
+        candidate = service._prepare_d4_r003_fixture_candidate(
+            "a", "py-direct", ["python", "-m", "pytest", "-q"])
+        expected_error = D4PythonImportDenied
+    else:
+        target = workspace / "go-project/cmd/app/main.go"
+        candidate = service._prepare_d4_r003_fixture_candidate(
+            "a", "go-project", ["go", "test", "./..."])
+        expected_error = D4GoImportSourceDenied
+    parent = target.parent
+    parent_mode = parent.stat().st_mode & 0o777
+    target_ino = target.stat().st_ino
+    target_dev = target.stat().st_dev
+    mutated = []
+    original_read = os.read
+
+    def corrupt_parent_during_source_read(fd, count):
+        data = original_read(fd, count)
+        st = os.fstat(fd)
+        if not mutated and st.st_ino == target_ino and st.st_dev == target_dev:
+            os.chmod(parent, 0o777)
+            mutated.append(True)
+        return data
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "read", corrupt_parent_during_source_read)
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw: (
+            _ for _ in ()).throw(AssertionError("no child permitted")))
+        try:
+            with pytest.raises(expected_error):
+                if source_kind == "python":
+                    inspect_d4_python_first_party_import_sources(
+                        service.get("a"), candidate)
+                else:
+                    inspect_d4_go_direct_import_sources(
+                        service.get("a"), candidate,
+                        staged_go_manifest=())
+        finally:
+            os.chmod(parent, parent_mode)
+    assert mutated == [True]
+    assert service._lbe_owner.snapshot()["reserved_slots"] == 0
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("python_direct", "py-direct", ["python", "-m", "compileall", "-q", "./src"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project", ["go", "build", "-o", "bin/app", "./cmd/app"]),
+])
+def test_d4_service_worker_binds_real_selected_host_fd_source_without_native(
+        product_service, monkeypatch, kind, cwd, argv):
+    """The actual Service->one-use Worker consumes selected-host FD evidence."""
+    import hashlib
+    service, workspace = product_service
+    private, provisioner, manifests = _d4_service_operator_bundle(
+        service, workspace, kind=kind)
+    root = workspace.parent.parent / "host-selected-fixture"
+    root.mkdir(mode=0o700)
+    root.chmod(0o700)
+    selected = root / "dyld-source"
+    raw = b"static selected host source, never executed\\n"
+    selected.write_bytes(raw)
+    selected.chmod(0o600)
+    expected = (("dyld-source", hashlib.sha256(raw).hexdigest()),)
+    calls = []
+
+    def forbidden(*_args, **_kwargs):
+        calls.append(True)
+        raise AssertionError("no native child or OS signal authorized")
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", forbidden)
+        m.setattr(os, "kill", forbidden)
+        m.setattr(os, "killpg", forbidden, raising=False)
+        offered = service._observe_d4_r003_operator_provisioner(
+            "a", cwd, argv, provisioner_root=str(provisioner))
+        identities = {
+            label: view.observed_source_identity_sha256
+            for label, view in offered.items() if label in manifests
+        }
+        venv = offered["venv"].proposed_manifest if kind == "pipenv" else None
+        venv_identity = (offered["venv"].observed_source_identity_sha256
+                         if kind == "pipenv" else None)
+        result = service._exercise_d4_r003_assembled_source_only_worker(
+            "a", cwd, argv, private_root=str(private),
+            provisioner_root=str(provisioner), staged_manifests=manifests,
+            expected_source_identities=identities, venv_manifest=venv,
+            expected_venv_identity_sha256=venv_identity,
+            host_source_root=str(root), host_source_expected=expected)
+        assert result["status"] == "launch_failed"
+        assert result["executed"] is False
+        assert result["process_may_be_running"] is False
+        assert service._exec_active == set()
+        assert service._lbe_owner.snapshot()["reserved_slots"] == 0
+        with pytest.raises(GatewayError) as denied:
+            service.invoke_exec("a", cwd, argv, dry_run=False)
+        assert denied.value.code == "exec_disabled"
+    assert calls == []
+
+
+@pytest.mark.parametrize("failure,code", [
+    ("missing_expected", "runner_unavailable"),
+    ("wrong_digest", "runner_unavailable"),
+    ("drift_after_attaching", "attempt_replay_denied"),
+])
+def test_d4_service_host_fd_identity_failure_refuses_before_worker_child(
+        product_service, monkeypatch, failure, code):
+    """Host source changes are rejected by the SAME bound Worker marker."""
+    import hashlib
+    from gateway.lbe_hosted_source_probe import D4HostedSelectedSourceRecheck
+
+    service, workspace = product_service
+    private, provisioner, manifests = _d4_service_operator_bundle(
+        service, workspace, kind="go")
+    root = workspace.parent.parent / "host-selected-fixture"
+    root.mkdir(mode=0o700)
+    root.chmod(0o700)
+    selected = root / "dyld-source"
+    raw = b"static selected host source, never executed\\n"
+    selected.write_bytes(raw)
+    selected.chmod(0o600)
+    expected = (("dyld-source", hashlib.sha256(raw).hexdigest()),)
+    if failure == "wrong_digest":
+        expected = (("dyld-source", "a" * 64),)
+    if failure == "missing_expected":
+        expected = None
+    calls = []
+
+    def forbidden(*_args, **_kwargs):
+        calls.append(True)
+        raise AssertionError("invalid host source may never spawn or signal")
+
+    if failure == "drift_after_attaching":
+        original = D4HostedSelectedSourceRecheck.recheck_once
+
+        def changed_source_before_recheck(this):
+            selected.write_bytes(b"host source changed after initial sample\\n")
+            return original(this)
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        m.setattr(subprocess, "Popen", forbidden)
+        m.setattr(os, "kill", forbidden)
+        m.setattr(os, "killpg", forbidden, raising=False)
+        if failure == "drift_after_attaching":
+            m.setattr(D4HostedSelectedSourceRecheck, "recheck_once",
+                      changed_source_before_recheck)
+        offered = service._observe_d4_r003_operator_provisioner(
+            "a", "go-project", ["go", "test", "./..."],
+            provisioner_root=str(provisioner))
+        identity = {"go": offered["go"].observed_source_identity_sha256}
+        with pytest.raises(GatewayError) as denied:
+            service._exercise_d4_r003_assembled_source_only_worker(
+                "a", "go-project", ["go", "test", "./..."],
+                private_root=str(private),
+                provisioner_root=str(provisioner),
+                staged_manifests=manifests,
+                expected_source_identities=identity,
+                host_source_root=str(root), host_source_expected=expected)
+        assert denied.value.code == code
+        assert service._exec_active == set()
+        assert service._lbe_owner.snapshot()["reserved_slots"] == 0
+        assert service._lbe_owner.snapshot()["unavailable"] is False
+    assert calls == []
+
+
+@pytest.mark.parametrize("kind,cwd,argv", [
+    ("python_direct", "py-direct", ["python", "-m", "pytest", "-q"]),
+    ("python_direct", "py-direct",
+     ["python", "-m", "compileall", "-q", "./src"]),
+    ("pipenv", "py-pipenv", ["python", "-m", "pytest", "-q"]),
+    ("go", "go-project", ["go", "test", "./..."]),
+    ("go", "go-project", ["go", "vet", "./..."]),
+    ("go", "go-project",
+     ["go", "build", "-o", "bin/app", "./cmd/app"]),
+])
+def test_r006_private_runner_all_six_use_exact_product_recipe_then_replay_denies(
+        product_service, monkeypatch, kind, cwd, argv):
+    from gateway.lbe_hosted_source_probe import D4HostedSelectedSourceObservation
+    from gateway.lbe_owner_grant_bootstrap import D4ConsumedOwnerGrant
+    from gateway.lbe_r006_macos_allowlist import (
+        D4R006HostAllowlistObservation, R006_HOST_SOURCE_FINGERPRINT,
+        R006_RUNNER_PROFILE_FINGERPRINT,
+    )
+    from gateway import lbe_r006_native_runner as r006_runner
+    from gateway.lbe_r006_native_runner import D4R006NativeLaunchBoundary
+    from gateway.lbe_worker import LbeNoChildStarted
+
+    service, workspace = product_service
+    private, hashes = _stage_d4_native_bytes_in_private_runner(
+        workspace, kind=kind)
+    trees = _d4_staged_trees(workspace, kind)
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", {"PATH": "/usr/bin:/bin"})
+        candidate, marker, _observation, recipe = (
+            service._prepare_d4_r003_native_recipe(
+                "a", cwd, argv, private_root=private,
+                expected_hashes=hashes, expected_trees=trees,
+                timeout_seconds=120))
+
+        selected = D4HostedSelectedSourceObservation(
+            root_identity=(1, 2, 3, 4, 5, 0o40755, 0, 1),
+            selected=(("x", "b" * 64,
+                       (1, 2, 1, 4, 5, 0o100444, 0, 1)),),
+            root_ancestor_identities=((1, 2, 0o40755, 0),),
+        )
+        host = D4R006HostAllowlistObservation(
+            system=selected, usr=selected,
+            source_fingerprint=R006_HOST_SOURCE_FINGERPRINT,
+            runner_profile_fingerprint=R006_RUNNER_PROFILE_FINGERPRINT,
+            image_version="20261104.0514.1", macos_version="15.8.2",
+            os_build="24H232", kernel_sysname="Darwin", machine="arm64",
+            run_id=42445537246, run_attempt=1, job_name="r007-t0",
+            mount_table_fingerprint="f" * 64,
+            actual_host_safety_verified=True,
+            no_ambient_credentials_observed=True,
+            no_ambient_proxy_observed=True,
+            no_writable_nonlocal_mounts_observed=True,
+        )
+        consumed = object.__new__(D4ConsumedOwnerGrant)
+        m.setattr(
+            D4ConsumedOwnerGrant, "check_binding",
+            lambda self, plan, bound_recipe: None)
+        m.setattr(
+            r006_runner, "verify_r006_fixed_host_allowlist_t0",
+            lambda: host)
+        calls = []
+        fake_child = object()
+
+        def fake_popen(spawn_argv, **kwargs):
+            calls.append((spawn_argv, kwargs))
+            return fake_child
+
+        m.setattr(subprocess, "Popen", fake_popen)
+        boundary = D4R006NativeLaunchBoundary(
+            service.get("a"), candidate.plan, recipe, host, consumed, marker)
+        assert boundary.launch(candidate.plan) is fake_child
+        assert calls[0][0] == list(recipe.resolved_spawn_argv)
+        assert calls[0][1]["cwd"] == recipe.working_directory
+        assert calls[0][1]["env"] == dict(recipe.closed_child_environment)
+        assert calls[0][1]["close_fds"] is True
+        assert calls[0][1]["start_new_session"] is False
+
+        # The same first-party/source marker is already burned before Popen.
+        with pytest.raises(LbeNoChildStarted):
+            boundary.launch(candidate.plan)
+        assert len(calls) == 1
+
+
+
+@pytest.mark.parametrize("row,cwd,argv", [
+    (index, cwd, argv) for index, (cwd, argv) in enumerate(_ROWS, 1)
+])
+def test_r010_d4_actual_workspace_service_selection_binds_six_sources(
+        product_service, monkeypatch, row, cwd, argv):
+    """The real service's Workspace name differs from its project cwd."""
+    from gateway.lbe_r010_row_fs import (
+        capture_r010_d4_selected_source_from_service,
+        validate_r010_fixed_row_plan,
+    )
+
+    service, workspace = product_service
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                  (_ for _ in ()).throw(AssertionError("no T1 Popen")))
+        candidate = service._prepare_d4_r003_fixture_candidate(
+            "a", cwd, argv, timeout_seconds=120)
+        assert candidate.plan.workspace == "a"
+        assert candidate.plan.cwd == cwd
+        validate_r010_fixed_row_plan(row, candidate.plan)
+        observed = capture_r010_d4_selected_source_from_service(
+            row=row, ctx=service.get("a"), candidate=candidate)
+    assert observed.workspace == "a"
+    assert observed.project_cwd == cwd
+    assert observed.selected_source.files
+    assert observed.source_count == len(candidate.source_sha256)
+    assert observed.native_launch_allowed is False
+    assert observed.runtime_loaded_sources_proven is False
+    assert observed.six_command_product_t1_pass is False
+    with pytest.raises(GatewayError) as denied:
+        service.invoke_exec("a", cwd, argv, dry_run=False)
+    assert denied.value.code == "exec_disabled"
+
+
+def test_r010_d4_rejects_actual_service_selected_source_drift(product_service):
+    from gateway.lbe_r010_row_fs import (
+        R010RowFiniteDenied,
+        capture_r010_d4_selected_source_from_service,
+    )
+    service, root = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "py-direct", ["python", "-m", "pytest", "-q"])
+    (root / "py-direct" / "src" / "main.py").write_bytes(b"x = CHANGED\n")
+    with pytest.raises(R010RowFiniteDenied):
+        capture_r010_d4_selected_source_from_service(
+            row=1, ctx=service.get("a"), candidate=candidate)
+
+
+def test_r010_d4_rejects_cross_workspace_service_candidate(product_service):
+    from dataclasses import replace
+    from gateway.lbe_r010_row_fs import (
+        R010RowFiniteDenied,
+        capture_r010_d4_selected_source_from_service,
+    )
+    service, _ = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "test", "./..."])
+    altered = replace(candidate, plan=replace(candidate.plan, workspace="b"))
+    with pytest.raises(R010RowFiniteDenied, match="Workspace"):
+        capture_r010_d4_selected_source_from_service(
+            row=4, ctx=service.get("a"), candidate=altered)
+
+
+def test_r010_d4_rejects_poisoned_file_identity(product_service):
+    from dataclasses import replace
+    from gateway.lbe_r010_row_fs import (
+        R010RowFiniteDenied,
+        capture_r010_d4_selected_source_from_service,
+    )
+    service, _ = product_service
+    candidate = service._prepare_d4_r003_fixture_candidate(
+        "a", "go-project", ["go", "vet", "./..."])
+    original = candidate.source_identity
+    poisoned = ((
+        original[0][0],
+        (original[0][1][0] + 1, *original[0][1][1:]),
+    ), *original[1:])
+    with pytest.raises(R010RowFiniteDenied):
+        capture_r010_d4_selected_source_from_service(
+            row=5, ctx=service.get("a"),
+            candidate=replace(candidate, source_identity=poisoned))
+
+
+def test_r010_full_six_source_selection_is_one_real_shared_service(
+        product_service, monkeypatch):
+    from gateway.lbe_r010_six_service import (
+        R010SixSourcePlan, recheck_r010_service_six_source,
+    )
+    service, root = product_service
+    def forbidden(*_a, **_kw):
+        raise AssertionError("source-only R010 must never run a child")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", forbidden)
+        m.setattr(os, "kill", forbidden)
+        m.setattr(os, "killpg", forbidden, raising=False)
+        plan = service._prepare_r010_six_command_source_only("a")
+        assert type(plan) is R010SixSourcePlan
+        assert plan.workspace == "a"
+        assert len(plan.rows) == 6
+        assert tuple(row.candidate.plan.requested_argv for row in plan.rows) == (
+            tuple(tuple(argv) for _, argv in _ROWS))
+        assert tuple(row.index for row in plan.rows) == (1, 2, 3, 4, 5, 6)
+        assert all(row.candidate.plan.workspace == "a" for row in plan.rows)
+        assert plan.native_launch_allowed is False
+        assert plan.six_command_product_t1_pass is False
+        assert plan.summary()["row_count"] == 6
+        assert recheck_r010_service_six_source(
+            service=service, ctx=service.get("a"), snapshot=plan) is plan
+        for cwd, argv in _ROWS:
+            with pytest.raises(GatewayError) as ex:
+                service.invoke_exec("a", cwd, argv, dry_run=False)
+            assert ex.value.code == "exec_disabled"
+    assert service._active_operations == 0
+    assert service._exec_active == set()
+    assert not (root / "go-project" / "bin" / "app").exists()
+
+
+def test_r010_six_source_stale_after_first_party_mutation(product_service):
+    from gateway.lbe_r010_six_service import (
+        R010SixSourceDenied, recheck_r010_service_six_source,
+    )
+    service, root = product_service
+    candidate = service._prepare_r010_six_command_source_only("a")
+    (root / "go-project" / "cmd" / "app" / "main.go").write_bytes(
+        b"package main\nfunc changed(){}\n")
+    with pytest.raises(R010SixSourceDenied, match="source"):
+        recheck_r010_service_six_source(
+            service=service, ctx=service.get("a"), snapshot=candidate)
+
+
+@pytest.mark.parametrize("wrong", [
+    ("b", 120), ("a", 0), ("a", 121), ("a", True),
+])
+def test_r010_six_service_denies_wrong_scope_or_timeout(product_service, wrong):
+    service, _ = product_service
+    name, timeout = wrong
+    with pytest.raises((GatewayError, ValueError)):
+        service._prepare_r010_six_command_source_only(
+            name, timeout_seconds=timeout)
+    assert service._active_operations == 0
+
+
+def test_r010_six_service_detects_missing_source_and_does_not_launch(
+        product_service, monkeypatch):
+    service, root = product_service
+    (root / "py-direct" / "src" / "main.py").unlink()
+    def forbidden(*_a, **_kw):
+        raise AssertionError("never spawn while source absent")
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    with pytest.raises(GatewayError, match="R010"):
+        service._prepare_r010_six_command_source_only("a")
+    assert service._active_operations == 0
+    assert service._exec_active == set()
+
+
+def test_r010_six_service_rejects_cross_instance_source_plan(
+        product_service):
+    from dataclasses import replace
+    from gateway.lbe_r010_six_service import (
+        R010SixSourceDenied, recheck_r010_service_six_source,
+    )
+    service, _ = product_service
+    good = service._prepare_r010_six_command_source_only("a")
+    wrong = replace(good, workspace="b")
+    with pytest.raises(R010SixSourceDenied):
+        recheck_r010_service_six_source(
+            service=service, ctx=service.get("a"), snapshot=wrong)
+    wrong_row = replace(good.rows[1], index=3)
+    with pytest.raises(R010SixSourceDenied):
+        recheck_r010_service_six_source(
+            service=service, ctx=service.get("a"),
+            snapshot=replace(good, rows=(good.rows[0], wrong_row) + good.rows[2:]))
+
+
+
+def _r010_t0_job_for_shared_service(tmp_path):
+    """Disposable PRIVATE test-only Job envelope; never GitHub/OIDC authority."""
+    import hashlib
+    from gateway.lbe_r010_job_envelope import (
+        R010JobKey, _create_once_in_pinned_anchor)
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+
+    anchor = tmp_path / "r010-job-anchor"
+    anchor.mkdir(mode=0o700)
+    anchor_fd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    key = R010JobKey(
+        repo="chinanjjohn2012/mac-file-gateway", pr=114,
+        workflow_id=145, workflow_path=".github/workflows/r010.yml",
+        workflow_ref=("chinanjjohn2012/mac-file-gateway/"
+                      ".github/workflows/r010.yml@refs/heads/main"),
+        run_id=42640408843, run_attempt=1, check_run_id=129239691259,
+        job_name="r010_preexec_hold", head_sha="a" * 40,
+        design_id="MWE-LBE-R010-AUTHORITY-CHAIN-DESIGN-013-CANDIDATE",
+        design_blob="f57e39543a6fe3d64fe99b8669fc7da854b93a64",
+        owner_choice_comment_id=6740275850, host_option="A1",
+        review_sequence_option="B1",
+        state_domain="R010_EPHEMERAL_JOB_STATE_V1",
+    )
+    raw = tuple(f"{i:064x}" for i in range(1, 7))
+    digests = tuple(hashlib.sha256(bytes.fromhex(n)).hexdigest() for n in raw)
+    return anchor_fd, anchor, key, raw, digests
+
+
+def test_r010_shared_service_canonically_binds_one_row1_nonce_without_launch(
+        product_service, tmp_path, monkeypatch):
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    def deny(*_a, **_kw):
+        raise AssertionError("R010 source binding may not launch or signal")
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", deny)
+        m.setattr(os, "kill", deny)
+        m.setattr(os, "killpg", deny, raising=False)
+        try:
+            with _create_once_in_pinned_anchor(fd, key) as env:
+                journal = R010SerialNonceJournal(
+                    env, six_nonce_sha256=digests)
+                six = service._prepare_r010_six_command_source_only("a")
+                capture = service._bind_r010_first_row_source_only(
+                    "a", source_plan=six, journal=journal, nonce=raw[0])
+                assert capture.status()["reservation_bound"] is False
+                assert capture.status()["native_launch_allowed"] is False
+                assert journal.row_state_snapshot()["job_state_model"] == (
+                    "JOB_ROW_RUNNING_1")
+                assert journal.row_state_snapshot()["rows_model"] == (
+                    ("ROW_RUNNING",) + ("ROW_NOT_RUN",) * 5)
+                with pytest.raises(GatewayError):
+                    service._bind_r010_first_row_source_only(
+                        "a", source_plan=six,
+                        journal=journal, nonce=raw[0])
+                with pytest.raises(GatewayError) as denied:
+                    service.invoke_exec(
+                        "a", "py-direct",
+                        ["python", "-m", "pytest", "-q"], dry_run=False)
+                assert denied.value.code == "exec_disabled"
+        finally:
+            os.close(fd)
+    assert service._active_operations == 0
+    assert service._exec_active == set()
+
+
+@pytest.mark.parametrize("change", ["wrong_nonce", "source_drift",
+                                    "cross_workspace", "cancelled"])
+def test_r010_shared_first_row_invalid_source_latches_all_six_without_spawn(
+        product_service, tmp_path, monkeypatch, change):
+    import json
+    import threading
+    from dataclasses import replace
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+
+    service, root = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                  (_ for _ in ()).throw(AssertionError("never launch")))
+        try:
+            with _create_once_in_pinned_anchor(fd, key) as env:
+                journal = R010SerialNonceJournal(
+                    env, six_nonce_sha256=digests)
+                six = service._prepare_r010_six_command_source_only("a")
+                token = raw[0]
+                cancelled = None
+                if change == "wrong_nonce":
+                    token = raw[1]
+                if change == "source_drift":
+                    (root / "py-direct" / "src" / "main.py").write_bytes(
+                        b"changed before row1\n")
+                if change == "cross_workspace":
+                    six = replace(six, workspace="b")
+                if change == "cancelled":
+                    cancelled = threading.Event()
+                    cancelled.set()
+                with pytest.raises(GatewayError, match="failed closed"):
+                    service._bind_r010_first_row_source_only(
+                        "a", source_plan=six, journal=journal,
+                        nonce=token, cancelled=cancelled)
+                job = env.snapshot()
+                rootpath = anchor / job["envelope_root_name"]
+                failure = json.loads(
+                    (rootpath / "command-journal" /
+                     "r010-row-failure.json").read_text())
+                assert failure["status"] == "JOB_FAILED_LATCHED"
+                assert failure["rows"] == ["ROW_VOID"] * 6
+                with pytest.raises(GatewayError):
+                    service._bind_r010_first_row_source_only(
+                        "a", source_plan=six,
+                        journal=journal, nonce=raw[0])
+        finally:
+            os.close(fd)
+    assert service._active_operations == 0
+    assert service._exec_active == set()
+
+
+
+def test_r010_six_source_rejects_forged_other_instance_token(product_service):
+    from dataclasses import replace
+    from gateway.lbe_r010_six_service import (
+        R010SixSourceDenied, recheck_r010_service_six_source,
+    )
+    service, _ = product_service
+    source = service._prepare_r010_six_command_source_only("a")
+    poisoned = replace(source, service_identity=object())
+    with pytest.raises(R010SixSourceDenied):
+        recheck_r010_service_six_source(
+            service=service, ctx=service.get("a"), snapshot=poisoned)
+
+
+@pytest.mark.parametrize("when", ["before_worker", "after_reservation"])
+def test_r010_same_service_worker_prelaunch_source_drift_is_zero_popen(
+        product_service, tmp_path, monkeypatch, when):
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import (
+        R010SerialAdmissionDenied, R010SerialNonceJournal)
+    from gateway.lbe_worker import LbeWorkPlan, LbeWorker, LbeWorkerError
+    from gateway.lbe_pipe_drain import BoundedPipeDrain
+
+    service, root = product_service
+    fd, anchor, key, raw, hashes = _r010_t0_job_for_shared_service(tmp_path)
+    launched = []
+    def launcher(_plan):
+        launched.append(True)
+        raise AssertionError("source drift must block before Popen")
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(env, six_nonce_sha256=hashes)
+            source = service._prepare_r010_six_command_source_only("a")
+            capture = service._bind_r010_first_row_source_only(
+                "a", source_plan=source, journal=journal, nonce=raw[0])
+            selected_file = root / "py-direct" / "src" / "main.py"
+            if when == "before_worker":
+                selected_file.write_bytes(b"changed before Worker starts\n")
+                drain_factory = None
+            else:
+                def drain_factory(capture):
+                    selected_file.write_bytes(
+                        b"changed after reserve before launcher\n")
+                    return BoundedPipeDrain(capture)
+            worker = LbeWorker(
+                service._lbe_owner, launcher=launcher,
+                **({"drain_factory": drain_factory}
+                   if drain_factory is not None else {}))
+            with pytest.raises(LbeWorkerError, match="invalid_worker_dependency"):
+                worker.run(
+                    source.rows[0].candidate.plan,
+                    r010_source_capture=capture)
+            assert launched == []
+            # Incomplete capture cannot be promoted by a later public ACK.
+            with pytest.raises(R010SerialAdmissionDenied):
+                journal.finalize_first_row_from_worker_capture_source_only(
+                    capture=capture, selected_root_fd=-1,
+                    selected_before=None, private_root_fd=-1,
+                    private_before=None)
+            assert service._lbe_owner.snapshot()["unavailable"] is False
+            assert service._lbe_owner.snapshot()["reserved_slots"] == 0
+    finally:
+        os.close(fd)
+    assert service._active_operations == 0
+    assert service._exec_active == set()
+
+
+
+def test_r010_six_sources_durably_sealed_with_nonce_and_job_key(
+        product_service, tmp_path, monkeypatch):
+    import hashlib
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_six_service import fingerprint_r010_six_source
+
+    service, _ = product_service
+    fd, anchor, key, nonces, digests = _r010_t0_job_for_shared_service(
+        tmp_path)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(
+                env, six_nonce_sha256=digests)
+            six = service._prepare_r010_six_command_source_only("a")
+            expected, expected_rows = fingerprint_r010_six_source(
+                service=service, ctx=service.get("a"), snapshot=six)
+            cap = service._bind_r010_first_row_source_only(
+                "a", source_plan=six, journal=journal, nonce=nonces[0])
+            assert cap.status()["same_service_source_bound"] is True
+            state = journal.row_state_snapshot()
+            assert state["six_source_durable_binding_present"] is True
+            assert state["six_source_sha256"] == expected
+            root = anchor / env.snapshot()["envelope_root_name"]
+            binding = json.loads((
+                root / "command-journal" /
+                "six-row-source-binding.json").read_text())
+            assert binding["source_sha256"] == expected
+            assert binding["source_row_sha256"] == list(expected_rows)
+            assert len(set(binding["source_row_sha256"])) == 6
+            assert binding["nonce_sha256"] == list(digests)
+            assert binding["job_key_sha256"] == key.key_sha256()
+            assert binding["native_launch_allowed"] is False
+            assert binding["six_command_product_t1_pass"] is False
+            assert binding["row_positive_success"] is False
+            assert (root / "command-journal" /
+                    "row-01-burn.json").exists()
+    finally:
+        os.close(fd)
+
+
+def test_r010_source_binding_cannot_be_reattached_or_replaced(
+        product_service, tmp_path):
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import (
+        R010SerialAdmissionDenied, R010SerialNonceJournal)
+    service, _ = product_service
+    fd, _, key, _, digests = _r010_t0_job_for_shared_service(tmp_path)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(
+                env, six_nonce_sha256=digests)
+            six = service._prepare_r010_six_command_source_only("a")
+            journal.bind_six_source_before_first_burn(
+                service=service, ctx=service.get("a"), source_plan=six)
+            with pytest.raises(R010SerialAdmissionDenied):
+                journal.bind_six_source_before_first_burn(
+                    service=service, ctx=service.get("a"), source_plan=six)
+            assert journal.row_state_snapshot()["job_state_model"] == (
+                "JOB_PREEXEC_HOLD")
+            assert journal.row_state_snapshot()["native_launch_allowed"] is False
+    finally:
+        os.close(fd)
+
+
+def test_r010_cannot_bind_six_source_after_first_burn(
+        product_service, tmp_path):
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import (
+        R010SerialAdmissionDenied, R010SerialNonceJournal)
+    service, _ = product_service
+    fd, _, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(
+                env, six_nonce_sha256=digests)
+            six = service._prepare_r010_six_command_source_only("a")
+            journal.burn_first_nonce(raw[0])
+            with pytest.raises(R010SerialAdmissionDenied):
+                journal.bind_six_source_before_first_burn(
+                    service=service, ctx=service.get("a"), source_plan=six)
+    finally:
+        os.close(fd)
+
+
+
+def test_r010_source_rejection_is_latched_with_six_void_rows(
+        product_service, tmp_path, monkeypatch):
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    service, root = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(
+        tmp_path)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(
+                env, six_nonce_sha256=digests)
+            six = service._prepare_r010_six_command_source_only("a")
+            real = journal.bind_six_source_before_first_burn
+            def mutate_before_bind(*, service, ctx, source_plan):
+                (root / "go-project" / "cmd" / "app" / "main.go"
+                 ).write_bytes(b"package main\n// changed\n")
+                return real(service=service, ctx=ctx,
+                            source_plan=source_plan)
+            monkeypatch.setattr(
+                journal, "bind_six_source_before_first_burn",
+                mutate_before_bind)
+            with pytest.raises(GatewayError, match="failed closed"):
+                service._bind_r010_first_row_source_only(
+                    "a", source_plan=six, journal=journal, nonce=raw[0])
+            home = anchor / env.snapshot()["envelope_root_name"]
+            result = json.loads(
+                (home / "command-journal" /
+                 "r010-row-failure.json").read_text())
+            assert result["rows"] == ["ROW_VOID"] * 6
+            assert result["status"] == "JOB_FAILED_LATCHED"
+            assert not (home / "command-journal" /
+                        "six-row-source-binding.json").exists()
+    finally:
+        os.close(fd)
+
+
+def test_r010_worker_capture_denied_after_job_latch_before_launch(
+        product_service, tmp_path, monkeypatch):
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, root = product_service
+    fd, _, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    launched = []
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(
+                env, six_nonce_sha256=digests)
+            six = service._prepare_r010_six_command_source_only("a")
+            cap = service._bind_r010_first_row_source_only(
+                "a", source_plan=six, journal=journal, nonce=raw[0])
+            journal.latch_failure("owner_reader_ambiguous")
+            def forbidden(*_args, **_kw):
+                launched.append(True)
+                raise AssertionError("no Worker launcher after Job latch")
+            with pytest.raises(LbeWorkerError, match="invalid_worker_dependency"):
+                LbeWorker(service._lbe_owner, launcher=forbidden).run(
+                    six.rows[0].candidate.plan, r010_source_capture=cap)
+            assert launched == []
+    finally:
+        os.close(fd)
+
+
+
+def test_r010_shared_service_single_source_to_first_row_transaction(
+        product_service, tmp_path, monkeypatch):
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    service, _ = product_service
+    fd, anchor, key, raw, hashes = _r010_t0_job_for_shared_service(tmp_path)
+    def no_spawn(*_a, **_kw):
+        raise AssertionError("R010 private preflight must not spawn")
+    monkeypatch.setattr(subprocess, "Popen", no_spawn)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(
+                env, six_nonce_sha256=hashes)
+            receipt = service._prepare_and_bind_r010_first_row_source_only(
+                "a", journal=journal, nonce=raw[0])
+            assert receipt.status()["same_service_source_bound"] is True
+            assert receipt.status()["native_launch_allowed"] is False
+            assert journal.row_state_snapshot()["job_state_model"] == (
+                "JOB_ROW_RUNNING_1")
+            home = anchor / env.snapshot()["envelope_root_name"]
+            bound = json.loads(
+                (home / "command-journal" /
+                 "six-row-source-binding.json").read_text())
+            assert bound["job_key_sha256"] == key.key_sha256()
+            assert len(bound["source_row_sha256"]) == 6
+            assert bound["six_command_product_t1_pass"] is False
+            for cwd, argv in _ROWS:
+                with pytest.raises(GatewayError) as denied:
+                    service.invoke_exec("a", cwd, argv, dry_run=False)
+                assert denied.value.code == "exec_disabled"
+    finally:
+        os.close(fd)
+    assert service._active_operations == 0
+    assert service._exec_active == set()
+
+
+def test_r010_single_service_failed_preflight_is_six_void(
+        product_service, tmp_path):
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    service, root = product_service
+    fd, anchor, key, raw, hashes = _r010_t0_job_for_shared_service(tmp_path)
+    (root / "go-project" / "cmd" / "app" / "main.go").unlink()
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(
+                env, six_nonce_sha256=hashes)
+            with pytest.raises(GatewayError, match="failed closed"):
+                service._prepare_and_bind_r010_first_row_source_only(
+                    "a", journal=journal, nonce=raw[0])
+            home = anchor / env.snapshot()["envelope_root_name"]
+            failed = json.loads(
+                (home / "command-journal" /
+                 "r010-row-failure.json").read_text())
+            assert failed["rows"] == ["ROW_VOID"] * 6
+            assert not (home / "command-journal" /
+                        "row-01-burn.json").exists()
+    finally:
+        os.close(fd)
+    assert service._active_operations == 0
+
+
+
+@pytest.mark.parametrize("exit_code,mutate_source,expected", [
+    (0, False, "ROW_FINITE_ZERO_SOURCE_ONLY_NOT_PRODUCT_T1"),
+    (7, False, "ROW_OBSERVED_NONZERO"),
+    (0, True, "ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS"),
+])
+def test_r010_actual_shared_service_finalizes_first_owner_row_source_only(
+        product_service, tmp_path, monkeypatch, exit_code, mutate_source,
+        expected):
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_row_fs import observe_r010_private_tree
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_worker import LbeWorker
+    service, root = product_service
+    fd, anchor, key, raw, hashes = _r010_t0_job_for_shared_service(
+        tmp_path)
+    private = tmp_path / "r010-private-row-output"
+    private.mkdir(mode=0o700)
+    pfd = os.open(private, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    before = observe_r010_private_tree(root_fd=pfd)
+    def deny(*_args, **_kw):
+        raise AssertionError("no real native PRODUCT_T1")
+    monkeypatch.setattr(subprocess, "Popen", deny)
+    class FakeChild:
+        def __init__(self):
+            stdout_read, stdout_write = os.pipe()
+            stderr_read, stderr_write = os.pipe()
+            os.close(stdout_write)
+            os.close(stderr_write)
+            self.stdout = os.fdopen(stdout_read, "rb", buffering=0)
+            self.stderr = os.fdopen(stderr_read, "rb", buffering=0)
+        def wait(self):
+            return exit_code
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(
+                env, six_nonce_sha256=hashes)
+            capture = service._prepare_and_bind_r010_first_row_source_only(
+                "a", journal=journal, nonce=raw[0])
+            result = LbeWorker(
+                service._lbe_owner, launcher=lambda _plan: FakeChild()
+            ).run(capture._plan, r010_source_capture=capture)
+            assert result["status"] == "exited"
+            assert result["process_may_be_running"] is True
+            assert result["cleanup_proven"] is False
+            assert result["full_descendant_tree_clean"] == "not_proven"
+            assert result["exit_code"] == exit_code
+            if mutate_source:
+                (root / "py-direct" / "src" / "main.py").write_bytes(
+                    b"x=changed after original exit\n")
+            decided = service._finalize_r010_first_row_source_only(
+                "a", journal=journal, capture=capture,
+                private_root_fd=pfd, private_before=before)
+            assert decided["status"] == expected
+            assert decided["next_row_allowed"] is False
+            assert decided["native_launch_allowed"] is False
+            home = anchor / env.snapshot()["envelope_root_name"]
+            if exit_code == 0 and not mutate_source:
+                record = json.loads(
+                    (home / "command-journal" /
+                     "row-01-source-only.json").read_text())
+                assert record["six_source_binding_sha256"]
+                assert record["job_key_sha256"] == key.key_sha256()
+                assert record["six_command_product_t1_pass"] is False
+            else:
+                failure = json.loads(
+                    (home / "command-journal" /
+                     "r010-row-failure.json").read_text())
+                assert failure["rows"] == (
+                    [expected] + ["ROW_VOID"] * 5)
+    finally:
+        os.close(pfd)
+        os.close(fd)
+    assert service._active_operations == 0
+    assert service._exec_active == set()
+
+
+def _r010_fake_completed_child(exit_code=0):
+    """Actual DirectChildOwner.wait and two EOF drains; NO OS subprocess."""
+    class FakeChild:
+        def __init__(self):
+            out_r, out_w = os.pipe()
+            err_r, err_w = os.pipe()
+            os.close(out_w)
+            os.close(err_w)
+            self.stdout = os.fdopen(out_r, "rb", buffering=0)
+            self.stderr = os.fdopen(err_r, "rb", buffering=0)
+
+        def wait(self):
+            return exit_code
+
+    return FakeChild()
+
+
+def _r010_source_model_step(
+        *, service, root, journal, six, raw, row, private_fd,
+        exit_code=0, output_drift=False):
+    """One real Worker/Owner/Journal source transaction; FakeChild T0."""
+    from gateway.lbe_r010_row_fs import observe_r010_private_tree
+    from gateway.lbe_worker import LbeWorker
+    from gateway.lbe_r010_finite_integrity import observe_go_output_absent
+
+    before = observe_r010_private_tree(root_fd=private_fd)
+    if row == 1:
+        capture = service._bind_r010_first_row_source_only(
+            "a", source_plan=six, journal=journal, nonce=raw[0])
+    else:
+        capture = service._bind_r010_later_source_model_row(
+            "a", source_plan=six, journal=journal, row=row,
+            nonce=raw[row - 1])
+    assert capture.status()["row"] == row
+    plan = six.rows[row - 1].candidate.plan
+    assert capture._plan is plan
+    go_fd = None
+    go_before = None
+    if row == 6:
+        go_fd = os.open(
+            root / "go-project" / "bin",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        go_before = observe_go_output_absent(parent_fd=go_fd)
+
+    def fake_launcher(observed_plan):
+        assert observed_plan is plan
+        if row == 6 and exit_code == 0:
+            # A first-party synthetic output after Worker source recheck:
+            # real pinned bin/app checks will be applied in finite postflight.
+            output = root / "go-project" / "bin" / "app"
+            output.write_bytes(b"fixed-T0-go-build-result")
+            output.chmod(0o700)
+        return _r010_fake_completed_child(exit_code)
+
+    try:
+        result = LbeWorker(
+            service._lbe_owner, launcher=fake_launcher).run(
+                plan, r010_source_capture=capture)
+        assert result["status"] == "exited"
+        assert result["exit_code"] == exit_code
+        assert result["process_may_be_running"] is True
+        assert result["cleanup_proven"] is False
+        assert result["full_descendant_tree_clean"] == "not_proven"
+        assert result["output_complete"] is True
+        assert capture.status()["worker_result_recorded"] is True
+        if output_drift:
+            (root / "py-direct" / "src" / "main.py").write_bytes(
+                b"mutated after original reaper observed exit\\n")
+        decision = service._finalize_r010_source_model_row(
+            "a", row=row, journal=journal, capture=capture,
+            private_root_fd=private_fd, private_before=before,
+            go_output_parent_fd=go_fd, go_output_before=go_before)
+        assert decision["native_launch_allowed"] is False
+        assert decision["next_row_allowed"] is False
+        assert decision["six_command_product_t1_pass"] is False
+        assert capture.status()["consumed"] is True
+        return decision
+    finally:
+        if go_fd is not None:
+            os.close(go_fd)
+
+
+def test_r010_one_real_service_owner_worker_journal_six_rows_fake_t0(
+        product_service, tmp_path, monkeypatch):
+    """End-to-end six *source-model* rows, not six native PRODUCT_T1 calls."""
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import (
+        R010SerialAdmissionDenied, R010SerialNonceJournal)
+    from gateway.lbe_r010_row_fs import observe_r010_private_tree
+
+    service, root = product_service
+    fd, anchor, key, raw, hashes = _r010_t0_job_for_shared_service(tmp_path)
+    private = tmp_path / "t0-owned-row-output"
+    private.mkdir(mode=0o700)
+    pfd = os.open(private, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    def forbidden(*_a, **_kw):
+        raise AssertionError("source-only integration may not use real Popen")
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(os, "kill", forbidden)
+    monkeypatch.setattr(os, "killpg", forbidden, raising=False)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as instance:
+            journal = R010SerialNonceJournal(
+                instance, six_nonce_sha256=hashes)
+            six = service._prepare_r010_six_command_source_only("a")
+            for row in range(1, 7):
+                decision = _r010_source_model_step(
+                    service=service, root=root, journal=journal,
+                    six=six, raw=raw, row=row, private_fd=pfd)
+                assert decision["status"] == (
+                    "OWNER_WORKER_FINITE_SOURCE_MODEL_ZERO_NOT_T1")
+                next_model = row + 1 if row < 6 else None
+                assert decision["source_model_next_row"] == next_model
+                state = journal.row_state_snapshot()
+                assert state["source_only_model_rows_completed"] == row
+                assert state["product_t1_original_rows_attested"] is False
+                assert state["native_launch_allowed"] is False
+                assert state["six_command_product_t1_pass"] is False
+                assert state["rows_model"][:row] == (
+                    "ROW_POSITIVE_SUCCESS",) * row
+                home = anchor / instance.snapshot()["envelope_root_name"]
+                record = json.loads((
+                    home / "command-journal" /
+                    ("row-%02d-source-model-observed.json" % row)
+                ).read_text())
+                assert record["job_key_sha256"] == key.key_sha256()
+                assert record["source_only_model"] is True
+                assert record["actual_product_t1_attested"] is False
+                assert record["row_positive_success"] is False
+                assert record["native_launch_allowed"] is False
+            assert state["job_state_model"] == "JOB_SIX_COMMAND_COMPLETE"
+            assert state["source_only_worker_journal_connected"] is True
+            with pytest.raises(R010SerialAdmissionDenied, match="not implemented"):
+                journal.begin_later_row(2, raw[1])
+            with pytest.raises(R010SerialAdmissionDenied, match="not proven"):
+                journal.claim_six_command_pass()
+            # Source-model completion is never a public Exec bypass.
+            for cwd, argv in _ROWS:
+                with pytest.raises(GatewayError) as denied:
+                    service.invoke_exec("a", cwd, argv, dry_run=False)
+                assert denied.value.code == "exec_disabled"
+    finally:
+        os.close(fd)
+        os.close(pfd)
+    assert service._active_operations == 0
+    assert service._exec_active == set()
+
+
+@pytest.mark.parametrize("failed_row", (1, 2, 3, 4, 5, 6))
+def test_r010_six_row_original_owner_nonzero_latches_all_later_rows(
+        product_service, tmp_path, monkeypatch, failed_row):
+    """Same reservation reaper exit1 -> durable failed row + void later rows."""
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import (
+        R010SerialAdmissionDenied, R010SerialNonceJournal)
+
+    service, root = product_service
+    fd, anchor, key, raw, hashes = _r010_t0_job_for_shared_service(tmp_path)
+    private = tmp_path / "r010-private-nonzero"
+    private.mkdir(mode=0o700)
+    pfd = os.open(private, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_k:
+                        (_ for _ in ()).throw(AssertionError("no Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as instance:
+            journal = R010SerialNonceJournal(
+                instance, six_nonce_sha256=hashes)
+            six = service._prepare_r010_six_command_source_only("a")
+            for row in range(1, failed_row + 1):
+                decision = _r010_source_model_step(
+                    service=service, root=root, journal=journal, six=six,
+                    raw=raw, row=row, private_fd=pfd,
+                    exit_code=7 if row == failed_row else 0)
+            assert decision["status"] == "ROW_OBSERVED_NONZERO"
+            assert decision["durably_latched"] is True
+            home = anchor / instance.snapshot()["envelope_root_name"]
+            failure = json.loads((
+                home / "command-journal" / "r010-row-failure.json"
+            ).read_text())
+            assert failure["active_row"] == failed_row
+            assert failure["status"] == "JOB_FAILED_LATCHED"
+            assert failure["rows"] == (
+                ["ROW_POSITIVE_SUCCESS"] * (failed_row - 1) +
+                ["ROW_OBSERVED_NONZERO"] + ["ROW_VOID"] * (6 - failed_row))
+            assert failure["native_launch_allowed"] is False
+            with pytest.raises(R010SerialAdmissionDenied):
+                journal.row_state_snapshot()
+            with pytest.raises(GatewayError):
+                service._bind_r010_later_source_model_row(
+                    "a", row=min(6, failed_row + 1),
+                    source_plan=six, journal=journal,
+                    nonce=raw[min(5, failed_row)])
+    finally:
+        os.close(fd)
+        os.close(pfd)
+
+
+def test_r010_worker_exit_zero_source_drift_never_advances(
+        product_service, tmp_path, monkeypatch):
+    """Exact real selected before/after source invalid -> FAILED and VOID."""
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+
+    service, root = product_service
+    fd, anchor, key, raw, hashes = _r010_t0_job_for_shared_service(tmp_path)
+    private = tmp_path / "r010-private-source-drift"
+    private.mkdir(mode=0o700)
+    pfd = os.open(private, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_k:
+                        (_ for _ in ()).throw(AssertionError("no Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as instance:
+            journal = R010SerialNonceJournal(instance, six_nonce_sha256=hashes)
+            six = service._prepare_r010_six_command_source_only("a")
+            decided = _r010_source_model_step(
+                service=service, root=root, journal=journal,
+                six=six, raw=raw, row=1, private_fd=pfd,
+                output_drift=True)
+            assert decided["status"] == (
+                "ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS")
+            home = anchor / instance.snapshot()["envelope_root_name"]
+            failure = json.loads((
+                home / "command-journal" / "r010-row-failure.json"
+            ).read_text())
+            assert failure["rows"] == (
+                ["ROW_OBSERVED_ZERO_INVALID_OUTPUT_OR_FS"] +
+                ["ROW_VOID"] * 5)
+    finally:
+        os.close(fd)
+        os.close(pfd)
+
+
+def test_r010_source_model_row2_cannot_burn_before_owned_row1_result(
+        product_service, tmp_path, monkeypatch):
+    """Blocked row2 cannot run with a matching nonce but missing row1 reap."""
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import (
+        R010SerialAdmissionDenied, R010SerialNonceJournal)
+
+    service, _ = product_service
+    fd, _, key, raw, hashes = _r010_t0_job_for_shared_service(tmp_path)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_k:
+                        (_ for _ in ()).throw(AssertionError("no Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as instance:
+            journal = R010SerialNonceJournal(instance, six_nonce_sha256=hashes)
+            six = service._prepare_r010_six_command_source_only("a")
+            capture = service._bind_r010_first_row_source_only(
+                "a", source_plan=six, journal=journal, nonce=raw[0])
+            assert capture.status()["row"] == 1
+            with pytest.raises(R010SerialAdmissionDenied):
+                journal.burn_source_model_later_nonce(
+                    row=2, nonce=raw[1], service=service,
+                    ctx=service.get("a"), source_plan=six)
+            with pytest.raises(GatewayError):
+                service._bind_r010_later_source_model_row(
+                    "a", row=2, nonce=raw[1], journal=journal,
+                    source_plan=six)
+    finally:
+        os.close(fd)
+
+
+def test_r010_private_worker_result_detaches_mutable_public_argv(
+        product_service, tmp_path, monkeypatch):
+    """Post-return public response mutation cannot rewrite private receipt."""
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_row_fs import observe_r010_private_tree
+    from gateway.lbe_worker import LbeWorker
+
+    service, _root = product_service
+    fd, _, key, raw, hashes = _r010_t0_job_for_shared_service(tmp_path)
+    private = tmp_path / "private-capture-mutation"
+    private.mkdir(mode=0o700)
+    pfd = os.open(private, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as instance:
+            journal = R010SerialNonceJournal(instance, six_nonce_sha256=hashes)
+            six = service._prepare_r010_six_command_source_only("a")
+            capture = service._bind_r010_first_row_source_only(
+                "a", source_plan=six, journal=journal, nonce=raw[0])
+            before = observe_r010_private_tree(root_fd=pfd)
+            result = LbeWorker(
+                service._lbe_owner,
+                launcher=lambda _p: _r010_fake_completed_child(0),
+            ).run(capture._plan, r010_source_capture=capture)
+            assert result["requested_argv"] == list(capture._plan.requested_argv)
+            result["requested_argv"].append("unreviewed")
+            result["effective_argv"].append("modified-after-return")
+            assert capture._result["requested_argv"] == list(
+                capture._plan.requested_argv)
+            assert capture._result["effective_argv"] == list(
+                capture._plan.effective_argv)
+            observed = service._finalize_r010_source_model_row(
+                "a", row=1, journal=journal, capture=capture,
+                private_root_fd=pfd, private_before=before)
+            assert observed["status"] == (
+                "OWNER_WORKER_FINITE_SOURCE_MODEL_ZERO_NOT_T1")
+            assert observed["native_launch_allowed"] is False
+    finally:
+        os.close(fd)
+        os.close(pfd)
+
+
+def test_r010_owner_health_drift_during_finite_postflight_latches_job(
+        product_service, tmp_path, monkeypatch):
+    """A late Owner unavailable latch cannot become a source-model success."""
+    import json
+    from gateway import lbe_r010_serial_journal as mod
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import (
+        R010SerialAdmissionDenied, R010SerialNonceJournal)
+    from gateway.lbe_r010_row_fs import observe_r010_private_tree
+    from gateway.lbe_worker import LbeWorker
+
+    service, _root = product_service
+    fd, anchor, key, raw, hashes = _r010_t0_job_for_shared_service(tmp_path)
+    private = tmp_path / "private-postflight-drift"
+    private.mkdir(mode=0o700)
+    pfd = os.open(private, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as instance:
+            journal = R010SerialNonceJournal(instance, six_nonce_sha256=hashes)
+            six = service._prepare_r010_six_command_source_only("a")
+            cap = service._bind_r010_first_row_source_only(
+                "a", source_plan=six, journal=journal, nonce=raw[0])
+            before = observe_r010_private_tree(root_fd=pfd)
+            LbeWorker(
+                service._lbe_owner,
+                launcher=lambda _p: _r010_fake_completed_child(0),
+            ).run(cap._plan, r010_source_capture=cap)
+
+            real = mod.verify_r010_finite_row_after
+            def late_latch(**kwargs):
+                valid = real(**kwargs)
+                service._lbe_owner.latch_unavailable(cap._reservation)
+                return valid
+            monkeypatch.setattr(mod, "verify_r010_finite_row_after", late_latch)
+            decided = service._finalize_r010_source_model_row(
+                "a", row=1, journal=journal, capture=cap,
+                private_root_fd=pfd, private_before=before)
+            assert decided["status"] == "ROW_AMBIGUOUS"
+            assert decided["durably_latched"] is True
+            home = anchor / instance.snapshot()["envelope_root_name"]
+            failure = json.loads((
+                home / "command-journal" / "r010-row-failure.json"
+            ).read_text())
+            assert failure["rows"] == ["ROW_AMBIGUOUS"] + ["ROW_VOID"] * 5
+            with pytest.raises(R010SerialAdmissionDenied):
+                journal.row_state_snapshot()
+    finally:
+        os.close(fd)
+        os.close(pfd)
+
+
+
+def _r010_synthetic_chain_before_same_service_worker(
+        key, env, journal, *, raw_only=False):
+    """Synthetic signed/current/Owner references, but an ACTUAL private file."""
+    from gateway.lbe_r010_authority_source import (
+        bind_r010_authority_source_to_job)
+    from gateway.lbe_r010_grant_candidate import (
+        R010GrantExpected, R010GrantSourceObservation)
+    from gateway.lbe_r010_owner_choice import R010OwnerDesignChoiceObservation
+    from gateway.lbe_r010_provider_transport import R010GithubOwnerRead
+    from gateway.lbe_r010_provider_job import R010CurrentJobSource
+    from gateway.lbe_r010_a1_host import (
+        R010A1HostSource, R010A1ClosedPreexecSource)
+
+    choice = R010OwnerDesignChoiceObservation(
+        comment_id=key.owner_choice_comment_id, body_sha256="1" * 64,
+        design_id=key.design_id, design_blob=key.design_blob,
+        b_review_node_id="PRR_R014_B", c_review_node_id="PRR_R014_C",
+        options=("A1", "B1"),
+        risk_marker="R010_REAFFIRM_R006_RISK1_9_PLUS_RISK10_11",
+    )
+    owner = R010GithubOwnerRead(
+        choice=choice, raw_choice_sha256="2" * 64,
+        raw_reviews_sha256="3" * 64)
+    current = R010CurrentJobSource(
+        run_id=key.run_id, run_attempt=key.run_attempt,
+        job_id=3001, check_run_id=key.check_run_id,
+        head_sha=key.head_sha, run_body_sha256="4" * 64,
+        jobs_body_sha256="5" * 64, oidc_jwt_sha256="6" * 64)
+    grant = R010GrantSourceObservation(
+        grant_comment_id=987654321, body_sha256="7" * 64,
+        implementation_head_sha=key.head_sha,
+        standards_review_node_id="PRR_CODE_B",
+        spec_review_node_id="PRR_CODE_C",
+        signed_jwt_sha256="6" * 64,
+        job_envelope_key_sha256=key.key_sha256(),
+        grant_expires_unix=1800000100)
+    values = {n: "f" * 64 for n in R010GrantExpected.__dataclass_fields__}
+    values.update(
+        base_sha="b" * 40, head_sha=key.head_sha, tree_sha="c" * 40,
+        job_envelope_key_sha256=key.key_sha256())
+    grant_expected = R010GrantExpected(**values)
+    receipt = None
+    if not raw_only:
+        receipt = bind_r010_authority_source_to_job(
+            envelope=env, job_key=key, journal=journal,
+            owner_source=owner, current_job=current,
+            grant_source=grant, expected=grant_expected)
+    host = R010A1HostSource(
+        head_sha=key.head_sha, run_id=str(key.run_id),
+        run_attempt=str(key.run_attempt), job_name=key.job_name,
+        image_version="20261104.0514.1",
+        host_source_sha256="8" * 64,
+        mount_table_sha256="9" * 64,
+        ssh_selector_observed=True, host_snapshot_from_original_os=False)
+    helper = ("HOME", "LANG", "LC_ALL", "PATH", "TMPDIR")
+    closed = R010A1ClosedPreexecSource(
+        head_sha=key.head_sha, run_id=str(key.run_id),
+        mount_table_sha256=host.mount_table_sha256,
+        helper_keys=helper, child_keys=helper)
+    if raw_only:
+        return {
+            "owner_source": owner, "current_job": current,
+            "grant_source": grant, "expected": grant_expected,
+        }, host, closed
+    return receipt, host, closed
+
+
+def test_r010_actual_service_owner_worker_and_persisted_source_join_six_rows(
+        product_service, tmp_path, monkeypatch):
+    """Actual internal service/Worker/Owner/Journal; six FakeChildren T0."""
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_source_service import (
+        bind_r010_authority_source_to_service_only,
+        R010ServiceSourceDenied)
+    from gateway.lbe_r010_row_fs import observe_r010_private_tree
+    from gateway.lbe_r010_finite_integrity import observe_go_output_absent
+    from gateway.lbe_worker import LbeWorker
+
+    service, root = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    work = tmp_path / "private-source-bridge"
+    work.mkdir(mode=0o700)
+    pfd = os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    def denied(*_a, **_kw):
+        raise AssertionError("R010 source bridge must never start native child")
+    monkeypatch.setattr(subprocess, "Popen", denied)
+    monkeypatch.setattr(os, "kill", denied)
+    monkeypatch.setattr(os, "killpg", denied, raising=False)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(
+                env, six_nonce_sha256=digests)
+            receipt, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, env, journal)
+            session = bind_r010_authority_source_to_service_only(
+                service=service, workspace="a", envelope=env,
+                journal=journal, job_key=key, source=receipt,
+                host=host, closed=closed)
+            assert session.status().native_launch_allowed is False
+            assert session.status().provider_runtime_authenticated is False
+            directory = anchor / env.snapshot()["envelope_root_name"] / "command-journal"
+            record = json.loads(
+                (directory / "r010-service-owner-source-bridge.json").read_text())
+            assert record["authority_source_sha256"] == receipt.source_digest_sha256
+            assert record["host_original_os_source_claim"] is False
+            assert record["live_preexec_attested"] is False
+            assert record["native_launch_allowed"] is False
+            with pytest.raises(R010ServiceSourceDenied, match="already claimed"):
+                bind_r010_authority_source_to_service_only(
+                    service=service, workspace="a", envelope=env,
+                    journal=journal, job_key=key, source=receipt,
+                    host=host, closed=closed)
+
+            for row in range(1, 7):
+                before = observe_r010_private_tree(root_fd=pfd)
+                capture = session.begin_source_model_row(
+                    row=row, nonce=raw[row - 1])
+                assert capture.status()["same_service_source_bound"] is True
+                assert capture.status()["row"] == row
+                go_fd = -1
+                go_before = None
+                if row == 6:
+                    go_fd = os.open(
+                        root / "go-project" / "bin",
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    go_before = observe_go_output_absent(parent_fd=go_fd)
+                def fake_launcher(plan):
+                    if row == 6:
+                        output = root / "go-project" / "bin" / "app"
+                        output.write_bytes(b"model-go-compiler-output\n")
+                        output.chmod(0o700)
+                    return _r010_fake_completed_child(0)
+                try:
+                    result = LbeWorker(
+                        service._lbe_owner, launcher=fake_launcher
+                    ).run(capture._plan, r010_source_capture=capture)
+                    assert result["status"] == "exited"
+                    decision = session.finish_source_model_row(
+                        row=row, capture=capture,
+                        private_root_fd=pfd, private_before=before,
+                        go_output_parent_fd=go_fd if go_fd >= 0 else None,
+                        go_output_before=go_before)
+                finally:
+                    if go_fd >= 0:
+                        os.close(go_fd)
+                assert decision["status"] == (
+                    "OWNER_WORKER_FINITE_SOURCE_MODEL_ZERO_NOT_T1")
+                assert session.status().source_model_rows_completed == row
+                assert session.status().six_command_product_t1_pass is False
+                assert decision["native_launch_allowed"] is False
+                assert journal.row_state_snapshot()["source_only_model_rows_completed"] == row
+                with pytest.raises(R010ServiceSourceDenied):
+                    session.begin_source_model_row(row=row, nonce=raw[row-1])
+            assert session.status().current_source_model_next_row is None
+            assert journal.row_state_snapshot()["job_state_model"] == "JOB_SIX_COMMAND_COMPLETE"
+            for cwd, argv in _ROWS:
+                with pytest.raises(GatewayError) as denied_exec:
+                    service.invoke_exec("a", cwd, argv, dry_run=False)
+                assert denied_exec.value.code == "exec_disabled"
+    finally:
+        os.close(fd)
+        os.close(pfd)
+    assert service._active_operations == 0
+
+
+@pytest.mark.parametrize("drift", [
+    "wrong_head", "wrong_run", "wrong_mount", "claimed_native",
+    "wrong_service", "missing_original_record", "tampered_source_record",
+])
+def test_r010_source_service_bridge_rejects_cross_job_and_untrusted_source(
+        product_service, tmp_path, monkeypatch, drift):
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_source_service import (
+        R010ServiceSourceDenied, bind_r010_authority_source_to_service_only)
+
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no native Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(env, six_nonce_sha256=digests)
+            receipt, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, env, journal)
+            workspace = "a"
+            if drift == "wrong_head":
+                host = replace(host, head_sha="e" * 40)
+            elif drift == "wrong_run":
+                host = replace(host, run_id="999")
+            elif drift == "wrong_mount":
+                closed = replace(closed, mount_table_sha256="0" * 64)
+            elif drift == "claimed_native":
+                receipt = replace(receipt, native_launch_allowed=True)
+            elif drift == "wrong_service":
+                workspace = "foreign"
+            elif drift == "missing_original_record":
+                os.unlink(
+                    "r010-authority-source-binding.json",
+                    dir_fd=env._journal_fd)
+            elif drift == "tampered_source_record":
+                with open(
+                    anchor / env.snapshot()["envelope_root_name"]
+                    / "command-journal" / "r010-authority-source-binding.json",
+                    "ab") as out:
+                    out.write(b"tamper")
+            with pytest.raises((R010ServiceSourceDenied, GatewayError)):
+                bind_r010_authority_source_to_service_only(
+                    service=service, workspace=workspace, envelope=env,
+                    journal=journal, job_key=key, source=receipt,
+                    host=host, closed=closed)
+            assert not (
+                anchor / env.snapshot()["envelope_root_name"]
+                / "command-journal" / "r010-service-owner-source-bridge.json"
+            ).exists()
+    finally:
+        os.close(fd)
+
+
+def test_r010_source_service_lost_ack_or_record_tamper_permanently_latches(
+        product_service, tmp_path, monkeypatch):
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_source_service import (
+        R010ServiceSourceDenied, bind_r010_authority_source_to_service_only)
+
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no native Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(env, six_nonce_sha256=digests)
+            receipt, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, env, journal)
+            session = bind_r010_authority_source_to_service_only(
+                service=service, workspace="a", envelope=env,
+                journal=journal, job_key=key, source=receipt,
+                host=host, closed=closed)
+            # Actual persisted source is gone after binding; dataclass alone
+            # cannot authorize the Worker on a later first-row attempt.
+            os.unlink("r010-authority-source-binding.json",
+                      dir_fd=env._journal_fd)
+            with pytest.raises(R010ServiceSourceDenied):
+                session.begin_source_model_row(row=1, nonce=raw[0])
+            assert session.status().failed is True
+            with pytest.raises(R010ServiceSourceDenied):
+                session.begin_source_model_row(row=1, nonce=raw[0])
+    finally:
+        os.close(fd)
+
+
+
+@pytest.mark.parametrize("corruption", [
+    "bridge_deleted", "bridge_appended", "authority_changed",
+])
+def test_r010_source_bridge_rechecks_persisted_bytes_before_actual_worker(
+        product_service, tmp_path, monkeypatch, corruption):
+    """No FakeChild launcher when an original source changes AFTER row burn."""
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_source_service import R010ServiceSourceDenied
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    calls = []
+    def fake_launcher(_plan):
+        calls.append("attempted")
+        return _r010_fake_completed_child()
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(env, six_nonce_sha256=digests)
+            receipt, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, env, journal)
+            # Use the actual internal WorkspaceService entrypoint rather than
+            # manufacturing a Session directly.
+            session = service._bind_r010_a1_source_job_only(
+                "a", envelope=env, journal=journal,
+                job_key=key, source=receipt, host=host, closed=closed)
+            cap = session.begin_source_model_row(row=1, nonce=raw[0])
+            directory = anchor / env.snapshot()["envelope_root_name"] / "command-journal"
+            if corruption == "bridge_deleted":
+                os.unlink(directory / "r010-service-owner-source-bridge.json")
+            elif corruption == "bridge_appended":
+                with open(directory / "r010-service-owner-source-bridge.json", "ab") as f:
+                    f.write(b"tamper-after-burn")
+            else:
+                with open(directory / "r010-authority-source-binding.json", "ab") as f:
+                    f.write(b"tamper-after-burn")
+            with pytest.raises(LbeWorkerError) as exc:
+                LbeWorker(service._lbe_owner, launcher=fake_launcher).run(
+                    cap._plan, r010_source_capture=cap)
+            assert exc.value.code == "invalid_worker_dependency"
+            assert calls == []
+            assert session.status().failed is True
+            assert session.status().native_launch_allowed is False
+            with pytest.raises(R010ServiceSourceDenied):
+                session.begin_source_model_row(row=1, nonce=raw[0])
+    finally:
+        os.close(fd)
+
+
+def test_r010_service_bridge_uncertain_fsync_is_permanent_deny(
+        product_service, tmp_path, monkeypatch):
+    """Disk-error after claim is not a renewed bridge to another Worker."""
+    from gateway import lbe_r010_source_service as source
+    from gateway.lbe_r010_job_envelope import (
+        R010JobEnvelopeDenied, _create_once_in_pinned_anchor)
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+
+    service, _ = product_service
+    fd, _, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(env, six_nonce_sha256=digests)
+            receipt, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, env, journal)
+            def uncertain(*_a, **_kw):
+                raise R010JobEnvelopeDenied("synthetic fsync fault")
+            monkeypatch.setattr(source, "_write_once", uncertain)
+            for i in range(2):
+                with pytest.raises(source.R010ServiceSourceDenied):
+                    service._bind_r010_a1_source_job_only(
+                        "a", envelope=env, journal=journal,
+                        job_key=key, source=receipt,
+                        host=host, closed=closed)
+            assert journal._failed is True
+            assert getattr(env, "_r010_source_service_claimed", False) is True
+    finally:
+        os.close(fd)
+
+
+
+@pytest.mark.parametrize("reason", [
+    "waiter_disconnected", "worker_capture_missing",
+    "owner_reader_ambiguous", "result_ack_lost",
+    "source_postflight_uncertain",
+])
+def test_r010_owner_worker_source_abort_latches_row_and_voids_all_remaining(
+        product_service, tmp_path, monkeypatch, reason):
+    """A lost Worker/HTTP ACK never starts a replay or a later source row."""
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_source_service import R010ServiceSourceDenied
+    from gateway.lbe_worker import LbeWorker
+
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    def forbidden(*_a, **_kw):
+        raise AssertionError("source abort may not launch a native child")
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(os, "kill", forbidden)
+    monkeypatch.setattr(os, "killpg", forbidden, raising=False)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(env, six_nonce_sha256=digests)
+            receipt, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, env, journal)
+            session = service._bind_r010_a1_source_job_only(
+                "a", envelope=env, journal=journal,
+                job_key=key, source=receipt, host=host, closed=closed)
+            cap = session.begin_source_model_row(row=1, nonce=raw[0])
+            if reason == "result_ack_lost":
+                result = LbeWorker(
+                    service._lbe_owner,
+                    launcher=lambda _p: _r010_fake_completed_child(0),
+                ).run(cap._plan, r010_source_capture=cap)
+                assert result["exit_code"] == 0
+                # No receipt was consumed by journal; ACK is ambiguous.
+            with pytest.raises(R010ServiceSourceDenied):
+                session.abort_unfinished_source_row(
+                    row=1, capture=cap, reason="bad-caller-reason")
+            result = session.abort_unfinished_source_row(
+                row=1, capture=cap, reason=reason)
+            assert result["status"] == "JOB_FAILED_LATCHED"
+            assert result["native_launch_allowed"] is False
+            directory = anchor / env.snapshot()["envelope_root_name"] / "command-journal"
+            failure = json.loads((directory / "r010-row-failure.json").read_text())
+            assert failure["rows"] == ["ROW_AMBIGUOUS"] + ["ROW_VOID"] * 5
+            assert failure["active_row"] == 1
+            assert failure["native_launch_allowed"] is False
+            assert session.status().failed is True
+            assert session.status().current_source_model_next_row is None
+            with pytest.raises(R010ServiceSourceDenied):
+                session.abort_unfinished_source_row(
+                    row=1, capture=cap, reason=reason)
+            with pytest.raises(R010ServiceSourceDenied):
+                session.begin_source_model_row(row=2, nonce=raw[1])
+    finally:
+        os.close(fd)
+
+
+def test_r010_source_abort_uncertain_fsync_also_denies_all_future_rows(
+        product_service, tmp_path, monkeypatch):
+    from gateway import lbe_r010_serial_journal as mod
+    from gateway.lbe_r010_job_envelope import (
+        R010JobEnvelopeDenied, _create_once_in_pinned_anchor)
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_source_service import R010ServiceSourceDenied
+
+    service, _ = product_service
+    fd, _, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no native Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(env, six_nonce_sha256=digests)
+            receipt, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, env, journal)
+            session = service._bind_r010_a1_source_job_only(
+                "a", envelope=env, journal=journal,
+                job_key=key, source=receipt, host=host, closed=closed)
+            cap = session.begin_source_model_row(row=1, nonce=raw[0])
+            def fail_disk(*_a, **_kw):
+                raise R010JobEnvelopeDenied("synthetic failure fsync uncertainty")
+            monkeypatch.setattr(mod, "_write_once", fail_disk)
+            with pytest.raises(R010ServiceSourceDenied, match="permanent deny"):
+                session.abort_unfinished_source_row(
+                    row=1, capture=cap, reason="result_ack_lost")
+            assert journal._failed is True
+            assert session.status().failed is True
+            with pytest.raises(R010ServiceSourceDenied):
+                session.begin_source_model_row(row=2, nonce=raw[1])
+    finally:
+        os.close(fd)
+
+
+
+def test_r010_original_host_claim_requires_actual_closed_product_os_environment(
+        product_service, tmp_path, monkeypatch):
+    """At the Worker boundary, a *real-host claim* cannot keep SSH/OIDC env."""
+    import hashlib
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_source_service import R010ServiceSourceDenied
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    helper = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/private/tmp/r010-private-home",
+        "TMPDIR": "/private/tmp/r010-private-tmp",
+        "LANG": "C", "LC_ALL": "C",
+    }
+    digest = hashlib.sha256(json.dumps(
+        helper, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True).encode("ascii")).hexdigest()
+    launched = []
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no native Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(env, six_nonce_sha256=digests)
+            receipt, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, env, journal)
+            # Deliberately mark a T0 synthetic host as if original. This
+            # DOES NOT authenticate it, but now requires actual OS env
+            # strictness to avoid treating a dataclass as a scrub.
+            host = replace(host, host_snapshot_from_original_os=True)
+            closed = replace(closed, helper_env_sha256=digest)
+            # Current inherited pytest/GitHub ambient env is not the exact
+            # five-key product-helper environment; it must be refused.
+            with monkeypatch.context() as m:
+                m.setattr(os, "environ", {**helper,
+                                         "SSH_AUTH_SOCK": "/private/tmp/agent"})
+                with pytest.raises(R010ServiceSourceDenied):
+                    service._bind_r010_a1_source_job_only(
+                        "a", envelope=env, journal=journal,
+                        job_key=key, source=receipt, host=host,
+                        closed=closed)
+            # Only the exact five-key map may be SOURCE-bound.
+            with monkeypatch.context() as m:
+                m.setattr(os, "environ", helper)
+                session = service._bind_r010_a1_source_job_only(
+                    "a", envelope=env, journal=journal,
+                    job_key=key, source=receipt, host=host,
+                    closed=closed)
+                assert session.status().native_launch_allowed is False
+                cap = session.begin_source_model_row(row=1, nonce=raw[0])
+                # A new ambient selector between nonce burn and the actual
+                # Worker callback MUST be rejected before the fake launcher.
+                helper["SSH_AUTH_SOCK"] = "/private/tmp/t0-ssh"
+                def fake_launcher(_plan):
+                    launched.append(True)
+                    return _r010_fake_completed_child()
+                with pytest.raises(LbeWorkerError) as exc:
+                    LbeWorker(
+                        service._lbe_owner, launcher=fake_launcher).run(
+                        cap._plan, r010_source_capture=cap)
+                assert exc.value.code == "invalid_worker_dependency"
+                assert launched == []
+                assert session.status().failed is True
+    finally:
+        os.close(fd)
+
+
+def test_r010_original_host_claim_rejects_bogus_preexec_helper_digest(
+        product_service, tmp_path, monkeypatch):
+    """No client-authored matching key names may bypass map-value drift."""
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_source_service import R010ServiceSourceDenied
+
+    service, _ = product_service
+    fd, _, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    helper = {
+        "PATH": "/usr/bin:/bin", "HOME": "/private/tmp/r010-private-home",
+        "TMPDIR": "/private/tmp/r010-private-tmp", "LANG": "C", "LC_ALL": "C",
+    }
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as env:
+            journal = R010SerialNonceJournal(env, six_nonce_sha256=digests)
+            receipt, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, env, journal)
+            host = replace(host, host_snapshot_from_original_os=True)
+            closed = replace(closed, helper_env_sha256="a" * 64)
+            with monkeypatch.context() as m:
+                m.setattr(os, "environ", helper)
+                with pytest.raises(R010ServiceSourceDenied):
+                    service._bind_r010_a1_source_job_only(
+                        "a", envelope=env, journal=journal,
+                        job_key=key, source=receipt, host=host,
+                        closed=closed)
+    finally:
+        os.close(fd)
+
+
+
+def _r010_model_preexec_source(key, receipt, host, closed):
+    """A synthetic source tuple, NEVER live TLS/Provider/Owner authority."""
+    from gateway.lbe_r010_preexec_source import R010PreexecSourceObservation
+    return R010PreexecSourceObservation(
+        design_blob=key.design_blob,
+        owner_choice_comment_id=key.owner_choice_comment_id,
+        job_envelope_key_sha256=key.key_sha256(),
+        oidc_original_jwt_sha256=receipt.oidc_jwt_sha256,
+        full_darwin_mount_table_sha256=host.mount_table_sha256,
+        helper_keys=closed.helper_keys,
+        helper_env_sha256=closed.helper_env_sha256,
+        signed_input_sha256="c" * 64,
+        signed_issuer_metadata_sha256="b" * 64,
+        signed_jwks_sha256="d" * 64,
+        signed_run_id=str(key.run_id),
+        signed_run_attempt=str(key.run_attempt),
+        signed_check_run_id=str(key.check_run_id),
+        verified_at_unix=1800000000,
+        expires_unix=1800000100,
+    )
+
+
+
+def _r010_synthetic_preimport_receipt(key, closed):
+    """Synthetic pre-import scrub source receipt; never provider/T1 authority."""
+    from gateway.lbe_r010_preimport_gate import R010PreimportScrubReceipt
+    return R010PreimportScrubReceipt(
+        head_sha=key.head_sha,
+        run_id=str(key.run_id),
+        run_attempt=str(key.run_attempt),
+        job_name=key.job_name,
+        helper_keys=closed.helper_keys,
+        helper_env_sha256=closed.helper_env_sha256,
+        selectors_scrubbed=True,
+        product_modules_absent_before_scrub=True,
+        source_original_os=False,
+    )
+
+
+
+def test_r010_preexec_original_jwt_source_reaches_same_owner_worker_journal(
+        product_service, tmp_path, monkeypatch):
+    """Real source-model Service/Owner/Worker/Journal, synthetic JWT receipt."""
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_row_fs import observe_r010_private_tree
+    from gateway.lbe_worker import LbeWorker
+
+    service, root = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    private = tmp_path / "source-preexec-private"
+    private.mkdir(mode=0o700)
+    private_fd = os.open(
+        private, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    def forbid(*_a, **_kw):
+        raise AssertionError("PREEXEC source T0 must never launch native child")
+    monkeypatch.setattr(subprocess, "Popen", forbid)
+    monkeypatch.setattr(os, "kill", forbid)
+    monkeypatch.setattr(os, "killpg", forbid, raising=False)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as envelope:
+            journal = R010SerialNonceJournal(
+                envelope, six_nonce_sha256=digests)
+            authority, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, envelope, journal)
+            closed = replace(closed, helper_env_sha256="e" * 64)
+            preexec = _r010_model_preexec_source(
+                key, authority, host, closed)
+            seal = seal_r010_preexec_source_in_job(
+                envelope=envelope, job_key=key,
+                preexec=preexec, host=host, closed=closed)
+            session = service._bind_r010_a1_composed_preexec_job_source_only(
+                "a", envelope=envelope, journal=journal,
+                job_key=key, source=authority, host=host,
+                closed=closed, preexec_source=preexec, preexec_seal=seal)
+            path = (anchor / envelope.snapshot()["envelope_root_name"]
+                    / "command-journal" /
+                    "r010-service-owner-source-bridge.json")
+            record = json.loads(path.read_bytes())
+            assert record["preexec_source_model_joined"] is True
+            assert len(record["preexec_source_model_sha256"]) == 64
+            assert record["preexec_original_record_sha256"] == seal.record_sha256
+            assert record["live_preexec_attested"] is False
+            assert record["native_launch_allowed"] is False
+            before = observe_r010_private_tree(root_fd=private_fd)
+            capture = session.begin_source_model_row(row=1, nonce=raw[0])
+            response = LbeWorker(
+                service._lbe_owner,
+                launcher=lambda _plan: _r010_fake_completed_child(0),
+            ).run(capture._plan, r010_source_capture=capture)
+            assert response["status"] == "exited"
+            row = session.finish_source_model_row(
+                row=1, capture=capture, private_root_fd=private_fd,
+                private_before=before)
+            assert row["status"] == "OWNER_WORKER_FINITE_SOURCE_MODEL_ZERO_NOT_T1"
+            assert row["native_launch_allowed"] is False
+            assert session.status().source_model_rows_completed == 1
+            assert session.status().provider_runtime_authenticated is False
+            assert session.status().native_launch_allowed is False
+            with pytest.raises(GatewayError) as exc:
+                service.invoke_exec(
+                    "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                    dry_run=False)
+            assert exc.value.code == "exec_disabled"
+    finally:
+        os.close(private_fd)
+        os.close(fd)
+
+
+@pytest.mark.parametrize("mismatch", [
+    "wrong_jwt", "wrong_design", "wrong_choice", "wrong_job",
+    "wrong_mount", "wrong_env", "claimed_live", "claimed_grant",
+    "wrong_signed_run", "wrong_signed_attempt", "wrong_signed_check_run",
+    "stale_expiry", "bad_jwks",
+])
+def test_r010_composed_preexec_source_cross_job_drift_fails_before_nonce(
+        product_service, tmp_path, mismatch):
+    """SOURCE-only congruence cannot promote forged PREEXEC/Grant booleans."""
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_source_service import R010ServiceSourceDenied
+
+    service, root = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as envelope:
+            journal = R010SerialNonceJournal(
+                envelope, six_nonce_sha256=digests)
+            authority, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, envelope, journal)
+            closed = replace(closed, helper_env_sha256="e" * 64)
+            preexec = _r010_model_preexec_source(
+                key, authority, host, closed)
+            seal = seal_r010_preexec_source_in_job(
+                envelope=envelope, job_key=key,
+                preexec=preexec, host=host, closed=closed)
+            if mismatch == "wrong_jwt":
+                preexec = replace(preexec, oidc_original_jwt_sha256="9" * 64)
+            elif mismatch == "wrong_design":
+                preexec = replace(preexec, design_blob="a" * 40)
+            elif mismatch == "wrong_choice":
+                preexec = replace(preexec, owner_choice_comment_id=1)
+            elif mismatch == "wrong_job":
+                preexec = replace(preexec, job_envelope_key_sha256="b" * 64)
+            elif mismatch == "wrong_mount":
+                preexec = replace(preexec, full_darwin_mount_table_sha256="c" * 64)
+            elif mismatch == "wrong_env":
+                preexec = replace(preexec, helper_env_sha256="d" * 64)
+            elif mismatch == "claimed_live":
+                preexec = replace(preexec, signed_provider_job_live=True)
+            elif mismatch == "claimed_grant":
+                preexec = replace(preexec, owner_product_t1_grant_verified=True)
+            elif mismatch == "wrong_signed_run":
+                preexec = replace(preexec, signed_run_id="999")
+            elif mismatch == "wrong_signed_attempt":
+                preexec = replace(preexec, signed_run_attempt="2")
+            elif mismatch == "wrong_signed_check_run":
+                preexec = replace(preexec, signed_check_run_id="999")
+            elif mismatch == "stale_expiry":
+                preexec = replace(preexec, expires_unix=1799999999)
+            else:
+                preexec = replace(preexec, signed_jwks_sha256="not-a-hash")
+            with pytest.raises(R010ServiceSourceDenied):
+                service._bind_r010_a1_composed_preexec_job_source_only(
+                    "a", envelope=envelope, journal=journal,
+                    job_key=key, source=authority, host=host,
+                    closed=closed, preexec_source=preexec, preexec_seal=seal)
+            path = anchor / envelope.snapshot()["envelope_root_name"]
+            assert not (path / "command-journal" /
+                        "r010-service-owner-source-bridge.json").exists()
+            assert not journal._burned
+    finally:
+        os.close(fd)
+
+
+def test_r010_composed_preexec_source_changed_after_burn_stops_worker(
+        product_service, tmp_path, monkeypatch):
+    """The original preexec tuple is verified again at Worker prelauncher."""
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    launched = []
+    def fake(_plan):
+        launched.append(True)
+        return _r010_fake_completed_child(0)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no T1 Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as envelope:
+            journal = R010SerialNonceJournal(envelope, six_nonce_sha256=digests)
+            authority, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, envelope, journal)
+            closed = replace(closed, helper_env_sha256="e" * 64)
+            preexec = _r010_model_preexec_source(key, authority, host, closed)
+            seal = seal_r010_preexec_source_in_job(
+                envelope=envelope, job_key=key,
+                preexec=preexec, host=host, closed=closed)
+            session = service._bind_r010_a1_composed_preexec_job_source_only(
+                "a", envelope=envelope, journal=journal,
+                job_key=key, source=authority, host=host,
+                closed=closed, preexec_source=preexec, preexec_seal=seal)
+            cap = session.begin_source_model_row(row=1, nonce=raw[0])
+            session._preexec = replace(
+                preexec, oidc_original_jwt_sha256="a" * 64)
+            with pytest.raises(LbeWorkerError) as exc:
+                LbeWorker(service._lbe_owner, launcher=fake).run(
+                    cap._plan, r010_source_capture=cap)
+            assert exc.value.code == "invalid_worker_dependency"
+            assert launched == []
+            assert session.status().failed is True
+            assert session.status().native_launch_allowed is False
+    finally:
+        os.close(fd)
+
+
+
+@pytest.mark.parametrize("mutation", [
+    "delete_preexec", "append_preexec", "chmod_preexec", "replace_preexec",
+])
+def test_r010_original_preexec_receipt_tamper_denied_at_worker_boundary(
+        product_service, tmp_path, monkeypatch, mutation):
+    """Private O_EXCL PREEXEC source file is mandatory at Worker prelauncher."""
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_worker import LbeWorker, LbeWorkerError
+
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    launched = []
+    def fake(_plan):
+        launched.append("unexpected-launch")
+        return _r010_fake_completed_child(0)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("native Popen forbidden")))
+    monkeypatch.setattr(os, "kill", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no kill")))
+    monkeypatch.setattr(os, "killpg", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no killpg")),
+                        raising=False)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as envelope:
+            journal = R010SerialNonceJournal(envelope, six_nonce_sha256=digests)
+            authority, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, envelope, journal)
+            closed = replace(closed, helper_env_sha256="e" * 64)
+            preexec = _r010_model_preexec_source(key, authority, host, closed)
+            seal = seal_r010_preexec_source_in_job(
+                envelope=envelope, job_key=key,
+                preexec=preexec, host=host, closed=closed)
+            session = service._bind_r010_a1_composed_preexec_job_source_only(
+                "a", envelope=envelope, journal=journal,
+                job_key=key, source=authority, host=host, closed=closed,
+                preexec_source=preexec, preexec_seal=seal)
+            cap = session.begin_source_model_row(row=1, nonce=raw[0])
+            record = (anchor / envelope.snapshot()["envelope_root_name"]
+                      / "command-journal" / "r010-preexec-original-source.json")
+            if mutation == "delete_preexec":
+                record.unlink()
+            elif mutation == "append_preexec":
+                with open(record, "ab") as f:
+                    f.write(b"tamper")
+            elif mutation == "chmod_preexec":
+                record.chmod(0o644)
+            else:
+                raw_bytes = record.read_bytes()
+                record.unlink()
+                record.write_bytes(raw_bytes)
+                record.chmod(0o600)
+            with pytest.raises(LbeWorkerError) as exc:
+                LbeWorker(service._lbe_owner, launcher=fake).run(
+                    cap._plan, r010_source_capture=cap)
+            assert exc.value.code == "invalid_worker_dependency"
+            assert launched == []
+            assert session.status().failed is True
+            assert session.status().native_launch_allowed is False
+    finally:
+        os.close(fd)
+
+
+def test_r010_uncertain_original_preexec_fsync_never_retries(
+        product_service, tmp_path, monkeypatch):
+    """Partial record write is an irrevocable Job consumption, not a retry."""
+    from gateway import lbe_r010_preexec_journal as mod
+    from gateway.lbe_r010_job_envelope import (
+        R010JobEnvelopeDenied, _create_once_in_pinned_anchor)
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+
+    service, _ = product_service
+    fd, _, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as envelope:
+            journal = R010SerialNonceJournal(envelope, six_nonce_sha256=digests)
+            authority, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, envelope, journal)
+            closed = replace(closed, helper_env_sha256="e" * 64)
+            preexec = _r010_model_preexec_source(key, authority, host, closed)
+            def failed_write(*_a, **_kw):
+                raise R010JobEnvelopeDenied("synthetic failed fsync")
+            monkeypatch.setattr(mod, "_write_once", failed_write)
+            for _ in range(2):
+                with pytest.raises(mod.R010PreexecSealDenied):
+                    seal_r010_preexec_source_in_job(
+                        envelope=envelope, job_key=key,
+                        preexec=preexec, host=host, closed=closed)
+            assert getattr(envelope, "_r010_preexec_source_claimed", False)
+    finally:
+        os.close(fd)
+
+
+
+def test_r010_first_party_source_pipeline_original_job_to_worker_and_journal(
+        product_service, tmp_path, monkeypatch):
+    """One PREIMPORT->PREEXEC->Owner/Worker/Journal path spans all six rows."""
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_row_fs import observe_r010_private_tree
+    from gateway.lbe_r010_finite_integrity import observe_go_output_absent
+    from gateway.lbe_worker import LbeWorker
+
+    service, root = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    work = tmp_path / "pipeline-owned-private-output"
+    work.mkdir(mode=0o700)
+    pfd = os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    def forbidden(*_a, **_kw):
+        raise AssertionError("R010 source pipeline cannot call native Popen")
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(os, "kill", forbidden)
+    monkeypatch.setattr(os, "killpg", forbidden, raising=False)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as envelope:
+            journal = R010SerialNonceJournal(envelope, six_nonce_sha256=digests)
+            parts, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, envelope, journal, raw_only=True)
+            closed = replace(closed, helper_env_sha256="e" * 64)
+            preexec = _r010_model_preexec_source(
+                key, parts["current_job"], host, closed)
+            preimport = _r010_synthetic_preimport_receipt(key, closed)
+            source = service._prepare_r010_a1_product_source_pipeline_only(
+                "a", envelope=envelope, job_key=key, journal=journal,
+                preimport_receipt=preimport,
+                preexec_source=preexec, host=host, closed=closed, **parts)
+            assert source.status == "ONE_JOB_PROVIDER_OWNER_WORKER_SOURCE_ONLY_NO_T1"
+            assert source.preimport_receipt is preimport
+            assert source.native_launch_allowed is False
+            assert source.current_provider_job_authenticated is False
+            assert source.current_owner_grant_authenticated is False
+            assert source.sealed_preexec.native_launch_allowed is False
+            assert source.sealed_preexec.preimport_receipt_sha256 == (
+                preimport.receipt_sha256)
+            assert source.authority_source.native_launch_allowed is False
+            assert source.session.status().native_launch_allowed is False
+            path = anchor / envelope.snapshot()["envelope_root_name"] / "command-journal"
+            assert (path / "r010-preexec-original-source.json").exists()
+            assert (path / "r010-authority-source-binding.json").exists()
+            record = json.loads(
+                (path / "r010-service-owner-source-bridge.json").read_text())
+            assert record["preexec_original_record_sha256"] == (
+                source.sealed_preexec.record_sha256)
+            assert record["preimport_scrub_receipt_sha256"] == (
+                preimport.receipt_sha256)
+            assert record["authority_source_sha256"] == (
+                source.authority_source.source_digest_sha256)
+            assert record["native_launch_allowed"] is False
+
+            for row in range(1, 7):
+                before = observe_r010_private_tree(root_fd=pfd)
+                cap = source.session.begin_source_model_row(
+                    row=row, nonce=raw[row - 1])
+                go_fd = -1
+                go_before = None
+                if row == 6:
+                    go_fd = os.open(
+                        root / "go-project" / "bin",
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    go_before = observe_go_output_absent(parent_fd=go_fd)
+                def fake_launcher(_plan):
+                    if row == 6:
+                        output = root / "go-project" / "bin" / "app"
+                        output.write_bytes(b"pipeline-source-model-go-build\n")
+                        output.chmod(0o700)
+                    return _r010_fake_completed_child(0)
+                try:
+                    result = LbeWorker(
+                        service._lbe_owner, launcher=fake_launcher,
+                    ).run(cap._plan, r010_source_capture=cap)
+                    assert result["status"] == "exited"
+                    decided = source.session.finish_source_model_row(
+                        row=row, capture=cap,
+                        private_root_fd=pfd, private_before=before,
+                        go_output_parent_fd=go_fd if go_fd >= 0 else None,
+                        go_output_before=go_before)
+                finally:
+                    if go_fd >= 0:
+                        os.close(go_fd)
+                assert decided["status"] == (
+                    "OWNER_WORKER_FINITE_SOURCE_MODEL_ZERO_NOT_T1")
+                assert source.session.status().source_model_rows_completed == row
+                assert decided["native_launch_allowed"] is False
+                assert decided["six_command_product_t1_pass"] is False
+
+            assert source.session.status().current_source_model_next_row is None
+            assert source.session.status().six_command_product_t1_pass is False
+            state = journal.row_state_snapshot()
+            assert state["job_state_model"] == "JOB_SIX_COMMAND_COMPLETE"
+            assert state["source_only_model_rows_completed"] == 6
+            assert state["product_t1_original_rows_attested"] is False
+            for cwd, argv in _ROWS:
+                with pytest.raises(GatewayError) as ex:
+                    service.invoke_exec("a", cwd, argv, dry_run=False)
+                assert ex.value.code == "exec_disabled"
+    finally:
+        os.close(fd)
+        os.close(pfd)
+
+
+def test_r010_source_pipeline_partial_provider_owner_failure_poisoned_job(
+        product_service, tmp_path, monkeypatch):
+    """One PREEXEC seal + invalid Owner source must persist ALL ROW_VOID."""
+    import json
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_product_pipeline import R010ProductSourcePipelineDenied
+
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("no Popen")))
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as envelope:
+            journal = R010SerialNonceJournal(envelope, six_nonce_sha256=digests)
+            parts, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, envelope, journal, raw_only=True)
+            closed = replace(closed, helper_env_sha256="e" * 64)
+            preexec = _r010_model_preexec_source(
+                key, parts["current_job"], host, closed)
+            preimport = _r010_synthetic_preimport_receipt(key, closed)
+            parts["grant_source"] = replace(
+                parts["grant_source"], implementation_head_sha="9" * 40)
+            for attempt in range(2):
+                with pytest.raises(R010ProductSourcePipelineDenied):
+                    service._prepare_r010_a1_product_source_pipeline_only(
+                        "a", envelope=envelope, job_key=key, journal=journal,
+                        preimport_receipt=preimport,
+                        preexec_source=preexec, host=host, closed=closed,
+                        **parts)
+            directory = anchor / envelope.snapshot()["envelope_root_name"] / "command-journal"
+            assert (directory / "r010-preexec-original-source.json").exists()
+            assert not (directory / "r010-service-owner-source-bridge.json").exists()
+            assert journal._failed is True
+            rows = json.loads((directory / "r010-row-failure.json").read_text())
+            assert rows["status"] == "JOB_FAILED_LATCHED"
+            assert rows["rows"] == ["ROW_VOID"] * 6
+            assert rows["native_launch_allowed"] is False
+    finally:
+        os.close(fd)
+
+
+def test_r010_product_pipeline_preimport_receipt_drift_poisoned_before_row(
+        product_service, tmp_path):
+    """A forged pre-import receipt cannot reach Provider/Owner or burn row 1."""
+    from gateway.lbe_r010_job_envelope import _create_once_in_pinned_anchor
+    from gateway.lbe_r010_serial_journal import R010SerialNonceJournal
+    from gateway.lbe_r010_product_pipeline import R010ProductSourcePipelineDenied
+
+    service, _ = product_service
+    fd, anchor, key, raw, digests = _r010_t0_job_for_shared_service(tmp_path)
+    try:
+        with _create_once_in_pinned_anchor(fd, key) as envelope:
+            journal = R010SerialNonceJournal(envelope, six_nonce_sha256=digests)
+            parts, host, closed = _r010_synthetic_chain_before_same_service_worker(
+                key, envelope, journal, raw_only=True)
+            closed = replace(closed, helper_env_sha256="e" * 64)
+            preexec = _r010_model_preexec_source(
+                key, parts["current_job"], host, closed)
+            preimport = replace(
+                _r010_synthetic_preimport_receipt(key, closed),
+                helper_env_sha256="f" * 64)
+            with pytest.raises(R010ProductSourcePipelineDenied):
+                service._prepare_r010_a1_product_source_pipeline_only(
+                    "a", envelope=envelope, job_key=key, journal=journal,
+                    preimport_receipt=preimport,
+                    preexec_source=preexec, host=host, closed=closed, **parts)
+            directory = (
+                anchor / envelope.snapshot()["envelope_root_name"]
+                / "command-journal")
+            assert not (directory / "r010-preexec-original-source.json").exists()
+            assert not (directory / "r010-authority-source-binding.json").exists()
+            assert journal._failed is True
+            assert journal._burned is False
+    finally:
+        os.close(fd)

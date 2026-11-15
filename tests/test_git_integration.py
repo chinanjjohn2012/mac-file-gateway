@@ -453,3 +453,184 @@ def test_real_linked_worktree_and_independent_repo_lock_admission(tmp_path, monk
         if thread.is_alive():
             thread.join(timeout=12)
         service.close()
+
+
+def native(where: Path, *args: str) -> str:
+    return subprocess.check_output(["git", *args], cwd=where, text=True)
+
+
+@pytest.mark.parametrize("object_format", ["sha1", "sha256"])
+def test_commit_range_branch_tip_and_parents_match_native_git(tmp_path, object_format):
+    repo, a, b, control, service = fixture(
+        tmp_path,
+        grants={"a": ["diff", "rev-parse", "rev-list"], "b": ["diff"]},
+        object_format=object_format,
+    )
+    try:
+        base = git(repo, "rev-parse", "HEAD")
+        (a / "one.txt").write_text("one changed\n")
+        git(repo, "add", "a/one.txt")
+        git(repo, "commit", "-qm", "second")
+        end = git(repo, "rev-parse", "HEAD")
+        git(repo, "branch", "topic", base)
+        index = (repo / ".git" / "index").read_bytes()
+        before = git(repo, "status", "--porcelain=v1")
+        head = git(repo, "rev-parse", "HEAD")
+
+        names = apply(service, "a", "diff", options={
+            "base": base, "end": end, "name_status": True,
+        })
+        assert names["exit_code"] == 0, names["stderr"]
+        assert names["stdout"] == native(
+            repo, "--no-lazy-fetch", "diff", "--name-status",
+            "--end-of-options", base, end,
+        )
+        assert names["effective_argv"] == [
+            "--no-lazy-fetch", "diff", "--name-status", "--end-of-options", base, end,
+        ]
+        assert names["branch_checked"] is False and names["output_truncated"] is False
+
+        full = apply(service, "a", "diff", options={"base": base, "end": end})
+        assert full["exit_code"] == 0, full["stderr"]
+        assert full["stdout"] == native(
+            repo, "--no-lazy-fetch", "diff", "--end-of-options", base, end,
+        )
+        short_base, short_end = base[:8], end[:8]
+        for options, flags in (
+            ({"name_status": True}, ["--name-status"]),
+            ({"stat": True}, ["--stat"]),
+            ({"check": True}, ["--check"]),
+            ({}, []),
+        ):
+            short = apply(service, "a", "diff", options={
+                "base": short_base, "end": short_end, **options,
+            })
+            assert short["exit_code"] == 0, short["stderr"]
+            assert short["stdout"] == native(
+                repo, "--no-lazy-fetch", "diff", *flags,
+                "--end-of-options", short_base, short_end,
+            )
+            assert short["output_truncated"] is False
+
+        tip = apply(service, "a", "rev-parse", options={"target": "branch", "name": "topic"})
+        assert tip["exit_code"] == 0, tip["stderr"]
+        assert tip["stdout"] == native(
+            repo, "--no-lazy-fetch", "rev-parse", "--verify",
+            "--end-of-options", "refs/heads/topic",
+        )
+        assert tip["stdout"] == base + "\n"
+        assert tip["branch_checked"] is True
+        assert tip["effective_argv"][-1] == "refs/heads/topic"
+
+        parents = apply(service, "a", "rev-list", options={"commit": end})
+        assert parents["exit_code"] == 0, parents["stderr"]
+        assert parents["stdout"] == native(
+            repo, "--no-lazy-fetch", "rev-list", "--parents",
+            "--max-count=1", "--end-of-options", end,
+        )
+        assert parents["stdout"] == end + " " + base + "\n"
+        assert parents["branch_checked"] is False
+
+        missing = apply(service, "a", "rev-parse", options={
+            "target": "branch", "name": "absent",
+        })
+        assert missing["exit_code"] != 0
+        assert missing["branch_checked"] is True
+        assert missing["stdout"] == ""
+
+        with pytest.raises(GatewayError) as bad_name:
+            apply(service, "a", "rev-parse", options={"target": "branch", "name": "HEAD"})
+        assert bad_name.value.code == "git_option_invalid"
+        unresolved = apply(service, "a", "rev-list", options={"commit": "ab" * 32})
+        assert unresolved["exit_code"] != 0
+        assert unresolved["stdout"] == ""
+        with pytest.raises(GatewayError) as denied:
+            service.invoke_git("b", "rev-list", options={"commit": end}, dry_run=False)
+        assert denied.value.code == "git_command_not_allowed"
+        with pytest.raises(GatewayError) as denied_tip:
+            service.invoke_git(
+                "b", "rev-parse", options={"target": "branch", "name": "topic"},
+                dry_run=False,
+            )
+        assert denied_tip.value.code == "git_command_not_allowed"
+
+        assert (repo / ".git" / "index").read_bytes() == index
+        assert git(repo, "status", "--porcelain=v1") == before
+        assert git(repo, "rev-parse", "HEAD") == head
+        assert list((control / "git-state").iterdir()) == []
+    finally:
+        service.close()
+
+
+def test_readonly_diff_forms_match_native_git(tmp_path):
+    repo, a, _b, control, service = fixture(tmp_path, grants={"a": ["diff"]})
+    try:
+        parent = git(repo, "rev-parse", "HEAD")
+        (a / "one.txt").write_text("one changed\n")
+        git(repo, "add", "a/one.txt")
+        git(repo, "commit", "-qm", "second")
+        git(repo, "branch", "topic", parent)
+        index = (repo / ".git" / "index").read_bytes()
+        before = git(repo, "status", "--porcelain=v1")
+        head = git(repo, "rev-parse", "HEAD")
+        forms = (
+            ({"base": "HEAD~1", "name_status": True}, ["--name-status"], ["HEAD~1"], None),
+            ({"base": "topic", "end": "HEAD", "range": "..", "stat": True},
+             ["--stat"], ["topic..HEAD"], None),
+            ({"base": "HEAD~1", "end": "HEAD", "range": "...", "name_only": True},
+             ["--name-only"], ["HEAD~1...HEAD"], ["one.txt"]),
+            ({"base": "HEAD", "cached": True, "numstat": True},
+             ["--cached", "--numstat"], ["HEAD"], None),
+        )
+        for options, flags, revisions, paths in forms:
+            result = apply(service, "a", "diff", options=options, paths=paths)
+            assert result["exit_code"] == 0, result["stderr"]
+            literal = [] if not paths else ["--", *( ":(literal)" + item for item in paths)]
+            assert result["stdout"] == native(
+                a, "--no-lazy-fetch", "diff", *flags, "--end-of-options",
+                *revisions, *literal,
+            )
+        missing_branch = apply(service, "a", "diff", options={"base": "no-such-branch"})
+        assert missing_branch["exit_code"] != 0
+        assert missing_branch["branch_checked"] is True
+        assert (repo / ".git" / "index").read_bytes() == index
+        assert git(repo, "status", "--porcelain=v1") == before
+        assert git(repo, "rev-parse", "HEAD") == head
+        assert list((control / "git-state").iterdir()) == []
+    finally:
+        service.close()
+
+
+def test_ranged_diff_and_rev_list_do_not_fetch_missing_objects(tmp_path):
+    repo, a, _b, control, service = fixture(
+        tmp_path, grants={"a": ["diff", "rev-list"]},
+    )
+    try:
+        parent = git(repo, "rev-parse", "HEAD")
+        (a / "one.txt").write_text("one changed\n")
+        git(repo, "add", "a/one.txt")
+        git(repo, "commit", "-qm", "second")
+        head = git(repo, "rev-parse", "HEAD")
+        remote = tmp_path / "origin.git"
+        git(tmp_path, "init", "--bare", "-q", str(remote))
+        git(remote, "config", "uploadpack.allowFilter", "true")
+        git(repo, "remote", "add", "origin", str(remote))
+        git(repo, "push", "-q", "origin", "HEAD:refs/heads/main")
+        git(repo, "config", "remote.origin.promisor", "true")
+        objects = repo / ".git" / "objects"
+        (objects / parent[:2] / parent[2:]).unlink()
+        before = {p.relative_to(objects): p.read_bytes()
+                  for p in objects.rglob("*") if p.is_file()}
+
+        diff = apply(service, "a", "diff", options={"base": parent, "end": head})
+        assert diff["exit_code"] != 0, "A missing commit must not be fetched"
+        assert {p.relative_to(objects): p.read_bytes()
+                for p in objects.rglob("*") if p.is_file()} == before
+        listed = apply(service, "a", "rev-list", options={"commit": parent})
+        assert listed["exit_code"] != 0, "A missing commit must not be fetched"
+        assert listed["stdout"] == ""
+        assert {p.relative_to(objects): p.read_bytes()
+                for p in objects.rglob("*") if p.is_file()} == before
+        assert list((control / "git-state").iterdir()) == []
+    finally:
+        service.close()

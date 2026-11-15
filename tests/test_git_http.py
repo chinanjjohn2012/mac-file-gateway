@@ -370,3 +370,69 @@ def test_multi_rest_git_actual_threadpool_worker_owns_root_fd_until_close(
             assert response and response[0]["exit_code"] == 0
     finally:
         svc.close()
+
+
+@pytest.mark.parametrize("mode", ["legacy", "multi"])
+def test_rest_commit_range_branch_tip_and_parents(tmp_path, monkeypatch, mode):
+    instance = (make_legacy if mode == "legacy" else make_multi)(
+        tmp_path, commands=("diff", "rev-parse", "rev-list"),
+    )
+    root = tmp_path / ("project" if mode == "legacy" else "parent")
+    subprocess.run(["git", "-c", "user.name=Fixture", "-c",
+                    "user.email=f@example.invalid", "commit", "--allow-empty",
+                    "-qm", "initial"], cwd=root, check=True)
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    note = root / ("note.txt" if mode == "legacy" else "a/note.txt")
+    note.write_text("note\n")
+    subprocess.run(["git", "add", str(note.relative_to(root))], cwd=root, check=True)
+    subprocess.run(["git", "-c", "user.name=Fixture", "-c",
+                    "user.email=f@example.invalid", "commit", "-qm", "second"],
+                   cwd=root, check=True)
+    end = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    subprocess.run(["git", "branch", "topic", base], cwd=root, check=True)
+    scope = {"workspace": "a"} if mode == "multi" else {}
+    queries = (
+        ("diff", {"base": base, "end": end, "name_status": True},
+         ["--no-lazy-fetch", "diff", "--name-status", "--end-of-options", base, end]),
+        ("rev-parse", {"target": "branch", "name": "topic"},
+         ["--no-lazy-fetch", "rev-parse", "--verify", "--end-of-options", "refs/heads/topic"]),
+        ("rev-list", {"commit": end},
+         ["--no-lazy-fetch", "rev-list", "--parents", "--max-count=1", "--end-of-options", end]),
+    )
+    app = (create_app if mode == "legacy" else create_multi_app)(instance, enable_mcp=False)
+    try:
+        with TestClient(app, base_url="http://127.0.0.1:8765") as client:
+            def no_git(*_unused, **_unused_kw):
+                raise AssertionError("Preview/rejected input must not start Git")
+            with monkeypatch.context() as patch:
+                patch.setattr(subprocess, "Popen", no_git)
+                for command, options, argv in queries:
+                    preview = request(client, {**scope, "command": command, "options": options})
+                    assert preview["execute_started"] is False
+                    assert preview["branch_checked"] is False
+                    assert preview["effective_argv"] == argv
+                assert request(client, {
+                    **scope, "command": "diff", "dry_run": False,
+                    "options": {"base": base, "end": end, "revision": "HEAD"},
+                }, status=400)["error"] == "git_option_invalid"
+                assert request(client, {
+                    **scope, "command": "rev-list", "dry_run": False,
+                    "options": {"commit": "HEAD"},
+                }, status=400)["error"] == "git_option_invalid"
+            for command, options, argv in queries:
+                result = request(client, {
+                    **scope, "command": command, "options": options, "dry_run": False,
+                })
+                assert result["exit_code"] == 0, result["stderr"]
+                assert result["stdout"] == subprocess.check_output(
+                    ["git", *argv], cwd=root, text=True,
+                )
+                assert result["cleanup_status"] == "complete"
+                assert result["output_truncated"] is False
+            tip = request(client, {
+                **scope, "command": "rev-parse", "dry_run": False,
+                "options": {"target": "branch", "name": "topic"},
+            })
+            assert tip["branch_checked"] is True
+    finally:
+        instance.close()

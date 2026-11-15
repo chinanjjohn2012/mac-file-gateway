@@ -336,3 +336,87 @@ def test_mcp_git_tool_absent_without_effective_grants(tmp_path, mode):
             assert res.get("isError") is True
     finally:
         instance.close()
+
+
+@pytest.mark.parametrize("mode", ["legacy", "multi"])
+@pytest.mark.parametrize("protocol", PROTOCOLS)
+def test_mcp_commit_range_branch_tip_and_parents(tmp_path, mode, protocol):
+    instance = (legacy_gateway if mode == "legacy" else multi_service)(
+        tmp_path, commands=("diff", "rev-parse", "rev-list"),
+    )
+    root = tmp_path / "project"
+    subprocess.run(["git", "-c", "user.name=Fixture", "-c",
+                    "user.email=f@example.invalid", "commit", "--allow-empty",
+                    "-qm", "initial"], cwd=root, check=True)
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    changed = root / ("a/note.txt" if mode == "multi" else "note.txt")
+    changed.write_text("note\n")
+    subprocess.run(["git", "add", str(changed.relative_to(root))], cwd=root, check=True)
+    subprocess.run(["git", "-c", "user.name=Fixture", "-c",
+                    "user.email=f@example.invalid", "commit", "-qm", "second"],
+                   cwd=root, check=True)
+    end = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    subprocess.run(["git", "branch", "topic", base], cwd=root, check=True)
+    scope = {"workspace": "a"} if mode == "multi" else {}
+    app = (create_app if mode == "legacy" else create_multi_app)(instance)
+    queries = {
+        "diff": {
+            "options": {"base": base, "end": end, "name_status": True},
+            "argv": ["--no-lazy-fetch", "diff", "--name-status",
+                     "--end-of-options", base, end],
+            "native": ["--no-lazy-fetch", "diff", "--name-status",
+                       "--end-of-options", base, end],
+        },
+        "rev-parse": {
+            "options": {"target": "branch", "name": "topic"},
+            "argv": ["--no-lazy-fetch", "rev-parse", "--verify",
+                     "--end-of-options", "refs/heads/topic"],
+            "native": ["--no-lazy-fetch", "rev-parse", "--verify",
+                       "--end-of-options", "refs/heads/topic"],
+        },
+        "rev-list": {
+            "options": {"commit": end},
+            "argv": ["--no-lazy-fetch", "rev-list", "--parents",
+                     "--max-count=1", "--end-of-options", end],
+            "native": ["--no-lazy-fetch", "rev-list", "--parents",
+                       "--max-count=1", "--end-of-options", end],
+        },
+    }
+    try:
+        with TestClient(app, base_url="http://127.0.0.1:8765") as client:
+            initialized(client, protocol)
+            for command, spec in queries.items():
+                arguments = {"command": command, "options": spec["options"], **scope}
+                preview = rpc(client, "tools/call", {
+                    "name": "run_git", "arguments": arguments,
+                })
+                assert preview.get("isError") is not True, preview
+                preview_data = preview["structuredContent"]
+                assert preview_data["execute_started"] is False
+                assert preview_data["branch_checked"] is False
+                assert preview_data["effective_argv"] == spec["argv"]
+                applied = rpc(client, "tools/call", {
+                    "name": "run_git",
+                    "arguments": {**arguments, "dry_run": False},
+                })
+                assert applied.get("isError") is not True, applied
+                data = applied["structuredContent"]
+                assert data["exit_code"] == 0, data["stderr"]
+                assert data["stdout"] == subprocess.check_output(
+                    ["git", *spec["native"]], cwd=root, text=True,
+                )
+                assert data["cleanup_status"] == "complete"
+                if command == "rev-parse":
+                    assert data["branch_checked"] is True
+            rejected = rpc(client, "tools/call", {
+                "name": "run_git",
+                "arguments": {
+                    "command": "diff",
+                    "options": {"base": base, "end": end, "revision": "HEAD"},
+                    "dry_run": False, **scope,
+                },
+            })
+            assert rejected.get("isError") is True, rejected
+            assert "git_option_invalid" in str(rejected)
+    finally:
+        instance.close()

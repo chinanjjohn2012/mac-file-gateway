@@ -298,14 +298,20 @@ class GitCLIExecutor:
         # is therefore checked by Git under the repository lock and RUNNING
         # intent, before any business command. Never pass a bare branch name
         # as a push refspec: the compiler builds the complete refs/heads pair.
-        branch_name = None
+        branch_names: list[str] = []
         if command == "branch" and values["action"] in {"create", "delete"}:
-            branch_name = values["name"]
+            branch_names.append(values["name"])
         elif command == "switch":
-            branch_name = values["name"]
+            branch_names.append(values["name"])
         elif command in {"pull", "push"}:
-            branch_name = values["branch"]
-        if branch_name is not None:
+            branch_names.append(values["branch"])
+        elif command == "rev-parse" and "name" in values:
+            branch_names.append(values["name"])
+        elif command == "diff":
+            for endpoint in ("base", "end"):
+                if values.get(endpoint + "_kind") == "branch":
+                    branch_names.append(values[endpoint])
+        for branch_name in branch_names:
             checked_name = self._checked_git(
                 key, call_id, cwd,
                 ["check-ref-format", "--branch", branch_name],
@@ -341,11 +347,19 @@ class GitCLIExecutor:
             if present.exit_code != 0:
                 raise GatewayError("git_branch_unknown", "Local Git branch does not exist.")
             if values["force_with_lease"]:
-                obj = self._checked_git(key, call_id, cwd,
-                                        ["rev-parse", "--show-object-format"], deadline, evidence)
-                expected = {"sha1": 40, "sha256": 64}.get(obj.stdout.strip())
-                if expected is None or len(values["expected_remote_oid"]) != expected:
-                    raise GatewayError("git_option_invalid", "Git object ID has wrong format.")
+                self._require_object_format(
+                    key, call_id, cwd, values["expected_remote_oid"], deadline, evidence,
+                )
+    def _require_object_format(self, key: tuple[int, int], call_id: str, cwd: str,
+                               oid: str, deadline: float,
+                               evidence: _RepoCleanupEvidence) -> None:
+        # Push lease only. Diff and rev-list pass hex of any length through;
+        # Git reports a missing or unusable object without a gateway length check.
+        obj = self._checked_git(key, call_id, cwd,
+                                ["rev-parse", "--show-object-format"], deadline, evidence)
+        expected = {"sha1": 40, "sha256": 64}.get(obj.stdout.strip())
+        if expected is None or len(oid) != expected:
+            raise GatewayError("git_option_invalid", "Git object ID has wrong format.")
 
     def run(self, *, workspace: str, root_fd: int, root_path: str,
             cwd: str = ".", command: str, options: dict[str, Any] | None = None,
@@ -401,7 +415,11 @@ class GitCLIExecutor:
             return {
                 **preview, "dry_run": False, "repository_checked": True,
                 "execute_started": True, "remote_checked": command in {"fetch", "pull", "push"},
-                "branch_checked": command in {"switch", "push"},
+                "branch_checked": command in {"switch", "push"} or (
+                    command == "rev-parse" and "name" in dict(compiled.options)) or (
+                    command == "diff" and any(
+                        dict(compiled.options).get(key) == "branch"
+                        for key in ("base_kind", "end_kind"))),
                 "exit_code": result.exit_code, "stdout": result.stdout,
                 "stderr": result.stderr, "timed_out": result.timed_out,
                 "output_truncated": result.output_truncated,

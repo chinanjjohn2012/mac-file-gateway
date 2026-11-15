@@ -65,6 +65,7 @@
       "diff",
       "log",
       "rev-parse",
+      "rev-list",
       "branch",
       "switch",
       "add",

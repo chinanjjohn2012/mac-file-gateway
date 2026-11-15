@@ -145,15 +145,17 @@ gateway_info 和 list_workspaces 可以公开 Git 是否启用、允许的命令
 
 ## 5. V1 命令 Schema（执行前冻结）
 
-**V1 仅支持 status、diff、log、branch、switch、add、commit、fetch、pull、push。checkout、clone 不属于 V1，配置或调用均应拒绝。** 每个 Git 参数由服务端严格结构化编译，不存在 raw argv、任意额外选项或 Git 全局参数透传。未完成本节全部约束和测试的命令不能进入可配置命令列表。
+**V1 仅支持 status、diff、log、rev-parse、rev-list、branch、switch、add、commit、fetch、pull、push。checkout、clone 不属于 V1，配置或调用均应拒绝。** 每个 Git 参数由服务端严格结构化编译，不存在 raw argv、任意额外选项或 Git 全局参数透传。未完成本节全部约束和测试的命令不能进入可配置命令列表。
 
 所有 options 为严格对象；除下面列出的字段外任何键均拒绝，布尔字段不接受 0/1 或字符串代替；路径参数未定义的命令必须 paths=[]；错误和互斥参数必须在启动业务 Git 前拒绝。
 
 | 子命令 | options 字段与固定默认值 | paths | 精确 argv 模板（省略 false 对应的可选 flag） |
 |---|---|---|---|
 | status | short=false, branch=false | 可选 | git status [--short] [--branch] [-- <literal-paths>] |
-| diff | cached=false, stat=false | 可选 | git diff [--cached] [--stat] [-- <literal-paths>] |
+| diff | 只读布尔开关见实现中的固定名单；base 可选，end 必须搭配 base；range 只能是 `..` 或 `...`；另有 unified、diff_algorithm、diff_filter、pickaxe、pickaxe_regex | 始终可选，使用 literal pathspec | 无修订：git diff [只读开关] [-- <literal-paths>]；有修订：git --no-lazy-fetch diff [只读开关] --end-of-options <修订...> [-- <literal-paths>]。--cached 最多一个修订。拒绝 --output、--ext-diff、--textconv、--no-index 和原始 argv |
 | log | limit=20（1..50）, oneline=false | 必须 [] | git log --max-count=N [--oneline] |
+| rev-parse | target=tree；取值为 tree / head / branch。tree 与 head 禁止 name；branch 必填 name | 必须 [] | git --no-lazy-fetch rev-parse --verify HEAD^{tree}；head 时改为 HEAD^{commit}；branch 时为 git --no-lazy-fetch rev-parse --verify --end-of-options refs/heads/<name> |
+| rev-list | commit 必填且为任意长度的小写十六进制，limit=1（1..50） | 必须 [] | git --no-lazy-fetch rev-list --parents --max-count=N --end-of-options <commit> |
 | branch | action 必填且为 list/create/delete；create/delete 必填 name，list 必须不提供 name | 必须 [] | git branch --list；git branch -- <name>；git branch -d -- <name> |
 | switch | name 必填, create=false | 必须 [] | git switch --no-guess <name>；新建时 git switch --no-guess --no-track -c <name> HEAD |
 | add | all=false, update=false；两者不得同时 true；都为 false 时必须提供非空 paths | 可选 | git add [-A 或 -u] [-- <literal-paths>] |
@@ -173,6 +175,7 @@ gateway_info 和 list_workspaces 可以公开 Git 是否启用、允许的命令
 7. **fetch/pull/push Remote** 只能从 Git 已配置 Remote 名称选择，不能由本轮客户端提供本地目录、Remote URL、额外 refspec 或 SSH 命令；已配置 Remote 本身指向 Workspace 外的地址属于已接受的间接行为。pull.branch 与 push.branch 分别用受控本地 Branch 名语法，编译完整 refs/heads/<branch>。
 8. **add 互斥。** all 和 update 不能同为 true；二者均 false 且 paths 为空报错。无 paths 的 git add -A / -u 按 Git 原生语义可覆盖整个父级仓库，这是用户已接受行为。
 9. Commit Message 可由 Hook 进一步解释，Git Remote 和 Hook/Filter 可能执行其他程序；这是有意接受的高权限 Git 语义，而非参数白名单可提供的 OS 隔离。
+10. **只读 diff。** 比较端点可以是任意长度的小写十六进制、`HEAD` 及其 `~n` / `^n` / `@{n}` 祖先、或通过分支名校验的引用。两点和三点语法由 `range` 拼成一个端点参数。paths 可以和修订一起使用。写文件的 `--output`、执行外部程序的 `--ext-diff` / `--textconv`、以及 `--no-index` 不在字段名单里。`rev-list.commit` 同样是任意长度的小写十六进制，网关不按 SHA-1 / SHA-256 长度拒绝。执行期只对分支名端点用 `check-ref-format --branch` 核对。有修订时固定带 `--no-lazy-fetch`。对象缺失或前缀不唯一时由 Git 失败，不 fetch，也不修改工作区、index、HEAD 或 refs。完整 diff 仍受 131072 字节合并输出上限约束。`--force-with-lease` 的 expected_remote_oid 仍按仓库对象格式核对完整长度。
 
 ### 5.1 预览与实际执行
 

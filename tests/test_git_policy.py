@@ -15,10 +15,50 @@ from gateway.git_policy import (
      ("status", "--short", "--branch", "--", ":(literal)src/*[1].py")),
     ("diff", {"cached": True, "stat": True}, ["-file"],
      ("diff", "--cached", "--stat", "--", ":(literal)-file")),
+    ("diff", {"name_status": True}, [], ("diff", "--name-status")),
+    ("diff", {"cached": True, "name_status": True, "stat": True}, ["-file"],
+     ("diff", "--cached", "--name-status", "--stat", "--", ":(literal)-file")),
+    ("diff", {"base": "a" * 40, "end": "b" * 40, "name_status": True, "stat": True}, [],
+     ("--no-lazy-fetch", "diff", "--name-status", "--stat", "--end-of-options", "a" * 40, "b" * 40)),
+    ("diff", {"base": "c" * 64, "end": "d" * 64}, [],
+     ("--no-lazy-fetch", "diff", "--end-of-options", "c" * 64, "d" * 64)),
+    ("diff", {"base": "266f0cc0", "end": "71cdcde8", "name_status": True}, [],
+     ("--no-lazy-fetch", "diff", "--name-status", "--end-of-options", "266f0cc0", "71cdcde8")),
+    ("diff", {"base": "266f0cc0", "end": "71cdcde8", "stat": True}, [],
+     ("--no-lazy-fetch", "diff", "--stat", "--end-of-options", "266f0cc0", "71cdcde8")),
+    ("diff", {"base": "266f0cc0", "end": "71cdcde8", "check": True}, [],
+     ("--no-lazy-fetch", "diff", "--check", "--end-of-options", "266f0cc0", "71cdcde8")),
+    ("diff", {"base": "266f0cc0", "end": "71cdcde8"}, [],
+     ("--no-lazy-fetch", "diff", "--end-of-options", "266f0cc0", "71cdcde8")),
+    ("diff", {"check": True}, [], ("diff", "--check")),
+    ("diff", {"base": "a" * 40}, [],
+     ("--no-lazy-fetch", "diff", "--end-of-options", "a" * 40)),
+    ("diff", {"base": "266f0cc0", "end": "HEAD", "name_status": True}, [],
+     ("--no-lazy-fetch", "diff", "--name-status", "--end-of-options", "266f0cc0", "HEAD")),
+    ("diff", {"base": "HEAD~1", "end": "HEAD", "range": "..."}, ["src/a.py"],
+     ("--no-lazy-fetch", "diff", "--end-of-options", "HEAD~1...HEAD", "--", ":(literal)src/a.py")),
+    ("diff", {"base": "main", "cached": True, "numstat": True}, [],
+     ("--no-lazy-fetch", "diff", "--cached", "--numstat", "--end-of-options", "main")),
+    ("diff", {"base": "topic", "end": "HEAD", "range": "..", "stat": True,
+              "unified": 3, "diff_filter": "AM"}, [],
+     ("--no-lazy-fetch", "diff", "--stat", "-U3", "--diff-filter=AM",
+      "--end-of-options", "topic..HEAD")),
+    ("diff", {"base": "HEAD", "pickaxe": "token"}, [],
+     ("--no-lazy-fetch", "diff", "-Stoken", "--end-of-options", "HEAD")),
     ("log", {}, [], ("log", "--max-count=20")),
     ("rev-parse", {}, [], ("--no-lazy-fetch", "rev-parse", "--verify", "HEAD^{tree}")),
     ("rev-parse", {"target": "tree"}, [], ("--no-lazy-fetch", "rev-parse", "--verify", "HEAD^{tree}")),
     ("rev-parse", {"target": "head"}, [], ("--no-lazy-fetch", "rev-parse", "--verify", "HEAD^{commit}")),
+    ("rev-parse", {"target": "branch", "name": "topic/+x"}, [],
+     ("--no-lazy-fetch", "rev-parse", "--verify", "--end-of-options", "refs/heads/topic/+x")),
+    ("rev-list", {"commit": "a" * 40}, [],
+     ("--no-lazy-fetch", "rev-list", "--parents", "--max-count=1", "--end-of-options", "a" * 40)),
+    ("rev-list", {"commit": "a" * 8}, [],
+     ("--no-lazy-fetch", "rev-list", "--parents", "--max-count=1", "--end-of-options", "a" * 8)),
+    ("diff", {"base": "abc", "end": "def0"}, [],
+     ("--no-lazy-fetch", "diff", "--end-of-options", "abc", "def0")),
+    ("rev-list", {"commit": "e" * 64, "limit": 5}, [],
+     ("--no-lazy-fetch", "rev-list", "--parents", "--max-count=5", "--end-of-options", "e" * 64)),
     ("log", {"limit": 5, "oneline": True}, [], ("log", "--max-count=5", "--oneline")),
     ("branch", {"action": "list"}, [], ("branch", "--list")),
     ("branch", {"action": "create", "name": "topic/+x"}, [],
@@ -51,7 +91,8 @@ def test_exact_compiled_argv(command, options, paths, expected):
 
 def test_exact_command_set_and_lease():
     assert GIT_V1_COMMANDS == {"status", "diff", "log", "branch", "switch",
-                               "add", "commit", "fetch", "pull", "push", "rev-parse"}
+                               "add", "commit", "fetch", "pull", "push",
+                               "rev-parse", "rev-list"}
     oid = "a" * 40
     item = compile_git_command("push", options={
         "remote": "origin", "branch": "+main",
@@ -103,6 +144,34 @@ def test_no_unimplemented_git_command(command):
               "expected_remote_oid": "0"*40}, []),
     ("log", {}, ["x"]),
     ("commit", {"message": "x"}, ["x"]),
+    ("diff", {"end": "b" * 40}, []),
+    ("diff", {"base": "a" * 40, "end": "b" * 40, "cached": True}, []),
+    ("diff", {"base": "A" * 40, "end": "B" * 40}, []),
+    ("diff", {"base": "0" * 40, "end": "0" * 40}, []),
+    ("diff", {"check": "yes"}, []),
+    ("diff", {"output": "/tmp/x"}, []),
+    ("diff", {"ext_diff": True}, []),
+    ("diff", {"textconv": True}, []),
+    ("diff", {"no_index": True}, []),
+    ("diff", {"base": "a..b", "end": "main"}, []),
+    ("diff", {"base": "--output=x", "end": "main"}, []),
+    ("diff", {"base": "HEAD", "end": "main", "range": "...."}, []),
+    ("diff", {"base": "HEAD", "range": ".."}, []),
+    ("diff", {"patch": True, "no_patch": True}, []),
+    ("diff", {"merge_base": True}, []),
+    ("diff", {"pickaxe": ""}, []),
+    ("diff", {"diff_filter": "Q"}, []),
+    ("diff", {"unified": -1}, []),
+    ("rev-parse", {"target": "branch"}, []),
+    ("rev-parse", {"target": "head", "name": "main"}, []),
+    ("rev-parse", {"target": "tree", "name": "main"}, []),
+    ("rev-parse", {"name": "main"}, []),
+    ("rev-parse", {"target": "main"}, []),
+    ("rev-list", {}, []),
+    ("rev-list", {"commit": "HEAD"}, []),
+    ("rev-list", {"commit": "a" * 40, "limit": 0}, []),
+    ("rev-list", {"commit": "a" * 40, "limit": 51}, []),
+    ("rev-list", {"commit": "a" * 40}, ["x"]),
 ])
 def test_invalid_options_rejected(command, opts, paths):
     with pytest.raises(GatewayError) as exc:
@@ -151,6 +220,15 @@ def test_preview_is_pure_and_clear_about_checks(monkeypatch):
     assert head["effective_argv"] == ["--no-lazy-fetch", "rev-parse", "--verify", "HEAD^{commit}"]
     assert head["options"] == {"target": "head"}
     assert head["execute_started"] is False and head["repository_checked"] is False
+    base, end = "a" * 40, "b" * 40
+    ranged = preview_git("diff", options={"base": base, "end": end, "name_status": True})
+    assert ranged["effective_argv"] == ["--no-lazy-fetch", "diff", "--name-status",
+                                        "--end-of-options", base, end]
+    assert ranged["execute_started"] is False and ranged["branch_checked"] is False
+    parents = preview_git("rev-list", options={"commit": end})
+    assert parents["effective_argv"] == ["--no-lazy-fetch", "rev-list", "--parents",
+                                         "--max-count=1", "--end-of-options", end]
+    assert parents["execute_started"] is False and parents["repository_checked"] is False
     result = preview_git("push", workspace="workspace-a", cwd="src",
                          options={"remote": "origin", "branch": "+main"})
     assert result["effective_argv"][-1] == "refs/heads/+main:refs/heads/+main"

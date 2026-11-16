@@ -2464,6 +2464,20 @@ class WorkspaceService:
                 is_v2 and effective and durability == "healthy"
                 and not self._closing and eligible_names
                 and len(self._exec_active) < 4)
+            # Pure read-only explanation: never an execution authorization.
+            from .lbe_mvp_readiness import summarize_mvp_readiness
+            mvp_readiness = (
+                summarize_mvp_readiness(
+                    enabled=effective, apply_configured=mvp_configured,
+                    tools_ready=self._mvp_tools is not None,
+                    durability=durability,
+                    owner_unavailable=bool(lbe_state and lbe_state["unavailable"]),
+                    capacity_exhausted=bool(
+                        lbe_state and lbe_state["capacity_exhausted"]),
+                    closing=self._closing, apply_eligible=mvp_positive_ready,
+                    preview_eligible=v2_preview_available,
+                ) if is_v2 else None
+            )
             return {"name": "Mac File Gateway", "version": "2.5.0", "mode": "multi",
                     "workspace_count": len(self._workspaces),
                     **({"config_schema_version": 2}
@@ -2496,6 +2510,7 @@ class WorkspaceService:
                             "apply_configured": mvp_configured,
                             "tool_selection_ready": (
                                 self._mvp_tools is not None),
+                            "mvp_readiness": mvp_readiness,
                             "supported_apply_commands": [
                                 "py-direct-pytest", "py-direct-compileall",
                                 "py-pipenv-pytest", "go-test", "go-vet",

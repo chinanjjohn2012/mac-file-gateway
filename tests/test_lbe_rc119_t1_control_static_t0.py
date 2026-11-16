@@ -1,7 +1,6 @@
 """SAFE T0 on RC119's separate, permanently nonoperative test control."""
 from __future__ import annotations
 
-import copy
 import json
 import subprocess
 from pathlib import Path
@@ -22,17 +21,26 @@ def _manifest():
     return json.loads(TEMPLATE.read_text(encoding="utf-8"))
 
 
+# Independent literal Design-002 oracle; never derive expected rows from
+# the tested static control SIX data (or from current product at runtime).
+EXPECTED_SIX = (
+    ("S1", "py-direct", "direct", ("python", "-m", "pytest", "-q")),
+    ("S2", "py-direct", "direct", ("python", "-m", "compileall", "-q", "./src")),
+    ("S3", "py-pipenv", "pipenv", ("python", "-m", "pytest", "-q")),
+    ("S4", "go-project", "direct", ("go", "test", "./...")),
+    ("S5", "go-project", "direct", ("go", "vet", "./...")),
+    ("S6", "go-project", "direct",
+     ("go", "build", "-o", "bin/app", "./cmd/app")),
+)
+
+
 def _matrix():
     return [
         {"ingress": ingress, "id": ident, "cwd": cwd, "runner": runner,
          "requested_argv": list(argv)}
-        for ingress in INGRESSSES
-        for ident, cwd, runner, argv in SIX
+        for ingress in ("direct", "rest", "mcp")
+        for ident, cwd, runner, argv in EXPECTED_SIX
     ]
-
-
-# Declare this independently, not by importing the product's run-command list.
-INGRESSSES = ("direct", "rest", "mcp")
 
 
 def _event():
@@ -57,6 +65,7 @@ def test_template_is_pure_unattested_and_has_complete_required_categories(monkey
     monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_k:
                         pytest.fail("STATIC T0 MUST NEVER START NATIVE"))
     lock = _manifest()
+    assert len(REQUIRED_INPUT_IDS) == 22
     assert len(lock["inputs"]) == len(REQUIRED_INPUT_IDS)
     assert {row["id"] for row in lock["inputs"]} == set(REQUIRED_INPUT_IDS)
     assert all(row["evidence_status"] == "NOT_ATTESTED" and
@@ -91,7 +100,8 @@ def test_lock_fail_closed_shape_and_fake_attestation(mutation, reason):
 def test_exact_eighteen_canonical_requests_have_only_static_grade(monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_k:
                         pytest.fail("STATIC T0 spawned original child"))
-    assert INGRESSSES == INGRESSES
+    assert tuple(SIX) == EXPECTED_SIX
+    assert INGRESSES == ("direct", "rest", "mcp")
     plan = _matrix()
     assert len(plan) == 18
     decision = inspect_six_matrix(plan)
@@ -196,3 +206,31 @@ def test_not_a_workflow_controller_or_ambient_exec_primitive():
     assert "os.system" not in source
     assert "workflow_dispatch" not in source
     assert "native_execution_authorized" in source
+
+def test_false_frozen_digest_data_cannot_promote_native_or_source_provenance():
+    lock = _manifest()
+    first = lock["inputs"][0]
+    first["expected_sha256"] = "a" * 64
+    first["observed_sha256"] = "a" * 64
+    out = inspect_input_lock(lock)
+    # Identical self-claimed hashes are NOT independently fetched bytes.
+    assert out["declaration_format_valid"]
+    assert out["blocking_codes"] == ["external_bytes_not_attested"]
+    assert out["native_execution_authorized"] is False
+
+
+def test_wrong_control_identity_and_missing_lock_are_rejected():
+    event = _event()
+    approval = _approval(event)
+    event["control_tree"] = "f" * 40
+    assert "approval_identity_mismatch" in inspect_event(
+        event, approval)["blocking_codes"]
+    event = _event()
+    approval = _approval(event)
+    approval["input_lock_sha256"] = None
+    assert "input_lock_not_fixed" in inspect_event(
+        event, approval)["blocking_codes"]
+    approval["input_lock_sha256"] = "invalid"
+    assert "input_lock_digest_invalid" in inspect_event(
+        event, approval)["blocking_codes"]
+

@@ -25,7 +25,8 @@ is the existing PR119 feature branch, so its direct delta is only these
 nonoperative control-preparation files plus MANIFEST.sha256.
 
 The module tools/lbe_rc119_t1_control_static.py is pure data: it imports
-only Python re, never reads or modifies the filesystem, opens a socket,
+only standard-library re and collections.abc, never reads or modifies
+the filesystem, opens a socket,
 imports foreign project code, invokes GitHub, creates a child or returns a
 positive launch grant. The SAFE T0 tests use disposable in-memory dicts,
 hard-trap subprocess.Popen and test exact negative conditions. They are NOT

@@ -14,6 +14,28 @@ https://github.com/chinanjjohn2012/mac-file-gateway/tree/release/ms1
 
 **2.5.0 源码包含 Git CLI V1，执行权限默认关闭。** Git CLI V1 已经过分批独立复审、macOS 原生测试与真实 Secure MCP Tunnel 测试；这些证据并不代表已创建正式 Tag/Release、部署到生产或授权生产 Git。正式合并、发布和启用仍须独立运营审批。运行基于官方 MCP Python SDK 2.3.0。
 
+### 六命令 MVP 使用闭环（独立 Draft 候选，未发布）
+
+> **不要把这条开发分支当成 `release/ms1` 的已上线功能。**
+> [PR #113](https://github.com/chinanjjohn2012/mac-file-gateway/pull/113)
+> 是冻结的 Python/Pipenv/Go 六命令产品候选；
+> [PR #118](https://github.com/chinanjjohn2012/mac-file-gateway/pull/118)
+> 独立开发只读配置诊断、官方 MCP `ClientSession` SAFE T0 与使用说明。
+> 两者都不代表真实用户 Mac/Tunnel 集成、原生 T1 或生产运行已经通过。
+
+在 #118 开发候选的 **schema-v2 Multi** 模式中，`GET /info`、
+`GET /health` 和现有 MCP `gateway_info` 可读取
+`exec_policy.mvp_readiness` 的固定阻断原因（例如双开关缺失、
+私有工具不可用、历史状态隔离、容量不足）。**只读诊断不授权执行**，
+也不会自动恢复或删除旧状态。只允许原合同 S1–S6 六条固定命令；
+所有实际 `dry_run=false` 执行仍须单独授权、安全门禁和复审，
+不能由一次预览、状态为 eligible 或测试 GREEN 推导。
+
+完整的双开关配置、私有工具选择、六命令名单、只读官方客户端示例、
+SAFE T0/真实集成证据边界见
+[六命令 MVP 开发使用指南](docs/MULTI_WORKSPACE_EXEC_SIX_COMMAND_MVP_RUNTIME.md)。
+
+
 ### 已包含的主要代码
 
 ```text

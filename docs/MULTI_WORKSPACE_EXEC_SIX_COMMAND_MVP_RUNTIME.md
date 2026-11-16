@@ -141,6 +141,39 @@ real Go/Pipenv/Python execution, third-party source/credential qualification
 or production integration. Real native/Tunnel/T1 tests require their own
 authorized target, isolated environment, R10 and independent evidence.
 
+### Read-only official ClientSession example (operator-controlled)
+
+The following is a **read-only example** for an already authorized LOCAL
+loopback Gateway running this candidate. It does not start a Gateway/Tunnel,
+enable Exec or send `run_command`, and has NOT been run on the user's Mac
+by this milestone. Use only an approved endpoint and current SDK 2.3.0:
+
+```python
+import asyncio
+import json
+from mcp.client.session import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+
+async def inspect_only():
+    async with streamable_http_client(
+        "http://127.0.0.1:8765/mcp"
+    ) as (reader, writer):
+        async with ClientSession(reader, writer) as session:
+            await session.initialize()
+            result = await session.call_tool("gateway_info", {})
+            if result.is_error or result.structured_content is None:
+                raise RuntimeError("read-only gateway_info unavailable")
+            policy = result.structured_content["exec_policy"]
+            print(json.dumps(policy["mvp_readiness"], indent=2))
+
+asyncio.run(inspect_only())
+```
+
+This example calls `gateway_info` only; it does not prove the Mac listener,
+ChatGPT Tunnel, installed toolchains, native child, or integration are ready.
+Its expected output is the sanitized read-only eligibility explanation,
+never a command-execution success receipt.
+
 ### Nonexecuting operator troubleshooting
 
 1. Read `gateway_info` or `GET /info`; distinguish `preview_available`,

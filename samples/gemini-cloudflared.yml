@@ -1,0 +1,11 @@
+# TEMPLATE ONLY: replace all placeholders, store credentials outside project.
+# Named Tunnel, fixed HTTPS host. Gemini cannot use a private localhost URL.
+tunnel: TUNNEL_UUID
+credentials-file: /private/path/to/your/cloudflared-tunnel-credentials.json
+ingress:
+  - hostname: gemini-mcp.example.com
+    path: '^/(mcp|oauth/(authorize|continue|token|revoke)|\.well-known/oauth-(authorization-server|protected-resource)(/mcp)?)$'
+    service: http://127.0.0.1:8766
+    originRequest:
+      httpHostHeader: 127.0.0.1:8766
+  - service: http_status:404

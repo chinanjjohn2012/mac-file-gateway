@@ -52,6 +52,30 @@ def test_nested_command_specific_validation_and_paths():
         assert exc.value.code == "git_option_invalid"
 
 
+def test_run_git_logs_request_then_compiled_argv(capsys):
+    validate_tool_arguments('run_git', {
+        'command': 'diff',
+        'options': {'cached': True, 'check': True},
+        'dry_run': True,
+    }, multi=False)
+    err = capsys.readouterr().err.splitlines()
+    assert err[0] == ('git request {"command":"diff","cwd":".","dry_run":true,'
+                      '"options":{"cached":true,"check":true},"paths":[]}')
+    assert err[1] == 'git argv git diff --cached --check'
+
+
+def test_run_git_logs_request_when_compile_raises(capsys):
+    with pytest.raises(TypeError):
+        validate_tool_arguments('run_git', {
+            'command': 'diff',
+            'options': {'range': []},
+        }, multi=False)
+    err = capsys.readouterr().err
+    assert 'git request ' in err
+    assert '"range":[]' in err
+    assert 'git argv' not in err
+
+
 def test_phase_d_git_adapters_use_only_the_reviewed_sync_git_service():
     # A's pure compiler remains separate; D intentionally registers run_git.
     # Neither adapter may turn the structured schema into a raw command

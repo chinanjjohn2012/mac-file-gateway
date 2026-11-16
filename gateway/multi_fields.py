@@ -5,6 +5,9 @@ Gateway always enforce scopes again at the actual filesystem operation.
 """
 from __future__ import annotations
 
+import json
+import shlex
+import sys
 from typing import Any
 from .core import GatewayError
 from .git_policy import compile_git_command, validate_git_relative_path
@@ -43,6 +46,25 @@ _PHASE2 = {'run_command', 'local_skill_info', 'begin_local_skill',
            'read_skill_file', 'run_skill_script'}
 
 
+def _log_git_request(arguments: dict[str, Any]) -> None:
+    record = {
+        'command': arguments.get('command'),
+        'cwd': arguments.get('cwd', '.'),
+        'dry_run': arguments.get('dry_run', True),
+        'options': arguments.get('options', {}),
+        'paths': arguments.get('paths', []),
+    }
+    if 'workspace' in arguments:
+        record['workspace'] = arguments['workspace']
+    print('git request ' + json.dumps(record, ensure_ascii=False, default=str,
+                                       separators=(',', ':')),
+          file=sys.stderr, flush=True)
+
+
+def _log_git_argv(argv: tuple[str, ...]) -> None:
+    print('git argv ' + shlex.join(('git', *argv)), file=sys.stderr, flush=True)
+
+
 def validate_tool_arguments(name: str, arguments: Any, *, multi: bool) -> dict[str, Any]:
     if type(name) is not str or name not in _SPECS or (multi and name in _PHASE2):
         raise GatewayError('invalid_argument', 'This tool is not supported in this mode.')
@@ -70,8 +92,11 @@ def validate_tool_arguments(name: str, arguments: Any, *, multi: bool) -> dict[s
         # Strict nested input validation occurs before SDK/Pydantic coercion.
         # It is pure: no Git process, repository read or symlink dereference.
         validate_git_relative_path(arguments.get('cwd', '.'))
-        compile_git_command(arguments['command'], options=arguments.get('options', {}),
-                            paths=arguments.get('paths', []))
+        # Log before compile so a TypeError still shows which call arrived.
+        _log_git_request(arguments)
+        compiled = compile_git_command(arguments['command'], options=arguments.get('options', {}),
+                                       paths=arguments.get('paths', []))
+        _log_git_argv(compiled.argv)
         seconds = arguments.get('timeout_seconds', 120)
         if not 10 <= seconds <= 900:
             raise GatewayError('git_option_invalid', 'Git timeout must be from 10 to 900.')

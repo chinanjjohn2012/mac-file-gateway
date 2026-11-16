@@ -339,6 +339,7 @@ def test_real_service_scope_and_runner_readiness_not_false_eligible(
         assert before["read_only"] is not eligible
         assert before["workspaces"][0]["exec_apply_available"] is eligible
         if not eligible:
+            from gateway.core import GatewayError
             assert "six_command_scope_unavailable" in diag["blocking_codes"]
             assert diag["preview"] == "eligible"
             # A legal unrelated-scope Python PREVIEW remains nonspawning.
@@ -346,11 +347,14 @@ def test_real_service_scope_and_runner_readiness_not_false_eligible(
                 assert service.invoke_exec(
                     "a", "notes", ["python", "-m", "pytest", "-q"],
                     dry_run=True)["status"] == "preview"
-            with pytest.raises(Exception):
+            with pytest.raises(GatewayError) as denied:
                 # No static diagnosis value is an execution authorization.
                 service.invoke_exec("a", "py-direct",
                                     ["python", "-m", "pytest", "-q"],
                                     dry_run=False)
+            assert denied.value.code == (
+                "runner_unavailable"
+                if paths == ("py-direct",) else "exec_scope")
         else:
             assert diag["blocking_codes"] == []
         assert service.info() == before
@@ -417,3 +421,66 @@ def test_schema_v1_info_and_workspaces_shape_unmodified_by_v2_readiness(
         assert info["exec_policy"]["available"] is False
     finally:
         service.close()
+
+
+
+def test_two_workspace_disjoint_scope_and_opt_in_not_aggregated(
+        mvp, monkeypatch):
+    """No borrowing one Workspace's bool or cwd to make another eligible."""
+    import json
+    from gateway.exec_state import ExecStateStore
+    from gateway.workspaces import ActiveRuntimeInventory, WorkspaceService
+    from gateway.workspaces_config import parse_workspace_config
+
+    _make, root_a, private, tool_config, _bin = mvp
+    root_b = root_a.parent / "b"
+    root_b.mkdir()
+    (root_b / "notes").mkdir()
+    (root_b / "py-direct").mkdir()
+    (root_a / "notes").mkdir(exist_ok=True)
+    isolated = private.parent / "private-two-scope"
+    isolated.mkdir(mode=0o700)
+    isolated.chmod(0o700)
+    tools_json = isolated / "mvp-exec-tools.json"
+    tools_json.write_text(json.dumps(json.loads(tool_config.read_text())))
+    tools_json.chmod(0o600)
+    state = ExecStateStore(isolated / "exec-state",
+                           workspace_roots=(str(root_a), str(root_b)))
+    state.close()
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda *_a, **_k: pytest.fail("T0 spawned native child"))
+
+    cases = [
+        (False, ["py-direct"], False),  # candidate b has disabled opt-in
+        (True, ["notes"], False),       # two positive flags, both scopes wrong
+        (True, ["py-direct"], True),    # one genuinely supported b S1/S2 cwd
+    ]
+    for b_apply, b_paths, expected in cases:
+        config = parse_workspace_config({
+            "schema_version": 2,
+            "server": {"port": 8765, "transport": "http",
+                       "exec": {"enabled": True}},
+            "workspaces": {
+                "a": {"root": str(root_a),
+                      "exec": {"enabled": True, "paths": ["notes"]}},
+                "b": {"root": str(root_b),
+                      "exec": {"enabled": b_apply, "paths": b_paths}},
+            },
+        })
+        service = WorkspaceService(
+            config, config_dir=isolated,
+            inventory=ActiveRuntimeInventory(
+                paths=(private.parent / "runtime",)))
+        try:
+            status = service.info()
+            assert status["exec_policy"]["available"] is expected
+            assert status["exec_policy"]["mvp_readiness"][
+                "six_command_apply"] == ("eligible" if expected else "blocked")
+            a, b = status["workspaces"]
+            assert a["id"] == "a" and b["id"] == "b"
+            assert a["exec_apply_available"] is False
+            assert b["exec_apply_available"] is expected
+            assert status["workspaces"] == service.list_workspaces()["workspaces"]
+            assert service.info() == status
+        finally:
+            service.close()

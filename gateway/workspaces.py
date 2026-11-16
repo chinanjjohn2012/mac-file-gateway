@@ -2352,6 +2352,7 @@ class WorkspaceService:
         """
         with self._lifecycle:
             v2 = self.settings.schema_version == 2
+            from .lbe_mvp_readiness import has_supported_six_command_scope
             old_state_healthy = bool(
                 v2 and self._exec_state is not None
                 and self._exec_state.durability_state == "healthy")
@@ -2372,12 +2373,15 @@ class WorkspaceService:
                     v2 and self.settings.exec_apply_enabled
                     and ctx.settings.exec_apply_enabled
                     and ctx.settings.exec_paths)
+                mvp_supported = bool(
+                    mvp_configured and has_supported_six_command_scope(
+                        ctx.settings.exec_paths, ctx.settings.exec_runners))
                 apply = bool(
                     preview
                     and (self._lbe_positive_authorized
                          or (pending_plan is not None
                              and pending_plan.workspace == ctx.name)
-                         or (mvp_configured and self._mvp_tools is not None))
+                         or (mvp_supported and self._mvp_tools is not None))
                     and self._lbe_owner is not None
                     and self._lbe_owner.can_admit_any((ctx.name,)))
                 result.append({
@@ -2441,13 +2445,18 @@ class WorkspaceService:
                 and any(ctx.settings.exec_apply_enabled
                         and ctx.settings.exec_paths
                         for ctx in self._workspaces.values()))
-            mvp_names = tuple(
+            from .lbe_mvp_readiness import has_supported_six_command_scope
+            mvp_scoped_names = tuple(
                 ctx.name for ctx in self._workspaces.values()
                 if (ctx.settings.exec_enabled
                     and ctx.settings.exec_apply_enabled
-                    and ctx.name not in self._exec_active))
+                    and has_supported_six_command_scope(
+                        ctx.settings.exec_paths, ctx.settings.exec_runners)))
+            mvp_scope_ready = bool(mvp_scoped_names)
+            mvp_names = tuple(name for name in mvp_scoped_names
+                              if name not in self._exec_active)
             mvp_positive_ready = bool(
-                v2_state_healthy and mvp_configured
+                v2_state_healthy and mvp_configured and mvp_names
                 and self._mvp_tools is not None
                 and self._lbe_owner.can_admit_any(mvp_names))
             v2_available = bool(
@@ -2464,6 +2473,21 @@ class WorkspaceService:
                 is_v2 and effective and durability == "healthy"
                 and not self._closing and eligible_names
                 and len(self._exec_active) < 4)
+            # Pure read-only explanation: never an execution authorization.
+            from .lbe_mvp_readiness import summarize_mvp_readiness
+            mvp_readiness = (
+                summarize_mvp_readiness(
+                    enabled=effective, apply_configured=mvp_configured,
+                    scope_ready=mvp_scope_ready,
+                    tools_ready=self._mvp_tools is not None,
+                    durability=durability,
+                    owner_unavailable=bool(lbe_state and lbe_state["unavailable"]),
+                    capacity_exhausted=bool(
+                        lbe_state and lbe_state["capacity_exhausted"]),
+                    closing=self._closing, apply_eligible=mvp_positive_ready,
+                    preview_eligible=v2_preview_available,
+                ) if is_v2 else None
+            )
             return {"name": "Mac File Gateway", "version": "2.5.0", "mode": "multi",
                     "workspace_count": len(self._workspaces),
                     **({"config_schema_version": 2}
@@ -2478,7 +2502,7 @@ class WorkspaceService:
                         (is_v2 and (
                             self._lbe_positive_authorized
                             or r006_one_shot_ready
-                            or (mvp_configured
+                            or (mvp_configured and mvp_scope_ready
                                 and self._mvp_tools is not None)))),
                     "file_read_only": not self.any_write, "path_base": ".",
                     "workspaces": self.list_workspaces()["workspaces"],
@@ -2496,6 +2520,7 @@ class WorkspaceService:
                             "apply_configured": mvp_configured,
                             "tool_selection_ready": (
                                 self._mvp_tools is not None),
+                            "mvp_readiness": mvp_readiness,
                             "supported_apply_commands": [
                                 "py-direct-pytest", "py-direct-compileall",
                                 "py-pipenv-pytest", "go-test", "go-vet",

@@ -84,3 +84,127 @@ It deliberately refuses when ANY exec-state entry (including a symlink or
 incomplete previous attempt) already exists. Never use it to recover a missing
 old lock, UNKNOWN/PREPARED/RUNNING/RETIRED state, corrupt history or a live
 Gateway; those cases remain blocked for separate operator investigation.
+
+## Read-only six-command status diagnostics (usability milestone 001)
+
+Schema-v2 `GET /info`, `GET /health`, and existing MCP `gateway_info`
+now expose the same `exec_policy.mvp_readiness` fields. They derive from
+one service status snapshot, perform no file probing, do not mutate
+permissions, and launch NO Python/Pipenv/Go child.
+
+For an already authorized local status read, `GET /info` (or official MCP
+`gateway_info`) includes, for example:
+
+    "mvp_readiness": {
+      "six_command_apply": "blocked",
+      "preview": "eligible",
+      "blocking_codes": ["dual_opt_in_or_scope_missing"],
+      "evidence_grade": "runtime_status_only_not_native_test"
+    }
+
+Fixed codes are `exec_paths_disabled`,
+`dual_opt_in_or_scope_missing`, `six_command_scope_unavailable`,
+`selected_tools_unavailable`,
+`historical_state_quarantined`, `historical_state_unavailable`,
+`original_child_owner_unavailable`,
+`original_child_capacity_exhausted`, `service_closing`, and
+`workspace_original_child_slot_unavailable`. Codes are non-sensitive:
+they never reveal absolute roots, tool paths, process identifiers, files,
+secret values or private owner state. A blocked status may list several
+causes. Do not erase/recreate an old Exec state or lock to clear a code.
+
+**An "eligible" status is NOT authorization, actual native qualification,
+or integration PASS.** It means only aggregate configuration/tool/state/slot
+readiness at this instant; each request must still pass command, Workspace,
+cwd, runner, binary identity and all service/launcher checks. Preview is
+separate from APPLY, and an unknown timed-out/lost ACK MUST NOT be retried
+automatically. Git/File permissions are independent.
+
+### Official SDK ClientSession — SAFE T0 coverage
+
+`tests/test_lbe_mvp_usability_t0.py` uses the official pinned MCP SDK
+`ClientSession` through its in-memory `Client(build_multi_mcp(service))`
+in legacy and modern modes. It checks all six fixed command PREVIEWS,
+a missing-opt-in apply refusal, six FakeWorker applies, and illegal/cross-
+Workspace refusals. Every `subprocess.Popen` is hard-trapped during the
+test. The separate REST/MCP-server T0 regression checks `/info`,
+`/health` and `gateway_info` status consistency.
+
+The additional `test_official_streamable_http_client_session_over_inprocess_asgi`
+executes `ClientSession` through the SDK `streamable_http_client` over
+`httpx2.ASGITransport` using the real SDK `/mcp` ASGI handler, with a
+hard `Popen` refusal. It verifies six previews, read-only diagnostic parity,
+and disabled-apply rejection. This is an in-process HTTP-protocol T0, not a
+socket listener, not a user-machine Tunnel test, and not native T1.
+
+These are **not** an actual socket-based ClientSession test, user Mac/Tunnel,
+real Go/Pipenv/Python execution, third-party source/credential qualification
+or production integration. Real native/Tunnel/T1 tests require their own
+authorized target, isolated environment, R10 and independent evidence.
+
+### Read-only official ClientSession example (operator-controlled)
+
+The following is a **read-only example** for an already authorized LOCAL
+loopback Gateway running this candidate. It does not start a Gateway/Tunnel,
+enable Exec or send `run_command`, and has NOT been run on the user's Mac
+by this milestone. Use only an approved endpoint and current SDK 2.3.0:
+
+```python
+import asyncio
+import json
+from mcp.client.session import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+
+async def inspect_only():
+    async with streamable_http_client(
+        "http://127.0.0.1:8765/mcp"
+    ) as (reader, writer):
+        async with ClientSession(reader, writer) as session:
+            await session.initialize()
+            result = await session.call_tool("gateway_info", {})
+            if result.is_error or result.structured_content is None:
+                raise RuntimeError("read-only gateway_info unavailable")
+            policy = result.structured_content["exec_policy"]
+            print(json.dumps(policy["mvp_readiness"], indent=2))
+
+asyncio.run(inspect_only())
+```
+
+This example calls `gateway_info` only; it does not prove the Mac listener,
+ChatGPT Tunnel, installed toolchains, native child, or integration are ready.
+Its expected output is the sanitized read-only eligibility explanation,
+never a command-execution success receipt.
+
+### Nonexecuting operator troubleshooting
+
+1. Read `gateway_info` or `GET /info`; distinguish `preview_available`,
+   `apply_configured`, `tool_selection_ready`, `durability_state` and
+   `mvp_readiness`.
+2. For an explicitly operator-approved schema-v2 setup verify BOTH
+   `server.exec.enabled` and `workspaces.<id>.exec.enabled` and exactly
+   scoped paths. Never auto-migrate paths-only/v1 into positive APPLY.
+3. When permitted, inspect the already-private operator-selected
+   `mvp-exec-tools.json` and existing-only historical owner.lock/state.
+   Do not auto-provision, reset, install foreign tools or run a command to
+   obtain a prettier status.
+4. Select ONLY one of the six request vectors above and use `dry_run=true`.
+   This validates a preview, not a positive grant. Actual apply is outside
+   this unapproved testing environment.
+
+### Fixed status-scope false-positive repair (P2-USABILITY-118-01 / P2-C118-USABILITY-01)
+
+`apply_configured=true` only reports BOTH operator opt-ins and nonempty
+configured `exec.paths`; it does NOT promise a supported six-command row.
+`six_command_apply=eligible` now additionally requires at least one
+configured Workspace with a grant containing an exact S1–S6 cwd and
+the appropriate effective Direct/Pipenv runner-project selection. If all
+scopes are unrelated (e.g. `exec.paths=["notes"]`) or only a Pipenv
+workspace has no `py-pipenv=pipenv` runner mapping, the ready status is
+`blocked`, `blocking_codes` includes
+`six_command_scope_unavailable`, and per-Workspace
+`exec_apply_available=false`. A safe preview for another legal
+scope remains possible. Nothing automatically edits user config,
+widens allowed paths or runs a child. These static compatibility checks
+are NOT a proof that selected binaries, source, current state or actual
+execution will pass at later request time; service and launcher gates
+still decide all requests independently.

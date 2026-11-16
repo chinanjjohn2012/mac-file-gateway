@@ -81,18 +81,34 @@ def _hex(value: object, chars: int, name: str) -> None:
         raise GateDenied(f"{name}: immutable lowercase hex required")
 
 
-def check_command_vector(data: object) -> None:
-    """T0 check of requested vs *effective* argv for one of 18 cases."""
-    x = _mapping(data, frozenset(("command_id", "transport", "workspace", "runner",
-                                  "request_argv", "effective_argv")), "vector")
+def _operator_workspace_id(value: object) -> str:
+    """T0 fixture identity only; never accepts a client-declared grant."""
+    if type(value) is not str or not value.strip() or "\x00" in value:
+        raise GateDenied("operator workspace ID must be an exact nonempty string")
+    return value
+
+
+def check_command_vector(data: object, *, operator_workspace_id: str) -> None:
+    """Validate six-vector data against an independently selected Workspace ID.
+
+    The caller MUST supply operator_workspace_id from a reviewed, trusted
+    Workspace fixture, not from data itself. This inert comparison does not
+    authenticate config, grant Exec, or launch any original child.
+    """
+    expected_id = _operator_workspace_id(operator_workspace_id)
+    x = _mapping(data, frozenset(("command_id", "transport", "workspace_id",
+                                  "cwd", "runner", "request_argv",
+                                  "effective_argv")), "vector")
     code = x["command_id"]
     if type(code) is not str or code not in COMMANDS:
         raise GateDenied("outside six approved commands")
     if type(x["transport"]) is not str or x["transport"] not in TRANSPORTS:
         raise GateDenied("outside three approved transports")
-    workspace, runner, requested, effective = COMMANDS[code]
-    if type(x["workspace"]) is not str or x["workspace"] != workspace:
-        raise GateDenied("workspace changed")
+    cwd, runner, requested, effective = COMMANDS[code]
+    if type(x["workspace_id"]) is not str or x["workspace_id"] != expected_id:
+        raise GateDenied("workspace ID differs from operator fixture")
+    if type(x["cwd"]) is not str or x["cwd"] != cwd:
+        raise GateDenied("canonical command cwd changed")
     if type(x["runner"]) is not str or x["runner"] != runner:
         raise GateDenied("runner changed")
     if type(x["request_argv"]) is not list or tuple(x["request_argv"]) != requested:
@@ -103,12 +119,15 @@ def check_command_vector(data: object) -> None:
         raise GateDenied("argv type changed")
 
 
-def canonical_vector(code: str, transport: str) -> dict[str, object]:
+def canonical_vector(code: str, transport: str, *, operator_workspace_id: str) -> dict[str, object]:
+    """Produce a data-only candidate for the caller's trusted Workspace fixture."""
+    trusted_id = _operator_workspace_id(operator_workspace_id)
     if type(code) is not str or type(transport) is not str or code not in COMMANDS or transport not in TRANSPORTS:
         raise GateDenied("not a fixed command or route")
-    ws, runner, requested, effective = COMMANDS[code]
-    return dict(command_id=code, transport=transport, workspace=ws, runner=runner,
-                request_argv=list(requested), effective_argv=list(effective))
+    cwd, runner, requested, effective = COMMANDS[code]
+    return dict(command_id=code, transport=transport, workspace_id=trusted_id,
+                cwd=cwd, runner=runner, request_argv=list(requested),
+                effective_argv=list(effective))
 
 
 @dataclass(frozen=True)

@@ -203,3 +203,68 @@ def test_official_client_session_six_fake_worker_applies_and_negatives(
             for row in SIX_FIXED_COMMANDS]
     finally:
         service.close()
+
+def test_official_streamable_http_client_session_over_inprocess_asgi(
+        mvp, monkeypatch):
+    """Official client + SDK HTTP route, no TCP socket/host Tunnel or native child.
+
+    httpx2.ASGITransport keeps every client request in this Python process.
+    Unlike direct Client(server), this exercises actual SDK HTTP request and
+    protocol handling against the configured streamable_http_app().
+    The separate Boundary/REST auth policies retain their existing tests.
+    """
+    import httpx2
+    from mcp.client.streamable_http import streamable_http_client
+    from gateway.mcp_transport import build_streamable_http_app
+    from gateway.multi_admission import MAX_RAW_BODY
+
+    make, *_ = mvp
+    service = make(server_enabled=False, workspace_enabled=True)
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda *_a, **_kw: pytest.fail("ASGI T0 spawned child"))
+    sdk = build_multi_mcp(service)
+    app = build_streamable_http_app(sdk, port=8765,
+                                   max_request_body_size=MAX_RAW_BODY)
+
+    async def exercise():
+        # Explicit SDK lifespan, not a real listener. Every HTTP request stays
+        # in the ASGITransport; there is no Mac, tunnel or outbound network.
+        async with sdk.session_manager.run():
+            async with httpx2.AsyncClient(
+                transport=httpx2.ASGITransport(app=app),
+                base_url="http://127.0.0.1:8765",
+                timeout=httpx2.Timeout(30.0, read=300.0),
+            ) as http:
+                async with streamable_http_client(
+                    "http://127.0.0.1:8765/mcp",
+                    http_client=http,
+                ) as (reader, writer):
+                    async with ClientSession(reader, writer) as session:
+                        await session.initialize()
+                        names = {tool.name for tool in (
+                            await session.list_tools()).tools}
+                        assert {"gateway_info", "run_command"} <= names
+                        info = (await session.call_tool(
+                            "gateway_info", {})).structured_content
+                        diagnosis = info["exec_policy"]["mvp_readiness"]
+                        assert diagnosis["six_command_apply"] == "blocked"
+                        assert "dual_opt_in_or_scope_missing" in (
+                            diagnosis["blocking_codes"])
+                        for row in SIX_FIXED_COMMANDS:
+                            response = await session.call_tool("run_command", {
+                                "workspace": "a", "cwd": row.cwd,
+                                "argv": list(row.requested_argv),
+                                "dry_run": True})
+                            assert response.is_error is not True
+                            assert response.structured_content["status"] == "preview"
+                        rejected = await session.call_tool("run_command", {
+                            "workspace": "a", "cwd": "py-direct",
+                            "argv": ["python", "-m", "pytest", "-q"],
+                            "dry_run": False})
+                        assert rejected.is_error is True
+                        assert rejected.structured_content["error"] == "exec_disabled"
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        service.close()

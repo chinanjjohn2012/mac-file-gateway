@@ -129,6 +129,13 @@ Workspace refusals. Every `subprocess.Popen` is hard-trapped during the
 test. The separate REST/MCP-server T0 regression checks `/info`,
 `/health` and `gateway_info` status consistency.
 
+The additional `test_official_streamable_http_client_session_over_inprocess_asgi`
+executes `ClientSession` through the SDK `streamable_http_client` over
+`httpx2.ASGITransport` using the real SDK `/mcp` ASGI handler, with a
+hard `Popen` refusal. It verifies six previews, read-only diagnostic parity,
+and disabled-apply rejection. This is an in-process HTTP-protocol T0, not a
+socket listener, not a user-machine Tunnel test, and not native T1.
+
 These are **not** an actual socket-based ClientSession test, user Mac/Tunnel,
 real Go/Pipenv/Python execution, third-party source/credential qualification
 or production integration. Real native/Tunnel/T1 tests require their own

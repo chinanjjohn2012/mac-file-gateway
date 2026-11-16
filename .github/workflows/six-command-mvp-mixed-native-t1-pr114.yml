@@ -1,0 +1,88 @@
+name: six-command-mvp-mixed-native-t1-pr114
+
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  pr114-disposable-macos-15-arm64-native-mixed:
+    if: >-
+      github.event.pull_request.number == 114 &&
+      github.event.pull_request.head.repo.full_name == 'chinanjjohn2012/mac-file-gateway' &&
+      github.event.pull_request.head.ref == 'feat/lbe-five-day-d2-nonoperative-prelaunch-20261106' &&
+      github.event.label.name == 'mvp-mixed-native-t1-approved' &&
+      github.actor == 'chinanjjohn2012'
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONNOUSERSITE: "1"
+      PYTHONPATH: ""
+      PIP_NO_INPUT: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - name: Checkout exact Head without persisted credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Admit G05 source Head Tree and Manifest before imports
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 -I -S tools/g05_ci_admission.py --expected-head "$G05_EXPECTED_HEAD"
+
+      - name: Verify hosted disposable macOS 15 ARM64
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -eu
+          test "$(uname -s)" = "Darwin"
+          test "$(uname -m)" = "arm64"
+          test "$RUNNER_OS" = "macOS"
+          test "$RUNNER_ARCH" = "ARM64"
+          test "$RUNNER_ENVIRONMENT" = "github-hosted"
+          test "${ImageOS:-}" = "macos15"
+          test -n "${ImageVersion:-}"
+          test -n "$RUNNER_TEMP"
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up disposable Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: false
+
+      - name: Install public test dependencies
+        run: |
+          set -eu
+          python -m pip install --no-cache-dir -r requirements-dev.txt 'pipenv>=2024,<2027'
+          python -m pip check
+
+      - name: Run ONE real S1 child overlapping real Git and File
+        env:
+          G05_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MVP_MIXED_T1_APPROVED_PR: "114"
+          GOPROXY: "off"
+          GOSUMDB: "off"
+        run: |
+          set -eu
+          python -m tools.mvp_native_mixed_t1
+
+      - name: Preserve mixed T1 receipt even when failed
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr114-mixed-t1-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/mvp-native-mixed-t1-result.json
+          if-no-files-found: warn
+          retention-days: 7

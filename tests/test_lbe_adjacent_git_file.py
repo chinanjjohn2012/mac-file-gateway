@@ -99,7 +99,7 @@ def test_v2_granted_git_file_and_exec_preview_in_same_disposable_service(
         svc.close()
 
 
-def test_v2_same_instance_real_git_and_file_write_after_proof_denial_and_unknown(
+def test_v2_same_instance_real_git_and_file_write_after_disabled_denial_and_unknown(
     tmp_path: Path, monkeypatch,
 ):
     """D0 §0.1: one actual service keeps legitimate Git/File after both denials.
@@ -176,7 +176,7 @@ def test_v2_same_instance_real_git_and_file_write_after_proof_denial_and_unknown
                 svc.invoke_exec(
                     "a", "src", ["python", "ok.py"],
                     timeout_seconds=5, dry_run=False)
-            assert denied.value.code == "exec_cleanup_proof_required"
+            assert denied.value.code == "exec_disabled"
             assert svc._lbe_owner.snapshot()["reserved_slots"] == 0
         assert list((private / "exec-state").glob("r-*.json")) == []
 
@@ -237,5 +237,126 @@ def test_v2_same_instance_real_git_and_file_write_after_proof_denial_and_unknown
         assert denied_exec.value.code == "exec_disabled"
         assert not (b / "not-allowed.txt").exists()
         assert marker.read_bytes() == original_unknown
+    finally:
+        svc.close()
+
+
+def test_positive_optin_fake_worker_preserves_real_git_file_and_unknown(
+        tmp_path: Path, monkeypatch):
+    """SAFE T0: dual-opt-in positive-path FakeWorker plus REAL Git and File.
+
+    Real native Exec + Git/File in this same service remains NOT_RUN; this
+    regression checks the shared authorization and state paths only.  Never
+    launch a Python, Pipenv or Go child in this test.
+    """
+    import json
+
+    from gateway.lbe_worker import LbeWorker
+
+    a = tmp_path / "projects" / "a"
+    (a / "py-direct" / "src").mkdir(parents=True)
+    (a / "py-direct" / "src" / "main.py").write_text("VALUE = 42\n")
+    (a / "py-direct" / "safe.txt").write_text("BEFORE\n")
+    subprocess.run(["git", "init", "-q"], cwd=a, check=True,
+                   capture_output=True)
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    tools = tmp_path / "operator-tools"
+    tools.mkdir()
+    for name in ("python", "go"):
+        f = tools / name
+        f.write_bytes(b"\x7fELF fake, NEVER EXECUTED")
+        f.chmod(0o700)
+    script = tools / "pipenv"
+    script.write_bytes(
+        b"#!" + str(tools / "python").encode() +
+        b"\n# fake pipenv, NEVER EXECUTED\n")
+    script.chmod(0o700)
+    selection = private / "mvp-exec-tools.json"
+    selection.write_text(json.dumps({
+        "executables": {name: str(tools / name)
+                        for name in ("python", "pipenv", "go")},
+    }))
+    selection.chmod(0o600)
+    state = ExecStateStore(private / "exec-state",
+                           workspace_roots=(str(a),))
+    state.close()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    config = parse_workspace_config({
+        "schema_version": 2,
+        "server": {"port": 8765, "transport": "http",
+                   "exec": {"enabled": True}, "git": {"enabled": True}},
+        "workspaces": {
+            "a": {
+                "root": str(a),
+                "exec": {"enabled": True, "paths": ["py-direct"],
+                         "runners": []},
+                "write": {"enabled": True, "paths": ["py-direct"]},
+                "git": {"allowed_commands": ["status"]},
+            },
+        },
+    })
+    svc = WorkspaceService(
+        config, config_dir=private,
+        inventory=ActiveRuntimeInventory(paths=(runtime,)))
+    calls = []
+    def fake_worker(self, plan, *, cancelled=None, **kwargs):
+        calls.append((plan.workspace, plan.cwd, plan.requested_argv))
+        return {
+            "status": "exited", "executed": True, "exit_code": 0,
+            "stdout": "", "stderr": "", "timed_out": False,
+            "output_complete": True, "pipe_reader_failed": False,
+            "cleanup_proven": False, "process_may_be_running": True,
+            "full_descendant_tree_clean": "not_proven",
+        }
+
+    def real_git_and_file_write(expected: str, next_text: str):
+        git = svc.invoke_git("a", "status", dry_run=False,
+                             timeout_seconds=30)
+        assert git["exit_code"] == 0
+        assert git["execute_started"] is True
+        before = svc.invoke("a", "read_file", "py-direct/safe.txt")
+        assert expected.rstrip("\n") in before["content"]
+        svc.invoke("a", "write_file", "py-direct/safe.txt", next_text,
+                   before["file_sha256"], dry_run=False)
+        assert (a / "py-direct" / "safe.txt").read_text() == next_text
+
+    try:
+        assert svc.info()["exec_policy"]["available"] is True
+        assert svc.info()["exec_policy"]["apply_configured"] is True
+        real_git_and_file_write("BEFORE\n", "MIDDLE\n")
+        with monkeypatch.context() as patch:
+            patch.setattr(LbeWorker, "run", fake_worker)
+            patch.setattr(subprocess, "Popen",
+                          lambda *args, **kwargs: pytest.fail(
+                              "native Exec forbidden in mixed SAFE T0"))
+            result = svc.invoke_exec(
+                "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                dry_run=False)
+        assert result["status"] == "exited"
+        assert calls == [
+            ("a", "py-direct", ("python", "-m", "pytest", "-q"))]
+        real_git_and_file_write("MIDDLE\n", "AFTER\n")
+        stat_root = a.stat()
+        store = svc._exec_state
+        attempt = store.prepare("a", (stat_root.st_dev, stat_root.st_ino))
+        store.mark_unknown(attempt)
+        marker = private / "exec-state" / ("r-" + attempt + ".json")
+        unknown_original = marker.read_bytes()
+        with monkeypatch.context() as patch:
+            patch.setattr(subprocess, "Popen",
+                          lambda *args, **kwargs: pytest.fail(
+                              "quarantined native Exec forbidden"))
+            with pytest.raises(GatewayError) as denied:
+                svc.invoke_exec(
+                    "a", "py-direct", ["python", "-m", "pytest", "-q"],
+                    dry_run=False)
+        assert denied.value.code == "exec_quarantined"
+        real_git_and_file_write("AFTER\n", "STILL_ALLOWED\n")
+        assert marker.read_bytes() == unknown_original
+        assert store.durability_state == "quarantined"
+        with pytest.raises(GatewayError):
+            svc.invoke_git("missing", "status", dry_run=False)
     finally:
         svc.close()

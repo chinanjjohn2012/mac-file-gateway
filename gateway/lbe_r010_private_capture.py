@@ -1,0 +1,202 @@
+"""One-use R010 source-only capture of a real Worker reservation and result.
+
+This is a private identity correlation object, NOT an Owner T1 Grant. It is
+created from the already-burned, exact-row Job journal and attached by LbeWorker
+immediately after DirectChildOwner.reserve(), BEFORE the launcher callback.
+The actual Worker stores a detached result snapshot; a user-supplied REST/
+MCP result dict, later fake ACK, second reservation or changed dictionary
+cannot produce a trusted runtime receipt. Even a healthy FakeChild does not
+authorize Go/Pipenv/Python PRODUCT_T1 or advance the Job to row 2.
+"""
+from __future__ import annotations
+
+import threading
+from typing import Any
+
+from .lbe_direct_owner import DirectChildOwner, _Reservation
+from .lbe_worker import LbeWorkPlan
+
+_MARKER = object()
+
+
+class R010PrivateCaptureDenied(ValueError):
+    """Private source capture was mismatched, missing or consumed."""
+
+
+def _detached_worker_scalars(result: dict[str, Any]) -> dict[str, Any]:
+    """Copy only actual Worker scalar/list-of-strings result values.
+
+    The public response can be edited after LbeWorker.run returns. Its
+    mutable nested argv lists must never be the private Journal's evidence.
+    Reject unfamiliar object graphs instead of invoking custom copy hooks.
+    """
+    if type(result) is not dict or not 1 <= len(result) <= 48:
+        raise R010PrivateCaptureDenied("unqualified Worker result structure")
+    copy: dict[str, Any] = {}
+    for name, value in result.items():
+        if type(name) is not str or not 1 <= len(name) <= 100:
+            raise R010PrivateCaptureDenied("unqualified Worker result key")
+        if type(value) is list:
+            if (len(value) > 64
+                    or any(type(part) is not str or len(part) > 4096
+                           for part in value)):
+                raise R010PrivateCaptureDenied("unqualified Worker list")
+            copy[name] = list(value)
+        elif type(value) in (str, int, bool) or value is None:
+            copy[name] = value
+        else:
+            raise R010PrivateCaptureDenied("non-scalar Worker result")
+    return copy
+
+
+class R010PrivateWorkerCapture:
+    """Source only, never returns a spawn, grant or execution capability."""
+
+    __slots__ = (
+        "_owner", "_plan", "_journal", "_row", "_nonce_sha256", "_reservation",
+        "_result", "_consumed", "_lock", "_source_binding",
+    )
+
+    def __init__(self, marker: object, *, owner: DirectChildOwner,
+                 plan: LbeWorkPlan, journal: object, nonce_sha256: str,
+                 row: int = 1):
+        if (marker is not _MARKER or type(owner) is not DirectChildOwner
+                or type(plan) is not LbeWorkPlan
+                or type(nonce_sha256) is not str or len(nonce_sha256) != 64
+                or type(row) is not int or not 1 <= row <= 6):
+            raise R010PrivateCaptureDenied("not a journal-minted source capture")
+        self._owner = owner
+        self._plan = plan
+        self._journal = journal
+        self._row = row
+        self._nonce_sha256 = nonce_sha256
+        self._reservation = None
+        self._result = None
+        self._consumed = False
+        self._lock = threading.Lock()
+        self._source_binding = None
+
+    @classmethod
+    def _issue_source_only(cls, *, journal: object, owner: DirectChildOwner,
+                           plan: LbeWorkPlan,
+                           nonce_sha256: str,
+                           row: int = 1) -> "R010PrivateWorkerCapture":
+        """Called only by the first-row journal, never public request data."""
+        return cls(_MARKER, owner=owner, plan=plan, journal=journal,
+                   nonce_sha256=nonce_sha256, row=row)
+
+    def _bind_six_source(self, *, service: object, ctx: object,
+                         source_plan: object) -> None:
+        """Bind the original source service instance before any Worker step."""
+        from .lbe_r010_six_service import (
+            R010SixSourcePlan, recheck_r010_service_six_source,
+        )
+        from .workspaces import WorkspaceService, WorkspaceContext
+        if (type(service) is not WorkspaceService
+                or type(ctx) is not WorkspaceContext
+                or type(source_plan) is not R010SixSourcePlan
+                or service._lbe_owner is not self._owner
+                or source_plan.rows[self._row - 1].candidate.plan is not self._plan
+                or getattr(self._journal, "_six_source_plan", None)
+                   is not source_plan):
+            raise R010PrivateCaptureDenied("source binding not from same service")
+        try:
+            recheck_r010_service_six_source(
+                service=service, ctx=ctx, snapshot=source_plan)
+        except Exception:
+            raise R010PrivateCaptureDenied(
+                "source drift before Worker binding") from None
+        with self._lock:
+            if self._source_binding is not None or self._consumed:
+                raise R010PrivateCaptureDenied(
+                    "source service binding already consumed")
+            self._source_binding = (service, ctx, source_plan)
+
+    def _recheck_six_source(self) -> None:
+        """Second first-party check at the actual Worker launch boundary."""
+        with self._lock:
+            binding = self._source_binding
+        if binding is None:
+            # Old disposable FakeChild T0 may create an unbound SOURCE_ONLY
+            # receipt; it never grants PRODUCT_T1 or allows row advancement.
+            try:
+                self._journal._require_active_private_capture(self, None)
+            except Exception:
+                raise R010PrivateCaptureDenied(
+                    "private capture no longer bound to a live Job") from None
+            return
+        from .lbe_r010_six_service import recheck_r010_service_six_source
+        try:
+            self._journal._require_active_private_capture(
+                self, binding[2])
+            recheck_r010_service_six_source(
+                service=binding[0], ctx=binding[1],
+                snapshot=binding[2])
+            self._journal._require_active_private_capture(
+                self, binding[2])
+        except Exception:
+            raise R010PrivateCaptureDenied(
+                "service source or Job identity drift before launcher"
+            ) from None
+
+    def _check_for_worker(self, owner: DirectChildOwner,
+                          plan: LbeWorkPlan) -> None:
+        with self._lock:
+            if (self._owner is not owner or self._plan is not plan
+                    or self._reservation is not None or self._result is not None
+                    or self._consumed):
+                raise R010PrivateCaptureDenied(
+                    "capture not bound to this exact Worker plan")
+        self._recheck_six_source()
+
+    def _bind_reserved(self, owner: DirectChildOwner,
+                       reservation: _Reservation,
+                       plan: LbeWorkPlan) -> None:
+        with self._lock:
+            if (self._owner is not owner or self._plan is not plan
+                    or self._reservation is not None or self._consumed
+                    or type(reservation) is not _Reservation
+                    or reservation.owner is not owner
+                    or reservation.workspace != plan.workspace):
+                raise R010PrivateCaptureDenied(
+                    "Worker reservation differs from first-row capture")
+            self._reservation = reservation
+
+    def _record_worker_result(self, owner: DirectChildOwner,
+                              reservation: _Reservation,
+                              plan: LbeWorkPlan,
+                              result: dict[str, Any]) -> None:
+        with self._lock:
+            if (self._owner is not owner or self._plan is not plan
+                    or self._reservation is not reservation
+                    or self._result is not None or self._consumed
+                    or type(result) is not dict):
+                raise R010PrivateCaptureDenied(
+                    "returned Worker result is not from reserved attempt")
+            self._result = _detached_worker_scalars(result)
+
+    def _take_for_journal(self, journal: object):
+        """Consume EXACT original private references once, never an ACK."""
+        with self._lock:
+            if (self._journal is not journal or self._consumed
+                    or self._reservation is None or self._result is None):
+                raise R010PrivateCaptureDenied(
+                    "first-row Worker capture not complete or already used")
+            self._consumed = True
+            return (self._owner, self._reservation,
+                    self._plan, _detached_worker_scalars(self._result),
+                    self._nonce_sha256)
+
+    def status(self) -> dict[str, object]:
+        """No reservation, PID, secret, nonce or output in the diagnostic."""
+        with self._lock:
+            return {
+                "status": "PRIVATE_WORKER_SOURCE_CAPTURE_ONLY",
+                "row": self._row,
+                "reservation_bound": self._reservation is not None,
+                "worker_result_recorded": self._result is not None,
+                "consumed": self._consumed,
+                "same_service_source_bound": self._source_binding is not None,
+                "native_launch_allowed": False,
+                "row_positive_success": False,
+            }

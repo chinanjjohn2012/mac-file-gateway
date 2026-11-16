@@ -23,7 +23,8 @@ from test_lbe_mvp_apply_t0 import mvp  # existing disposable fake-tool fixture
 
 
 def test_diagnostic_pure_failure_and_success_oracles():
-    p = dict(enabled=False, apply_configured=False, tools_ready=False,
+    p = dict(enabled=False, apply_configured=False, scope_ready=False,
+             tools_ready=False,
              durability="disabled", owner_unavailable=False,
              capacity_exhausted=False, closing=False, apply_eligible=False,
              preview_eligible=False)
@@ -34,7 +35,8 @@ def test_diagnostic_pure_failure_and_success_oracles():
     assert denied["evidence_grade"] == "runtime_status_only_not_native_test"
     ok = summarize_mvp_readiness(**{
         **p, "enabled": True, "apply_configured": True,
-        "tools_ready": True, "durability": "healthy",
+        "scope_ready": True, "tools_ready": True,
+        "durability": "healthy",
         "apply_eligible": True, "preview_eligible": True})
     assert ok["blocking_codes"] == []
     assert ok["six_command_apply"] == "eligible"
@@ -51,7 +53,8 @@ def test_diagnostic_pure_failure_and_success_oracles():
 def test_each_safety_status_has_fixed_fail_closed_code(
         durability, owner, busy, closing, code):
     state = summarize_mvp_readiness(
-        enabled=True, apply_configured=True, tools_ready=True,
+        enabled=True, apply_configured=True, scope_ready=True,
+        tools_ready=True,
         durability=durability, owner_unavailable=owner,
         capacity_exhausted=busy, closing=closing,
         apply_eligible=False, preview_eligible=True)
@@ -266,5 +269,151 @@ def test_official_streamable_http_client_session_over_inprocess_asgi(
 
     try:
         asyncio.run(exercise())
+    finally:
+        service.close()
+
+
+# Independent literal expected scopes: never manufacture expected S1..S6
+# from the same production SIX_FIXED_COMMANDS tuple used by the oracle.
+@pytest.mark.parametrize("paths,runners,expected", [
+    (("notes",), (), False),
+    (("py-direct/src",), (), False),
+    (("py-pipenv",), (), False),  # S3 REQUIRES explicit Pipenv runner
+    (("py-direct",), ("py-direct=pipenv",), False),
+    (("py-direct",), (), True),  # S1/S2 Direct, root exactly matches cwd
+    (("go-project",), (), True),  # S4/S5 (and supported S6)
+    (("py-pipenv",), ("py-pipenv=pipenv",), True),
+    ((".",), (), True),  # Go direct even when root is nearest scope
+    ((".",), ("py-direct=direct",), True),
+    ((".",), ("go-project=pipenv",), True),  # Go ignores Python runner
+])
+def test_independent_literal_six_command_scope_matrix(paths, runners, expected):
+    from gateway.lbe_mvp_readiness import has_supported_six_command_scope
+    assert has_supported_six_command_scope(paths, runners) is expected
+
+
+def _make_scope_variant(mvp, *, paths, runners):
+    """Real parser and same disposable historical private state/tools."""
+    from gateway.workspaces import ActiveRuntimeInventory, WorkspaceService
+    from gateway.workspaces_config import parse_workspace_config
+    _make, root, private, *_ = mvp
+    parsed = parse_workspace_config({
+        "schema_version": 2,
+        "server": {"port": 8765, "transport": "http",
+                   "exec": {"enabled": True}},
+        "workspaces": {
+            "a": {"root": str(root),
+                  "exec": {"enabled": True, "paths": list(paths),
+                           "runners": list(runners)}},
+        },
+    })
+    return WorkspaceService(parsed, config_dir=private,
+                            inventory=ActiveRuntimeInventory(
+                                paths=(private.parent / "runtime",)))
+
+
+@pytest.mark.parametrize("paths,runners,eligible", [
+    (("notes",), (), False),
+    (("py-pipenv",), (), False),
+    (("py-direct",), ("py-direct=pipenv",), False),
+    (("py-direct",), (), True),
+    (("go-project",), (), True),
+    (("py-pipenv",), ("py-pipenv=pipenv",), True),
+])
+def test_real_service_scope_and_runner_readiness_not_false_eligible(
+        mvp, monkeypatch, paths, runners, eligible):
+    _make, root, *_ = mvp
+    (root / "notes").mkdir(exist_ok=True)
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda *_a, **_k: pytest.fail("SAFE T0 started child"))
+    service = _make_scope_variant(mvp, paths=paths, runners=runners)
+    try:
+        before = service.info()
+        diag = before["exec_policy"]["mvp_readiness"]
+        assert before["exec_policy"]["apply_configured"] is True
+        assert before["exec_policy"]["tool_selection_ready"] is True
+        assert diag["six_command_apply"] == ("eligible" if eligible else "blocked")
+        assert before["exec_policy"]["available"] is eligible
+        assert before["exec_policy"]["completion_capability"] == (
+            "best_effort" if eligible else "none")
+        assert before["read_only"] is not eligible
+        assert before["workspaces"][0]["exec_apply_available"] is eligible
+        if not eligible:
+            assert "six_command_scope_unavailable" in diag["blocking_codes"]
+            assert diag["preview"] == "eligible"
+            # A legal unrelated-scope Python PREVIEW remains nonspawning.
+            if paths == ("notes",):
+                assert service.invoke_exec(
+                    "a", "notes", ["python", "-m", "pytest", "-q"],
+                    dry_run=True)["status"] == "preview"
+            with pytest.raises(Exception):
+                # No static diagnosis value is an execution authorization.
+                service.invoke_exec("a", "py-direct",
+                                    ["python", "-m", "pytest", "-q"],
+                                    dry_run=False)
+        else:
+            assert diag["blocking_codes"] == []
+        assert service.info() == before
+    finally:
+        service.close()
+
+
+def test_missing_six_scope_is_consistent_across_rest_mcp_health_and_list(
+        mvp, monkeypatch):
+    from starlette.testclient import TestClient
+    _make, root, *_ = mvp
+    (root / "notes").mkdir(exist_ok=True)
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda *_a, **_k: pytest.fail("SAFE T0 spawned"))
+    service = _make_scope_variant(mvp, paths=("notes",), runners=())
+    headers = {"Accept": "application/json, text/event-stream",
+               "Content-Type": "application/json"}
+    try:
+        with TestClient(create_multi_app(service),
+                        base_url="http://127.0.0.1:8765") as http:
+            info = http.get("/info").json()
+            assert info["exec_policy"]["available"] is False
+            assert info["workspaces"][0]["exec_apply_configured"] is True
+            assert info["workspaces"][0]["exec_apply_available"] is False
+            assert http.get("/health").json()["exec_policy"] == info["exec_policy"]
+            assert http.get("/workspaces").json() == service.list_workspaces()
+            r = http.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "id": 17, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                           "clientInfo": {"name": "safe-t0-scope", "version": "1"}}})
+            assert r.status_code == 200
+            http.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "method": "notifications/initialized"})
+            r = http.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "id": 18, "method": "tools/call",
+                "params": {"name": "gateway_info", "arguments": {}}})
+            assert r.status_code == 200
+            assert r.json()["result"]["structuredContent"]["exec_policy"][
+                "mvp_readiness"] == info["exec_policy"]["mvp_readiness"]
+    finally:
+        service.close()
+
+
+def test_schema_v1_info_and_workspaces_shape_unmodified_by_v2_readiness(
+        mvp, monkeypatch):
+    from gateway.workspaces import ActiveRuntimeInventory, WorkspaceService
+    from gateway.workspaces_config import parse_workspace_config
+    _make, root, private, *_ = mvp
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda *_a, **_k: pytest.fail("T0 native child"))
+    config = parse_workspace_config({
+        "schema_version": 1,
+        "workspaces": {"a": {"root": str(root), "write": {"enabled": False}}},
+    })
+    service = WorkspaceService(
+        config, config_dir=private,
+        inventory=ActiveRuntimeInventory(
+            paths=(private.parent / "runtime",)))
+    try:
+        info = service.info()
+        assert "mvp_readiness" not in info["exec_policy"]
+        assert "supported_apply_commands" not in info["exec_policy"]
+        assert "exec_apply_available" not in info["workspaces"][0]
+        assert info["exec_policy"]["available"] is False
     finally:
         service.close()

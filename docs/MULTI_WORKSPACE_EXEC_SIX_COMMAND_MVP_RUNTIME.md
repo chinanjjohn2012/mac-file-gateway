@@ -103,7 +103,8 @@ For an already authorized local status read, `GET /info` (or official MCP
     }
 
 Fixed codes are `exec_paths_disabled`,
-`dual_opt_in_or_scope_missing`, `selected_tools_unavailable`,
+`dual_opt_in_or_scope_missing`, `six_command_scope_unavailable`,
+`selected_tools_unavailable`,
 `historical_state_quarantined`, `historical_state_unavailable`,
 `original_child_owner_unavailable`,
 `original_child_capacity_exhausted`, `service_closing`, and
@@ -189,3 +190,21 @@ never a command-execution success receipt.
 4. Select ONLY one of the six request vectors above and use `dry_run=true`.
    This validates a preview, not a positive grant. Actual apply is outside
    this unapproved testing environment.
+
+### Fixed status-scope false-positive repair (P2-USABILITY-118-01 / P2-C118-USABILITY-01)
+
+`apply_configured=true` only reports BOTH operator opt-ins and nonempty
+configured `exec.paths`; it does NOT promise a supported six-command row.
+`six_command_apply=eligible` now additionally requires at least one
+configured Workspace with a grant containing an exact S1–S6 cwd and
+the appropriate effective Direct/Pipenv runner-project selection. If all
+scopes are unrelated (e.g. `exec.paths=["notes"]`) or only a Pipenv
+workspace has no `py-pipenv=pipenv` runner mapping, the ready status is
+`blocked`, `blocking_codes` includes
+`six_command_scope_unavailable`, and per-Workspace
+`exec_apply_available=false`. A safe preview for another legal
+scope remains possible. Nothing automatically edits user config,
+widens allowed paths or runs a child. These static compatibility checks
+are NOT a proof that selected binaries, source, current state or actual
+execution will pass at later request time; service and launcher gates
+still decide all requests independently.

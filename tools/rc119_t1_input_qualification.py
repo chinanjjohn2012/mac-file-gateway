@@ -22,6 +22,16 @@ PROFILE_B_BLOB = "1df5ccf9dbf920ff243e04d0e57f45a82e1b2a13"
 SOURCE_CANDIDATE_ONLY = True
 NATIVE_EXECUTION_AUTHORIZED = False
 MAX_T0_FILE_BYTES = 16 * 1024 * 1024
+_TEMPLATE_FIELDS = frozenset({
+    "schema_version", "kind", "target_repo", "target_pr", "target_head",
+    "target_tree", "control_commit", "control_tree", "source_provenance",
+    "owner_native_test_permission", "network_profile", "replay_consumption", "inputs",
+})
+_ROW_FIELDS = frozenset({
+    "id", "origin_uri", "source_version", "expected_size_bytes",
+    "expected_sha256", "observed_sha256", "fetched_bytes_location",
+    "verified_import_location", "independent_evidence_uri", "evidence_status",
+})
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _COMPONENT = re.compile(r"[A-Za-z0-9_.-]+\Z")
 REQUIRED_IDS = (
@@ -53,10 +63,15 @@ def inspect_input_template(obj: object) -> dict[str, object]:
     errors: list[str] = []
     if not isinstance(obj, Mapping):
         return _report(["NOT_OBJECT"], [])
+    if set(obj) != _TEMPLATE_FIELDS:
+        errors.append("UNEXPECTED_OR_MISSING_TOP_LEVEL_FIELDS")
     for key, expected in (("schema_version", 1),
                           ("kind", "RC119_T1_INPUT_IDENTITY_TEMPLATE_NONATTESTED"),
                           ("target_repo", REPO), ("target_pr", RC_PR),
-                          ("target_head", RC_HEAD), ("target_tree", RC_TREE)):
+                          ("target_head", RC_HEAD), ("target_tree", RC_TREE),
+                          ("control_commit", None), ("control_tree", None),
+                          ("source_provenance", "BASE_AND_TARGET_GIT_IDENTITIES_ONLY_NOT_NATIVE_SELECTED_INPUTS"),
+                          ("network_profile", "PENDING_B_C_AND_OWNER_DECISION")):
         if type(obj.get(key)) is not type(expected) or obj.get(key) != expected:
             errors.append("IDENTITY_MISMATCH:" + key)
     rows = obj.get("inputs")
@@ -67,6 +82,8 @@ def inspect_input_template(obj: object) -> dict[str, object]:
         if not isinstance(item, Mapping):
             errors.append("INPUT_NOT_MAPPING")
             continue
+        if set(item) != _ROW_FIELDS:
+            errors.append("UNEXPECTED_OR_MISSING_INPUT_FIELDS")
         name = item.get("id")
         if type(name) is not str or name not in REQUIRED_IDS:
             errors.append("UNKNOWN_ID")

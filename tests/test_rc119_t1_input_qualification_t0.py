@@ -20,7 +20,10 @@ def sample_template() -> dict:
              "evidence_status": "NOT_ATTESTED"} for x in q.REQUIRED_IDS]
     return {"schema_version": 1, "kind": "RC119_T1_INPUT_IDENTITY_TEMPLATE_NONATTESTED",
             "target_repo": q.REPO, "target_pr": q.RC_PR, "target_head": q.RC_HEAD,
-            "target_tree": q.RC_TREE, "owner_native_test_permission": "NOT_GRANTED",
+            "target_tree": q.RC_TREE, "control_commit": None, "control_tree": None,
+            "source_provenance": "BASE_AND_TARGET_GIT_IDENTITIES_ONLY_NOT_NATIVE_SELECTED_INPUTS",
+            "network_profile": "PENDING_B_C_AND_OWNER_DECISION",
+            "owner_native_test_permission": "NOT_GRANTED",
             "replay_consumption": "NOT_IMPLEMENTED", "inputs": rows}
 
 
@@ -42,6 +45,10 @@ def test_exact_22_unattested_categories_are_not_source_pass():
     lambda x: x.update({"target_pr": True}),
     lambda x: x.update({"owner_native_test_permission": "GRANTED"}),
     lambda x: x.update({"replay_consumption": "CONSUMED"}),
+    lambda x: x.update({"native_execution_authorized": True}),
+    lambda x: x["inputs"][0].update({"claimed_source_closed": True}),
+    lambda x: x.update({"source_provenance": "ALL_SOURCE_CLOSED"}),
+    lambda x: x.update({"control_commit": "0"*40}),
 ])
 def test_bad_template_fails_closed(mutator):
     x = sample_template()

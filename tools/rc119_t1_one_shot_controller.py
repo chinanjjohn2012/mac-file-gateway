@@ -37,7 +37,7 @@ _FIELDS = frozenset({
 })
 _STATES = frozenset({
     "SIX_RESERVED", "SIX_CONSUMED", "SIX_PASSED", "MIXED_CONSUMED",
-    "MIXED_FINALIZED", "FAILED", "REVOKED", "EXPIRED",
+    "MIXED_FINALIZED", "FAILED", "REVOKED", "EXPIRED", "UNKNOWN",
 })
 _TRANSITIONS = {
     "START_SIX": ("SIX_RESERVED", "SIX_CONSUMED"),
@@ -110,13 +110,16 @@ def _view(state: str) -> dict[str, object]:
 class LocalT0Controller:
     """SQLite simulated state, atomic only among clients of ONE local db file.
 
+    Each private SQLite file admits at most ONE synthetic run for its whole
+    lifetime, including after finalization, revocation, UNKNOWN or expiry.
+    That is a conservative local no-rearm oracle, not a global runner lease.
     Caller must use a private synthetic path. This is NOT approved for GitHub
     workflows, shared runners, production, or actual original-child execution.
     """
 
     def __init__(self, db_file: Path) -> None:
         self.db_file = Path(db_file)
-        if self.db_file.exists() and self.db_file.is_symlink():
+        if self.db_file.is_symlink():
             raise ControllerDenied("SYMLINK_DATABASE_DENIED")
         with closing(self._db()) as conn:
             conn.execute("""CREATE TABLE IF NOT EXISTS attempts (
@@ -127,6 +130,10 @@ class LocalT0Controller:
             )""")
 
     def _db(self) -> sqlite3.Connection:
+        # Local synthetic path only. Recheck obvious symlink replacement;
+        # this still DOES NOT close a concurrent pathname/SQLite open race.
+        if self.db_file.is_symlink():
+            raise ControllerDenied("SYMLINK_DATABASE_DENIED")
         # No immutable auth data, tokens or actual foreign sources are stored.
         db = sqlite3.connect(self.db_file, timeout=2.0, isolation_level=None)
         db.execute("PRAGMA busy_timeout=2000")
@@ -138,6 +145,11 @@ class LocalT0Controller:
         try:
             with closing(self._db()) as conn:
                 conn.execute("BEGIN IMMEDIATE")
+                # One disposable ledger represents exactly ONE attempt, forever.
+                # Do not infer process cleanup from FINALIZED/EXPIRED/FAILED.
+                # BEGIN IMMEDIATE serializes competing clients of THIS ONE file.
+                if conn.execute("SELECT 1 FROM attempts LIMIT 1").fetchone():
+                    raise ControllerDenied("DUPLICATE_OR_PRIVATE_LEDGER_ALREADY_USED")
                 conn.execute("""INSERT INTO attempts
                     (run_id, nonce_sha256, fingerprint, expires_at, state)
                     VALUES(?,?,?,?,?)""", (
@@ -159,7 +171,7 @@ class LocalT0Controller:
                                          WHERE run_id=?""", (run_id,)).fetchone()
                 if row is None or row[0] != fp:
                     raise ControllerDenied("UNKNOWN_OR_CHANGED_RUN_BINDING")
-                if row[1] <= now and row[2] not in ("EXPIRED", "REVOKED", "FAILED", "MIXED_FINALIZED"):
+                if row[1] <= now and row[2] not in ("EXPIRED", "REVOKED", "FAILED", "UNKNOWN", "MIXED_FINALIZED"):
                     conn.execute("UPDATE attempts SET state='EXPIRED' WHERE run_id=?", (run_id,))
                     row = (row[0],row[1],"EXPIRED")
                 conn.execute("COMMIT")
@@ -194,7 +206,7 @@ class LocalT0Controller:
                 if row is None or row[0] != fp:
                     raise ControllerDenied("UNKNOWN_OR_CHANGED_RUN_BINDING")
                 if row[1] <= now:
-                    conn.execute("UPDATE attempts SET state='EXPIRED' WHERE run_id=? AND state NOT IN ('REVOKED','FAILED','MIXED_FINALIZED')", (claim["run_id"],))
+                    conn.execute("UPDATE attempts SET state='EXPIRED' WHERE run_id=? AND state NOT IN ('REVOKED','FAILED','UNKNOWN','MIXED_FINALIZED')", (claim["run_id"],))
                     conn.execute("COMMIT")
                     raise ControllerDenied("RUN_EXPIRED")
                 if row[2] != start:
@@ -217,7 +229,7 @@ class LocalT0Controller:
     def cancel(self, claim: object, *, now: int, reason: str = "REVOKED") -> dict[str, object]:
         fp = validate_synthetic_claim(claim, now=now, require_fresh=False)
         assert isinstance(claim, dict)
-        if reason not in ("FAILED", "REVOKED"):
+        if reason not in ("FAILED", "REVOKED", "UNKNOWN"):
             raise ControllerDenied("INVALID_TERMINAL_REASON")
         try:
             with closing(self._db()) as conn:
@@ -226,7 +238,7 @@ class LocalT0Controller:
                                    (claim["run_id"],)).fetchone()
                 if row is None or row[0] != fp:
                     raise ControllerDenied("UNKNOWN_OR_CHANGED_RUN_BINDING")
-                if row[1] in ("MIXED_FINALIZED", "REVOKED", "FAILED", "EXPIRED"):
+                if row[1] in ("MIXED_FINALIZED", "REVOKED", "FAILED", "EXPIRED", "UNKNOWN"):
                     raise ControllerDenied("TERMINAL_STATE_IMMUTABLE")
                 conn.execute("UPDATE attempts SET state=? WHERE run_id=?", (reason,claim["run_id"]))
                 conn.execute("COMMIT")

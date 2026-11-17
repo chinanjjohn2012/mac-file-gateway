@@ -145,12 +145,14 @@ def test_revoke_and_failure_are_terminal(tmp_path):
         a.advance(d,now=NOW,event="START_SIX")
     with pytest.raises(c.ControllerDenied):
         a.cancel(d,now=NOW,reason="FAILED")
+    # A separate synthetic run must use a FRESH disposable DB file.
+    a2=c.LocalT0Controller(tmp_path / "fresh-private-ledger.sqlite")
     d2=claim(run_id=13,nonce_sha256="a"*64)
-    a.reserve(d2,now=NOW)
-    a.advance(d2,now=NOW,event="START_SIX")
-    a.cancel(d2,now=NOW,reason="FAILED")
+    a2.reserve(d2,now=NOW)
+    a2.advance(d2,now=NOW,event="START_SIX")
+    a2.cancel(d2,now=NOW,reason="FAILED")
     with pytest.raises(c.ControllerDenied):
-        a.advance(d2,now=NOW,event="COMPLETE_SIX")
+        a2.advance(d2,now=NOW,event="COMPLETE_SIX")
 
 
 def test_expiration_persists_across_db_reopen_and_denies(tmp_path):
@@ -171,6 +173,92 @@ def test_replayed_changed_bound_identity_denied(tmp_path):
         a.advance(claim(control_head="b"*40),now=NOW+5,event="START_SIX")
     with pytest.raises(c.ControllerDenied,match="RUN_ID_MISMATCH"):
         a.state(run_id=4321,claim=d,now=NOW+5)
+
+
+
+def test_distinct_run_and_nonce_denied_in_same_private_ledger_before_and_after_completion(tmp_path):
+    a=controller(tmp_path)
+    first=claim()
+    second=claim(run_id=9001,nonce_sha256="f"*64)
+    a.reserve(first,now=NOW)
+    with pytest.raises(c.ControllerDenied,match="PRIVATE_LEDGER_ALREADY_USED"):
+        a.reserve(second,now=NOW)
+    a.advance(first,now=NOW,event="START_SIX")
+    a.advance(first,now=NOW,event="COMPLETE_SIX",
+              receipt=c.receipt_for_t0(first,now=NOW,kind="COMPLETE_SIX"))
+    a.advance(first,now=NOW,event="START_MIXED")
+    a.advance(first,now=NOW,event="COMPLETE_MIXED",
+              receipt=c.receipt_for_t0(first,now=NOW,kind="COMPLETE_MIXED"))
+    with pytest.raises(c.ControllerDenied,match="PRIVATE_LEDGER_ALREADY_USED"):
+        a.reserve(second,now=NOW+1)
+
+
+def test_two_different_run_ids_concurrently_only_one_private_reservation(tmp_path):
+    path=tmp_path / "one-db-two-clients.sqlite"
+    a=c.LocalT0Controller(path)
+    b=c.LocalT0Controller(path)
+    first=claim()
+    second=claim(run_id=9002,nonce_sha256="e"*64)
+    def reserve(pair):
+        ctl,d=pair
+        try:
+            ctl.reserve(d,now=NOW)
+            return "RESERVED"
+        except c.ControllerDenied:
+            return "DENIED"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        answers=list(pool.map(reserve,[(a,first),(b,second)]))
+    assert sorted(answers)==["DENIED","RESERVED"]
+
+
+def test_expired_or_revoked_ledger_does_not_silently_rearm(tmp_path):
+    a=controller(tmp_path)
+    first=claim(expires_at=NOW+10)
+    a.reserve(first,now=NOW)
+    assert a.state(run_id=first["run_id"],claim=first,now=NOW+11)["t0_state"]=="EXPIRED"
+    with pytest.raises(c.ControllerDenied,match="PRIVATE_LEDGER_ALREADY_USED"):
+        a.reserve(claim(run_id=9003,nonce_sha256="d"*64),now=NOW+11)
+    # Revoked private run also cannot silently issue a second grant.
+    b=c.LocalT0Controller(tmp_path / "revoked-simulation.sqlite")
+    other=claim(run_id=9004,nonce_sha256="c"*64)
+    b.reserve(other,now=NOW)
+    b.cancel(other,now=NOW,reason="REVOKED")
+    with pytest.raises(c.ControllerDenied,match="PRIVATE_LEDGER_ALREADY_USED"):
+        b.reserve(claim(run_id=9005,nonce_sha256="b"*64),now=NOW)
+
+
+def test_unknown_outcome_is_sticky_terminal_and_blocks_reuse(tmp_path):
+    a=controller(tmp_path)
+    d=claim()
+    a.reserve(d,now=NOW)
+    a.advance(d,now=NOW,event="START_SIX")
+    assert a.cancel(d,now=NOW+2,reason="UNKNOWN")["t0_state"]=="UNKNOWN"
+    assert a.state(run_id=d["run_id"],claim=d,now=NOW+4000)["t0_state"]=="UNKNOWN"
+    with pytest.raises(c.ControllerDenied,match="STATE_REPLAY"):
+        a.advance(d,now=NOW+3,event="COMPLETE_SIX",
+                  receipt=c.receipt_for_t0(d,now=NOW,kind="COMPLETE_SIX"))
+    with pytest.raises(c.ControllerDenied,match="PRIVATE_LEDGER_ALREADY_USED"):
+        a.reserve(claim(run_id=9006,nonce_sha256="a"*64),now=NOW+3)
+
+
+def test_dangling_symlink_ledger_path_denied_even_when_target_missing(tmp_path):
+    link=tmp_path / "dangling-simulation.sqlite"
+    link.symlink_to(tmp_path / "does-not-exist.sqlite")
+    with pytest.raises(c.ControllerDenied,match="SYMLINK_DATABASE_DENIED"):
+        c.LocalT0Controller(link)
+    assert not (tmp_path / "does-not-exist.sqlite").exists()
+
+
+def test_visible_symlink_replacement_before_db_call_denied(tmp_path):
+    a=controller(tmp_path)
+    path=a.db_file
+    path.unlink()
+    replacement=tmp_path / "dummy-replacement.sqlite"
+    replacement.write_bytes(b"synthetic noncredential bytes")
+    path.symlink_to(replacement)
+    with pytest.raises(c.ControllerDenied,match="SYMLINK_DATABASE_DENIED"):
+        a.reserve(claim(),now=NOW)
+    assert replacement.read_bytes()==b"synthetic noncredential bytes"
 
 
 def test_no_actual_execution_mode_or_github_writes():

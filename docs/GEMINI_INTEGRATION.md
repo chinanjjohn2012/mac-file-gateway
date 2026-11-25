@@ -13,6 +13,8 @@
 
 ## 0. 前提
 
+本文以下步骤以 Cloudflare 为例（既有配置默认兼容）。如选择 Microsoft Dev Tunnels，使用独立的 [Dev Tunnel 安装与联调说明](GEMINI_DEVTUNNEL.md)，仍共用 8766 Adapter 和 8765 Gateway；不同时运行两个 Gemini Tunnel。
+
 - Python 3.11+；现有 `release/ms1` 的依赖已安装（项目当前固定 `mcp==2.3.0`）。
 - macOS 安装 `cloudflared`（建议 Named Tunnel 和固定 HTTPS 域名）。**不要求公网 IP、路由器端口映射或云主机**。
 - Gemini Custom Apps 当前要求美国个人账号、18 岁以上、Keep Activity 开启且英文界面；以 [Google 帮助中心](https://support.google.com/gemini/answer/17209137) 为准。

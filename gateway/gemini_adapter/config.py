@@ -11,6 +11,8 @@ import stat
 from urllib.parse import urlsplit
 
 SCOPES = frozenset({"files:read", "files:write", "files:delete"})
+TUNNEL_TYPES = frozenset({"cloudflare", "devtunnel"})
+DEVTUNNEL_HOST = re.compile(r"[a-z0-9][a-z0-9-]{0,56}-8766(?:\.[a-z0-9][a-z0-9-]{0,61})?\.devtunnels\.ms\Z")
 GOOGLE_REDIRECT_HOSTS = frozenset({
     "oauth-redirect.googleusercontent.com",
     "oauth-redirect-sandbox.googleusercontent.com",
@@ -29,6 +31,7 @@ class Config:
     workspaces: tuple[str, ...] = ()
     redirect_uris: tuple[str, ...] = ()
     state_file: Path | None = None
+    tunnel_type: str = "cloudflare"
 
     @property
     def resource(self) -> str:
@@ -61,6 +64,23 @@ class Config:
             return False
 
 
+def validate_public_url(base: str, tunnel_type: str, listen_port: int = 8766,
+                        gateway_port: int = 8765) -> None:
+    if not isinstance(tunnel_type, str) or tunnel_type not in TUNNEL_TYPES:
+        raise ValueError("Unknown Gemini tunnel_type")
+    if not isinstance(base, str):
+        raise ValueError("public_url must be a bare HTTPS origin")
+    p = urlsplit(base)
+    if not (p.scheme == "https" and p.hostname and p.netloc == p.hostname
+            and not p.path and not p.query and not p.fragment):
+        raise ValueError("public_url must be a bare HTTPS origin with no path or port")
+    if tunnel_type == "devtunnel":
+        if listen_port != 8766 or gateway_port != 8765:
+            raise ValueError("Dev Tunnel mode requires Adapter 8766 and Gateway 8765")
+        if not DEVTUNNEL_HOST.fullmatch(p.hostname):
+            raise ValueError("Dev Tunnel public_url must be the exact HTTPS port-8766 devtunnels.ms origin")
+
+
 def _check_private_file(path: Path) -> None:
     info = path.lstat()
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
@@ -71,18 +91,18 @@ def load_config(path: str | Path) -> Config:
     path = Path(path).expanduser().absolute()
     _check_private_file(path)
     data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict) or set(data) - {"public_url", "client_id", "client_secret", "listen_port", "gateway_port", "scopes", "workspaces", "redirect_uris"}:
+    if not isinstance(data, dict) or set(data) - {"public_url", "client_id", "client_secret", "listen_port", "gateway_port", "scopes", "workspaces", "redirect_uris", "tunnel_type"}:
         raise ValueError("Unknown Gemini config field")
     base = data.get("public_url", "")
-    p = urlsplit(base)
-    if not (p.scheme == "https" and p.hostname and p.netloc == p.hostname and not p.path and not p.query and not p.fragment):
-        raise ValueError("public_url must be a bare HTTPS origin with no path or port")
+    tunnel_type = data.get("tunnel_type", "cloudflare")
     for key in ("listen_port", "gateway_port"):
         n = data.get(key, 8766 if key == "listen_port" else 8765)
         if type(n) is not int or not 1024 <= n <= 65535:
             raise ValueError(f"Invalid {key}")
     if data.get("listen_port", 8766) == data.get("gateway_port", 8765):
         raise ValueError("Gemini and Gateway ports must be different")
+    validate_public_url(base, tunnel_type, data.get("listen_port", 8766),
+                        data.get("gateway_port", 8765))
     if not (isinstance(data.get("client_id"), str) and len(data["client_id"]) >= 12
             and isinstance(data.get("client_secret"), str) and len(data["client_secret"]) >= 32):
         raise ValueError("Client credentials are missing or too short")
@@ -102,6 +122,7 @@ def load_config(path: str | Path) -> Config:
         listen_port=data.get("listen_port", 8766), gateway_port=data.get("gateway_port", 8765),
         scopes=tuple(scopes), workspaces=tuple(workspaces), redirect_uris=tuple(redirects),
         state_file=path.with_name("gemini-state.sqlite3"),
+        tunnel_type=tunnel_type,
     )
     if len(set(redirects)) != len(redirects):
         raise ValueError("Duplicate redirect URI")
@@ -110,14 +131,17 @@ def load_config(path: str | Path) -> Config:
     return config
 
 
-def initialize_config(path: str | Path, *, public_url: str, workspaces: tuple[str, ...] = ()) -> Config:
+def initialize_config(path: str | Path, *, public_url: str, workspaces: tuple[str, ...] = (),
+                      tunnel_type: str = "cloudflare") -> Config:
     """Creates local secrets once; refuse replacement of existing config."""
+    validate_public_url(public_url, tunnel_type)
     path = Path(path).expanduser().absolute()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if path.parent.stat().st_mode & 0o077:
         raise ValueError("Config directory must not grant access to group/other")
     data = {
         "public_url": public_url,
+        "tunnel_type": tunnel_type,
         "client_id": "mfg-" + secrets.token_urlsafe(18),
         "client_secret": secrets.token_urlsafe(48),
         "listen_port": 8766, "gateway_port": 8765,

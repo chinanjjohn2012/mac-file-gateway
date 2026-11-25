@@ -17,11 +17,13 @@ from gateway.gemini_adapter.proxy import MCPRelay
 from gateway.gemini_adapter.store import Store, challenge_for
 
 
-@pytest.fixture
-def context(tmp_path):
+@pytest.fixture(params=["cloudflare", "devtunnel"])
+def context(tmp_path, request):
     home = tmp_path / "private"
     home.mkdir(mode=0o700)
-    config = Config(public_url="https://gemini-mcp.example.com",client_id="gemini-test-client-id",
+    public_url = ("https://mfg-test-8766.usw2.devtunnels.ms" if request.param == "devtunnel"
+                  else "https://gemini-mcp.example.com")
+    config = Config(public_url=public_url,tunnel_type=request.param,client_id="gemini-test-client-id",
                     client_secret="s"*48,state_file=home/"gemini-state.sqlite3",
                     workspaces=("a",),scopes=("files:read","files:write","files:delete"),
                     redirect_uris=("https://oauth-redirect.googleusercontent.com/r/testclient",
@@ -62,7 +64,8 @@ def context(tmp_path):
     transport=httpx.MockTransport(fake_upstream)
     upstream=httpx.AsyncClient(transport=transport,follow_redirects=False)
     relay=MCPRelay(config,client=upstream)
-    with TestClient(create_app(config,store=store,relay=relay),base_url="https://127.0.0.1:8766") as client:
+    base_url = config.public_url if request.param == "devtunnel" else "https://127.0.0.1:8766"
+    with TestClient(create_app(config,store=store,relay=relay),base_url=base_url) as client:
         yield config,store,client,calls
     store.close()
     import anyio
@@ -99,7 +102,7 @@ def test_discovery_and_unprotected_routes(context):
     config,store,client,calls=context
     resource=client.get("/.well-known/oauth-protected-resource")
     assert resource.status_code==200
-    assert resource.json()["resource"]=="https://gemini-mcp.example.com/mcp"
+    assert resource.json()["resource"]==config.resource
     meta=client.get("/.well-known/oauth-authorization-server").json()
     assert meta["code_challenge_methods_supported"]==["S256"]
     assert "registration_endpoint" not in meta
@@ -286,3 +289,111 @@ def test_exact_oauth_redirect_allowlist(context):
              "code_challenge":challenge_for("A"*64),"code_challenge_method":"S256"}
     assert client.get("/oauth/authorize",params={**payload,"redirect_uri":"https://oauth-redirect.googleusercontent.com/r/unknown"}).status_code==400
     assert client.get("/oauth/authorize",params={**payload,"redirect_uri":"https://oauth-redirect.googleusercontent.com/r/abc"}).status_code==200
+
+
+
+def test_tunnel_host_and_route_boundary(context):
+    config, _, client, calls = context
+    host = config.public_url.removeprefix("https://")
+    discovery = "/.well-known/oauth-protected-resource"
+    if config.tunnel_type == "cloudflare":
+        assert client.get(discovery, headers={"Host": host}).status_code == 421
+        assert client.get("/health").status_code == 200
+        return
+    for value in (host, host + ":443", "localhost:8766", "127.0.0.1:8766", "localhost", "127.0.0.1"):
+        assert client.get(discovery, headers={"Host": value}).status_code == 200
+        assert client.get("/health", headers={"Host": value}).status_code == 404
+        assert client.get("/mcp", headers={"Host": value}).status_code == 401
+    for value in ("other-8766.usw2.devtunnels.ms", host + ".evil.example",
+                  "localhost:8765", "evil.example"):
+        assert client.get(discovery, headers={"Host": value, "X-Forwarded-Host": host}).status_code == 421
+    assert client.get(discovery, headers={"Origin": "https://evil.example"}).status_code == 421
+    assert client.get(discovery, headers={"Origin": config.public_url}).status_code == 200
+    for path in ("/health", "/mcp/", "/read", "/write", "/git/run", "/oauth/admin", "/%6dcp"):
+        assert client.get(path, follow_redirects=False).status_code == 404
+    assert client.post(discovery).status_code == 405
+    assert client.get("/oauth/token").status_code == 405
+    assert not calls
+
+
+def test_devtunnel_private_configuration(tmp_path):
+    from gateway.gemini_adapter.__main__ import main
+    from gateway.gemini_adapter.config import validate_public_url
+
+    path = tmp_path / "dev" / "gemini.json"
+    url = "https://mfg-test-8766.usw2.devtunnels.ms"
+    config = initialize_config(path, public_url=url, tunnel_type="devtunnel")
+    assert load_config(path).tunnel_type == "devtunnel"
+    assert config.issuer == url and config.resource == url + "/mcp"
+    validate_public_url("https://mfg-test-8766.devtunnels.ms", "devtunnel")
+    for value in ("https://mfg-test-8765.usw2.devtunnels.ms", url + "/mcp",
+                  url + ".evil.example", "http://mfg-test-8766.usw2.devtunnels.ms",
+                  "https://devtunnels.ms", "https://example.com"):
+        with pytest.raises(ValueError):
+            validate_public_url(value, "devtunnel")
+    with pytest.raises(ValueError):
+        validate_public_url(url, "devtunnel", 8767, 8765)
+    with pytest.raises(ValueError):
+        validate_public_url(url, "devtunnel", 8766, 8764)
+    with pytest.raises(ValueError):
+        validate_public_url(url, "unknown")
+    data = json.loads(path.read_text())
+    del data["tunnel_type"]
+    path.write_text(json.dumps(data))
+    assert load_config(path).tunnel_type == "cloudflare"
+    new_path = tmp_path / "cli" / "gemini.json"
+    assert main(["init", "--config", str(new_path), "--public-url", url,
+                 "--tunnel-type", "devtunnel"]) == 0
+    assert load_config(new_path).tunnel_type == "devtunnel"
+
+
+def test_devtunnel_port_preflight(tmp_path, monkeypatch):
+    import subprocess
+    from gateway.gemini_adapter.devtunnel import check_ports, validate_ports, validate_tunnel_id
+
+    config = initialize_config(tmp_path / "dev" / "gemini.json",
+                               public_url="https://mfg-test-8766.usw2.devtunnels.ms",
+                               tunnel_type="devtunnel")
+    valid = {"portNumber": 8766, "protocol": "http"}
+    validate_ports(json.dumps({"ports": [valid]}), config)
+    validate_ports(json.dumps({"ports": [{**valid, "portForwardingUris": [config.public_url + "/"]}]}), config)
+    for ports in ([], [valid, {"portNumber": 8765, "protocol": "http"}],
+                  [{"portNumber": 8765, "protocol": "http"}],
+                  [{"portNumber": "8766", "protocol": "http"}],
+                  [{**valid, "protocol": "auto"}],
+                  [{**valid, "portForwardingUris": ["https://wrong.example"]}],
+                  [{**valid, "portForwardingUris": "invalid"}]):
+        with pytest.raises(ValueError):
+            validate_ports(json.dumps({"ports": ports}), config)
+    with pytest.raises(ValueError):
+        validate_ports("unexpected CLI output", config)
+    for value in ("", "--allow-anonymous", "a b", "a/b"):
+        with pytest.raises(ValueError):
+            validate_tunnel_id(value)
+    def fake_run(argv, **kwargs):
+        assert argv == ["devtunnel", "port", "list", "mfg-test.usw2", "--json", "--nologo"]
+        assert kwargs["check"] is True and kwargs["timeout"] == 20
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"ports": [valid]}), stderr="")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    check_ports("mfg-test.usw2", config)
+
+
+def test_devtunnel_http_preflight(context):
+    from gateway.gemini_adapter.devtunnel import verify_http
+    config, _, client, calls = context
+    if config.tunnel_type == "cloudflare":
+        with pytest.raises(ValueError):
+            verify_http(client, "https://127.0.0.1:8766", config)
+    else:
+        verify_http(client, config.public_url, config)
+        verify_http(client, "http://127.0.0.1:8766", config)
+    assert not calls
+
+
+def test_devtunnel_preflight_rejects_interstitial(context):
+    from gateway.gemini_adapter.devtunnel import verify_http
+    config, _, _, _ = context
+    with httpx.Client(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, text="<html>Sign in to tunnel</html>"))) as client:
+        with pytest.raises(ValueError):
+            verify_http(client, config.public_url, config)

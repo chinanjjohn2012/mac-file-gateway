@@ -95,6 +95,28 @@ bash tunnel-gemini-dev.sh TUNNEL_ID --config "$CONFIG" --probe-public
 
 Microsoft 的防钓鱼提示页面可能出现在首次 HTML 浏览器访问；真实用户应阅读提示再自行继续。API 探测使用 Accept: application/json，不依赖浏览器登录 Cookie。不要要求 Gemini 注入绕过提示或 Microsoft 认证的特殊 Header，也不要把 Microsoft Tunnel Token 当作 Gemini OAuth Token。
 
+### 独立 curl 检查脚本（不需要 Dev Tunnel CLI）
+
+在 Gateway 安装目录运行，默认读取 ~/.config/mac-file-gateway/gemini-devtunnel/gemini.json：
+
+~~~bash
+# 只检查本地 8766（默认）
+bash test-gemini-dev.sh
+
+# Tunnel 已启动后，只检查公网 HTTPS
+bash test-gemini-dev.sh --public
+
+# 同时检查本地和公网
+bash test-gemini-dev.sh --both
+
+# 使用自定义配置
+bash test-gemini-dev.sh --both --config "$CONFIG"
+~~~
+
+脚本底层执行实际 curl 请求，复用现有 OAuth metadata、401 challenge 与 404 路由隔离检查；逐条输出 HTTP 状态和每个目标的 PASS/FAIL。不会读取或修改工作区文件，不发送 OAuth Client Secret、Token 或 Cookie，不跟随重定向，不关闭 TLS 证书验证，不修改 Tunnel ACL。公网探测遇到 Microsoft 登录或 HTML 提示页面时按失败处理。
+
+退出码：0 为选定目标全部通过，1 为 HTTP/网络/安全检查失败，2 为配置或依赖错误。先通过本地检查，再启用受限公网访问并运行公网检查。所有检查通过也不代表 Gemini 的真实 OAuth 和读写已验收。
+
 ## 5. 连接 Gemini Web
 
 打开 https://gemini.google.com/devmode ，Create new -> MCP Server URL 填写实际 PUBLIC_URL/mcp。Additional settings 中填写预注册的 Client ID/Secret。若 Google 分配的回调地址尚未登记，先确认真实地址后按原 Gemini 安装文档的 exact redirect_uris 方式配置并重启 Adapter。

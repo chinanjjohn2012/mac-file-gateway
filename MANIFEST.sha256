@@ -1,5 +1,5 @@
 9a8723d8e7675aa52d54620648c22bf493547a82dfeff7af591d08a55f10d9cb  ./.github/workflows/controlled-exec-tests.yml
-3abfff6bf438155ebb05f726efd8bb299ad260057bafbc2f7de69264f0b6c7a3  ./.github/workflows/gemini-adapter-tests.yml
+5a1786caa0fc09e729fa1a2dceeea75a9404d50378e54067960c8b06ddb79ed4  ./.github/workflows/gemini-adapter-tests.yml
 a248a4a4ac7da92f555f034bbb9637fb77fab91a7078f5d093366cf8a937f88f  ./.github/workflows/sensitive-content-macos.yml
 ef06acea97a3c12d0a236a36d6d1bd74b735c62b712e3ad69e50c6f87ac90b90  ./.gitignore
 c628bc1938af816701f0f9a4818ebdd5115cbac6945f6f7a736caf1f58a0de19  ./BUILD_INFO.json
@@ -9,7 +9,7 @@ c8032dbe30ecd8d0e1395b1d97d12cba82c696e31b011d22eea53e222343fd76  ./README.zh-CN
 4c67f17c350d405e65b82585a922ad2ef2bb08ce1c3c56a085f6dd4271b06e02  ./docs/CONTROLLED_EXEC.md
 6133250e80219b7f0948cfb9bdf22fc5536460f3eee14fa3841dd55a09113afe  ./docs/DIRECTORY_API.md
 3b6860053cfd22d05f6ac3dcc53f9b2ad203710655697bee247adf905de19619  ./docs/FILE_LIFECYCLE_API.md
-a35b149b07648c0135356486917581f3555caf0d14a91818b0b01af1909bd56a  ./docs/GEMINI_DEVTUNNEL.md
+eab17b4e0b61b859269893ad4253741844c071fdbb7875388b9e5e06553d61b0  ./docs/GEMINI_DEVTUNNEL.md
 b6b403b04628598a1b5efd6706f659312fa0c9f647c9c01e29418b39ec6a02d4  ./docs/GEMINI_DUAL_PORT_IMPLEMENTATION_PLAN.md
 411551581be6b740d91b05ae04553b947c48c75023306906e8619bedc8f107f0  ./docs/GEMINI_INTEGRATION.md
 c6d07712257af3239190499e9a895a6a69851da59051416c5e2ea48a8af2105e  ./docs/GIT_CLI_V1_DESIGN.md
@@ -52,6 +52,7 @@ c5db6e03a6ba6549343b10b655d950e281abd45cea88c985f6842492fbc5d7d6  ./gateway/gemi
 c44858ade7ca393b40147bdfd70943ab8334ef8a61ead4325ccfad9ffd8d32a2  ./gateway/gemini_adapter/__main__.py
 346b49c39c93987d6d70b83051bc3a908b79888ccf0da2599eec445125dce2a4  ./gateway/gemini_adapter/app.py
 b659d988dc874ae6e94d4a715f4f32ba21cd7416caf149ae4ab1fe67f183cb49  ./gateway/gemini_adapter/config.py
+fe0ac0bdcfdff78b2e36ee39ef5b4e414642202a87188103a14b74ecd7a34d19  ./gateway/gemini_adapter/curl_probe.py
 d8effef9619ef5355696de53a290db989ed79c8cbee522a9ef5333c64d55fa5b  ./gateway/gemini_adapter/devtunnel.py
 3c6225300abee2939dbdacf8f2080a45fe3a42db3ee9a952b515bca1a7342a12  ./gateway/gemini_adapter/oauth.py
 3484f2996ce5ea747ed37201a95f42104a82478129d815aa45d6ad6a6e5e9183  ./gateway/gemini_adapter/proxy.py
@@ -100,6 +101,7 @@ f3349cfa62997de65b7787de2cc4d383e820acac9bc46229776a98c01166c366  ./samples/loca
 6a30cec53a77ca3188cfcb814fab2b5dbb5d39c53247bd12d657e464a3128e71  ./samples/local-skill-policy/hook-selftests.json
 ebe1ac7054c9f481a622acc4b57ae72e732edf24d37656e10c11e68b9e60f322  ./samples/local-skill-policy/skill-compatibility.json
 05e8de75082cccad122a89bab1bc7bd7b37a8d93d364459722a688ef6ce6ffc5  ./setup.sh
+e2c88cc3b571408eea3cb77f217c097ada462c2c5feb27f8cd7b1d0b6d154e3a  ./test-gemini-dev.sh
 29b21d638aba82f2c47c2a92ad502edd57e8c37f693c81447e70042055969ddc  ./tests/fixtures/skill-rejections.json
 213d7085f0fb3ca48f4d5312d2b2d469e566f54c1fdbe01a6a27f673eaefb516  ./tests/smoke_git_cli.py
 c9fef2eacae28b923ec43e9591f6576a241fd864b7876806f566bf97b9818257  ./tests/smoke_live.py
@@ -119,6 +121,7 @@ b6309e55d4507c94493708c7028a1ceafa51bcba6eb9a4bf1d4f43db9b37abd1  ./tests/test_e
 8dd0fda9430ec1d557f36e08bf4b6f1b5f15b723cf5dc4ca18650817d8704c06  ./tests/test_file_lifecycle.py
 090bd7c4eeee68aa57cece6924f481535c2177a6b7c41be9af67e2e64deedea4  ./tests/test_file_lifecycle_http.py
 bd5cc1fda1e71ce3ee11fa362dd886b03bd97f741f327c543103677fa725350f  ./tests/test_gemini_adapter.py
+9192b55191cd25eced93399f7f033f6c52ede5f65da120ba46d428ee00f54979  ./tests/test_gemini_curl_probe.py
 21839294fa8d450d3ad48059f99415175fe4b20859a7d0f69014384b04ca914c  ./tests/test_git_adapter_not_exposed.py
 a8cd41b95e0ca52718e0ac063ca3005f6d111e513c2ab976bbabfb0289a84147  ./tests/test_git_cli.py
 8e0567028defb5a7de722ee530b84846fd46f1ac5d566e7a55eb0011a4907655  ./tests/test_git_cli_args.py
